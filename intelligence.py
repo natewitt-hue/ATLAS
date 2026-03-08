@@ -440,6 +440,12 @@ KNOWN_MEMBER_TEAMS: dict[int, str] = {
 }
 
 
+# Build reverse mapping: nickname (lowercase) → list of Discord IDs
+_nickname_to_ids: dict[str, list[int]] = {}
+for _uid, _nick in KNOWN_MEMBERS.items():
+    _nickname_to_ids.setdefault(_nick.lower(), []).append(_uid)
+
+
 def get_nickname(discord_user_id: int) -> str | None:
     """Return the TSL nickname for a Discord user ID, or None if unknown."""
     return KNOWN_MEMBERS.get(discord_user_id)
