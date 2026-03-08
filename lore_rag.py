@@ -11,11 +11,15 @@ DB_DIR = "faiss_lore_db"
 INDEX_FILE = os.path.join(DB_DIR, "lore_index.faiss")
 META_FILE = os.path.join(DB_DIR, "lore_metadata.pkl")
 MODEL_NAME = "all-MiniLM-L6-v2"
+_cached_model = None
 
 MUST_INDEX_KEYWORDS = ["trade", "beef", "drama", "witt", "diddy", "cheese", "commish", "scam", "robbed"]
 
 def _load_model():
-    return SentenceTransformer(MODEL_NAME)
+    global _cached_model
+    if _cached_model is None:
+        _cached_model = SentenceTransformer(MODEL_NAME)
+    return _cached_model
 
 def is_lore_query(text):
     keywords = ["history", "beef", "drama", "said", "remember", "trade reaction", "lore"]
@@ -134,39 +138,6 @@ def test(query):
     print(f"Testing Query: '{query}'")
     res = build_lore_context(query, top_k=5)
     print(res)
-
-    def add_single_message(author, content):
-        """Adds a single new message to the FAISS index and metadata."""
-    if not os.path.exists(INDEX_FILE) or not os.path.exists(META_FILE):
-        return
-
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y-%m-%d")
-    formatted_text = f"[{timestamp}] {author}: {content}"
-
-    # 1. Load existing data
-    model = _load_model()
-    index = faiss.read_index(INDEX_FILE)
-    with open(META_FILE, "rb") as f:
-        metadata = pickle.load(f)
-
-    # 2. Embed the new message
-    new_vector = model.encode([formatted_text], convert_to_numpy=True)
-
-    # 3. Update index and metadata
-    index.add(new_vector)
-    metadata.append({
-        "author": author,
-        "timestamp": timestamp,
-        "formatted_text": formatted_text
-    })
-
-    # 4. Save back to disk
-    faiss.write_index(index, INDEX_FILE)
-    with open(META_FILE, "wb") as f:
-        pickle.dump(metadata, f)
-    
-    print(f"[LoreRAG] Live-indexed message from {author}")
 def collection_stats():
     """Returns a dictionary with the count of indexed messages for the bot to display."""
     if not os.path.exists(INDEX_FILE):
@@ -174,7 +145,7 @@ def collection_stats():
     try:
         index = faiss.read_index(INDEX_FILE)
         return {"count": index.ntotal}
-    except:
+    except Exception:
         return {"count": 0}
 
 def init():

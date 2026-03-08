@@ -37,6 +37,7 @@ gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+_startup_done = False
 
 # ── WittGPT Persona Call ─────────────────────────────────────────────────────
 
@@ -66,6 +67,11 @@ async def call_wittgpt(user_input: str, context: str) -> str:
 
 @bot.event
 async def on_ready():
+    global _startup_done
+    if _startup_done:
+        print(f"--- WittGPT RECONNECTED | {bot.user} ---")
+        return
+    _startup_done = True
     dm.load_all()
     intel.build_owner_map()
     lore_rag.init()
@@ -83,7 +89,7 @@ async def on_message(message: discord.Message):
     if len(message.content) > 20 or any(kw in message.content.lower() for kw in ["trade", "beef", "commish"]):
         try:
             lore_rag.add_single_message(message.author.display_name, message.content)
-        except:
+        except Exception:
             pass
 
     # 2. Intelligent Mention Handler
@@ -92,7 +98,7 @@ async def on_message(message: discord.Message):
         
         async with message.channel.typing():
             # STEP A: Get Intent from the Brain
-            intent = reasoning.get_intent(user_input)
+            intent = reasoning.get_intent(user_input, gemini)
             print(f"[Router] {message.author.name} wants: {intent}")
 
             # STEP B: Route to the correct module
@@ -112,8 +118,9 @@ async def on_message(message: discord.Message):
 
             elif intent == "STATS":
                 # Execute Python code for Madden stats
-                res_text, err = await reasoning.safe_exec_analyst_code(user_input, gemini)
-                wit = await call_wittgpt(user_input, res_text)
+                res = await reasoning.reason(user_input, gemini)
+                context = res.get("result", "") if res.get("success") else res.get("error", "No data found.")
+                wit = await call_wittgpt(user_input, context)
                 await message.reply(wit)
 
             else: # LORE or OTHER
@@ -129,7 +136,7 @@ async def on_message(message: discord.Message):
 @bot.tree.command(name="top_qbs", description="Show a chart of the top 10 passing leaders")
 async def top_qbs(interaction: discord.Interaction):
     await interaction.response.defer()
-    df = dm.get_dataframe("offensive")
+    df = dm.df_offense
     qb_df = df[df['position'] == 'QB'].nlargest(10, 'passYds')
     chart_buf = analysis.generate_bar_chart(qb_df, 'name', 'passYds', title="TSL Passing Leaders")
     file = discord.File(chart_buf, filename="chart.png")

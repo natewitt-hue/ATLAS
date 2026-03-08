@@ -246,6 +246,13 @@ def load_all():
     df_trades     = _build_trades()
     df_abilities  = _build_abilities()
 
+    # Invalidate reasoning schema cache so it rebuilds with fresh data
+    try:
+        import reasoning
+        reasoning.invalidate_schema_cache()
+    except Exception:
+        pass
+
     print(
         f"[DataManager] Ready — "
         f"Season {CURRENT_SEASON} | "

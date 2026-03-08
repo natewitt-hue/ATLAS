@@ -211,7 +211,12 @@ def build_embeds(data: dict) -> list[discord.Embed]:
     return []
 
 def _grade_color(grade: str) -> int:
-    return {"A+": 0x00FF88, "A": 0x33FF66, "B": 0xCCFF00, "C": 0xFFCC00, "D": 0xFF6600, "F": 0xFF2200}.get(grade, 0x808080)
+    return {
+        "A+": 0x00FF88, "A": 0x33FF66, "A-": 0x66FF44,
+        "B+": 0x99FF00, "B": 0xCCFF00, "B-": 0xE6E600,
+        "C+": 0xFFE600, "C": 0xFFCC00, "C-": 0xFFAA00,
+        "D": 0xFF6600, "F": 0xFF2200,
+    }.get(grade, 0x808080)
 
 def pos_change_embed(data: dict) -> discord.Embed:
     verdict = data.get("verdict", "UNKNOWN")

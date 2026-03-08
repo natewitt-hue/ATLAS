@@ -62,6 +62,12 @@ def get_schema() -> str:
     return _SCHEMA_CACHE
 
 
+def invalidate_schema_cache():
+    """Clear the cached schema so it rebuilds on next query (call after data reload)."""
+    global _SCHEMA_CACHE
+    _SCHEMA_CACHE = ""
+
+
 # ── Pre-built composite metrics (always available to generated code) ──────────
 
 PREBUILT_METRICS_CODE = """
@@ -1009,7 +1015,7 @@ async def query_discord_history(question: str, gemini_client) -> dict:
         "error": last_error,
         "attempts": MAX_SQL_RETRIES + 1,
     }
-def get_intent(user_input):
+def get_intent(user_input, gemini_client):
     """Uses Gemini to decide which tool to use."""
     prompt = f"""
     Analyze this user query: "{user_input}"
@@ -1028,5 +1034,5 @@ def get_intent(user_input):
             contents=[prompt]
         )
         return response.text.strip().upper()
-    except:
+    except Exception:
         return "LORE" # Default fallback
