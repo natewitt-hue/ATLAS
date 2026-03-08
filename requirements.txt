@@ -2,21 +2,30 @@
 discord.py>=2.3.0
 python-dotenv>=1.0.0
 
-# Google Gemini
+# Google Gemini AI
 google-genai>=0.8.0
 
 # Data processing
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Visual analytics (Feature 2)
+# Visual analytics
 matplotlib>=3.7.0
 seaborn>=0.12.0
 
-# Lore RAG vector database (Feature 1) — optional but recommended
-# Install with: pip install chromadb sentence-transformers
-chromadb>=0.4.0
+# Lore RAG vector database (FAISS)
+faiss-cpu>=1.7.0
 sentence-transformers>=2.2.0
 
-# SQLite FTS5 is built into Python's stdlib — no extra install needed
-# discord_history.db is created by: python data_manager.py --ingest-discord messages.jsonl
+# HTTP clients
+aiohttp>=3.9.0
+httpx>=0.25.0
+
+# Async SQLite (casino)
+aiosqlite>=0.19.0
+
+# Image processing (casino card renderer)
+Pillow>=10.0.0
+
+# HTML-to-image card renderer (optional — requires playwright install)
+# playwright>=1.40.0

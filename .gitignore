@@ -1,2 +1,42 @@
-
 .env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Binary tools
+*.jar
+*.exe
+
+# SQLite artifacts
+*.db-shm
+*.db-wal
+
+# Auto-generated snapshots
+*_Full_Code.txt
+SCAFFOLD_README.md
+
+# Cached API data (fetched live on startup)
+league_data/
+
+# Runtime caches
+.echo_cache/
+
+# Drive sync artifacts
+.tmp.drivedownload/
+.tmp.driveupload/
+
+# Runtime databases (rebuilt on startup or by cogs)
+sportsbook.db
+tsl_history.db
+TSL_Archive.db
+
+# Database backups
+db_backups/
+
+# Chat logs
+CHATLOGS/
+
+# Claude worktrees
+.claude/
