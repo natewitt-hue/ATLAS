@@ -20,7 +20,7 @@ import aiosqlite
 import json
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 import os
 import re
@@ -143,6 +143,7 @@ CATEGORY_COLORS = {
 MARKETS_PER_PAGE = 3         # Market cards shown per browse page (fits YES/NO buttons in 5-row limit)
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
 HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
+NUMBER_EMOJIS = ["①", "②", "③", "④", "⑤"]  # Circled numbers for labeled buttons
 
 # ─────────────────────────────────────────────
 # DATABASE SETUP
@@ -195,7 +196,7 @@ async def init_prediction_db(db_path: str = DB_PATH):
         """)
 
         # Migrations: add columns for trending/hot support
-        for col, default in [("volume_24hr", "0"), ("featured", "0")]:
+        for col, default in [("volume_24hr", "0"), ("featured", "0"), ("admin_approved", "0")]:
             try:
                 await db.execute(
                     f"ALTER TABLE prediction_markets ADD COLUMN {col} REAL DEFAULT {default}"
@@ -561,24 +562,52 @@ class WagerModal(discord.ui.Modal):
         required=True,
     )
 
-    def __init__(self, market_id: str, slug: str, side: str, price: float, title: str):
+    def __init__(self, market_id: str, slug: str, side: str, price: float,
+                 title: str, cog=None):
         super().__init__(title=f"Buy {side} — {title[:40]}")
         self.market_id    = market_id
         self.slug         = slug
         self.side         = side
         self.price        = price
         self.market_title = title
+        self.cog          = cog
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         raw = self.amount_input.value.strip()
         if not raw.isdigit() or int(raw) < 1:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Please enter a whole number ≥ 1.", ephemeral=True
             )
             return
 
+        # Fetch live price if cog available (safe to do after defer)
+        live_price = self.price  # fallback to cached
+        if self.cog:
+            try:
+                live = await asyncio.wait_for(
+                    self.cog.client.fetch_market_by_id(self.market_id),
+                    timeout=2.0,
+                )
+                if live:
+                    prices = extract_prices(live)
+                    live_price = prices["yes_price"] if self.side == "YES" else prices["no_price"]
+                    # Update DB cache
+                    now_ts = datetime.now(timezone.utc).isoformat()
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE prediction_markets SET yes_price=?, no_price=?, "
+                            "last_synced=? WHERE market_id=?",
+                            (prices["yes_price"], prices["no_price"],
+                             now_ts, self.market_id),
+                        )
+                        await db.commit()
+            except Exception:
+                pass  # use cached price
+
         quantity    = int(raw)
-        cost_bucks  = price_to_bucks(self.price) * quantity
+        cost_bucks  = price_to_bucks(live_price) * quantity
         payout      = PAYOUT_SCALE * quantity
         user_id     = str(interaction.user.id)
 
@@ -589,7 +618,7 @@ class WagerModal(discord.ui.Modal):
             balance = 0
 
         if balance < cost_bucks:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
                 ephemeral=True,
             )
@@ -599,7 +628,7 @@ class WagerModal(discord.ui.Modal):
         try:
             await update_balance(user_id, -cost_bucks)
         except ValueError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return
 
         # Write contract to DB
@@ -612,7 +641,7 @@ class WagerModal(discord.ui.Modal):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
             """, (
                 user_id, self.market_id, self.slug,
-                self.side, self.price,
+                self.side, live_price,
                 quantity, cost_bucks, payout, now,
             ))
             await db.commit()
@@ -625,7 +654,7 @@ class WagerModal(discord.ui.Modal):
             color=color,
             description=(
                 f"**{self.market_title}**\n\n"
-                f"Side: **{self.side}** · Price: **{self.price:.1%}** each\n"
+                f"Side: **{self.side}** · Price: **{live_price:.1%}** each\n"
                 f"Qty: **{quantity}** · Cost: **{cost_bucks:,} TSL Bucks**\n"
                 f"Potential: **{payout:,} TSL Bucks** if {self.side} wins\n\n"
                 f"*Profit if correct: +{profit:,} TSL Bucks*"
@@ -633,11 +662,11 @@ class WagerModal(discord.ui.Modal):
         )
         embed.set_footer(text="Use /portfolio to view your positions · ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class BetButtonView(discord.ui.View):
-    """YES / NO buttons on the /bet embed — fetches live odds before modal."""
+    """YES / NO buttons on the /bet embed — opens modal instantly, live odds in on_submit."""
 
     def __init__(self, market_id: str, slug: str, title: str,
                  yes_price: float, no_price: float,
@@ -650,46 +679,19 @@ class BetButtonView(discord.ui.View):
         self.no_price  = no_price
         self.cog       = cog
 
-    async def _fetch_live_price(self, side: str) -> float:
-        """Fetch live price from API with 2-second timeout; fallback to cached."""
-        if not self.cog:
-            return self.yes_price if side == "YES" else self.no_price
-        try:
-            live = await asyncio.wait_for(
-                self.cog.client.fetch_market_by_id(self.market_id),
-                timeout=2.0,
-            )
-            if live:
-                prices = extract_prices(live)
-                # Update DB cache
-                now = datetime.now(timezone.utc).isoformat()
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        "UPDATE prediction_markets SET yes_price=?, no_price=?, last_synced=? "
-                        "WHERE market_id=?",
-                        (prices["yes_price"], prices["no_price"], now, self.market_id),
-                    )
-                    await db.commit()
-                return prices["yes_price"] if side == "YES" else prices["no_price"]
-        except Exception:
-            pass
-        return self.yes_price if side == "YES" else self.no_price
-
     @discord.ui.button(label="Buy YES ✅", style=discord.ButtonStyle.success)
     async def buy_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        price = await self._fetch_live_price("YES")
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="YES",
-            price=price, title=self.title,
+            price=self.yes_price, title=self.title, cog=self.cog,
         )
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Buy NO ❌", style=discord.ButtonStyle.danger)
     async def buy_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        price = await self._fetch_live_price("NO")
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="NO",
-            price=price, title=self.title,
+            price=self.no_price, title=self.title, cog=self.cog,
         )
         await interaction.response.send_modal(modal)
 
@@ -792,14 +794,15 @@ class MarketBrowserView(discord.ui.View):
             yes_p = m.get("yes_price", 0.5)
             no_p = m.get("no_price", 0.5)
 
+            num = NUMBER_EMOJIS[i] if i < len(NUMBER_EMOJIS) else ""
             yes_btn = discord.ui.Button(
-                label=f"YES {yes_p:.0%}",
+                label=f"{num} YES {yes_p:.0%}",
                 style=discord.ButtonStyle.success,
                 custom_id=f"yes_{i}_{self.page}",
                 row=row,
             )
             no_btn = discord.ui.Button(
-                label=f"NO {no_p:.0%}",
+                label=f"{num} NO {no_p:.0%}",
                 style=discord.ButtonStyle.danger,
                 custom_id=f"no_{i}_{self.page}",
                 row=row,
@@ -838,38 +841,16 @@ class MarketBrowserView(discord.ui.View):
         self.add_item(next_btn)
 
     def _make_bet_cb(self, market: dict, side: str):
-        """Closure-safe callback: fetch live odds → open wager modal."""
+        """Closure-safe callback: open modal instantly, live odds fetched in on_submit."""
         async def callback(interaction: discord.Interaction):
             price = market["yes_price"] if side == "YES" else market["no_price"]
-            # Try to fetch live odds (2-second timeout)
-            if self.cog:
-                try:
-                    live = await asyncio.wait_for(
-                        self.cog.client.fetch_market_by_id(market["market_id"]),
-                        timeout=2.0,
-                    )
-                    if live:
-                        prices = extract_prices(live)
-                        price = prices["yes_price"] if side == "YES" else prices["no_price"]
-                        # Update DB cache
-                        now = datetime.now(timezone.utc).isoformat()
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute(
-                                "UPDATE prediction_markets SET yes_price=?, no_price=?, "
-                                "last_synced=? WHERE market_id=?",
-                                (prices["yes_price"], prices["no_price"],
-                                 now, market["market_id"]),
-                            )
-                            await db.commit()
-                except Exception:
-                    pass  # fall back to cached price
-
             modal = WagerModal(
                 market_id=market["market_id"],
                 slug=market["slug"],
                 side=side,
                 price=price,
                 title=market["title"],
+                cog=self.cog,
             )
             await interaction.response.send_modal(modal)
         return callback
@@ -957,10 +938,11 @@ class MarketBrowserView(discord.ui.View):
             heat = hot_label(vol_24h)
             heat_prefix = f"{heat} " if heat else ""
             vol_str = fmt_volume(m.get("volume", 0))
+            num = NUMBER_EMOJIS[i] if i < len(NUMBER_EMOJIS) else ""
 
             # Compact market card
             embed.add_field(
-                name=f"{cat}  {heat_prefix}{m['title'][:55]}",
+                name=f"{num} {cat}  {heat_prefix}{m['title'][:50]}",
                 value=(
                     f"**YES {yes_p:.0%}**  ·  **NO {no_p:.0%}**  ·  "
                     f"Vol: {vol_str}  ·  {end_str}"
@@ -1369,6 +1351,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         await self._ensure_db()
         await interaction.response.defer(ephemeral=True)
 
+        # 12-month settlement filter: hide markets that end more than 365 days out
+        max_end = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("""
                 SELECT market_id, slug, title, category,
@@ -1378,9 +1363,15 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 WHERE status = 'active'
                   AND yes_price <= ?
                   AND no_price  <= ?
+                  AND (
+                    end_date IS NULL
+                    OR end_date = ''
+                    OR end_date <= ?
+                    OR COALESCE(admin_approved, 0) = 1
+                  )
                 ORDER BY volume DESC
                 LIMIT 200
-            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD)) as cursor:
+            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD, max_end)) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
@@ -1439,6 +1430,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     @app_commands.describe(slug="The market slug/ID from /markets")
     async def bet_cmd(self, interaction: discord.Interaction, slug: str):
         await self._ensure_db()
+        await interaction.response.defer(ephemeral=True)
         slug = slug.strip().lower()
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1463,7 +1455,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     row = await cursor.fetchone()
 
         if not row:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Market `{slug}` not found. Use `/markets` to browse.",
                 ephemeral=True,
             )
@@ -1472,7 +1464,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         market_id, mkt_slug, title, category, yes_price, no_price, volume, end_date, status = row
 
         if status != "active":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⚠️ Market is **{status}** and not accepting new bets.",
                 ephemeral=True,
             )
@@ -1546,7 +1538,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             market_id=market_id, slug=mkt_slug, title=title,
             yes_price=yes_price, no_price=no_price, cog=self,
         )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ── Slash: /portfolio ─────────────────────
 
@@ -1776,6 +1768,57 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         )
         embed.set_footer(text="Polymarket Gamma API — No API key required")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Slash: /approve_market (admin) ────────
+
+    @app_commands.command(
+        name="approve_market",
+        description="[Admin] Approve a long-term market for betting (bypasses 12-month filter)."
+    )
+    @app_commands.describe(slug="Market slug to approve")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def approve_market_cmd(self, interaction: discord.Interaction, slug: str):
+        await self._ensure_db()
+        slug = slug.strip().lower()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT market_id, title, end_date FROM prediction_markets WHERE slug = ?",
+                (slug,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                # Try partial match
+                async with db.execute(
+                    "SELECT market_id, title, end_date FROM prediction_markets "
+                    "WHERE slug LIKE ? AND status = 'active' LIMIT 1",
+                    (f"%{slug}%",)
+                ) as cursor:
+                    row = await cursor.fetchone()
+
+        if not row:
+            await interaction.response.send_message(
+                f"❌ Market `{slug}` not found.", ephemeral=True
+            )
+            return
+
+        market_id, title, end_date = row
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE prediction_markets SET admin_approved = 1 WHERE market_id = ?",
+                (market_id,)
+            )
+            await db.commit()
+
+        end_str = end_date or "No end date"
+        await interaction.response.send_message(
+            f"✅ Approved long-term market: **{title[:60]}**\n"
+            f"End date: `{end_str}`\n"
+            f"This market will now appear in `/markets` regardless of settlement date.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):
