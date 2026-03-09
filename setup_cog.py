@@ -230,6 +230,7 @@ async def _provision_channels(guild: discord.Guild) -> dict:
                 # If the target category doesn't exist, create it
                 if category is None:
                     category = await guild.create_category(category_name)
+                    categories[category_name.upper()] = category  # cache for reuse
 
                 overwrites = _build_overwrites(guild, admin_role, read_only, admin_only)
 
@@ -422,6 +423,8 @@ class SetupCog(commands.Cog):
     async def setup_command(self, interaction: discord.Interaction):
         """Admin only. Presents a choice between remapping existing channels
         or creating new ATLAS category structure."""
+        await interaction.response.defer(ephemeral=True)
+
         embed = discord.Embed(
             title="ATLAS Server Setup",
             description=(
@@ -436,34 +439,13 @@ class SetupCog(commands.Cog):
         embed.set_footer(text="Channel IDs are stored statically — renaming channels won't break routing.")
 
         view = SetupChoiceView(self.bot)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ── on_guild_join listener ───────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
-        print(f"ATLAS: Joined guild '{guild.name}' ({guild.id}) — provisioning channels...")
-        try:
-            results = await _provision_channels(guild)
-            await _post_receipt(guild, results)
-            print(
-                f"ATLAS: Setup complete — "
-                f"{len(results['found'])} found, "
-                f"{len(results['created'])} created, "
-                f"{len(results['failed'])} failed."
-            )
-        except Exception:
-            traceback.print_exc()
-            try:
-                owner = guild.owner
-                if owner:
-                    await owner.send(
-                        f"**ATLAS Setup Failed** on `{guild.name}`.\n"
-                        f"Please re-invite the bot with **Manage Channels** and **Manage Roles** permissions, "
-                        f"then run `/setup` to complete initialization."
-                    )
-            except Exception:
-                pass
+        print(f"ATLAS: Joined guild '{guild.name}' ({guild.id}) — run /setup to configure channels.")
 
 
 async def setup(bot: commands.Bot):
