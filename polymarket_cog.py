@@ -23,6 +23,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 import os
+import re
+
+from google import genai
 
 from casino.casino_db import (
     DB_PATH,
@@ -31,6 +34,24 @@ from casino.casino_db import (
 )
 
 log = logging.getLogger("polymarket_cog")
+
+# ── Gemini AI Client (lazy singleton) ──
+_GEMINI_CLIENT = None
+
+def _get_gemini_client():
+    """Return a cached Gemini client, or None if API key unavailable."""
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is not None:
+        return _GEMINI_CLIENT
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        _GEMINI_CLIENT = genai.Client(api_key=api_key)
+        return _GEMINI_CLIENT
+    except Exception:
+        return None
+
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -59,6 +80,12 @@ CATEGORY_MAP = {
     "business":            "📈 Economics",
     "finance":             "📈 Economics",
     "economics":           "📈 Economics",
+    "economy":             "📈 Economics",
+    "fed rates":           "📈 Economics",
+    "fomc":                "📈 Economics",
+    "economic policy":     "📈 Economics",
+    "jerome powell":       "📈 Economics",
+    "fed":                 "📈 Economics",
     "science":             "🔬 Science",
     "health":              "🔬 Science",
     "tech":                "💻 Tech",
@@ -66,6 +93,7 @@ CATEGORY_MAP = {
     "artificial intelligence": "🤖 AI",
     "world":               "🌍 World",
     "climate":             "🌍 World",
+    "iran":                "🌍 World",
     # Politics variants
     "us-current-affairs":  "🏛️ Politics",
     "us current affairs":  "🏛️ Politics",
@@ -74,12 +102,17 @@ CATEGORY_MAP = {
     "nfl":                 "🏈 NFL",
     "nba":                 "🏀 NBA",
     "mlb":                 "⚾ MLB",
-    "soccer":              "⚽ Sports",
+    "nhl":                 "🏒 NHL",
+    "hockey":              "🏒 NHL",
+    "soccer":              "⚽ Soccer",
     "football":            "🏈 NFL",
     "basketball":          "🏀 NBA",
     "baseball":            "⚾ MLB",
+    "epl":                 "⚽ Soccer",
+    "premier league":      "⚽ Soccer",
     "mma":                 "🥊 MMA",
     "boxing":              "🥊 MMA",
+    "ufc":                 "🥊 MMA",
     "chess":               "♟️ Chess",
     # Gaming
     "gaming":              "🎮 Gaming",
@@ -102,10 +135,12 @@ CATEGORY_COLORS = {
     "🥊 MMA":           0xD4AF37,
     "♟️ Chess":         0x8B4513,
     "🎮 Gaming":        0x7B68EE,
+    "🏒 NHL":           0x000080,
+    "⚽ Soccer":        0x2ECC71,
     "🌐 Other":         0x95A5A6,
 }
 
-MARKETS_PER_PAGE = 5         # Market cards shown per browse page
+MARKETS_PER_PAGE = 3         # Market cards shown per browse page (fits YES/NO buttons in 5-row limit)
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
 HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
 
@@ -367,6 +402,76 @@ def map_category(raw_category: str) -> str:
     return f"🌐 {raw_category.title()}"
 
 
+def extract_category_from_event(event: dict, market_slug: str = "") -> str:
+    """
+    Extract category from a Polymarket event using tags, series, and slug heuristics.
+
+    Priority:
+      1. event.tags[].label/slug — most reliable (specific tags first)
+      2. event.seriesSlug or event.series[].title
+      3. Slug pattern matching (e.g., 'nba-' prefix)
+      4. Fallback to "Other"
+    """
+    # ── Tier 1: Tags ──
+    tags = event.get("tags", [])
+    if isinstance(tags, list) and tags:
+        # Prefer specific sports/topic tags over generic ones like "Sports"
+        SPECIFIC_SLUGS = {
+            "nba", "nfl", "mlb", "nhl", "mma", "ufc", "boxing", "chess",
+            "epl", "soccer", "ai", "crypto", "politics", "elections",
+            "economy", "fomc", "fed-rates",
+        }
+        for tag in tags:
+            if isinstance(tag, dict):
+                slug_tag = tag.get("slug", "").lower()
+                label = tag.get("label", "")
+            else:
+                slug_tag = str(tag).lower()
+                label = str(tag)
+            if slug_tag in SPECIFIC_SLUGS:
+                return map_category(slug_tag)
+            mapped = map_category(label)
+            if mapped != "🌐 Other" and not mapped.startswith("🌐 "):
+                return mapped
+        # No specific match — try first tag
+        first = tags[0]
+        label = first.get("label", "") if isinstance(first, dict) else str(first)
+        mapped = map_category(label)
+        if mapped != "🌐 Other" and not mapped.startswith("🌐 "):
+            return mapped
+
+    # ── Tier 2: Series ──
+    series_slug = event.get("seriesSlug", "")
+    if series_slug:
+        mapped = map_category(series_slug)
+        if mapped != "🌐 Other" and not mapped.startswith("🌐 "):
+            return mapped
+
+    series_list = event.get("series", [])
+    if isinstance(series_list, list):
+        for s in series_list:
+            title = s.get("title", "") if isinstance(s, dict) else str(s)
+            mapped = map_category(title)
+            if mapped != "🌐 Other" and not mapped.startswith("🌐 "):
+                return mapped
+
+    # ── Tier 3: Slug pattern matching ──
+    slug = (market_slug or event.get("slug", "")).lower()
+    SLUG_PREFIXES = {
+        "nba-": "nba", "nfl-": "nfl", "mlb-": "mlb", "nhl-": "nhl",
+        "soccer-": "soccer", "epl-": "epl", "ufc-": "ufc",
+        "boxing-": "boxing", "mma-": "mma", "chess-": "chess",
+        "bitcoin-": "crypto", "ethereum-": "crypto", "btc-": "crypto",
+        "trump-": "politics", "election-": "elections", "president-": "politics",
+        "fed-": "economics", "fomc-": "fomc",
+    }
+    for prefix, cat_key in SLUG_PREFIXES.items():
+        if prefix in slug:
+            return map_category(cat_key)
+
+    return "🌐 Other"
+
+
 def market_status(market: dict) -> str:
     """Derive a status string from Polymarket boolean fields."""
     if market.get("archived"):
@@ -412,13 +517,6 @@ def fmt_volume(vol) -> str:
         return f"${v/1_000:.1f}K"
     return f"${v:.0f}"
 
-
-def probability_bar(yes_price: float, width: int = 10) -> str:
-    """Render a visual probability bar: 🟩🟩🟩🟩🟩🟩⬜⬜⬜⬜ 62%"""
-    pct = max(0, min(100, round(yes_price * 100)))
-    filled = round(yes_price * width)
-    bar = "🟩" * filled + "⬜" * (width - filled)
-    return f"{bar} {pct}%"
 
 
 def is_lopsided(yes_price: float, no_price: float) -> bool:
@@ -539,30 +637,59 @@ class WagerModal(discord.ui.Modal):
 
 
 class BetButtonView(discord.ui.View):
-    """YES / NO buttons on the /bet embed."""
+    """YES / NO buttons on the /bet embed — fetches live odds before modal."""
 
     def __init__(self, market_id: str, slug: str, title: str,
-                 yes_price: float, no_price: float):
+                 yes_price: float, no_price: float,
+                 cog=None):
         super().__init__(timeout=300)
         self.market_id = market_id
         self.slug      = slug
         self.title     = title
         self.yes_price = yes_price
         self.no_price  = no_price
+        self.cog       = cog
+
+    async def _fetch_live_price(self, side: str) -> float:
+        """Fetch live price from API with 2-second timeout; fallback to cached."""
+        if not self.cog:
+            return self.yes_price if side == "YES" else self.no_price
+        try:
+            live = await asyncio.wait_for(
+                self.cog.client.fetch_market_by_id(self.market_id),
+                timeout=2.0,
+            )
+            if live:
+                prices = extract_prices(live)
+                # Update DB cache
+                now = datetime.now(timezone.utc).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE prediction_markets SET yes_price=?, no_price=?, last_synced=? "
+                        "WHERE market_id=?",
+                        (prices["yes_price"], prices["no_price"], now, self.market_id),
+                    )
+                    await db.commit()
+                return prices["yes_price"] if side == "YES" else prices["no_price"]
+        except Exception:
+            pass
+        return self.yes_price if side == "YES" else self.no_price
 
     @discord.ui.button(label="Buy YES ✅", style=discord.ButtonStyle.success)
     async def buy_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        price = await self._fetch_live_price("YES")
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="YES",
-            price=self.yes_price, title=self.title
+            price=price, title=self.title,
         )
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Buy NO ❌", style=discord.ButtonStyle.danger)
     async def buy_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        price = await self._fetch_live_price("NO")
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="NO",
-            price=self.no_price, title=self.title
+            price=price, title=self.title,
         )
         await interaction.response.send_modal(modal)
 
@@ -609,24 +736,28 @@ class CategorySelect(discord.ui.Select):
 
 
 class MarketBrowserView(discord.ui.View):
-    """Full market browser: category filter + hot markets + page navigation."""
+    """Full market browser: category filter + YES/NO bet buttons + page nav."""
 
     def __init__(self, all_markets: list[dict], categories: list[str],
                  hot_markets: list[dict] | None = None,
-                 category_counts: dict | None = None):
+                 category_counts: dict | None = None,
+                 cog=None):
         super().__init__(timeout=600)
-        self.all_markets    = all_markets
-        self.categories     = categories
-        self.hot_markets    = hot_markets or []
+        self.all_markets     = all_markets
+        self.categories      = categories
+        self.hot_markets     = hot_markets or []
         self.category_counts = category_counts or {}
-        self.filter         = "all"
-        self.page           = 0
+        self.filter          = "all"
+        self.page            = 0
+        self.cog             = cog  # for live API calls
 
         self.cat_select = CategorySelect(
             categories, parent_view=self, category_counts=self.category_counts
         )
         self.add_item(self.cat_select)
-        self._build_nav()
+        self._rebuild_buttons()
+
+    # ── Filtering / Pagination helpers ──
 
     def _filtered(self) -> list[dict]:
         if self.filter == "hot":
@@ -642,52 +773,132 @@ class MarketBrowserView(discord.ui.View):
     def _max_page(self) -> int:
         return max(0, (len(self._filtered()) - 1) // MARKETS_PER_PAGE)
 
-    def _build_nav(self):
-        to_remove = [c for c in self.children
-                     if getattr(c, "custom_id", "") in ("nav_prev", "nav_next")]
+    # ── Dynamic button management ──
+
+    def _rebuild_buttons(self):
+        """Clear and recreate YES/NO bet buttons + nav for the current page."""
+        # Remove everything except the CategorySelect
+        to_remove = [c for c in self.children if not isinstance(c, CategorySelect)]
         for item in to_remove:
             self.remove_item(item)
 
+        markets = self._filtered()
+        start = self.page * MARKETS_PER_PAGE
+        chunk = markets[start : start + MARKETS_PER_PAGE]
+
+        # Rows 1-3: YES / NO buttons per market card
+        for i, m in enumerate(chunk):
+            row = i + 1  # rows 1, 2, 3
+            yes_p = m.get("yes_price", 0.5)
+            no_p = m.get("no_price", 0.5)
+
+            yes_btn = discord.ui.Button(
+                label=f"YES {yes_p:.0%}",
+                style=discord.ButtonStyle.success,
+                custom_id=f"yes_{i}_{self.page}",
+                row=row,
+            )
+            no_btn = discord.ui.Button(
+                label=f"NO {no_p:.0%}",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"no_{i}_{self.page}",
+                row=row,
+            )
+            yes_btn.callback = self._make_bet_cb(m, "YES")
+            no_btn.callback = self._make_bet_cb(m, "NO")
+            self.add_item(yes_btn)
+            self.add_item(no_btn)
+
+        # Row 4: Navigation
         prev_btn = discord.ui.Button(
             label="◀ Prev",
             style=discord.ButtonStyle.secondary,
             custom_id="nav_prev",
             disabled=self.page == 0,
-            row=1,
+            row=4,
+        )
+        page_btn = discord.ui.Button(
+            label=f"{self.page + 1}/{self._max_page() + 1}",
+            style=discord.ButtonStyle.secondary,
+            custom_id="nav_page",
+            disabled=True,
+            row=4,
         )
         next_btn = discord.ui.Button(
             label="Next ▶",
             style=discord.ButtonStyle.secondary,
             custom_id="nav_next",
             disabled=self.page >= self._max_page(),
-            row=1,
+            row=4,
         )
         prev_btn.callback = self._prev
         next_btn.callback = self._next
         self.add_item(prev_btn)
+        self.add_item(page_btn)
         self.add_item(next_btn)
+
+    def _make_bet_cb(self, market: dict, side: str):
+        """Closure-safe callback: fetch live odds → open wager modal."""
+        async def callback(interaction: discord.Interaction):
+            price = market["yes_price"] if side == "YES" else market["no_price"]
+            # Try to fetch live odds (2-second timeout)
+            if self.cog:
+                try:
+                    live = await asyncio.wait_for(
+                        self.cog.client.fetch_market_by_id(market["market_id"]),
+                        timeout=2.0,
+                    )
+                    if live:
+                        prices = extract_prices(live)
+                        price = prices["yes_price"] if side == "YES" else prices["no_price"]
+                        # Update DB cache
+                        now = datetime.now(timezone.utc).isoformat()
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE prediction_markets SET yes_price=?, no_price=?, "
+                                "last_synced=? WHERE market_id=?",
+                                (prices["yes_price"], prices["no_price"],
+                                 now, market["market_id"]),
+                            )
+                            await db.commit()
+                except Exception:
+                    pass  # fall back to cached price
+
+            modal = WagerModal(
+                market_id=market["market_id"],
+                slug=market["slug"],
+                side=side,
+                price=price,
+                title=market["title"],
+            )
+            await interaction.response.send_modal(modal)
+        return callback
+
+    # ── Navigation / Filter callbacks ──
 
     async def apply_filter(self, interaction: discord.Interaction, cat: str):
         self.filter = cat
-        self.page   = 0
-        self._build_nav()
+        self.page = 0
+        self._rebuild_buttons()
         await interaction.response.edit_message(embed=self._embed(), view=self)
 
     async def _prev(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
-        self._build_nav()
+        self._rebuild_buttons()
         await interaction.response.edit_message(embed=self._embed(), view=self)
 
     async def _next(self, interaction: discord.Interaction):
         self.page = min(self._max_page(), self.page + 1)
-        self._build_nav()
+        self._rebuild_buttons()
         await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    # ── Embed builder ──
 
     def _embed(self) -> discord.Embed:
         markets = self._filtered()
-        total   = len(markets)
-        start   = self.page * MARKETS_PER_PAGE
-        chunk   = markets[start : start + MARKETS_PER_PAGE]
+        total = len(markets)
+        start = self.page * MARKETS_PER_PAGE
+        chunk = markets[start : start + MARKETS_PER_PAGE]
 
         if self.filter == "hot":
             cat_label = "🔥 Hot / Trending"
@@ -701,7 +912,6 @@ class MarketBrowserView(discord.ui.View):
             color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
         )
 
-        # Header block
         header_title = "🔥 TRENDING" if self.filter == "hot" else cat_label.upper()
         embed.description = (
             f"```\n"
@@ -712,30 +922,27 @@ class MarketBrowserView(discord.ui.View):
         )
 
         # Hot markets banner — only on page 0 of "all" filter
-        if (self.page == 0 and self.filter == "all"
-                and self.hot_markets):
+        if self.page == 0 and self.filter == "all" and self.hot_markets:
             hot_lines = []
             for hm in self.hot_markets[:HOT_MARKETS_COUNT]:
                 vol_24h = hm.get("volume_24hr", 0)
                 yes_p = hm.get("yes_price", 0.5)
                 heat = hot_label(vol_24h)
                 hot_lines.append(
-                    f"{heat} **{hm['title'][:45]}**\n"
-                    f"　{probability_bar(yes_p)} · 24h: {fmt_volume(vol_24h)}"
+                    f"{heat} **{hm['title'][:50]}** — "
+                    f"YES {yes_p:.0%} · 24h: {fmt_volume(vol_24h)}"
                 )
             if hot_lines:
                 embed.add_field(
-                    name="🔥 Hot Markets",
+                    name="🔥 Trending Now",
                     value="\n".join(hot_lines),
                     inline=False,
                 )
 
-        # Market cards
-        for m in chunk:
+        # Market cards (one per row, matching the YES/NO buttons below)
+        for i, m in enumerate(chunk):
             yes_p = m.get("yes_price", 0.5)
-            no_p  = m.get("no_price", 0.5)
-            yes_bucks = price_to_bucks(yes_p)
-            no_bucks  = price_to_bucks(no_p)
+            no_p = m.get("no_price", 0.5)
             vol_24h = m.get("volume_24hr", 0)
             cat = m.get("category", "🌐 Other")
 
@@ -745,26 +952,18 @@ class MarketBrowserView(discord.ui.View):
                 end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
                 end_str = f"<t:{int(end_dt.timestamp())}:R>"
             except Exception:
-                end_str = "No expiry"
+                end_str = "No end date"
 
-            # Heat indicator
             heat = hot_label(vol_24h)
             heat_prefix = f"{heat} " if heat else ""
-
-            # Volume display
             vol_str = fmt_volume(m.get("volume", 0))
-            vol_line = f"Vol: {vol_str}"
-            if vol_24h and vol_24h > 0:
-                vol_line += f" · 24h: {fmt_volume(vol_24h)}"
 
+            # Compact market card
             embed.add_field(
                 name=f"{cat}  {heat_prefix}{m['title'][:55]}",
                 value=(
-                    f"{probability_bar(yes_p)}\n"
-                    f"✅ YES **{yes_bucks}¢** ({yes_p:.0%})  ·  "
-                    f"❌ NO **{no_bucks}¢** ({no_p:.0%})\n"
-                    f"{vol_line}  ·  Ends: {end_str}\n"
-                    f"`/bet {truncate_slug(m['slug'])}`"
+                    f"**YES {yes_p:.0%}**  ·  **NO {no_p:.0%}**  ·  "
+                    f"Vol: {vol_str}  ·  {end_str}"
                 ),
                 inline=False,
             )
@@ -776,7 +975,7 @@ class MarketBrowserView(discord.ui.View):
                 inline=False,
             )
 
-        embed.set_footer(text="ATLAS Flow Casino · Polymarket · /bet <slug> to wager")
+        embed.set_footer(text="Click YES or NO below to bet · Odds fetched live · ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
         return embed
 
@@ -796,6 +995,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         self.bot    = bot
         self.client = PolymarketClient()
         self._db_ready = False
+        self._first_sync_done = False
         self.sync_markets.start()
 
     def cog_unload(self):
@@ -830,7 +1030,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         async with aiosqlite.connect(DB_PATH) as db:
             for event in events:
                 event_id = str(event.get("id", ""))
-                event_category = map_category(event.get("category", ""))
+                event_category = extract_category_from_event(event)
 
                 nested_markets = event.get("markets", [])
                 if not nested_markets:
@@ -844,7 +1044,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
                     prices = extract_prices(mkt)
                     title = mkt.get("question", "") or mkt.get("title", slug)
-                    category = map_category(mkt.get("category", "")) or event_category
+                    # Markets inherit category from parent event; override only
+                    # if the market's own slug reveals a more specific category
+                    mkt_category = extract_category_from_event(event, market_slug=slug)
+                    category = mkt_category if mkt_category != "🌐 Other" else event_category
                     status = market_status(mkt)
                     end_date = mkt.get("endDate", "") or mkt.get("end_date_iso", "")
                     volume = mkt.get("volumeNum") or mkt.get("volume") or 0
@@ -893,6 +1096,86 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         # ── Pass 2: Auto-resolve closed markets ──────────────────────────
         await self._auto_resolve_pass()
+
+        # ── Pass 3: Gemini classification for "Other" markets (first sync only) ──
+        if not self._first_sync_done:
+            self._first_sync_done = True
+            try:
+                await self._classify_unknown_categories()
+            except Exception as e:
+                log.warning(f"Gemini classification pass failed: {e}")
+
+    async def _classify_unknown_categories(self):
+        """
+        One-time Gemini classification for markets still labeled 'Other'.
+        Batches titles into one prompt, parses JSON response, updates DB.
+        """
+        gemini = _get_gemini_client()
+        if not gemini:
+            log.info("Gemini not available — skipping AI category classification.")
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT market_id, title, slug FROM prediction_markets "
+                "WHERE status='active' AND category LIKE '%Other%' "
+                "LIMIT 50"
+            ) as cursor:
+                unknowns = await cursor.fetchall()
+
+        if not unknowns:
+            log.info("No 'Other' markets to classify.")
+            return
+
+        log.info(f"Classifying {len(unknowns)} markets with Gemini...")
+
+        valid_cats = sorted(set(CATEGORY_MAP.values()))
+        lines = [f"{i+1}. {title} (slug: {slug})"
+                 for i, (mid, title, slug) in enumerate(unknowns)]
+
+        prompt = (
+            f"Classify each prediction market into exactly one category.\n"
+            f"Valid categories: {', '.join(valid_cats)}\n\n"
+            f"Markets:\n" + "\n".join(lines) + "\n\n"
+            f"Return ONLY a JSON array of objects: "
+            f'[{{"index": 1, "category": "chosen category"}}, ...]\n'
+            f"No explanation. Just the JSON array."
+        )
+
+        loop = asyncio.get_running_loop()
+        def _call():
+            return gemini.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[prompt],
+            )
+
+        try:
+            response = await loop.run_in_executor(None, _call)
+            text = response.text.strip()
+            json_match = re.search(r'\[.*\]', text, re.DOTALL)
+            if not json_match:
+                log.warning("Gemini returned non-JSON for classification.")
+                return
+            classifications = json.loads(json_match.group())
+        except Exception as e:
+            log.error(f"Gemini classification failed: {e}")
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            updated = 0
+            for item in classifications:
+                idx = item.get("index", 0) - 1
+                cat = item.get("category", "")
+                if 0 <= idx < len(unknowns) and cat:
+                    market_id = unknowns[idx][0]
+                    await db.execute(
+                        "UPDATE prediction_markets SET category = ? WHERE market_id = ?",
+                        (cat, market_id),
+                    )
+                    updated += 1
+            await db.commit()
+
+        log.info(f"Gemini classified {updated}/{len(unknowns)} markets.")
 
     async def _auto_resolve_pass(self):
         """
@@ -1142,6 +1425,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             markets, categories,
             hot_markets=hot_markets,
             category_counts=category_counts,
+            cog=self,
         )
 
         await interaction.followup.send(embed=view._embed(), view=view, ephemeral=True)
@@ -1196,10 +1480,33 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         yes_price = yes_price if yes_price is not None else 0.5
         no_price  = no_price  if no_price  is not None else 0.5
+
+        # Fetch live odds from Polymarket API (2-second timeout)
+        try:
+            live_data = await asyncio.wait_for(
+                self.client.fetch_market_by_id(market_id),
+                timeout=2.0,
+            )
+            if live_data:
+                live_prices = extract_prices(live_data)
+                yes_price = live_prices["yes_price"]
+                no_price = live_prices["no_price"]
+                # Update DB cache
+                now = datetime.now(timezone.utc).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE prediction_markets SET yes_price=?, no_price=?, "
+                        "last_synced=? WHERE market_id=?",
+                        (yes_price, no_price, now, market_id),
+                    )
+                    await db.commit()
+        except Exception:
+            pass  # use cached prices
+
         yes_bucks = price_to_bucks(yes_price)
         no_bucks  = price_to_bucks(no_price)
 
-        color = CATEGORY_COLORS.get(category, 0x7289DA)
+        color = CATEGORY_COLORS.get(category, 0xD4AF37)
         try:
             end_dt  = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             end_str = f"<t:{int(end_dt.timestamp())}:R>"
@@ -1207,12 +1514,12 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             end_str = end_date or "No expiry"
 
         embed = discord.Embed(
-            title=f"📊 {title}",
+            title=f"📊 {title[:70]}",
             color=color,
         )
         embed.description = (
-            f"**{category}**\n\n"
-            f"{probability_bar(yes_price)}\n\n"
+            f"```\n{category.upper()}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n```\n"
             f"Ends: {end_str}  ·  Volume: {fmt_volume(volume)}\n"
             f"Each contract pays **{PAYOUT_SCALE} TSL Bucks** if your side wins."
         )
@@ -1220,7 +1527,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             name="✅ Buy YES",
             value=(
                 f"**{yes_bucks} TSL Bucks** / contract\n"
-                f"Implied: {yes_price:.1%}"
+                f"Implied probability: **{yes_price:.1%}**"
             ),
             inline=True,
         )
@@ -1228,16 +1535,16 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             name="❌ Buy NO",
             value=(
                 f"**{no_bucks} TSL Bucks** / contract\n"
-                f"Implied: {no_price:.1%}"
+                f"Implied probability: **{no_price:.1%}**"
             ),
             inline=True,
         )
-        embed.set_footer(text="Click a button below · ATLAS Flow Casino")
+        embed.set_footer(text="💡 Odds fetched live · Click a button below · ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
 
         view = BetButtonView(
             market_id=market_id, slug=mkt_slug, title=title,
-            yes_price=yes_price, no_price=no_price,
+            yes_price=yes_price, no_price=no_price, cog=self,
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -1473,4 +1780,4 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PolymarketCog(bot))
-    log.info("PolymarketCog loaded.")
+    print("ATLAS: Flow · Polymarket Prediction Markets loaded.")
