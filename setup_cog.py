@@ -33,26 +33,31 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsl_history.
 # Keys become the config_key stored in server_config.
 # Structure: (config_key, display_name, category_name, read_only_for_members, admin_only)
 REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
-    # WITTGPT category
-    ("admin_chat",      "admin-chat",      "WITTGPT", False, True),   # admin-only R/W
-    ("bot_logs",        "bot-logs",        "WITTGPT", True,  True),   # admin-only, bot posts only
-    ("askwittgpt",      "askwittgpt",      "WITTGPT", False, False),  # everyone R/W
-    ("compliance",      "compliance",      "WITTGPT", True,  False),  # everyone reads, bot posts
-    ("power_rankings",  "power-rankings",  "WITTGPT", True,  False),  # everyone reads, bot posts
-    ("sportsbook",      "sportsbook",      "WITTGPT", False, False),  # everyone R/W
-    ("casino",          "casino",          "WITTGPT", False, False),  # everyone R/W
-    # TSL LEAGUE UPDATES category (existing — bot just needs the IDs)
-    ("announcements",   "announcements",   "TSL LEAGUE UPDATES", False, False),
-    ("game_results",    "game-results",    "TSL LEAGUE UPDATES", False, False),
-    ("roster_moves",    "roster-moves",    "TSL LEAGUE UPDATES", False, False),
-    ("dev_upgrades",    "dev-upgrades",    "TSL LEAGUE UPDATES", False, False),
-    # TSL TRADE CENTER category (existing)
-    ("trades",          "trades",          "TSL TRADE CENTER", False, False),
-    # TSL MADDEN category (existing — for force-request routing)
-    ("force_request",   "force-request",   "TSL MADDEN", False, False),
-    # Prediction Markets channel (used by polymarket_cog)
-    ("prediction_markets", "prediction-markets", "WITTGPT", False, False),
+    # ── ATLAS — Command Center (admin + AI) ──
+    ("admin_chat",      "admin-chat",      "ATLAS — Command Center", False, True),
+    ("bot_logs",        "bot-logs",        "ATLAS — Command Center", True,  True),
+    ("ask_atlas",       "ask-atlas",       "ATLAS — Command Center", False, False),
+    # ── ATLAS — Oracle (stats, rankings, results) ──
+    ("power_rankings",  "power-rankings",  "ATLAS — Oracle", True,  False),
+    ("announcements",   "announcements",   "ATLAS — Oracle", False, False),
+    ("game_results",    "game-results",    "ATLAS — Oracle", False, False),
+    # ── ATLAS — Genesis (roster, trades, development) ──
+    ("roster_moves",    "roster-moves",    "ATLAS — Genesis", False, False),
+    ("trades",          "trades",          "ATLAS — Genesis", False, False),
+    ("dev_upgrades",    "dev-upgrades",    "ATLAS — Genesis", False, False),
+    # ── ATLAS — Sentinel (enforcement, compliance) ──
+    ("compliance",      "compliance",      "ATLAS — Sentinel", True,  False),
+    ("force_request",   "force-request",   "ATLAS — Sentinel", False, False),
+    # ── ATLAS — Casino (economy, games, markets) ──
+    ("casino",          "casino",          "ATLAS — Casino", False, False),
+    ("sportsbook",      "sportsbook",      "ATLAS — Casino", False, False),
+    ("prediction_markets", "prediction-markets", "ATLAS — Casino", False, False),
 ]
+
+# Legacy channel name aliases for remap (old name → config_key)
+_CHANNEL_ALIASES: dict[str, str] = {
+    "askwittgpt": "ask_atlas",
+}
 
 # Channels where /complaint and /forcerequest are silently routed to DM → admin-chat.
 # These command names are enforced in their respective cogs using get_channel_id().
@@ -331,6 +336,12 @@ class SetupChoiceView(discord.ui.View):
 
         for config_key, channel_name, _cat, _ro, _ao in REQUIRED_CHANNELS:
             match = existing.get(channel_name.lower())
+            if not match:
+                # Check legacy aliases (e.g. "askwittgpt" → ask_atlas)
+                for alias, target_key in _CHANNEL_ALIASES.items():
+                    if target_key == config_key:
+                        match = existing.get(alias)
+                        break
             if match:
                 _save_channel_id(config_key, match.id, guild.id)
                 results["found"].append((config_key, match))

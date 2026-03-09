@@ -59,8 +59,13 @@ def _get_gemini_client():
 
 POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
 
-# Channels
-PREDICTION_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
+# Channel routing — resolved from setup_cog at runtime
+def _prediction_channel_id() -> int:
+    try:
+        from setup_cog import get_channel_id
+        return get_channel_id("prediction_markets") or 0
+    except ImportError:
+        return int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
 
 # How many TSL Bucks = 1 full contract payout
 # A YES at $0.65 costs 65 TSL Bucks; pays out 100 TSL Bucks if correct.
@@ -1346,7 +1351,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     # ── Utility ─────────────────────────────────
 
     def _channel(self):
-        return self.bot.get_channel(PREDICTION_CHANNEL_ID)
+        return self.bot.get_channel(_prediction_channel_id())
 
     # ── Slash: /markets ───────────────────────
 

@@ -169,8 +169,6 @@ DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 ADMIN_USER_IDS   = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
-# Required by polymarket_cog — set PREDICTION_MARKET_CHANNEL_ID in .env
-PREDICTION_MARKET_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 intents       = discord.Intents.all()

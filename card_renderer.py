@@ -258,7 +258,7 @@ def _build_html(data: dict) -> str:
         ai_clean = ai.strip().strip("*_")
         ai_html = f"""
         <div class="section-block ai-block">
-          <div class="section-title">🤖 WITTGPT VERDICT</div>
+          <div class="section-title">🤖 ATLAS VERDICT</div>
           <div class="ai-quote">"{ai_clean}"</div>
         </div>"""
 

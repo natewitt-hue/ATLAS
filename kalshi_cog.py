@@ -50,8 +50,13 @@ KALSHI_EMAIL      = os.getenv("KALSHI_EMAIL", "")
 KALSHI_PASSWORD   = os.getenv("KALSHI_PASSWORD", "")
 KALSHI_API_KEY    = os.getenv("KALSHI_API_KEY", "")
 
-# Channels
-PREDICTION_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
+# Channel routing — resolved from setup_cog at runtime
+def _prediction_channel_id() -> int:
+    try:
+        from setup_cog import get_channel_id
+        return get_channel_id("prediction_markets") or 0
+    except ImportError:
+        return int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
 
 # How many TSL Bucks = 1 Kalshi "dollar" (i.e. $1.00 = 100 TSL Bucks)
 # A YES at $0.65 costs 65 TSL Bucks; pays out 100 TSL Bucks if correct.
@@ -981,7 +986,7 @@ class KalshiCog(commands.Cog, name="Kalshi"):
     # ── Utility: resolve a channel lazily ────
 
     def _channel(self):
-        return self.bot.get_channel(PREDICTION_CHANNEL_ID)
+        return self.bot.get_channel(_prediction_channel_id())
 
     # ── Slash: /markets ───────────────────────
 
