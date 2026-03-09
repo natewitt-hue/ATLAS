@@ -555,8 +555,8 @@ class WagerModal(discord.ui.Modal):
     """Modal that asks the user how many contracts to buy."""
 
     amount_input = discord.ui.TextInput(
-        label="How many contracts? (1 contract = 1 TSL Buck unit)",
-        placeholder="e.g. 10",
+        label="How many contracts?",
+        placeholder="e.g. 10  (1 contract = 1 TSL Buck unit)",
         min_length=1,
         max_length=6,
         required=True,
@@ -564,7 +564,8 @@ class WagerModal(discord.ui.Modal):
 
     def __init__(self, market_id: str, slug: str, side: str, price: float,
                  title: str, cog=None):
-        super().__init__(title=f"Buy {side} — {title[:40]}")
+        # Discord modal title max = 45 chars. "Buy YES — " = 11 chars → 34 left for title
+        super().__init__(title=f"Buy {side} — {title[:34]}")
         self.market_id    = market_id
         self.slug         = slug
         self.side         = side
