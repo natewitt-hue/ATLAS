@@ -354,20 +354,20 @@ async def on_ready():
     import time
     _bot_start_time = time.time()
 
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _startup_load)
-    _startup_done = True
-
-    print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
-    print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
-
-    # Set ATLAS presence / status line
+    # Set presence immediately so the bot shows online during data load
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
             name="TSL · INTELLIGENCE · OVERSIGHT · AUTHORITY"
         )
     )
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _startup_load)
+    _startup_done = True
+
+    print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
+    print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
 
     # Guard prevents spawning a duplicate task on every Discord reconnect
     if not blowout_monitor.is_running():

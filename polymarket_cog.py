@@ -1355,8 +1355,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         description="Browse live Polymarket prediction markets."
     )
     async def markets_cmd(self, interaction: discord.Interaction):
-        await self._ensure_db()
         await interaction.response.defer(ephemeral=True)
+        await self._ensure_db()
 
         # 12-month settlement filter: hide markets that end more than 365 days out
         max_end = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
