@@ -1,26 +1,44 @@
 """
 intelligence.py
 
-Advanced intelligence modules for WittGPT:
-  - Draft class grading (seasons 2-5, real TSL drafts)
+Advanced intelligence modules for ATLAS:
+  - Draft class grading (seasons 2-current, real TSL drafts)
   - Hot/Cold tracker (last 3 games vs season avg)
   - Clutch stats (performance in close games ≤7pts)
   - Owner profiles (Discord user → team mapping + memory)
   - Beef mode (two owners in the same conversation)
+
+Fixes applied (v4):
+  - get_draft_class() now uses player_draft_map DB table for accurate drafting team.
+    Previously used players.teamName (current team) which broke for traded players.
+  - Added owner_tenure DB table awareness for tenure-filtered stats.
+
+Fixes applied (v3):
+  - _load_full_players() uses dm.get_players() (/export/players CSV) instead of
+    dm.df_players (stat leaders) — CSV has rookieYear, draftRound, dev, etc.
+  - _load_raw_offense() uses dm.df_offense (stat leaders, per-game stats).
+  - _load_raw_defense() uses dm.df_defense (stat leaders, per-game stats).
+  - get_weekly_results() now returns status==3 final games only (no live game scores).
+  - get_team_owner() prefers df_teams (has userName) over df_standings.
+  - build_owner_map() called via bot.py on_ready() — owner lookups now work.
 """
 
-import json
+import sqlite3
 import os
 import pandas as pd
 import numpy as np
 import data_manager as dm
 
+DB_PATH = os.path.join(os.path.dirname(__file__), "tsl_history.db")
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# rookieYear in players.json maps to TSL season index
+# rookieYear in players.csv maps to TSL season index (calendarYear)
 # Season 1 (2025) is the initial roster build — not a real draft
 # Real TSL draft classes start season 2 (2026)
-YEAR_TO_SEASON = {2025: 1, 2026: 2, 2027: 3, 2028: 4, 2029: 5}
+# Auto-extends beyond S5 via arithmetic: season = rookieYear - 2024
+_YEAR_BASE = 2024   # rookieYear = _YEAR_BASE + season
+YEAR_TO_SEASON = {yr: yr - _YEAR_BASE for yr in range(2025, 2035)}
 SEASON_TO_YEAR = {v: k for k, v in YEAR_TO_SEASON.items()}
 
 # Madden uses non-standard round numbering (2-8 instead of 1-7 for TSL)
@@ -43,328 +61,7 @@ GRADE_THRESHOLDS = [
     (0.0, "D"),
 ]
 
-# ── Draft class analysis ──────────────────────────────────────────────────────
-
-def _load_full_players() -> pd.DataFrame:
-    """Load players.json with draft columns not in dm.df_players."""
-    path = os.path.join(dm.DATA_DIR, "players.json")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    df = pd.DataFrame(raw)
-    df["fullName"] = df["firstName"] + " " + df["lastName"]
-    for col in ["draftRound", "draftPick", "rookieYear", "playerBestOvr", "yearsPro"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    return df
-
-
-def _letter_grade(score: float) -> str:
-    for threshold, grade in GRADE_THRESHOLDS:
-        if score >= threshold:
-            return grade
-    return "F"
-
-
-def get_draft_class(season: int) -> dict:
-    """
-    Full draft class breakdown for a given TSL season (2-5).
-    Returns structured dict with picks, grades, steals, busts.
-    """
-    if season < 2 or season > dm.CURRENT_SEASON:
-        return {"error": f"No real draft data for season {season}. TSL drafts started season 2."}
-
-    df = _load_full_players()
-    target_year = SEASON_TO_YEAR.get(season)
-    if not target_year:
-        return {"error": f"Unknown season {season}"}
-
-    cls = df[df["rookieYear"] == target_year].copy()
-    if cls.empty:
-        return {"error": f"No players found for season {season} draft."}
-
-    cls["devScore"]    = cls["dev"].map(DEV_SCORE).fillna(1)
-    cls["roundLabel"]  = cls["draftRound"].map(ROUND_LABELS).fillna("UDFA")
-    cls["pickValueRaw"]= cls["draftRound"] * 32 + cls["draftPick"]
-
-    # Class-level grade = weighted avg of devScore (60%) + OVR normalized (40%)
-    ovr_norm = (cls["playerBestOvr"] - 60).clip(0) / 40  # 60 = baseline, 99 = max
-    cls["gradeScore"] = cls["devScore"] * 0.6 + ovr_norm * 0.4
-
-    class_grade_score = cls["gradeScore"].mean()
-    letter = _letter_grade(class_grade_score)
-
-    # Best picks (steals) = high devScore relative to pick position (later rounds)
-    cls["stealScore"] = cls["devScore"] / (cls["draftRound"].clip(2, 8) / 2)
-    steals = cls.nlargest(5, "stealScore")[
-        ["firstName", "lastName", "teamName", "pos", "roundLabel", "draftPick",
-         "playerBestOvr", "dev"]
-    ].to_dict("records")
-
-    # Busts = R1/R2 picks with Normal dev and low OVR
-    early = cls[cls["draftRound"].isin([2, 3])].copy()
-    busts_df = early[
-        (early["dev"] == "Normal") | (early["playerBestOvr"] < 75)
-    ].sort_values("playerBestOvr")
-    busts = busts_df[
-        ["firstName", "lastName", "teamName", "pos", "roundLabel", "draftPick",
-         "playerBestOvr", "dev"]
-    ].head(5).to_dict("records")
-
-    # Top picks overall
-    top_picks = cls.nlargest(8, "playerBestOvr")[
-        ["firstName", "lastName", "teamName", "pos", "roundLabel", "draftPick",
-         "playerBestOvr", "dev"]
-    ].to_dict("records")
-
-    # Per-team grades
-    team_grades = (
-        cls.groupby("teamName")
-        .agg(
-            picks=("firstName", "count"),
-            avgOVR=("playerBestOvr", "mean"),
-            xfactors=("dev", lambda x: (x == "Superstar X-Factor").sum()),
-            superstars=("dev", lambda x: (x == "Superstar").sum()),
-            stars=("dev", lambda x: (x == "Star").sum()),
-            gradeScore=("gradeScore", "mean"),
-        )
-        .round(1)
-        .reset_index()
-        .sort_values("gradeScore", ascending=False)
-    )
-    team_grades["grade"] = team_grades["gradeScore"].apply(_letter_grade)
-
-    # Dev breakdown
-    dev_counts = cls["dev"].value_counts().to_dict()
-
-    return {
-        "type":        "draft_class",
-        "season":      season,
-        "year":        target_year,
-        "total_picks": len(cls),
-        "letter_grade":letter,
-        "grade_score": round(class_grade_score, 2),
-        "dev_counts":  dev_counts,
-        "avg_ovr":     round(cls["playerBestOvr"].mean(), 1),
-        "top_picks":   top_picks,
-        "steals":      steals,
-        "busts":       busts,
-        "team_grades": team_grades.head(10).to_dict("records"),
-    }
-
-
-def compare_draft_classes() -> dict:
-    """Compare all TSL draft classes (seasons 2-5) side by side."""
-    classes = []
-    for season in range(2, dm.CURRENT_SEASON + 1):
-        dc = get_draft_class(season)
-        if "error" not in dc:
-            classes.append({
-                "season":      dc["season"],
-                "year":        dc["year"],
-                "grade":       dc["letter_grade"],
-                "avg_ovr":     dc["avg_ovr"],
-                "xfactors":    dc["dev_counts"].get("Superstar X-Factor", 0),
-                "superstars":  dc["dev_counts"].get("Superstar", 0),
-                "stars":       dc["dev_counts"].get("Star", 0),
-                "total_picks": dc["total_picks"],
-            })
-    return {"type": "draft_comparison", "classes": classes}
-
-
-# ── Hot / Cold tracker ────────────────────────────────────────────────────────
-
-def _load_raw_offense() -> pd.DataFrame:
-    path = os.path.join(dm.DATA_DIR, "offensive.json")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    df = pd.DataFrame(raw)
-    NUM = ["passAtt", "passYds", "passTDs", "passInts", "passSacks",
-           "rushAtt", "rushYds", "rushTDs", "rushFum",
-           "recCatches", "recYds", "recTDs", "recDrops",
-           "seasonIndex", "stageIndex", "weekIndex"]
-    for c in NUM:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    return df
-
-
-def _load_raw_defense() -> pd.DataFrame:
-    path = os.path.join(dm.DATA_DIR, "defensive.json")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    df = pd.DataFrame(raw)
-    NUM = ["defTotalTackles", "defSacks", "defInts", "defForcedFum",
-           "defDeflections", "seasonIndex", "stageIndex", "weekIndex"]
-    for c in NUM:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    return df
-
-
-def get_hot_cold(player_name: str, last_n: int = 3) -> dict:
-    """
-    Compare a player's last N games vs their season average.
-    Returns structured dict with trend direction and key stat deltas.
-    """
-    # Try offense first, then defense
-    for load_fn, stat_cols, group in [
-        (_load_raw_offense,
-         ["passAtt", "passYds", "passTDs", "passInts", "rushYds", "rushTDs",
-          "recCatches", "recYds", "recTDs"],
-         "offense"),
-        (_load_raw_defense,
-         ["defTotalTackles", "defSacks", "defInts", "defForcedFum", "defDeflections"],
-         "defense"),
-    ]:
-        df = load_fn()
-        if "fullName" not in df.columns:
-            continue
-
-        player_df = df[
-            (df["fullName"] == player_name) &
-            (df["seasonIndex"] == dm.CURRENT_SEASON) &
-            (df["stageIndex"] == dm.REGULAR_STAGE)
-        ].sort_values("weekIndex")
-
-        if player_df.empty:
-            # Try last name match
-            last = player_name.split(".")[-1] if "." in player_name else player_name.split()[-1]
-            player_df = df[
-                (df["fullName"].str.contains(last, case=False, na=False)) &
-                (df["seasonIndex"] == dm.CURRENT_SEASON) &
-                (df["stageIndex"] == dm.REGULAR_STAGE)
-            ].sort_values("weekIndex")
-
-        if player_df.empty:
-            continue
-
-        # Only keep stat cols that are non-zero for this player
-        active_cols = [c for c in stat_cols if c in player_df.columns and player_df[c].sum() > 0]
-        if not active_cols:
-            continue
-
-        season_avg  = player_df[active_cols].mean()
-        last_n_avg  = player_df.tail(last_n)[active_cols].mean()
-        last_n_games = player_df.tail(last_n)[["weekIndex"] + active_cols].to_dict("records")
-
-        # Determine overall trend
-        deltas = {}
-        for col in active_cols:
-            sa = season_avg[col]
-            la = last_n_avg[col]
-            if sa > 0:
-                delta_pct = ((la - sa) / sa) * 100
-                deltas[col] = round(delta_pct, 1)
-
-        # Positive stats where higher = better
-        positive_stats = ["passYds", "passTDs", "rushYds", "rushTDs",
-                          "recYds", "recTDs", "recCatches",
-                          "defTotalTackles", "defSacks", "defInts", "defForcedFum"]
-        # Negative stats where lower = better
-        negative_stats = ["passInts", "rushFum", "recDrops"]
-
-        trend_score = 0
-        for col, delta in deltas.items():
-            if col in positive_stats:
-                trend_score += delta
-            elif col in negative_stats:
-                trend_score -= delta
-
-        if trend_score > 15:
-            trend = "🔥 HOT"
-        elif trend_score < -15:
-            trend = "🥶 COLD"
-        else:
-            trend = "➡️ NEUTRAL"
-
-        # Find player's team
-        team = player_df.iloc[-1].get("teamName", "")
-        pos  = player_df.iloc[-1].get("pos", "")
-        name_display = player_df.iloc[-1].get("extendedName") or player_name
-
-        return {
-            "type":        "hot_cold",
-            "name":        name_display,
-            "team":        team,
-            "pos":         pos,
-            "trend":       trend,
-            "trend_score": round(trend_score, 1),
-            "season_avg":  season_avg.round(1).to_dict(),
-            "last_n_avg":  last_n_avg.round(1).to_dict(),
-            "deltas":      deltas,
-            "last_n_games":last_n_games,
-            "last_n":      last_n,
-            "group":       group,
-        }
-
-    return {"type": "hot_cold", "error": f"No per-game data found for {player_name}"}
-
-
-# ── Clutch stats ──────────────────────────────────────────────────────────────
-
-def get_clutch_records(margin: int = 7) -> dict:
-    """Team records in close games (margin ≤ N points)."""
-    games = dm.df_games.copy()
-    cur = games[
-        (games["seasonIndex"] == dm.CURRENT_SEASON) &
-        (games["stageIndex"] == dm.REGULAR_STAGE) &
-        (games["status"] == 3)
-    ].copy()
-
-    cur["margin"] = abs(cur["homeScore"] - cur["awayScore"])
-    close = cur[cur["margin"] <= margin]
-    all_teams = cur["homeTeamName"].unique()
-
-    rows = []
-    for team in all_teams:
-        # All season record
-        hw = ((cur["homeTeamName"] == team) & (cur["homeScore"] > cur["awayScore"])).sum()
-        aw = ((cur["awayTeamName"] == team) & (cur["awayScore"] > cur["homeScore"])).sum()
-        hl = ((cur["homeTeamName"] == team) & (cur["homeScore"] < cur["awayScore"])).sum()
-        al = ((cur["awayTeamName"] == team) & (cur["awayScore"] < cur["homeScore"])).sum()
-
-        # Clutch record
-        cw = (
-            ((close["homeTeamName"] == team) & (close["homeScore"] > close["awayScore"])) |
-            ((close["awayTeamName"] == team) & (close["awayScore"] > close["homeScore"]))
-        ).sum()
-        cl = (
-            ((close["homeTeamName"] == team) & (close["homeScore"] < close["awayScore"])) |
-            ((close["awayTeamName"] == team) & (close["awayScore"] < close["homeScore"]))
-        ).sum()
-
-        rows.append({
-            "team":          team,
-            "overall_wins":  int(hw + aw),
-            "overall_losses":int(hl + al),
-            "clutch_wins":   int(cw),
-            "clutch_losses": int(cl),
-            "clutch_games":  int(cw + cl),
-            "clutch_winpct": round(cw / (cw + cl) if (cw + cl) > 0 else 0, 3),
-        })
-
-    df = pd.DataFrame(rows).sort_values("clutch_wins", ascending=False)
-    return {
-        "type":         "clutch",
-        "margin":       margin,
-        "records":      df.to_dict("records"),
-        "most_clutch":  df.iloc[0]["team"] if not df.empty else "?",
-        "least_clutch": df.sort_values("clutch_winpct").iloc[0]["team"] if not df.empty else "?",
-    }
-
-
-# ── Owner profiles & memory ───────────────────────────────────────────────────
-
-# In-memory owner profile store
-# Structure: { discord_user_id: OwnerProfile }
-_owner_profiles: dict[int, dict] = {}
-
-# Username → team mapping (built from teams.json)
-_username_to_team: dict[str, str] = {}
-_team_to_username: dict[str, str] = {}
-
 # ── Known Discord ID → nickname table ────────────────────────────────────────
-# Maps Discord user ID → preferred nickname WittGPT uses for them.
-# A second entry for the same person (e.g. Jo has two IDs) uses the same nickname.
 KNOWN_MEMBERS: dict[int, str] = {
     1253510201626329208: "Jo",
     456226577798135808:  "Jo",        # Jo's second account
@@ -403,8 +100,12 @@ KNOWN_MEMBERS: dict[int, str] = {
     801157966056259604:  "Noodle",
 }
 
+# Reverse map: lowercase nickname → list of Discord IDs
+_nickname_to_ids: dict[str, list[int]] = {}
+for _id, _nick in KNOWN_MEMBERS.items():
+    _nickname_to_ids.setdefault(_nick.lower(), []).append(_id)
+
 # Explicit Discord ID → team overrides
-# Used when nickname doesn't substring-match the teams.json userName
 KNOWN_MEMBER_TEAMS: dict[int, str] = {
     972717991886213140:  "Saints",      # AP        = AgrarianPeasant
     705567998710382722:  "Pack",        # Diddy     = BDiddy86
@@ -435,40 +136,410 @@ KNOWN_MEMBER_TEAMS: dict[int, str] = {
     710648515566633052:  "Pats",        # Neff      = Saucy0134
     871448457414598737:  "Bengals",     # JT        = current Bengals owner
     934556990045310996:  "Raiders",     # Shelly    = current Raiders owner
-    # Jo (both IDs) = former owner, no team
-    # Noodle = no team assigned
 }
 
 
+# ── Draft class analysis ──────────────────────────────────────────────────────
+
+def _load_full_players() -> pd.DataFrame:
+    """
+    Return the full players DataFrame with draft/dev columns.
+    Uses dm.get_players() (full /export/players CSV) which contains rookieYear,
+    draftRound, draftPick, yearsPro, dev, playerBestOvr, etc.
+
+    Do NOT use dm.df_players — that's built from stat leader endpoints
+    (passStats, rushLeaders, etc.) and does not contain draft columns.
+
+    MM export players.csv key fields:
+      rosterId, firstName, lastName, pos, yearsPro, draftPick, draftRound,
+      rookieYear (TSL season calendarYear int), dev, teamId, teamName,
+      playerBestOvr, ability1-6, all ratings, isFA, isOnIR, retired
+    """
+    raw = dm.get_players()
+    if not raw:
+        return pd.DataFrame()
+    df = pd.DataFrame(raw)
+    if df.empty:
+        return df
+    if "fullName" not in df.columns:
+        fn = df.get("firstName", pd.Series(dtype=str)).fillna("")
+        ln = df.get("lastName",  pd.Series(dtype=str)).fillna("")
+        df["fullName"] = fn + " " + ln
+    for col in ["draftRound", "draftPick", "rookieYear", "playerBestOvr", "yearsPro"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+def _letter_grade(score: float) -> str:
+    for threshold, grade in GRADE_THRESHOLDS:
+        if score >= threshold:
+            return grade
+    return "F"
+
+
+def get_draft_class(season: int) -> dict:
+    """
+    Full draft class breakdown for a given TSL season (2-current).
+    Uses player_draft_map from tsl_history.db — resolves drafting_team from
+    first statistical appearance, NOT players.teamName (which is current team
+    and breaks for traded players).
+    """
+    if season < 2 or season > dm.CURRENT_SEASON:
+        return {"error": f"No real draft data for season {season}. TSL drafts started season 2."}
+
+    # ── Pull from DB (accurate drafting team) ─────────────────────────────
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("""
+            SELECT extendedName, drafting_team, draftRound, draftPick,
+                   dev, playerBestOvr, pos, was_traded
+            FROM player_draft_map
+            WHERE CAST(drafting_season AS INTEGER) = ?
+        """, (season,)).fetchall()
+        conn.close()
+    except Exception as e:
+        return {"error": f"DB unavailable: {e}. Run build_tsl_db.py first."}
+
+    if not rows:
+        return {"error": f"No draft data for season {season} in DB. Rebuild tsl_history.db."}
+
+    cls = pd.DataFrame(rows, columns=[
+        "extendedName","teamName","draftRound","draftPick",
+        "dev","playerBestOvr","pos","was_traded"
+    ])
+    for col in ["draftRound","draftPick","playerBestOvr"]:
+        cls[col] = pd.to_numeric(cls[col], errors="coerce").fillna(0)
+
+    cls["devScore"]    = cls["dev"].map(DEV_SCORE).fillna(1)
+    cls["roundLabel"]  = cls["draftRound"].map(ROUND_LABELS).fillna("UDFA")
+    ovr_norm           = (cls["playerBestOvr"] - 60).clip(0) / 40
+    cls["gradeScore"]  = cls["devScore"] * 0.6 + ovr_norm * 0.4
+    cls["stealScore"]  = cls["devScore"] / (cls["draftRound"].clip(2, 8) / 2)
+
+    class_grade_score = cls["gradeScore"].mean()
+    letter = _letter_grade(class_grade_score)
+    target_year = SEASON_TO_YEAR.get(season, season + 2024)
+
+    def _pick_cols(df):
+        return df[["extendedName","teamName","pos","roundLabel","draftPick",
+                   "playerBestOvr","dev"]].to_dict("records")
+
+    steals   = _pick_cols(cls.nlargest(5, "stealScore"))
+    top_picks= _pick_cols(cls.nlargest(8, "playerBestOvr"))
+    early    = cls[cls["draftRound"].isin([2, 3])]
+    busts    = _pick_cols(
+        early[(early["dev"] == "Normal") | (early["playerBestOvr"] < 75)]
+        .sort_values("playerBestOvr").head(5)
+    )
+
+    team_grades = (
+        cls.groupby("teamName")
+        .agg(
+            picks=("extendedName", "count"),
+            avgOVR=("playerBestOvr", "mean"),
+            xfactors=("dev", lambda x: (x == "Superstar X-Factor").sum()),
+            superstars=("dev", lambda x: (x == "Superstar").sum()),
+            stars=("dev", lambda x: (x == "Star").sum()),
+            gradeScore=("gradeScore", "mean"),
+        )
+        .round(1)
+        .reset_index()
+        .sort_values("gradeScore", ascending=False)
+    )
+    team_grades["grade"] = team_grades["gradeScore"].apply(_letter_grade)
+
+    return {
+        "type":        "draft_class",
+        "season":      season,
+        "year":        target_year,
+        "total_picks": len(cls),
+        "letter_grade":letter,
+        "grade_score": round(class_grade_score, 2),
+        "dev_counts":  cls["dev"].value_counts().to_dict(),
+        "avg_ovr":     round(cls["playerBestOvr"].mean(), 1),
+        "top_picks":   top_picks,
+        "steals":      steals,
+        "busts":       busts,
+        "team_grades": team_grades.head(10).to_dict("records"),
+    }
+
+
+def compare_draft_classes() -> dict:
+    """Compare all TSL draft classes (seasons 2-current) side by side."""
+    classes = []
+    for season in range(2, dm.CURRENT_SEASON + 1):
+        dc = get_draft_class(season)
+        if "error" not in dc:
+            classes.append({
+                "season":      dc["season"],
+                "year":        dc["year"],
+                "grade":       dc["letter_grade"],
+                "avg_ovr":     dc["avg_ovr"],
+                "xfactors":    dc["dev_counts"].get("Superstar X-Factor", 0),
+                "superstars":  dc["dev_counts"].get("Superstar", 0),
+                "stars":       dc["dev_counts"].get("Star", 0),
+                "total_picks": dc["total_picks"],
+            })
+    return {"type": "draft_comparison", "classes": classes}
+
+
+# ── Hot / Cold tracker ────────────────────────────────────────────────────────
+
+def _load_raw_offense() -> pd.DataFrame:
+    """
+    Return per-game offensive stats from dm.df_offense (stat leader endpoints).
+    offensive.csv fields: id, fullName, extendedName, seasonIndex, stageIndex,
+    weekIndex, gameId, teamId, teamName, rosterId, pos, pass/rush/rec stats.
+    """
+    df = dm.df_offense.copy()
+    NUM = ["passAtt", "passYds", "passTDs", "passInts", "passSacks",
+           "rushAtt", "rushYds", "rushTDs", "rushFum",
+           "recCatches", "recYds", "recTDs", "recDrops",
+           "seasonIndex", "stageIndex", "weekIndex"]
+    for c in NUM:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
+
+
+def _load_raw_defense() -> pd.DataFrame:
+    """
+    Return per-game defensive stats from dm.df_defense (stat leader endpoints).
+    defensive.csv fields: statId, fullName, extendedName, seasonIndex, stageIndex,
+    weekIndex, gameId, teamId, teamName, rosterId, pos, defTotalTackles, defSacks,
+    defSafeties, defInts, defIntReturnYds, defForcedFum, defFumRec, defTDs,
+    defCatchAllowed, defDeflections, defPts.
+    """
+    df = dm.df_defense.copy()
+    NUM = ["defTotalTackles", "defSacks", "defInts", "defForcedFum",
+           "defDeflections", "seasonIndex", "stageIndex", "weekIndex"]
+    for c in NUM:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
+
+
+def get_hot_cold(player_name: str, last_n: int = 3) -> dict:
+    """
+    Compare a player's last N games vs their season average.
+    Returns structured dict with trend direction and key stat deltas.
+    """
+    for load_fn, stat_cols, group in [
+        (_load_raw_offense,
+         ["passAtt", "passYds", "passTDs", "passInts", "rushYds", "rushTDs",
+          "recCatches", "recYds", "recTDs"],
+         "offense"),
+        (_load_raw_defense,
+         ["defTotalTackles", "defSacks", "defInts", "defForcedFum", "defDeflections"],
+         "defense"),
+    ]:
+        df = load_fn()
+        if "fullName" not in df.columns:
+            if "firstName" in df.columns and "lastName" in df.columns:
+                df["fullName"] = df["firstName"].fillna("") + " " + df["lastName"].fillna("")
+            else:
+                continue
+
+        if "seasonIndex" in df.columns and "stageIndex" in df.columns:
+            player_df = df[
+                (df["fullName"] == player_name) &
+                (df["seasonIndex"] == dm.CURRENT_SEASON) &
+                (df["stageIndex"] == dm.REGULAR_STAGE)
+            ].sort_values("weekIndex")
+        elif "seasonIndex" in df.columns:
+            player_df = df[
+                (df["fullName"] == player_name) &
+                (df["seasonIndex"] == dm.CURRENT_SEASON)
+            ]
+        else:
+            player_df = df[df["fullName"] == player_name]
+
+        if player_df.empty:
+            last = player_name.split(".")[-1] if "." in player_name else player_name.split()[-1]
+            base = df[df["fullName"].str.contains(last, case=False, na=False)]
+            if "seasonIndex" in df.columns:
+                base = base[base["seasonIndex"] == dm.CURRENT_SEASON]
+            player_df = base.sort_values("weekIndex") if "weekIndex" in df.columns else base
+
+        if player_df.empty:
+            continue
+
+        active_cols = [c for c in stat_cols if c in player_df.columns and player_df[c].sum() > 0]
+        if not active_cols:
+            continue
+
+        season_avg   = player_df[active_cols].mean()
+        last_n_avg   = player_df.tail(last_n)[active_cols].mean()
+        last_n_games = player_df.tail(last_n)[
+            (["weekIndex"] if "weekIndex" in player_df.columns else []) + active_cols
+        ].to_dict("records")
+
+        deltas = {}
+        for col in active_cols:
+            sa = season_avg[col]
+            la = last_n_avg[col]
+            if sa > 0:
+                deltas[col] = round(((la - sa) / sa) * 100, 1)
+
+        positive_stats = ["passYds", "passTDs", "rushYds", "rushTDs",
+                          "recYds", "recTDs", "recCatches",
+                          "defTotalTackles", "defSacks", "defInts", "defForcedFum"]
+        negative_stats = ["passInts", "rushFum", "recDrops"]
+
+        trend_score = 0
+        for col, delta in deltas.items():
+            if col in positive_stats:
+                trend_score += delta
+            elif col in negative_stats:
+                trend_score -= delta
+
+        if trend_score > 15:
+            trend = "🔥 HOT"
+        elif trend_score < -15:
+            trend = "🥶 COLD"
+        else:
+            trend = "➡️ NEUTRAL"
+
+        team = player_df.iloc[-1].get("teamName", "")
+        pos  = player_df.iloc[-1].get("pos", "")
+        name_display = player_df.iloc[-1].get("extendedName") or player_name
+
+        return {
+            "type":         "hot_cold",
+            "name":         name_display,
+            "team":         team,
+            "pos":          pos,
+            "trend":        trend,
+            "trend_score":  round(trend_score, 1),
+            "season_avg":   season_avg.round(1).to_dict(),
+            "last_n_avg":   last_n_avg.round(1).to_dict(),
+            "deltas":       deltas,
+            "last_n_games": last_n_games,
+            "last_n":       last_n,
+            "group":        group,
+        }
+
+    return {"type": "hot_cold", "error": f"No per-game data found for {player_name}"}
+
+
+# ── Clutch stats ──────────────────────────────────────────────────────────────
+
+def get_clutch_records(margin: int = 7) -> dict:
+    """
+    Team records in close games (final margin ≤ N points).
+    Uses df_all_games (status==3 final games) for accuracy.
+    Falls back to df_games if needed.
+    """
+    src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+    if src.empty:
+        return {"type": "clutch", "error": "No game data available."}
+
+    games = src.copy()
+
+    def _resolve_col(df, *candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    home_score_col = _resolve_col(games, "homeScore", "homeTeamScore")
+    away_score_col = _resolve_col(games, "awayScore", "awayTeamScore")
+    home_name_col  = _resolve_col(games, "homeTeamName", "home")
+    away_name_col  = _resolve_col(games, "awayTeamName", "away")
+    status_col     = _resolve_col(games, "status")
+
+    if not all([home_score_col, away_score_col, home_name_col, away_name_col]):
+        return {"type": "clutch", "error": "Required game columns not found in game data."}
+
+    games[home_score_col] = pd.to_numeric(games[home_score_col], errors="coerce").fillna(0)
+    games[away_score_col] = pd.to_numeric(games[away_score_col], errors="coerce").fillna(0)
+
+    # Final games only — status==3 if available, otherwise score>0 fallback
+    if status_col:
+        games[status_col] = pd.to_numeric(games[status_col], errors="coerce").fillna(0).astype(int)
+        played = games[games[status_col] == 3].copy()
+    else:
+        played = games[
+            (games[home_score_col] > 0) | (games[away_score_col] > 0)
+        ].copy()
+
+    if played.empty:
+        return {"type": "clutch", "margin": margin, "records": [],
+                "most_clutch": "?", "least_clutch": "?"}
+
+    played["margin"] = (played[home_score_col] - played[away_score_col]).abs()
+    close = played[played["margin"] <= margin]
+
+    all_teams = played[home_name_col].dropna().unique()
+    rows = []
+
+    for team in all_teams:
+        hw = ((played[home_name_col] == team) & (played[home_score_col] > played[away_score_col])).sum()
+        aw = ((played[away_name_col] == team) & (played[away_score_col] > played[home_score_col])).sum()
+        hl = ((played[home_name_col] == team) & (played[home_score_col] < played[away_score_col])).sum()
+        al = ((played[away_name_col] == team) & (played[away_score_col] < played[home_score_col])).sum()
+
+        cw = (
+            ((close[home_name_col] == team) & (close[home_score_col] > close[away_score_col])) |
+            ((close[away_name_col] == team) & (close[away_score_col] > close[home_score_col]))
+        ).sum()
+        cl = (
+            ((close[home_name_col] == team) & (close[home_score_col] < close[away_score_col])) |
+            ((close[away_name_col] == team) & (close[away_score_col] < close[home_score_col]))
+        ).sum()
+
+        rows.append({
+            "team":           team,
+            "overall_wins":   int(hw + aw),
+            "overall_losses": int(hl + al),
+            "clutch_wins":    int(cw),
+            "clutch_losses":  int(cl),
+            "clutch_games":   int(cw + cl),
+            "clutch_winpct":  round(cw / (cw + cl) if (cw + cl) > 0 else 0, 3),
+        })
+
+    df = pd.DataFrame(rows).sort_values("clutch_wins", ascending=False)
+    return {
+        "type":         "clutch",
+        "margin":       margin,
+        "records":      df.to_dict("records"),
+        "most_clutch":  df.iloc[0]["team"] if not df.empty else "?",
+        "least_clutch": df.sort_values("clutch_winpct").iloc[0]["team"] if not df.empty else "?",
+    }
+
+
+# ── Owner profiles & memory ───────────────────────────────────────────────────
+
+_owner_profiles: dict[int, dict] = {}
+_username_to_team: dict[str, str] = {}
+_team_to_username: dict[str, str] = {}
+
+
 def get_nickname(discord_user_id: int) -> str | None:
-    """Return the TSL nickname for a Discord user ID, or None if unknown."""
     return KNOWN_MEMBERS.get(discord_user_id)
 
 
 def get_ids_for_nickname(nickname: str) -> list[int]:
-    """Return all known Discord IDs for a given nickname."""
     return _nickname_to_ids.get(nickname.lower(), [])
 
 
 def build_owner_map():
-    """Build username ↔ team lookup from df_teams, cross-referenced with KNOWN_MEMBERS."""
+    """Build username ↔ team lookup from df_teams (has userName field)."""
     global _username_to_team, _team_to_username
     if dm.df_teams.empty:
         return
     for _, row in dm.df_teams.iterrows():
-        uname = row.get("userName", "").strip()
-        team  = row.get("nickName", "")
+        uname = str(row.get("userName", "")).strip()
+        team  = str(row.get("nickName", "")).strip()
         if uname and team:
             _username_to_team[uname.lower()] = team
             _team_to_username[team.lower()]  = uname
 
-    # Also map TSL nicknames → team where the nickname matches or partially matches a userName
     for discord_id, nickname in KNOWN_MEMBERS.items():
         nick_lower = nickname.lower()
-        # Direct match
         if nick_lower in _username_to_team:
             continue
-        # Partial match (e.g. "Shaun" matches "SuaveShaunTTV")
         for uname, team in _username_to_team.items():
             if nick_lower in uname:
                 _username_to_team[nick_lower] = team
@@ -476,7 +547,6 @@ def build_owner_map():
 
 
 def get_owner_team(discord_username: str) -> str | None:
-    """Look up which TSL team a Discord username owns."""
     return _username_to_team.get(discord_username.lower())
 
 
@@ -485,13 +555,8 @@ def get_team_owner_username(team_name: str) -> str | None:
 
 
 def get_or_create_profile(discord_user_id: int, discord_username: str) -> dict:
-    """
-    Get or create a persistent owner profile.
-    Resolves TSL nickname from KNOWN_MEMBERS, team from KNOWN_MEMBER_TEAMS.
-    """
     if discord_user_id not in _owner_profiles:
         nickname = get_nickname(discord_user_id) or discord_username
-        # Team lookup: explicit override first, then username map, then nickname partial match
         team = (
             KNOWN_MEMBER_TEAMS.get(discord_user_id) or
             get_owner_team(nickname) or
@@ -518,7 +583,6 @@ def record_roast(discord_user_id: int):
 
 
 def record_beef(user_a_id: int, user_b_id: int):
-    """Track that two users are beefing."""
     for uid, oid in [(user_a_id, user_b_id), (user_b_id, user_a_id)]:
         if uid in _owner_profiles:
             profile = _owner_profiles[uid]
@@ -530,13 +594,9 @@ def record_beef(user_a_id: int, user_b_id: int):
 
 
 def get_owner_context(discord_user_id: int, discord_username: str) -> str:
-    """
-    Build a context string about the owner for WittGPT.
-    Uses TSL nickname from KNOWN_MEMBERS when available.
-    """
-    profile = get_or_create_profile(discord_user_id, discord_username)
+    profile  = get_or_create_profile(discord_user_id, discord_username)
     nickname = profile.get("nickname", discord_username)
-    team = profile.get("team")
+    team     = profile.get("team")
 
     lines = ["[OWNER CONTEXT]"]
     lines.append(
@@ -558,7 +618,13 @@ def get_owner_context(discord_user_id: int, discord_username: str) -> str:
                 )
         recent = dm.get_last_n_games(team, 3)
         if recent:
-            form = " ".join("W" if g["win"] else "L" for g in recent)
+            def _wl(g):
+                hs, aws = g.get("home_score", 0), g.get("away_score", 0)
+                is_home = g.get("home", "").lower() == team.lower()
+                team_score = hs if is_home else aws
+                opp_score = aws if is_home else hs
+                return "W" if team_score > opp_score else ("L" if team_score < opp_score else "T")
+            form = " ".join(_wl(g) for g in recent)
             lines.append(f"Last 3 games: {form}")
     else:
         lines.append("Team: NOT IN LEAGUE (spectator or unknown)")
@@ -576,20 +642,13 @@ def detect_beef(
     current_user_id: int,
     current_username: str,
     message_content: str,
-    active_users_in_channel: list[dict],  # list of {id, username}
+    active_users_in_channel: list[dict],
 ) -> dict | None:
-    """
-    Detects if a beef situation exists:
-    - Another league owner is @mentioned in the message, OR
-    - The message content targets another owner's team by name
-
-    Returns beef context dict if detected, None otherwise.
-    """
     content_lower = message_content.lower()
-    current_team = get_owner_team(current_username)
+    current_team  = get_owner_team(current_username)
 
     for user in active_users_in_channel:
-        uid = user.get("id")
+        uid   = user.get("id")
         uname = user.get("username", "")
         if uid == current_user_id:
             continue
@@ -598,7 +657,6 @@ def detect_beef(
         if not opponent_team:
             continue
 
-        # Check if opponent is @mentioned or their team is mentioned
         if uname.lower() in content_lower or (
             opponent_team and opponent_team.lower() in content_lower
         ):
@@ -618,18 +676,16 @@ def detect_beef(
 
 
 def build_beef_context(beef: dict) -> str:
-    """Build context string for WittGPT in beef mode."""
     a_team = beef.get("challenger_team", "Unknown")
     b_team = beef.get("opponent_team",   "Unknown")
     h2h    = beef.get("h2h", {})
 
     lines = [
-        f"[BEEF MODE ACTIVATED]",
+        "[BEEF MODE ACTIVATED]",
         f"{beef['challenger']} ({a_team}) is coming at {beef['opponent']} ({b_team})",
-        f"All-time H2H: {a_team} {h2h.get('a_wins',0)} — {h2h.get('b_wins',0)} {b_team}",
+        f"Season H2H: {a_team} {h2h.get('a_wins',0)} — {h2h.get('b_wins',0)} {b_team}",
     ]
 
-    # Add quick stats for both teams
     for team in [a_team, b_team]:
         if not dm.df_standings.empty:
             row = dm.df_standings[dm.df_standings["teamName"].str.lower() == team.lower()]
@@ -646,45 +702,36 @@ def build_beef_context(beef: dict) -> str:
 # ── Leaderboard channel auto-updater ─────────────────────────────────────────
 
 def build_leaderboard_data() -> dict:
-    """
-    Builds full leaderboard snapshot for auto-posting.
-    Combines power rankings + stat leaders + hot/cold flags.
-    """
     from analysis import power_rankings, stat_leaders
 
     pr = power_rankings()
 
-    # Stat leaders
     leaders = {
-        "Pass Yds":   stat_leaders(dm.df_offense, "passYds",        min_col="passAtt",    min_val=50,  top_n=3),
-        "Rush Yds":   stat_leaders(dm.df_offense, "rushYds",        min_col="rushAtt",    min_val=20,  top_n=3),
-        "Rec Yds":    stat_leaders(dm.df_offense, "recYds",         min_col="recCatches", min_val=10,  top_n=3),
-        "Sacks":      stat_leaders(dm.df_defense, "defSacks",       top_n=3),
-        "INTs":       stat_leaders(dm.df_defense, "defInts",        top_n=3),
-        "Tackles":    stat_leaders(dm.df_defense, "defTotalTackles",min_col="defTotalTackles", min_val=5, top_n=3),
+        "Pass Yds":   stat_leaders(dm.df_offense, "passYds",         min_col="passAtt",    min_val=50,  top_n=3),
+        "Rush Yds":   stat_leaders(dm.df_offense, "rushYds",         min_col="rushAtt",    min_val=20,  top_n=3),
+        "Rec Yds":    stat_leaders(dm.df_offense, "recYds",          min_col="recCatches", min_val=10,  top_n=3),
+        "Sacks":      stat_leaders(dm.df_defense, "defSacks",        top_n=3),
+        "INTs":       stat_leaders(dm.df_defense, "defInts",         top_n=3),
+        "Tackles":    stat_leaders(dm.df_defense, "defTotalTackles", min_col="defTotalTackles", min_val=5, top_n=3),
     }
 
     return {
-        "type":          "leaderboard",
+        "type":           "leaderboard",
         "power_rankings": pr[:10],
-        "stat_leaders":  leaders,
-        "season":        dm.CURRENT_SEASON,
-        "status":        dm.get_league_status(),
+        "stat_leaders":   leaders,
+        "season":         dm.CURRENT_SEASON,
+        "status":         dm.get_league_status(),
     }
 
 
 # ── Reaction pagination helper ────────────────────────────────────────────────
 
 class PaginatedResult:
-    """
-    Holds a multi-page result set for reaction-based pagination.
-    Pages are pre-built embed dicts. Bot stores these by message_id.
-    """
     def __init__(self, pages: list, title: str = ""):
-        self.pages     = pages
-        self.title     = title
-        self.current   = 0
-        self.total     = len(pages)
+        self.pages   = pages
+        self.title   = title
+        self.current = 0
+        self.total   = len(pages)
 
     def current_page(self):
         return self.pages[self.current] if self.pages else None
@@ -703,7 +750,6 @@ class PaginatedResult:
         return f"Page {self.current + 1} / {self.total}"
 
 
-# Registry of active paginated messages: { discord_message_id: PaginatedResult }
 _paginated_messages: dict[int, PaginatedResult] = {}
 
 

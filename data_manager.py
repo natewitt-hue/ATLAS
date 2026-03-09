@@ -1,1130 +1,1004 @@
 """
-data_manager.py
-Loads every TSL JSON file once at startup, aggregates per-game rows into
-season totals, and exposes clean DataFrames + lookup helpers to the rest
-of the bot.
+data_manager.py — ATLAS League Data Manager (MaddenStats API)
+─────────────────────────────────────────────────────────────────────────────
+Fetches all TSL data directly from the MaddenStats public API.
+No Render server, no Snallabot exports, no cold starts.
+
+API base: https://mymadden.com/api/lg/tsl/
+
+Public DataFrames (populated after load_all()):
+  df_standings   — 32 teams, W/L/T, yardage ranks, etc.
+  df_teams       — 32 teams with owner usernames
+  df_games       — current week schedule with home/away team names
+  df_players     — stat leaders (pass/rush/rec/def) used as player index
+  df_offense     — passing + rushing + receiving leaders
+  df_defense     — defensive leaders (sacks/ints/tackles)
+  df_team_stats  — alias for df_standings (all team stats live there)
+  df_trades      — all accepted trades this season
+  df_power       — MaddenStats power rankings (rank, record, phase ranks)
+
+Constants:
+  API_BASE        — MaddenStats API root
+  CURRENT_SEASON  — live season (1-indexed, from /info)
+  CURRENT_WEEK    — live week   (1-indexed, from /info)
+  CURRENT_STAGE   — current stageIndex (1 = regular season)
+  REGULAR_STAGE   — always 1 for this league
+
+Helper functions:
+  get_league_status()             → "Season X | Week Y"
+  get_team_record(team)           → "W-L-T" string
+  get_team_owner(team_name)       → string
+  get_last_n_games(team, n)       → list of recent game dicts
+  get_h2h_record(team_a, team_b)  → {a_wins, b_wins, ties}
+  get_weekly_results(week)        → FINAL games only (status==3) for a given week
+  discord_db_exists()             → bool
+  get_discord_db_schema()         → schema string for LLM
+  _get_discord_db(readonly)       → sqlite3.Connection
+
+MM Export field reference (games.csv):
+  id, scheduleId, seasonIndex, stageIndex, weekIndex(0-based),
+  homeTeamId, awayTeamId, homeTeamName, awayTeamName,
+  homeScore, awayScore, status(1=sched,2=live,3=final),
+  homeUser, awayUser, gameTime
+  Team names use nickName (Ravens, Bears, etc.)
+
+─────────────────────────────────────────────────────────────────────────────
+Fixes applied (v2 — WittGPT Code Review rebuild):
+  - BUG #1:  get_rings_count() cached at load_all() time — no more N live
+             API calls per trade evaluation.
+  - BUG #3:  Bare `except: pass` replaced with `except Exception as e: log.warning()`
+             throughout so real errors are no longer silently swallowed.
+  - BUG #5:  `import io` moved to top-level (was inside _fetch_csv).
+  - BUG #6:  `import math` inside load_all player age derivation replaced
+             with top-level import.
+  - FIX #11: get_position_scarcity() results cached at load_all() time.
+             _scarcity_cache is a module-level dict rebuilt on every sync.
+  - FIX #8:  _startup_done flag support — load_all() is safe to call
+             multiple times but callers (bot.py) can now guard against it.
+  - ADD:     flag_stat_padding(), snapshot_week_stats(), get_stat_delta()
+             merged from data_manager_additions.py. Fixes live blowout_monitor
+             AttributeError crash (monitor was failing silently every 15 min).
+             snapshot_week_stats() now called automatically at end of load_all().
+  - ADD:     get_week(), get_season(), get_draft_picks() convenience helpers.
+─────────────────────────────────────────────────────────────────────────────
+Fixes applied (v3 — ATLAS v1.4.2 Code Review):
+  - FIX:     Rebranded docstring + User-Agent from WittGPT → ATLAS.
+  - FIX:     Dead autograde callback block removed from load_all() — it ran
+             in a thread executor where asyncio.get_running_loop() always
+             raised RuntimeError, making it a silent no-op. Autograde is
+             handled by bot.py /wittsync after load_all returns.
+  - FIX:     Off-by-one in fallback week fetch range (_l_week+2 → _l_week+1)
+             — was fetching one weekIndex past what exists every sync.
+  - FIX:     get_last_n_games() completion filter now uses status field
+             instead of score sniffing — 0-0 completed games no longer dropped.
+  - FIX:     get_weekly_results() debug print → log.debug() — no longer
+             spams terminal on every call.
+  - FIX:     PRAGMA table_info() now quotes table name (SQL hygiene).
+  - DOC:     get_h2h_record() docstring clarifies current-season-only scope.
+  - DOC:     _rebuild_rings_cache() docstring warns about wins>=14 proxy
+             not detecting actual Super Bowl wins, and sequential API cost.
+─────────────────────────────────────────────────────────────────────────────
 """
 
-import json
+import io
+import math
 import os
+import sqlite3
+import time
+import requests
 import pandas as pd
+import logging
 
-# ── Constants ───────────────────────────────────────────────────────────────
+log = logging.getLogger(__name__)
 
-DATA_DIR = "league_data"
+# ── API Configuration ─────────────────────────────────────────────────────────
+LEAGUE_SLUG = "tsl"
+API_BASE    = f"https://mymadden.com/api/lg/{LEAGUE_SLUG}"
 
-# Auto-detected at load time from info.json
-CURRENT_SEASON: int = 5
-REGULAR_STAGE:  int = 1   # stageIndex=1 is regular season
+_HEADERS = {
+    "Accept":           "application/json, text/plain, */*",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer":          f"https://mymadden.com/lg/{LEAGUE_SLUG}",
+    "User-Agent":       "ATLAS-Bot/1.4",
+}
 
+# ── Live league state (overwritten by load_all()) ─────────────────────────────
+CURRENT_SEASON = 6
+CURRENT_WEEK   = 4
+CURRENT_STAGE  = 1
+REGULAR_STAGE  = 1     # stageIndex for regular season in this league
 
-# ── Low-level helpers ────────────────────────────────────────────────────────
-
-def _load(filename: str):
-    path = os.path.join(DATA_DIR, filename)
-    if not os.path.exists(path):
-        print(f"[DataManager] WARNING: {filename} not found.")
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[DataManager] ERROR loading {filename}: {e}")
-        return []
-
-
-def _to_numeric(df: pd.DataFrame, cols: list) -> pd.DataFrame:
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    return df
-
-
-def _current_regular(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter to current season, regular season stage."""
-    if df.empty:
-        return df
-    return df[
-        (df["seasonIndex"] == CURRENT_SEASON) &
-        (df["stageIndex"]  == REGULAR_STAGE)
-    ].copy()
-
-
-# ── Offense ──────────────────────────────────────────────────────────────────
-
-OFF_NUM = [
-    "passAtt", "passComp", "passTDs", "passInts", "passYds", "passSacks",
-    "rushAtt", "rushYds", "rushTDs", "rushFum", "rushBrokenTackles",
-    "rushYdsAfterContact", "rush20PlusYds",
-    "recCatches", "recDrops", "recYds", "recTDs", "recYdsAfterCatch",
-    "offPts",
-]
-OFF_GROUP = ["fullName", "extendedName", "teamName", "pos"]
-
-
-def _build_offense() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("offensive.json"))
-    if raw.empty:
-        return raw
-    raw = _to_numeric(raw, OFF_NUM + ["seasonIndex", "stageIndex"])
-    agg = _current_regular(raw).groupby(OFF_GROUP, as_index=False)[OFF_NUM].sum()
-    # Derived rates (safe divide)
-    def safe_div(a, b): return (a / b.replace(0, float("nan"))).round(1)
-    agg["passCompPct"]   = safe_div(agg["passComp"],  agg["passAtt"])
-    agg["passYdsPerAtt"] = safe_div(agg["passYds"],   agg["passAtt"])
-    agg["rushYdsPerAtt"] = safe_div(agg["rushYds"],   agg["rushAtt"])
-    agg["recYdsPerCatch"]= safe_div(agg["recYds"],    agg["recCatches"])
-    return agg
-
-
-# ── Defense ──────────────────────────────────────────────────────────────────
-
-DEF_NUM = [
-    "defTotalTackles", "defSacks", "defSafeties", "defInts", "defIntReturnYds",
-    "defForcedFum", "defFumRec", "defTDs", "defCatchAllowed", "defDeflections",
-    "defPts",
-]
-DEF_GROUP = ["fullName", "extendedName", "teamName", "pos"]
-
-
-def _build_defense() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("defensive.json"))
-    if raw.empty:
-        return raw
-    raw = _to_numeric(raw, DEF_NUM + ["seasonIndex", "stageIndex"])
-    return _current_regular(raw).groupby(DEF_GROUP, as_index=False)[DEF_NUM].sum()
-
-
-# ── Team Stats ───────────────────────────────────────────────────────────────
-
-TS_NUM = [
-    "defForcedFum", "defFumRec", "defIntsRec", "defPassYds", "defRushYds",
-    "defRedZoneFGs", "defRedZones", "defRedZoneTDs", "defSacks", "defTotalYds",
-    "off4thDownAtt", "off4thDownConv", "offFumLost", "offIntsLost",
-    "off1stDowns", "offPassTDs", "offPassYds", "offRushTDs", "offRushYds",
-    "offRedZoneFGs", "offRedZones", "offRedZoneTDs", "offSacks", "offTotalYds",
-    "penalties", "penaltyYds", "off3rdDownAtt", "off3rdDownConv",
-    "off2ptAtt", "off2ptConv", "tODiff", "tOGiveAways", "tOTakeaways",
-]
-
-
-def _build_team_stats() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("teamStats.json"))
-    if raw.empty:
-        return raw
-    raw = _to_numeric(raw, TS_NUM + ["seasonIndex", "stageIndex"])
-    agg = _current_regular(raw).groupby("teamName", as_index=False)[TS_NUM].sum()
-    # Recalculate percentages
-    def safe_pct(a, b): return (a / b.replace(0, float("nan")) * 100).round(1)
-    agg["off3rdDownConvPct"] = safe_pct(agg["off3rdDownConv"], agg["off3rdDownAtt"])
-    agg["off4thDownConvPct"] = safe_pct(agg["off4thDownConv"], agg["off4thDownAtt"])
-    agg["offRedZonePct"]     = safe_pct(agg["offRedZoneTDs"],  agg["offRedZones"])
-    agg["defRedZonePct"]     = safe_pct(agg["defRedZoneTDs"],  agg["defRedZones"])
-    return agg
-
-
-# ── Standings ────────────────────────────────────────────────────────────────
-
-def _build_standings() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("standings.json"))
-    if raw.empty:
-        return raw
-    return raw[raw["seasonIndex"] == CURRENT_SEASON].copy()
-
-
-# ── Teams (metadata + colors) ────────────────────────────────────────────────
-
-def _build_teams() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("teams.json"))
-    if raw.empty:
-        return raw
-    # Convert int colors to hex strings
-    if "primaryColor" in raw.columns:
-        raw["primaryHex"]   = raw["primaryColor"].apply(lambda c: f"#{int(c):06X}" if pd.notna(c) else "#808080")
-    if "secondaryColor" in raw.columns:
-        raw["secondaryHex"] = raw["secondaryColor"].apply(lambda c: f"#{int(c):06X}" if pd.notna(c) else "#ffffff")
-    return raw
-
-
-# ── Players (roster info + ratings) ─────────────────────────────────────────
-
-PLAYER_KEEP = [
-    # Identity
-    "rosterId", "firstName", "lastName", "age", "pos", "jerseyNum",
-    "dev", "teamName", "teamId", "isActive", "isFA", "retired",
-    "injuryType", "injuryLength", "isOnIR", "isOnPracticeSquad",
-    # Contract / cap
-    "capHit", "contractYearsLeft", "contractSalary",
-    "value", "playerBestOvr", "legacyScore",
-    # Physical — required for position change validation (Section 6.4)
-    "height", "weight",
-    # Speed / athleticism
-    "speedRating", "agilityRating", "changeOfDirectionRating",
-    "strengthRating", "throwPowerRating", "throwAccRating", "awareRating",
-    # Blocking (WR→TE, FB→TE, RB→FB)
-    "runBlockRating", "impactBlockRating", "leadBlockRating",
-    # Coverage / DB (S→CB, CB→S)
-    "manCoverRating", "zoneCoverRating", "pursuitRating",
-    # Tackling / defense (S→LB)
-    "tackleRating", "hitPowerRating", "blockShedRating",
-    # Receiving / routes (TE→WR, HB/TE→WR Slot)
-    "catchRating", "routeRunDeepRating", "routeRunShortRating",
-    "releaseRating", "breakTackleRating",
-    # Ball carrier (WR→HB, RB→FB)
-    "carryRating", "bCVRating",
-    # Abilities
-    "ability1", "ability2", "ability3", "ability4", "ability5", "ability6",
-]
-
-
-def _build_players() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("players.json"))
-    if raw.empty:
-        return raw
-    keep = [c for c in PLAYER_KEEP if c in raw.columns]
-    df = raw[keep].copy()
-    df["fullName"] = df["firstName"] + " " + df["lastName"]
-    return df
-
-
-# ── Games ────────────────────────────────────────────────────────────────────
-
-def _build_games() -> pd.DataFrame:
-    raw = pd.DataFrame(_load("games.json"))
-    if raw.empty:
-        return raw
-    raw = _to_numeric(raw, ["homeScore", "awayScore", "seasonIndex", "stageIndex", "weekIndex", "status"])
-    return raw
-
-
-# ── Trades ───────────────────────────────────────────────────────────────────
-
-def _build_trades() -> pd.DataFrame:
-    return pd.DataFrame(_load("trades.json"))
-
-
-# ── Player Abilities ─────────────────────────────────────────────────────────
-
-def _build_abilities() -> pd.DataFrame:
-    return pd.DataFrame(_load("playerAbilities.json"))
-
-
-# ── Public DataFrames (populated by load_all) ────────────────────────────────
-
-df_offense    = pd.DataFrame()
-df_defense    = pd.DataFrame()
-df_team_stats = pd.DataFrame()
+# ── DataFrames ────────────────────────────────────────────────────────────────
 df_standings  = pd.DataFrame()
 df_teams      = pd.DataFrame()
-df_players    = pd.DataFrame()
 df_games      = pd.DataFrame()
+df_players    = pd.DataFrame()
+df_offense    = pd.DataFrame()
+df_defense    = pd.DataFrame()
+df_team_stats = pd.DataFrame()   # alias → df_standings
 df_trades     = pd.DataFrame()
-df_abilities  = pd.DataFrame()
-league_info   = {}
+df_power      = pd.DataFrame()
+df_all_games  = pd.DataFrame()   # full season schedule with scores
+
+# Legacy compat shim
+DATA_DIR = ""
+BASE_URL = API_BASE
+
+# ── Internal lookup table ─────────────────────────────────────────────────────
+_team_id_to_name: dict[int, str] = {}   # teamId (int) → displayName (str)
+_team_id_to_abbr: dict[int, str] = {}   # teamId (int) → abbrName (str)
+
+# ── Ability engine caches (populated by load_all()) ───────────────────────────
+_players_cache:   list = []   # raw /export/players CSV — full roster with draft cols
+_abilities_cache: list = []   # raw /export/playerAbilities CSV
+
+# ── Discord DB path ───────────────────────────────────────────────────────────
+_DB_PATH = os.path.join(os.path.dirname(__file__), "discord_history.db")
+
+# ── Autograde callback (set by sportsbook cog after load_all fires) ───────────
+# Call signature: async def callback() — no args
+_autograde_callback = None
+
+# ── FIX #1: Rings count cache (rebuilt in load_all) ──────────────────────────
+_rings_cache: dict[int, int] = {}    # teamId → ring count
+
+# ── FIX #11: Position scarcity cache (rebuilt in load_all) ───────────────────
+_scarcity_cache: dict[str, dict] = {}  # pos → {count, expected, scarcity_class}
 
 
-def load_all():
-    """Call once at bot startup."""
-    global df_offense, df_defense, df_team_stats, df_standings
-    global df_teams, df_players, df_games, df_trades, df_abilities
-    global league_info, CURRENT_SEASON
+# ═════════════════════════════════════════════════════════════════════════════
+#  LOW-LEVEL HTTP HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 
-    print("[DataManager] Loading all TSL data...")
-
-    raw_info = _load("info.json")
-    if raw_info:
-        league_info    = raw_info
-        CURRENT_SEASON = raw_info.get("seasonIndex", 5)
-
-    df_offense    = _build_offense()
-    df_defense    = _build_defense()
-    df_team_stats = _build_team_stats()
-    df_standings  = _build_standings()
-    df_teams      = _build_teams()
-    df_players    = _build_players()
-    df_games      = _build_games()
-    df_trades     = _build_trades()
-    df_abilities  = _build_abilities()
-
-    print(
-        f"[DataManager] Ready — "
-        f"Season {CURRENT_SEASON} | "
-        f"Offense: {len(df_offense)} players | "
-        f"Defense: {len(df_defense)} players | "
-        f"TeamStats: {len(df_team_stats)} teams | "
-        f"Players: {len(df_players)} roster | "
-        f"Games: {len(df_games)} | "
-        f"Trades: {len(df_trades)} | "
-        f"Abilities: {len(df_abilities)}"
-    )
-
-
-def get_league_status() -> str:
-    return (
-        f"Season {league_info.get('seasonIndex','?')} | "
-        f"{league_info.get('stageName','?')} — "
-        f"{league_info.get('weekName','?')}"
-    )
-
-
-# ── Lookup helpers ────────────────────────────────────────────────────────────
-
-def get_team_color(team_name: str) -> int:
-    """Returns Discord-compatible int color for a team's primary color."""
-    if df_teams.empty or "nickName" not in df_teams.columns:
-        return 0x36393F
-    row = df_teams[df_teams["nickName"].str.lower() == team_name.lower()]
-    if row.empty:
-        row = df_teams[df_teams["displayName"].str.lower().str.contains(team_name.lower(), na=False)]
-    if not row.empty and "primaryColor" in row.columns:
-        return int(row.iloc[0]["primaryColor"])
-    return 0x36393F
-
-
-def get_team_abbr(team_name: str) -> str:
-    if df_teams.empty:
-        return team_name[:3].upper()
-    row = df_teams[df_teams["nickName"].str.lower() == team_name.lower()]
-    if row.empty:
-        row = df_teams[df_teams["displayName"].str.lower().str.contains(team_name.lower(), na=False)]
-    if not row.empty:
-        return row.iloc[0].get("abbrName", team_name[:3].upper())
-    return team_name[:3].upper()
-
-
-def get_team_owner(team_name: str) -> str:
-    if df_teams.empty:
-        return "Unknown"
-    row = df_teams[df_teams["nickName"].str.lower() == team_name.lower()]
-    if row.empty:
-        row = df_teams[df_teams["displayName"].str.lower().str.contains(team_name.lower(), na=False)]
-    if not row.empty:
-        return row.iloc[0].get("userName", "Unknown")
-    return "Unknown"
-
-
-def get_player_profile(full_name: str) -> dict | None:
-    """Return the players.json row for a player as a dict."""
-    if df_players.empty:
-        return None
-    row = df_players[df_players["fullName"].str.lower() == full_name.lower()]
-    if row.empty:
-        last = full_name.split()[-1]
-        row = df_players[df_players["lastName"].str.lower() == last.lower()]
-    if not row.empty:
-        return row.iloc[0].to_dict()
+def _get(path: str, params: dict | None = None, timeout: int = 20) -> dict | list | None:
+    """GET one endpoint. Returns parsed JSON or None on any failure."""
+    url = f"{API_BASE}{path}"
+    try:
+        r = requests.get(url, headers=_HEADERS, params=params, timeout=timeout)
+        if r.status_code == 200:
+            if not r.text.strip():
+                log.warning(f"[API] {path} → 200 but empty body")
+                return None
+            return r.json()
+        log.warning(f"[API] {path} → HTTP {r.status_code}")
+    except requests.exceptions.Timeout:
+        log.warning(f"[API] {path} → TIMEOUT")
+    except Exception as e:
+        log.warning(f"[API] {path} → {e}")
     return None
 
 
-def get_team_record(team_name: str) -> str:
+def _fetch_csv(path: str, timeout: int = 60) -> list:
+    """
+    Fetch a CSV endpoint (like /export/players, /export/playerAbilities).
+    Returns a list of dicts (one per row), or [] on failure.
+    """
+    url = f"{API_BASE}{path}"
+    try:
+        r = requests.get(url, headers=_HEADERS, timeout=timeout)
+        if r.status_code != 200:
+            log.warning(f"[CSV] {path} → HTTP {r.status_code}")
+            return []
+        text = r.text.strip()
+        if not text:
+            log.warning(f"[CSV] {path} → empty body")
+            return []
+        # FIX #5: io imported at top of file now
+        df = pd.read_csv(io.StringIO(text))
+        records = df.where(pd.notnull(df), None).to_dict(orient="records")
+        print(f"[CSV] {path} → {len(records)} rows loaded")
+        return records
+    except requests.exceptions.Timeout:
+        log.warning(f"[CSV] {path} → TIMEOUT")
+    except Exception as e:
+        log.warning(f"[CSV] {path} → {e}")
+    return []
+
+
+def _paginate(path: str, params: dict | None = None, max_pages: int = 10) -> list:
+    """Walk paginated MaddenStats endpoints up to max_pages."""
+    all_items: list = []
+    page = 1
+    while page <= max_pages:
+        p = dict(params or {})
+        p["page"]     = page
+        p["per_page"] = 50
+        result = _get(path, params=p)
+        if result is None:
+            break
+        items = result.get("data", []) if isinstance(result, dict) else result
+        if not items:
+            break
+        all_items.extend(items)
+        last_page = result.get("last_page", 1) if isinstance(result, dict) else 1
+        if page >= last_page:
+            break
+        page += 1
+        time.sleep(0.03)
+    return all_items
+
+
+def _df(records: list) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    try:
+        return pd.DataFrame(records)
+    except Exception as e:
+        log.warning(f"[df] build error: {e}")
+        return pd.DataFrame()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  TEAM NAME HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def team_name(team_id: int | str) -> str:
+    """Resolve a teamId → nickName, e.g. 774242306 → 'Bengals'."""
+    return _team_id_to_name.get(int(team_id), str(team_id))
+
+def team_abbr(team_id: int | str) -> str:
+    """Resolve a teamId → abbreviation, e.g. 774242306 → 'CIN'."""
+    return _team_id_to_abbr.get(int(team_id), str(team_id))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RINGS CACHE BUILDER  (FIX #1 — runs once per load_all, not per trade)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _rebuild_rings_cache(abbr_map: dict[int, str], season: int, stage: int) -> dict[int, int]:
+    """
+    Fetch ring counts for all teams and return {teamId: ring_count}.
+    Called once during load_all() — eliminates N live API calls per trade eval.
+
+    ⚠️  KNOWN LIMITATIONS:
+    - Uses wins >= 14 as a proxy for championship — this counts great regular
+      season records, NOT actual Super Bowl wins. A 14-win team that lost in
+      the playoffs would incorrectly count as having a ring.
+    - Makes (season-1) × len(abbr_map) sequential HTTP requests (~160 for S6).
+      Consider replacing with a single tsl_history.db query when championship
+      data is tracked there.
+    """
+    cache: dict[int, int] = {}
+    if season <= 1:
+        # No prior seasons to check
+        for tid in abbr_map:
+            cache[tid] = 0
+        return cache
+
+    for tid, abbr in abbr_map.items():
+        if not abbr:
+            cache[tid] = 0
+            continue
+        rings = 0
+        for s in range(1, season):
+            try:
+                data = _get(f"/teams/{abbr}/standings/{s}/{stage}")
+                if not data:
+                    continue
+                records = data if isinstance(data, list) else data.get("data", [data] if isinstance(data, dict) else [])
+                for rec in records:
+                    wins = int(rec.get("totalWins", 0) or 0)
+                    if wins >= 14:
+                        rings += 1
+                        break
+            except Exception as e:
+                log.warning(f"[Rings] Error fetching S{s} for {abbr}: {e}")
+        cache[tid] = rings
+
+    print(f"[Rings] Cache built: {sum(1 for v in cache.values() if v > 0)} teams with rings")
+    return cache
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  SCARCITY CACHE BUILDER  (FIX #11 — compute once, not per player_value call)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _rebuild_scarcity_cache(players: list) -> dict[str, dict]:
+    """
+    Compute position scarcity from the full player roster.
+    Called once during load_all() — eliminates iterating 1700+ players per trade asset.
+    """
+    EXPECTED: dict[str, int] = {
+        "QB": 32, "HB": 64, "WR": 96, "TE": 64, "LT": 32, "LG": 32, "C": 32,
+        "RG": 32, "RT": 32, "LE": 32, "RE": 32, "DT": 64, "LOLB": 32, "MLB": 32,
+        "ROLB": 32, "CB": 64, "FS": 32, "SS": 32, "K": 32, "P": 32,
+        "LEDGE": 32, "REDGE": 32, "MIKE": 32, "WILL": 32, "SAM": 32,
+    }
+    POS_ALIAS: dict[str, str] = {
+        "LE": "LEDGE", "RE": "REDGE", "LOLB": "WILL", "ROLB": "SAM", "MLB": "MIKE",
+    }
+
+    counts: dict[str, int] = {}
+    for p in players:
+        pos_raw = str(p.get("position", p.get("pos", "")) or "").upper()
+        pos = POS_ALIAS.get(pos_raw, pos_raw)
+        counts[pos] = counts.get(pos, 0) + 1
+
+    result = {}
+    for pos, expected in EXPECTED.items():
+        count = counts.get(pos, 0)
+        ratio = count / expected if expected > 0 else 1.0
+        if ratio < 0.60:
+            cls = "Scarce"
+        elif ratio > 1.30:
+            cls = "Saturated"
+        else:
+            cls = "Normal"
+        result[pos] = {"count": count, "expected": expected, "scarcity_class": cls}
+
+    return result
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  MAIN LOAD
+# ═════════════════════════════════════════════════════════════════════════════
+
+def load_all() -> None:
+    """Pull all TSL data from MaddenStats and populate module-level DataFrames.
+
+    Uses local variables during fetch so the live globals are never empty.
+    Swaps everything atomically at the end.
+    """
+    global CURRENT_SEASON, CURRENT_WEEK, CURRENT_STAGE
+    global df_standings, df_teams, df_games, df_players
+    global df_offense, df_defense, df_team_stats, df_trades, df_power
+    global _team_id_to_name, _team_id_to_abbr
+    global _players_cache, _abilities_cache
+    global _roster_by_id
+    global df_all_games
+    global _rings_cache, _scarcity_cache
+
+    print("--- FETCHING TSL DATA FROM MYMADDEN API ---")
+
+    # ── Local staging variables — globals stay untouched until the swap ────
+    _l_season = CURRENT_SEASON
+    _l_week   = CURRENT_WEEK
+    _l_stage  = CURRENT_STAGE
+
+    info = _get("/info")
+    if info:
+        season_val = info.get("season", _l_season)
+        _l_season  = int(season_val["id"] if isinstance(season_val, dict) else season_val)
+        _l_week    = int(info.get("week",       _l_week))
+        _l_stage   = int(info.get("stageIndex", _l_stage))
+        stage_name = info.get("stageName", "Regular Season")
+        print(f"✅ Live Data: Season {_l_season} | {stage_name} | Week {_l_week}")
+    else:
+        print(f"⚠️  MaddenStats unreachable — using cached defaults: S{_l_season} W{_l_week}")
+
+    # ── Teams ──────────────────────────────────────────────────────────────
+    raw_teams_resp = _get("/teams/all")
+    teams_raw = raw_teams_resp.get("data", []) if isinstance(raw_teams_resp, dict) else (raw_teams_resp or [])
+    _l_name_map = {}
+    _l_abbr_map = {}
+    for t in teams_raw:
+        tid = int(t.get("id", 0))
+        if tid:
+            _l_name_map[tid] = t.get("nickName") or t.get("displayName", "")
+            _l_abbr_map[tid] = t.get("abbrName", "")
+    _l_df_teams = _df(teams_raw)
+
+    # Local lookup helpers (use the local map, not the global one)
+    def _l_team_name(team_id):
+        return _l_name_map.get(int(team_id), str(team_id))
+
+    def _l_team_abbr(team_id):
+        return _l_abbr_map.get(int(team_id), "")
+
+    # ── Standings ──────────────────────────────────────────────────────────
+    raw_standings_resp = _get("/standings")
+    standings_raw = raw_standings_resp.get("data", []) if isinstance(raw_standings_resp, dict) else (raw_standings_resp or [])
+    for s in standings_raw:
+        tid = int(s.get("teamId", 0))
+        if tid and tid not in _l_name_map:
+            _l_name_map[tid] = s.get("teamName", "")
+    _l_df_standings = _df(standings_raw)
+
+    # ── Games ──────────────────────────────────────────────────────────────
+    raw_games_resp = _get("/games/schedule")
+    games_raw = raw_games_resp.get("data", []) if isinstance(raw_games_resp, dict) else (raw_games_resp or [])
+    for g in games_raw:
+        g["homeTeamName"] = _l_team_name(g.get("homeTeamId", 0))
+        g["awayTeamName"] = _l_team_name(g.get("awayTeamId", 0))
+        g["homeTeamAbbr"] = _l_team_abbr(g.get("homeTeamId", 0))
+        g["awayTeamAbbr"] = _l_team_abbr(g.get("awayTeamId", 0))
+        g["matchup_key"]  = f"{g['awayTeamName']} @ {g['homeTeamName']}"
+    _l_df_games = _df(games_raw)
+
+    # ── All scores ─────────────────────────────────────────────────────────
+    all_scores_resp = _get(f"/games/scores/{_l_season}/{_l_stage}")
+    all_scores_raw  = all_scores_resp.get("data", []) if isinstance(all_scores_resp, dict) else (all_scores_resp or [])
+
+    if len(all_scores_raw) <= 16:
+        all_scores_raw = []
+        for w_idx in range(0, _l_week + 1):
+            resp = _get(f"/games/scores/{_l_season}/{_l_stage}/{w_idx}")
+            chunk = resp.get("data", []) if isinstance(resp, dict) else (resp or [])
+            all_scores_raw.extend(chunk)
+            if chunk:
+                print(f"  Loaded weekIndex={w_idx}: {len(chunk)} games")
+
+    for g in all_scores_raw:
+        if not g.get("homeTeamName"):
+            g["homeTeamName"] = _l_team_name(g.get("homeTeamId", 0))
+        if not g.get("awayTeamName"):
+            g["awayTeamName"] = _l_team_name(g.get("awayTeamId", 0))
+
+    _l_df_all_games = _df(all_scores_raw)
+    print(f"✅ Full season games loaded: {len(_l_df_all_games)} rows")
+
+    # ── Power rankings ─────────────────────────────────────────────────────
+    raw_power_resp = _get("/power/full")
+    power_raw = raw_power_resp.get("data", []) if isinstance(raw_power_resp, dict) else (raw_power_resp or [])
+    for p in power_raw:
+        t = p.pop("team", {}) or {}
+        p["teamName"]    = t.get("nickName", t.get("displayName", ""))
+        p["abbrName"]    = t.get("abbrName", "")
+        p["userName"]    = t.get("userName", "")
+        p["ovrRating"]   = t.get("ovrRating", 0)
+        p["confName"]    = t.get("confName", "")
+        p["divName"]     = t.get("divName", "")
+        p["seed"]        = t.get("seed", 0)
+        p["winPct"]      = t.get("winPct", "0.000")
+    _l_df_power = _df(power_raw)
+
+    # ── Stats ──────────────────────────────────────────────────────────────
+    print("Fetching stat leaders...")
+
+    print("  → passing stats...")
+    pass_stats = _paginate("/stats/players/passStats",     max_pages=999)
+    print("  → rush leaders...")
+    rush_stats = _paginate("/stats/players/rushLeaders",   max_pages=999)
+    print("  → rec leaders...")
+    rec_stats  = _paginate("/stats/players/recLeaders",    max_pages=999)
+    for p in pass_stats: p["statType"] = "passing"
+    for p in rush_stats: p["statType"] = "rushing"
+    for p in rec_stats:  p["statType"] = "receiving"
+    _l_df_offense = _df(pass_stats + rush_stats + rec_stats)
+
+    print("  → sack leaders...")
+    sack_stats = _paginate("/stats/players/sackLeaders",    max_pages=999)
+    print("  → int leaders...")
+    int_stats  = _paginate("/stats/players/intLeaders",     max_pages=999)
+    print("  → tackle leaders...")
+    tck_stats  = _paginate("/stats/players/tackleLeaders",  max_pages=999)
+    for p in sack_stats: p["statType"] = "sacks"
+    for p in int_stats:  p["statType"] = "interceptions"
+    for p in tck_stats:  p["statType"] = "tackles"
+    _l_df_defense = _df(sack_stats + int_stats + tck_stats)
+
+    _l_df_players = _df(pass_stats + rush_stats + rec_stats + sack_stats + int_stats + tck_stats)
+
+    # ── Trades ─────────────────────────────────────────────────────────────
+    print("Fetching trades...")
+    trades_raw = _paginate(
+        "/trades/search",
+        params={"status": "accepted", "season": _l_season},
+        max_pages=99,
+    )
+    _l_df_trades = _df(trades_raw)
+
+    # ── Full roster ────────────────────────────────────────────────────────
+    print("Fetching full roster...")
+    players_raw = _fetch_csv("/export/players")
+    if not players_raw:
+        print("     ⚠️  /export/players returned empty — draft history and ability auditing disabled")
+    else:
+        for p in players_raw:
+            if "pos" not in p and "position" in p:
+                p["pos"] = p["position"]
+
+            if "overallRating" not in p or not p.get("overallRating"):
+                raw_ovr = p.get("playerBestOvr")
+                if raw_ovr is not None:
+                    p["overallRating"] = raw_ovr
+
+            # FIX #6: math imported at top level — no more `import math` per player
+            if "age" not in p or p.get("age") is None:
+                try:
+                    years_pro = int(float(p.get("yearsPro", 1) or 1))
+                    rookie_yr = int(float(p.get("rookieYear", _l_season) or _l_season))
+                    seasons_played = max(_l_season - rookie_yr, 0)
+                    p["age"] = 22 + seasons_played
+                except (ValueError, TypeError):
+                    p["age"] = 25
+
+            dev_raw = str(p.get("dev") or "")
+            if not dev_raw:
+                p["dev"] = "Normal"
+
+            tid = p.get("teamId")
+            if tid and "teamName" not in p:
+                try:
+                    p["teamName"] = _l_name_map.get(int(tid), "Free Agent")
+                except (ValueError, TypeError):
+                    p["teamName"] = "Free Agent"
+        print(f"     {len(players_raw)} players loaded")
+    _l_players_cache = players_raw
+
+    print("Fetching player abilities...")
+    abilities_raw = _fetch_csv("/export/playerAbilities")
+    if not abilities_raw:
+        print("     0 ability records — /export/playerAbilities returned empty")
+    else:
+        print(f"     {len(abilities_raw)} ability records loaded")
+    _l_abilities_cache = abilities_raw
+
+    # ── FIX #1: Build rings cache (once per sync, not per trade) ──────────
+    print("Building rings cache...")
+    _l_rings_cache = _rebuild_rings_cache(_l_abbr_map, _l_season, REGULAR_STAGE)
+
+    # ── FIX #11: Build scarcity cache (once per sync, not per player_value) ─
+    _l_scarcity_cache = _rebuild_scarcity_cache(_l_players_cache)
+    print(f"[Scarcity] Cache built: {len(_l_scarcity_cache)} positions indexed")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ATOMIC SWAP — assign everything at once so no command ever sees
+    #               partially-loaded state.
+    # ══════════════════════════════════════════════════════════════════════
+    CURRENT_SEASON = _l_season
+    CURRENT_WEEK   = _l_week
+    CURRENT_STAGE  = _l_stage
+
+    _team_id_to_name = _l_name_map
+    _team_id_to_abbr = _l_abbr_map
+
+    df_teams      = _l_df_teams
+    df_standings  = _l_df_standings
+    df_team_stats = _l_df_standings
+    df_games      = _l_df_games
+    df_all_games  = _l_df_all_games
+    df_power      = _l_df_power
+    df_offense    = _l_df_offense
+    df_defense    = _l_df_defense
+    df_players    = _l_df_players
+    df_trades     = _l_df_trades
+
+    _players_cache   = _l_players_cache
+    _abilities_cache = _l_abilities_cache
+    _rings_cache     = _l_rings_cache
+    _scarcity_cache  = _l_scarcity_cache
+
+    _rebuild_roster_index()
+    print(f"     {len(_roster_by_id)} players indexed by rosterId")
+
+    print(
+        f"✅ Load complete — "
+        f"{len(df_players)} players | "
+        f"{len(df_games)} games | "
+        f"{len(df_standings)} teams | "
+        f"{len(df_trades)} trades"
+    )
+
+    # NOTE: autograde callback is NOT fired here because load_all() runs in a
+    # thread executor (no event loop). bot.py's /wittsync handles autograde
+    # directly via `await dm._autograde_callback()` after load_all returns.
+
+    # ── Snapshot stats for blowout_monitor delta detection ────────────────────
+    snapshot_week_stats(CURRENT_WEEK)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PUBLIC HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def get_league_status() -> str:
+    return f"Season {CURRENT_SEASON} | Week {CURRENT_WEEK}"
+
+
+def get_players() -> list:
+    """Return full roster from /export/players CSV. Contains rookieYear, draftRound, dev, etc."""
+    return _players_cache
+
+
+def get_player_abilities() -> list:
+    return _abilities_cache
+
+
+def get_team_record(team: str) -> str:
+    """Return 'W-L-T' string for a team. '?-?-?' if not found."""
     if df_standings.empty:
         return "?-?-?"
-    row = df_standings[df_standings["teamName"].str.lower() == team_name.lower()]
-    if not row.empty:
-        r = row.iloc[0]
-        return f"{int(r.get('totalWins',0))}-{int(r.get('totalLosses',0))}-{int(r.get('totalTies',0))}"
-    return "?-?-?"
+    mask = df_standings["teamName"].str.lower() == team.lower()
+    if not mask.any():
+        return "?-?-?"
+    row = df_standings[mask].iloc[0]
+    w = int(row.get("totalWins",   0))
+    l = int(row.get("totalLosses", 0))
+    t = int(row.get("totalTies",   0))
+    return f"{w}-{l}-{t}"
+
+
+def get_team_owner(team_name: str) -> str:
+    """Return Discord userName for a given team nickName."""
+    # Check df_teams first (has userName directly)
+    if not df_teams.empty:
+        for col in ("nickName", "displayName"):
+            if col in df_teams.columns:
+                mask = df_teams[col].str.lower() == team_name.lower()
+                if mask.any():
+                    val = df_teams[mask].iloc[0].get("userName", "")
+                    if val:
+                        return str(val)
+
+    # Fallback: standings partial match
+    if not df_standings.empty and "teamName" in df_standings.columns:
+        mask = df_standings["teamName"].str.lower().str.contains(team_name.lower(), na=False)
+        if mask.any():
+            val = df_standings[mask].iloc[0].get("userName", "")
+            if val:
+                return str(val)
+
+    return "Unknown"
+
+
+def get_last_n_games(team: str, n: int = 5) -> list[dict]:
+    abbr = ""
+    if not df_teams.empty:
+        for col in ("nickName", "displayName"):
+            if col in df_teams.columns:
+                mask = df_teams[col].str.lower() == team.lower()
+                if mask.any():
+                    abbr = df_teams[mask].iloc[0].get("abbrName", "")
+                    break
+    if not abbr:
+        return []
+
+    data = _get(f"/teams/{abbr}/games/{CURRENT_SEASON}/{CURRENT_STAGE}")
+    if not data:
+        return []
+
+    games = data if isinstance(data, list) else data.get("data", [])
+    completed = [
+        g for g in games
+        if int(g.get("status", 0) or 0) in (2, 3)
+    ]
+    completed.sort(
+        key=lambda g: (g.get("seasonIndex", 0), g.get("weekIndex", 0)),
+        reverse=True,
+    )
+    results = []
+    for g in completed[:n]:
+        results.append({
+            "week":       int(g.get("week", g.get("weekIndex", 0))),
+            "home":       team_name(g.get("homeTeamId", 0)),
+            "away":       team_name(g.get("awayTeamId", 0)),
+            "home_score": int(g.get("homeScore", 0)),
+            "away_score": int(g.get("awayScore", 0)),
+        })
+    return results
+
+
+def get_weekly_results(week: int | None = None) -> list[dict]:
+    """
+    Return FINAL games only (status == 3) for the given week.
+    Uses df_all_games (full season load) as primary source.
+    Falls back to live API call if df_all_games is empty.
+
+    MM export schema:
+      weekIndex = week - 1 (0-based)
+      seasonIndex = 1-based TSL season
+      stageIndex  = 1 for Regular Season
+      status      = 1 scheduled | 2 in-progress | 3 final
+      homeTeamName / awayTeamName = nickName (Ravens, Bears, etc.)
+    """
+    target     = week if week is not None else CURRENT_WEEK
+    week_index = target - 1  # weekIndex is 0-based in MM exports
+
+    src = df_all_games if not df_all_games.empty else df_games
+
+    if not src.empty:
+        df = src.copy()
+
+        for col in ["weekIndex", "week", "seasonIndex", "stageIndex", "status"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(-1).astype(int)
+
+        if "weekIndex" in df.columns:
+            df = df[df["weekIndex"] == week_index]
+        elif "week" in df.columns:
+            df = df[df["week"] == target]
+
+        if "seasonIndex" in df.columns:
+            df = df[df["seasonIndex"] == CURRENT_SEASON]
+
+        if "stageIndex" in df.columns:
+            df = df[df["stageIndex"] == CURRENT_STAGE]
+
+        # Only final games (status == 3). Status 2 = in-progress, scores unreliable.
+        if "status" in df.columns:
+            df = df[df["status"] == 3]
+
+        results = []
+        for _, g in df.iterrows():
+            hs  = int(pd.to_numeric(g.get("homeScore", 0), errors="coerce") or 0)
+            aws = int(pd.to_numeric(g.get("awayScore", 0), errors="coerce") or 0)
+            home = str(g.get("homeTeamName") or team_name(g.get("homeTeamId", 0)))
+            away = str(g.get("awayTeamName") or team_name(g.get("awayTeamId", 0)))
+            results.append({
+                "week":       target,
+                "home":       home,
+                "away":       away,
+                "home_score": hs,
+                "away_score": aws,
+                "homeUser":   str(g.get("homeUser", "")),
+                "awayUser":   str(g.get("awayUser", "")),
+            })
+
+        log.debug(f"get_weekly_results: Week {target} (weekIndex={week_index}), "
+                  f"source has {len(src)} rows, found {len(results)} final games")
+        return results
+
+    # Fallback: live API call
+    raw = _get(f"/games/scores/{CURRENT_SEASON}/{CURRENT_STAGE}")
+    if isinstance(raw, dict):
+        scores = raw.get("data", [])
+    else:
+        scores = raw or []
+
+    results = []
+    for g in scores:
+        if pd.to_numeric(g.get("weekIndex", -1), errors="coerce") != week_index:
+            continue
+        if int(g.get("status", 0)) != 3:  # final only
+            continue
+        hs  = int(g.get("homeScore", 0) or 0)
+        aws = int(g.get("awayScore", 0) or 0)
+        home_obj = g.get("homeTeam") or {}
+        away_obj = g.get("awayTeam") or {}
+        results.append({
+            "week":       target,
+            "home":       g.get("homeTeamName") or home_obj.get("nickName") or home_obj.get("displayName") or team_name(g.get("homeTeamId", 0)),
+            "away":       g.get("awayTeamName") or away_obj.get("nickName") or away_obj.get("displayName") or team_name(g.get("awayTeamId", 0)),
+            "home_score": hs,
+            "away_score": aws,
+            "homeUser":   str(g.get("homeUser", "")),
+            "awayUser":   str(g.get("awayUser", "")),
+        })
+
+    return results
 
 
 def get_h2h_record(team_a: str, team_b: str) -> dict:
-    """Historical head-to-head record across all seasons."""
-    if df_games.empty:
-        return {"a_wins": 0, "b_wins": 0, "ties": 0}
-    a, b = team_a.lower(), team_b.lower()
-    mask = (
-        (df_games["homeTeamName"].str.lower() == a) & (df_games["awayTeamName"].str.lower() == b) |
-        (df_games["homeTeamName"].str.lower() == b) & (df_games["awayTeamName"].str.lower() == a)
-    ) & (df_games["status"] == 3)
-    games = df_games[mask]
+    """
+    Head-to-head record between two teams for the CURRENT SEASON only.
+    Uses df_all_games which is loaded from /games/scores/{season}/{stage}.
+    For all-time H2H, query tsl_history.db directly via Codex.
+    """
     a_wins = b_wins = ties = 0
-    for _, g in games.iterrows():
-        hs, aws = g["homeScore"], g["awayScore"]
-        home = g["homeTeamName"].lower()
-        if hs == aws:
-            ties += 1
-        elif (home == a and hs > aws) or (home == b and aws > hs):
-            a_wins += 1
-        else:
-            b_wins += 1
+    src = df_all_games if not df_all_games.empty else df_games
+    if src.empty:
+        return {"a_wins": a_wins, "b_wins": b_wins, "ties": ties}
+    a_l, b_l = team_a.lower(), team_b.lower()
+    for _, g in src.iterrows():
+        h   = str(g.get("homeTeamName", "")).lower()
+        aw  = str(g.get("awayTeamName", "")).lower()
+        hs  = int(pd.to_numeric(g.get("homeScore", 0), errors="coerce") or 0)
+        aws = int(pd.to_numeric(g.get("awayScore", 0), errors="coerce") or 0)
+        status = int(pd.to_numeric(g.get("status", 0), errors="coerce") or 0)
+        if status != 3:  # final only
+            continue
+        if not ({h, aw} == {a_l, b_l}):
+            continue
+        a_score = hs if h == a_l else aws
+        b_score = hs if h == b_l else aws
+        if a_score > b_score:   a_wins += 1
+        elif b_score > a_score: b_wins += 1
+        else:                   ties   += 1
     return {"a_wins": a_wins, "b_wins": b_wins, "ties": ties}
 
 
-def get_last_n_games(team_name: str, n: int = 5) -> list[dict]:
-    """Last N completed games for a team."""
-    if df_games.empty:
-        return []
-    t = team_name.lower()
-    mask = (
-        (df_games["homeTeamName"].str.lower() == t) |
-        (df_games["awayTeamName"].str.lower() == t)
-    ) & (df_games["status"] == 3) & (df_games["seasonIndex"] == CURRENT_SEASON)
-    recent = df_games[mask].sort_values(["stageIndex","weekIndex"], ascending=False).head(n)
-    results = []
-    for _, g in recent.iterrows():
-        home = g["homeTeamName"]
-        away = g["awayTeamName"]
-        hs, aws = int(g["homeScore"]), int(g["awayScore"])
-        is_home = home.lower() == t
-        team_score = hs if is_home else aws
-        opp_score  = aws if is_home else hs
-        opp        = away if is_home else home
-        results.append({
-            "opponent": opp,
-            "team_score": team_score,
-            "opp_score": opp_score,
-            "win": team_score > opp_score,
-            "week": int(g["weekIndex"]),
-        })
-    return results
-
-
-def get_weekly_results(season: int = None, week: int = None) -> list[dict]:
-    """Get all completed games for a given season/week. Defaults to last completed week."""
-    if df_games.empty:
-        return []
-    s = season or CURRENT_SEASON
-    completed = df_games[(df_games["seasonIndex"] == s) & (df_games["status"] == 3)]
-    w = week if week is not None else int(completed["weekIndex"].max())
-    games = completed[completed["weekIndex"] == w]
-    results = []
-    for _, g in games.iterrows():
-        results.append({
-            "home": g["homeTeamName"],
-            "away": g["awayTeamName"],
-            "home_score": int(g["homeScore"]),
-            "away_score": int(g["awayScore"]),
-            "home_user": g.get("homeUser", ""),
-            "away_user": g.get("awayUser", ""),
-            "week": int(g["weekIndex"]),
-        })
-    return results
-
-
-def get_trades(season: int = None, status: str = "accepted") -> list[dict]:
-    """Return trades filtered by season and status."""
-    if df_trades.empty:
-        return []
-    mask = df_trades["status"] == status
-    if season:
-        mask &= df_trades["seasonIndex"] == season
-    return df_trades[mask].to_dict("records")
-
-
-def get_player_abilities(player_name: str) -> list[str]:
-    """Return active ability titles for a player."""
-    if df_abilities.empty:
-        return []
-    fn = player_name.lower()
-    mask = (
-        (df_abilities["firstName"] + " " + df_abilities["lastName"]).str.lower() == fn
-    )
-    rows = df_abilities[mask & (df_abilities["isEmpty"] == 0)]
-    return rows["title"].tolist()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# DISCORD HISTORY — SQLite + FTS5 Database
-# ═══════════════════════════════════════════════════════════════════════════════
-"""
-Discord message archive stored in a local SQLite database with FTS5 full-text
-search. This enables exact counting, date lookups, and keyword searches that
-a vector DB cannot handle.
-
-Schema:
-  messages(id TEXT PK, timestamp TEXT, author TEXT, content TEXT, channel TEXT)
-  messages_fts  — FTS5 virtual table (content='messages', tokenize='unicode61')
-
-Run ingestion once via CLI:
-  python data_manager.py --ingest-discord /path/to/messages.jsonl
-
-Or call ingest_discord_jsonl() from any script.
-"""
-
-import sqlite3
-import time
-import argparse
-from pathlib import Path
-
-DISCORD_DB_PATH = os.environ.get("DISCORD_DB_PATH", "discord_history.db")
-
-# ── Read-only connection factory ──────────────────────────────────────────────
-
-def _get_discord_db(readonly: bool = True) -> sqlite3.Connection:
-    """
-    Open the Discord history SQLite database.
-    readonly=True uses immutable URI mode — safe for bot queries.
-    readonly=False opens for writes (ingestion only).
-    """
-    db_path = Path(DISCORD_DB_PATH)
-    if readonly:
-        if not db_path.exists():
-            raise FileNotFoundError(
-                f"Discord history DB not found at '{DISCORD_DB_PATH}'. "
-                "Run ingestion first: python data_manager.py --ingest-discord messages.jsonl"
-            )
-        uri = f"file:{db_path.resolve()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    else:
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-
-    conn.row_factory = sqlite3.Row   # rows behave like dicts
-    return conn
-
+# ═════════════════════════════════════════════════════════════════════════════
+#  DISCORD DB HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 
 def discord_db_exists() -> bool:
-    """Returns True if the Discord history DB has been built and has rows."""
-    try:
-        conn = _get_discord_db(readonly=True)
-        count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        conn.close()
-        return count > 0
-    except Exception:
-        return False
-
-
-# ── Schema creation ───────────────────────────────────────────────────────────
-
-_CREATE_MESSAGES_TABLE = """
-CREATE TABLE IF NOT EXISTS messages (
-    id        TEXT PRIMARY KEY,
-    timestamp TEXT NOT NULL,
-    author    TEXT NOT NULL,
-    channel   TEXT NOT NULL DEFAULT '',
-    content   TEXT NOT NULL
-);
-"""
-
-# FTS5 virtual table — indexes content for fast MATCH queries
-# tokenize='unicode61 remove_diacritics 2' handles accented chars + Unicode
-_CREATE_FTS_TABLE = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
-USING fts5(
-    content,
-    author UNINDEXED,
-    timestamp UNINDEXED,
-    channel UNINDEXED,
-    content='messages',
-    content_rowid='rowid',
-    tokenize='unicode61 remove_diacritics 2'
-);
-"""
-
-# Triggers to keep FTS in sync with the main table
-_CREATE_FTS_TRIGGERS = """
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content, author, timestamp, channel)
-    VALUES (new.rowid, new.content, new.author, new.timestamp, new.channel);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, author, timestamp, channel)
-    VALUES('delete', old.rowid, old.content, old.author, old.timestamp, old.channel);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, author, timestamp, channel)
-    VALUES('delete', old.rowid, old.content, old.author, old.timestamp, old.channel);
-    INSERT INTO messages_fts(rowid, content, author, timestamp, channel)
-    VALUES (new.rowid, new.content, new.author, new.timestamp, new.channel);
-END;
-"""
-
-_CREATE_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_messages_author    ON messages(author);
-CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-CREATE INDEX IF NOT EXISTS idx_messages_channel   ON messages(channel);
-"""
-
-
-def _init_discord_schema(conn: sqlite3.Connection):
-    """Create all tables, FTS virtual table, triggers, and indexes."""
-    conn.executescript(
-        _CREATE_MESSAGES_TABLE +
-        _CREATE_FTS_TABLE +
-        _CREATE_FTS_TRIGGERS +
-        _CREATE_INDEXES
-    )
-    conn.commit()
-
-
-# ── DiscordChatExporter JSON parser ──────────────────────────────────────────
-
-import datetime as _dt
-
-
-def _parse_dce_message(msg: dict, channel_name: str, fallback_id_prefix: str) -> tuple | None:
-    """
-    Parse a single message object from a DiscordChatExporter JSON file.
-
-    DiscordChatExporter message structure (relevant fields):
-      {
-        "id":        "1234567890",
-        "type":      "Default",           # skip non-Default types (pins, joins, etc.)
-        "timestamp": "2023-07-14T21:33:05.123+00:00",
-        "content":   "yo that was dogshit",
-        "author": {
-          "id":       "987654321",
-          "name":     "Diddy",            # the display name we care about
-          "discriminator": "0",
-          "isBot":    false
-        },
-        "attachments": [...],
-        "embeds":      [...],
-        "reactions":   [...],
-        "mentions":    [...]
-      }
-
-    Args:
-        msg:               Dict for one message from the "messages" array.
-        channel_name:      Channel name extracted from the file's root object.
-        fallback_id_prefix: Used when message has no id (rare).
-
-    Returns:
-        (id, timestamp, author, channel, content) tuple ready for SQLite INSERT,
-        or None if the message should be skipped.
-    """
-    # ── Skip non-Default message types (pins, joins, boosts, etc.)
-    msg_type = msg.get("type", "Default")
-    if isinstance(msg_type, str) and msg_type not in ("Default", "Reply", ""):
-        return None
-    if isinstance(msg_type, int) and msg_type not in (0, 19):
-        # 0 = Default, 19 = Reply in Discord's integer type system
-        return None
-
-    # ── Message ID
-    msg_id = str(msg.get("id") or f"{fallback_id_prefix}_{msg.get('timestamp','')}")
-    if not msg_id:
-        return None
-
-    # ── Content — combine text content and any sticker names
-    content_parts = []
-    raw_content = str(msg.get("content") or "").strip()
-    if raw_content:
-        content_parts.append(raw_content)
-
-    # Include sticker names as searchable text
-    for sticker in msg.get("stickers") or []:
-        name = sticker.get("name", "")
-        if name:
-            content_parts.append(f"[sticker: {name}]")
-
-    content = " ".join(content_parts).strip()
-
-    # Skip purely empty messages (attachments-only, reactions-only, etc.)
-    # We keep very short content (single emoji, "lol", etc.) — min_length is applied upstream
-    if not content:
-        return None
-
-    # ── Author
-    author_obj = msg.get("author") or {}
-    if isinstance(author_obj, dict):
-        # Skip bots
-        if author_obj.get("isBot") or author_obj.get("is_bot") or author_obj.get("bot"):
-            return None
-        # Prefer display name ("name") over username for TSL nicknames
-        author = (
-            author_obj.get("name") or
-            author_obj.get("nickname") or
-            author_obj.get("username") or
-            author_obj.get("global_name") or
-            "unknown"
-        )
-    else:
-        author = str(author_obj) or "unknown"
-
-    author = str(author).strip()[:100]
-    if not author:
-        author = "unknown"
-
-    # ── Timestamp
-    # DCE format: "2023-07-14T21:33:05.123+00:00" — strip timezone, keep ISO prefix
-    ts_raw = str(msg.get("timestamp") or "")
-    if ts_raw:
-        # Normalise to "YYYY-MM-DDTHH:MM:SS" (drop sub-seconds and timezone)
-        ts = ts_raw[:19]
-    else:
-        ts = ""
-
-    return (msg_id, ts, author, channel_name, content)
-
-
-def _collect_json_files(path: Path) -> list[Path]:
-    """
-    Given a path that is either a single .json file or a directory,
-    return a sorted list of all .json files to ingest.
-
-    Sorting is done naturally so "part 1" comes before "part 10".
-    """
-    import re as _re_nat
-
-    def _natural_key(p: Path) -> list:
-        """Natural sort: split on digit runs so 'part 2' < 'part 10'."""
-        parts = _re_nat.split(r"(\d+)", p.name)
-        return [int(x) if x.isdigit() else x.lower() for x in parts]
-
-    if path.is_file():
-        if path.suffix.lower() == ".json":
-            return [path]
-        raise ValueError(f"Expected a .json file or directory, got: {path}")
-
-    if path.is_dir():
-        files = sorted(
-            [f for f in path.iterdir() if f.is_file() and f.suffix.lower() == ".json"],
-            key=_natural_key,
-        )
-        if not files:
-            raise FileNotFoundError(f"No .json files found in directory: {path}")
-        return files
-
-    raise FileNotFoundError(f"Path does not exist: {path}")
-
-
-def _print_progress(
-    file_idx: int,
-    total_files: int,
-    filename: str,
-    stats: dict,
-    elapsed: float,
-    final: bool = False,
-) -> None:
-    """
-    Print a single-line progress indicator to stdout.
-
-    Example output:
-      [  3/200] TSL - general [part 3].json | total: 28,450 read | 27,901 inserted | 412.0 msg/s
-    """
-    rate = stats["total_read"] / max(elapsed, 0.001)
-    tag  = "DONE" if final else f"{file_idx:>3}/{total_files}"
-    # Truncate long filenames for terminal readability
-    fname_display = filename if len(filename) <= 48 else "…" + filename[-47:]
-    print(
-        f"[{tag}] {fname_display:<50} | "
-        f"total: {stats['total_read']:>9,} read | "
-        f"{stats['inserted']:>9,} inserted | "
-        f"{rate:>7,.0f} msg/s",
-        flush=True,
-    )
-
-
-# ── Main ingestion entry point ────────────────────────────────────────────────
-
-def ingest_discord(
-    source: str,
-    reset: bool = False,
-    batch_size: int = 5_000,
-    min_length: int = 1,
-) -> dict:
-    """
-    Ingest Discord message history exported by DiscordChatExporter into
-    discord_history.db. Accepts either:
-
-      • A single .json file  (one DCE export)
-      • A directory          (scanned for all *.json files, processed in
-                              natural sort order — "part 1" before "part 10")
-
-    DiscordChatExporter JSON root structure:
-      {
-        "guild":    { "id": "...", "name": "TSL" },
-        "channel":  { "id": "...", "name": "general", "type": "GuildTextChat" },
-        "messages": [ { "id", "type", "timestamp", "content", "author", ... }, ... ]
-      }
-
-    The function:
-      1. Discovers all target .json files (sorted naturally).
-      2. Opens a single persistent SQLite connection for the whole run.
-      3. Disables triggers during bulk load for speed; rebuilds FTS at the end.
-      4. Prints a per-file progress line and a final summary.
-
-    Args:
-        source:     Path to a .json file OR a directory of .json files.
-        reset:      Drop and recreate the DB before ingesting (clean slate).
-        batch_size: Rows per INSERT transaction. 5,000 is a safe default;
-                    increase to 20,000 on machines with ≥16 GB RAM.
-        min_length: Minimum character length of content to index. 1 keeps
-                    short reactions ("lol", "lmao") while dropping empty strings.
-
-    Returns:
-        dict: {
-            total_files, files_ok, files_failed,
-            total_read, inserted, skipped, errors,
-            elapsed_s
-        }
-    """
-    source_path = Path(source)
-    json_files  = _collect_json_files(source_path)
-    total_files = len(json_files)
-
-    print(f"\n[DiscordDB] Found {total_files} JSON file(s) to ingest from: {source_path}")
-    print(f"[DiscordDB] Target DB: {Path(DISCORD_DB_PATH).resolve()}")
-    print(f"[DiscordDB] Batch size: {batch_size:,} | Min content length: {min_length}\n")
-
-    # ── Open DB and initialise schema ─────────────────────────────────────────
-    conn = _get_discord_db(readonly=False)
-    _init_discord_schema(conn)
-
-    if reset:
-        print("[DiscordDB] --reset: dropping existing data for a clean rebuild...")
-        conn.executescript(
-            "DROP TABLE IF EXISTS messages_fts;"
-            "DROP TABLE IF EXISTS messages;"
-            "DROP TRIGGER IF EXISTS messages_ai;"
-            "DROP TRIGGER IF EXISTS messages_ad;"
-            "DROP TRIGGER IF EXISTS messages_au;"
-        )
-        _init_discord_schema(conn)
-        print("[DiscordDB] Schema recreated.\n")
-
-    # ── Disable FTS triggers for bulk load — we'll rebuild at the end ─────────
-    # Dropping triggers speeds up bulk INSERT by ~3-4x on 2M rows.
-    conn.executescript(
-        "DROP TRIGGER IF EXISTS messages_ai;"
-        "DROP TRIGGER IF EXISTS messages_ad;"
-        "DROP TRIGGER IF EXISTS messages_au;"
-    )
-    conn.commit()
-
-    # ── Performance pragmas (write-ahead log, larger page cache) ─────────────
-    conn.executescript(
-        "PRAGMA journal_mode = WAL;"
-        "PRAGMA synchronous  = NORMAL;"
-        "PRAGMA cache_size   = -65536;"   # 64 MB page cache
-        "PRAGMA temp_store   = MEMORY;"
-    )
-
-    # ── Aggregate stats ───────────────────────────────────────────────────────
-    stats = {
-        "total_files":  total_files,
-        "files_ok":     0,
-        "files_failed": 0,
-        "total_read":   0,
-        "inserted":     0,
-        "skipped":      0,
-        "errors":       0,
-    }
-
-    batch: list[tuple] = []
-    start = time.time()
-
-    def _flush(b: list[tuple]) -> None:
-        """INSERT OR IGNORE a batch of (id, ts, author, channel, content) tuples."""
-        if not b:
-            return
-        try:
-            conn.executemany(
-                "INSERT OR IGNORE INTO messages(id, timestamp, author, channel, content) "
-                "VALUES (?, ?, ?, ?, ?)",
-                b,
-            )
-            conn.commit()
-            stats["inserted"] += len(b)
-        except sqlite3.Error as e:
-            print(f"\n[DiscordDB] ⚠  Batch insert error: {e}")
-            stats["errors"] += len(b)
-
-    # ── Per-file processing loop ──────────────────────────────────────────────
-    for file_idx, json_path in enumerate(json_files, start=1):
-        try:
-            with open(json_path, "r", encoding="utf-8", errors="replace") as fh:
-                data = json.load(fh)
-        except json.JSONDecodeError as e:
-            print(f"\n[DiscordDB] ✗ JSON parse error in {json_path.name}: {e}")
-            stats["files_failed"] += 1
-            continue
-        except OSError as e:
-            print(f"\n[DiscordDB] ✗ Cannot open {json_path.name}: {e}")
-            stats["files_failed"] += 1
-            continue
-
-        # ── Extract channel name from DCE root object ─────────────────────
-        channel_obj  = data.get("channel") or {}
-        channel_name = str(
-            channel_obj.get("name") or
-            channel_obj.get("id") or
-            json_path.stem          # fall back to filename without extension
-        )[:80]
-
-        # ── Pull the messages array ───────────────────────────────────────
-        messages = data.get("messages") or []
-        if not isinstance(messages, list):
-            # Some exporters put messages at the root level as a list
-            if isinstance(data, list):
-                messages = data
-            else:
-                print(f"\n[DiscordDB] ✗ No 'messages' array in {json_path.name} — skipping.")
-                stats["files_failed"] += 1
-                continue
-
-        file_read = 0
-        for msg in messages:
-            if not isinstance(msg, dict):
-                stats["skipped"] += 1
-                continue
-
-            stats["total_read"] += 1
-            file_read += 1
-
-            row = _parse_dce_message(
-                msg,
-                channel_name=channel_name,
-                fallback_id_prefix=f"{json_path.stem}_{file_read}",
-            )
-
-            if row is None:
-                stats["skipped"] += 1
-                continue
-
-            # Apply minimum content length filter
-            if len(row[4]) < min_length:   # row[4] is content
-                stats["skipped"] += 1
-                continue
-
-            batch.append(row)
-
-            if len(batch) >= batch_size:
-                _flush(batch)
-                batch.clear()
-
-        stats["files_ok"] += 1
-
-        # Print per-file progress line
-        _print_progress(
-            file_idx, total_files, json_path.name,
-            stats, time.time() - start,
-        )
-
-    # ── Flush any remaining rows ──────────────────────────────────────────────
-    if batch:
-        _flush(batch)
-        batch.clear()
-
-    # ── Rebuild FTS index (much faster than per-row trigger inserts) ──────────
-    try:
-        print("\n[DiscordDB] Rebuilding FTS5 full-text index (this may take 1–3 minutes)...")
-        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-        conn.commit()
-        print("[DiscordDB] FTS index rebuilt successfully.")
-    except sqlite3.Error as e:
-        print(f"[DiscordDB] ⚠  FTS rebuild warning: {e}")
-
-    # ── Restore live-update triggers for future bot queries ───────────────────
-    try:
-        conn.executescript(_CREATE_FTS_TRIGGERS)
-        conn.commit()
-    except sqlite3.Error as e:
-        print(f"[DiscordDB] ⚠  Could not restore FTS triggers: {e}")
-
-    # ── Final stats ───────────────────────────────────────────────────────────
-    conn.close()
-    elapsed = time.time() - start
-    stats["elapsed_s"] = round(elapsed, 1)
-
-    _print_progress(
-        total_files, total_files, "── COMPLETE ──",
-        stats, elapsed, final=True,
-    )
-    print(
-        f"\n{'─'*70}\n"
-        f"  Files:    {stats['files_ok']:,} OK  |  {stats['files_failed']:,} failed\n"
-        f"  Messages: {stats['total_read']:,} read  |  {stats['inserted']:,} inserted  |  "
-        f"{stats['skipped']:,} skipped  |  {stats['errors']:,} errors\n"
-        f"  Time:     {elapsed:.1f}s  ({stats['total_read']/max(elapsed,0.001):,.0f} msg/s avg)\n"
-        f"{'─'*70}\n"
-    )
-    return stats
-
-
-# Backwards-compatible alias for any code that still calls the old name
-def ingest_discord_jsonl(filepath: str, reset: bool = False,
-                         batch_size: int = 5_000, min_length: int = 1) -> dict:
-    """Alias for ingest_discord() — accepts a single file path for backwards compatibility."""
-    return ingest_discord(filepath, reset=reset, batch_size=batch_size, min_length=min_length)
-
-
-# ── Schema introspection (for LLM context) ────────────────────────────────────
-
-DISCORD_DB_SCHEMA_TEXT = """
-SQLite database: discord_history.db
-Table: messages
-  id        TEXT  — Discord message snowflake ID (PRIMARY KEY)
-  timestamp TEXT  — ISO 8601 datetime string, e.g. '2023-07-14T21:33:05'
-  author    TEXT  — Discord username of the sender (e.g. 'Diddy', 'WittGPT')
-  channel   TEXT  — Channel name or ID (e.g. 'general', 'trash-talk')
-  content   TEXT  — Raw message text
-
-Virtual table: messages_fts  (FTS5 full-text index over content)
-  Use: SELECT m.* FROM messages m
-       JOIN messages_fts f ON m.rowid = f.rowid
-       WHERE messages_fts MATCH 'keyword'
-       ORDER BY rank;
-
-Useful query patterns:
-  -- Count how many times an author said something:
-  SELECT COUNT(*) FROM messages WHERE author LIKE '%Diddy%' AND content LIKE '%asshole%';
-
-  -- FTS keyword search with ranking:
-  SELECT m.author, m.timestamp, m.content
-  FROM messages m JOIN messages_fts f ON m.rowid = f.rowid
-  WHERE messages_fts MATCH 'keyword OR "exact phrase"'
-  ORDER BY rank LIMIT 20;
-
-  -- First/last time something was said:
-  SELECT author, timestamp, content FROM messages
-  WHERE content LIKE '%phrase%' ORDER BY timestamp ASC LIMIT 1;
-
-  -- Most active users:
-  SELECT author, COUNT(*) as msg_count FROM messages
-  GROUP BY author ORDER BY msg_count DESC LIMIT 10;
-
-  -- Messages by author in a date range:
-  SELECT * FROM messages
-  WHERE author LIKE '%username%'
-    AND timestamp BETWEEN '2023-01-01' AND '2023-12-31'
-  LIMIT 50;
-
-IMPORTANT SQL RULES:
-  1. NEVER use DROP, DELETE, UPDATE, INSERT, CREATE, ALTER, PRAGMA, ATTACH, or any DDL/DML.
-  2. Only SELECT statements are allowed.
-  3. Always LIMIT results (max 100 rows) to avoid timeouts.
-  4. For fuzzy author matches use: author LIKE '%name%' (case-insensitive in SQLite by default for ASCII).
-  5. FTS MATCH syntax: single words, "quoted phrases", OR, NOT, author:username
-  6. Avoid MATCH and LIKE on the same query — use one or the other.
-  7. Always return timestamp, author, content columns so results are human-readable.
-"""
+    return os.path.isfile(_DB_PATH)
 
 
 def get_discord_db_schema() -> str:
-    """Returns the schema description string for injection into LLM prompts."""
     if not discord_db_exists():
-        return "(Discord history DB not built yet — ingestion required)"
-    # Add live stats
+        return "Discord history DB not found."
     try:
-        conn = _get_discord_db(readonly=True)
-        total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        earliest = conn.execute("SELECT MIN(timestamp) FROM messages").fetchone()[0]
-        latest   = conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()[0]
-        authors  = conn.execute("SELECT COUNT(DISTINCT author) FROM messages").fetchone()[0]
-        conn.close()
-        stats_line = (
-            f"\nDatabase stats: {total:,} messages | "
-            f"{authors:,} unique authors | "
-            f"Date range: {earliest[:10] if earliest else '?'} → {latest[:10] if latest else '?'}"
-        )
-        return DISCORD_DB_SCHEMA_TEXT + stats_line
-    except Exception:
-        return DISCORD_DB_SCHEMA_TEXT
+        con = sqlite3.connect(_DB_PATH)
+        cur = con.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+        lines = []
+        for t in tables:
+            cur.execute(f'PRAGMA table_info("{t}")')
+            cols = [r[1] for r in cur.fetchall()]
+            lines.append(f"{t}({', '.join(cols)})")
+        con.close()
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error reading schema: {e}"
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+def _get_discord_db(readonly: bool = True) -> sqlite3.Connection:
+    if not discord_db_exists():
+        raise FileNotFoundError(f"Discord DB not found at {_DB_PATH}")
+    if readonly:
+        uri = f"file:{_DB_PATH}?mode=ro"
+        return sqlite3.connect(uri, uri=True, detect_types=sqlite3.PARSE_DECLTYPES)
+    return sqlite3.connect(_DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
 
-if __name__ == "__main__":
-    import sys
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "TSL Data Manager — Discord History Ingestion Tool\n\n"
-            "Ingests Discord message exports from DiscordChatExporter into\n"
-            "a local SQLite database (discord_history.db) with FTS5 search.\n\n"
-            "Accepts either a single .json file or a directory of .json files.\n"
-            "Files in a directory are processed in natural sort order."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+# ═════════════════════════════════════════════════════════════════════════════
+#  TRADE ENGINE HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 
-    parser.add_argument(
-        "--ingest-discord",
-        metavar="PATH",
-        help=(
-            "Path to a single DiscordChatExporter .json file, OR a directory\n"
-            "containing multiple .json export files (e.g. '[part 1].json',\n"
-            "'[part 2].json', ...). All .json files in the directory are\n"
-            "processed automatically in natural sort order."
-        ),
-    )
-    parser.add_argument(
-        "--reset",
-        action="store_true",
-        help=(
-            "Drop and recreate the discord_history.db before ingesting.\n"
-            "Use this for a clean rebuild. Without --reset, new messages\n"
-            "are merged into the existing DB (duplicates are ignored)."
-        ),
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=5_000,
-        help=(
-            "Number of rows per SQLite INSERT transaction (default: 5000).\n"
-            "Increase to 20000 on machines with ≥16 GB RAM for faster ingest."
-        ),
-    )
-    parser.add_argument(
-        "--min-length",
-        type=int,
-        default=1,
-        help=(
-            "Minimum character length of message content to index (default: 1).\n"
-            "Increase to 10 to skip single-character emoji-only messages."
-        ),
-    )
-    parser.add_argument(
-        "--db-stats",
-        action="store_true",
-        help="Print current discord_history.db statistics and exit.",
-    )
-    parser.add_argument(
-        "--db-path",
-        metavar="PATH",
-        default=None,
-        help=(
-            f"Override the default DB path (default: {DISCORD_DB_PATH}).\n"
-            "Can also be set via the DISCORD_DB_PATH environment variable."
-        ),
-    )
+_roster_by_id: dict[int, dict] = {}
 
-    args = parser.parse_args()
 
-    # Allow overriding DB path via CLI
-    if args.db_path:
-        import data_manager as _self
-        _self.DISCORD_DB_PATH = args.db_path
-        DISCORD_DB_PATH = args.db_path
+def _rebuild_roster_index() -> None:
+    global _roster_by_id
+    _roster_by_id = {}
+    for p in _players_cache:
+        rid = p.get("rosterId") or p.get("id")
+        if rid is not None:
+            _roster_by_id[int(rid)] = p
 
-    if args.db_stats:
-        print(get_discord_db_schema())
-        sys.exit(0)
 
-    elif args.ingest_discord:
-        try:
-            result = ingest_discord(
-                args.ingest_discord,
-                reset=args.reset,
-                batch_size=args.batch_size,
-                min_length=args.min_length,
-            )
-            # Exit with error code if nothing was inserted
-            if result["inserted"] == 0 and result["total_read"] > 0:
-                print("[DiscordDB] WARNING: Messages were read but none were inserted.")
-                print("  Check --min-length and that the JSON structure is correct.")
-                sys.exit(2)
-        except FileNotFoundError as e:
-            print(f"\nERROR: {e}")
-            sys.exit(1)
-        except Exception as e:
-            print(f"\nUnexpected error: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
+def get_contract_details(roster_id: int) -> dict:
+    p = _roster_by_id.get(int(roster_id), {})
+    years = int(p.get("contractYearsLeft", 2) or 2)
+    cap_raw = float(p.get("capPercent", 0) or p.get("capHit", 0) or 0)
+    cap_pct = cap_raw if cap_raw >= 0.5 else cap_raw * 100
+    signable = years > 0
+    return {
+        "years_remaining": years,
+        "cap_pct":         round(cap_pct, 2),
+        "signable_flag":   signable,
+    }
 
-    else:
-        parser.print_help()
-        print(
-            "\nExamples:\n"
-            "  # Ingest a single file:\n"
-            "  python data_manager.py --ingest-discord exports/chat.json\n\n"
-            "  # Ingest an entire folder of DCE files (clean rebuild):\n"
-            "  python data_manager.py --ingest-discord exports/ --reset\n\n"
-            "  # Check what's in the DB:\n"
-            "  python data_manager.py --db-stats\n"
-        )
 
+def get_team_record_dict(team_id: int) -> dict:
+    default = {"wins": 0, "losses": 0, "ties": 0}
+    if df_standings.empty:
+        return default
+    mask = df_standings["teamId"] == team_id if "teamId" in df_standings.columns else None
+    if mask is None or not mask.any():
+        name = _team_id_to_name.get(int(team_id), "")
+        if name and "teamName" in df_standings.columns:
+            mask = df_standings["teamName"].str.lower() == name.lower()
+    if mask is None or not mask.any():
+        return default
+    row = df_standings[mask].iloc[0]
+    return {
+        "wins":   int(row.get("totalWins",   0) or 0),
+        "losses": int(row.get("totalLosses", 0) or 0),
+        "ties":   int(row.get("totalTies",   0) or 0),
+    }
+
+
+def get_position_scarcity() -> dict[str, dict]:
+    """
+    Return cached position scarcity data.
+    FIX #11: No longer iterates _players_cache on every call —
+    uses _scarcity_cache built once during load_all().
+    Falls back to live computation if cache is empty (pre-load_all).
+    """
+    if _scarcity_cache:
+        return _scarcity_cache
+    # Fallback: compute live (only before first load_all)
+    return _rebuild_scarcity_cache(_players_cache)
+
+
+def get_rings_count(team_id: int) -> int:
+    """
+    Return cached ring count for a team.
+    FIX #1: No longer makes N live API calls per trade evaluation —
+    uses _rings_cache built once during load_all().
+    Falls back to 0 if cache is empty (pre-load_all).
+    """
+    return _rings_cache.get(int(team_id), 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONVENIENCE WRAPPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_week() -> int:
+    """Return current league week (1-indexed)."""
+    return CURRENT_WEEK
+
+
+def get_season() -> int:
+    """Return current league season (1-indexed)."""
+    return CURRENT_SEASON
+
+
+def get_draft_picks(team_id: int, year: int | None = None) -> list[dict]:
+    """
+    Return draft picks for a team.
+    NOTE: MaddenStats does not yet expose a /draftPicks endpoint.
+    Returns [] until that endpoint exists — commissioner must track picks
+    manually via the /trade wizard for now.
+    """
+    return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAT PADDING DETECTION — used by blowout_monitor in bot.py
+# Snapshots cumulative player stats each sync; diffs consecutive snapshots
+# to compute single-game deltas and flag suspiciously large outputs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_weekly_stat_snapshots: dict[int, dict] = {}   # week → {str(rosterId) → {stat: int}}
+
+_PADDING_STAT_FIELDS = ["passYds", "rushYds", "recYds", "passTDs", "rushTDs", "recTDs"]
+
+_PADDING_THRESHOLDS: dict[str, int] = {
+    "passYds": 450,
+    "rushYds": 225,
+    "recYds":  225,
+}
+
+
+def snapshot_week_stats(week: int) -> None:
+    """
+    Cache cumulative stats for all players at the given week.
+    Called automatically at the end of load_all() so every data sync
+    produces a new snapshot — no manual calls needed.
+    """
+    snapshot: dict[str, dict] = {}
+    for p in _players_cache:
+        pid = p.get("rosterId")
+        if pid:
+            snapshot[str(pid)] = {
+                f: int(p.get(f, 0) or 0) for f in _PADDING_STAT_FIELDS
+            }
+    _weekly_stat_snapshots[week] = snapshot
+    log.info(f"[dm] Week {week} stat snapshot stored ({len(snapshot)} players)")
+
+
+def get_stat_delta(player_id: int, week: int) -> dict[str, int]:
+    """
+    Single-game stat delta for one player: current week minus previous week.
+    Returns zeros if snapshots aren't available (safe pre-load_all no-op).
+    On week 1, treats cumulative stats as the single-game total.
+    """
+    zero = {f: 0 for f in _PADDING_STAT_FIELDS}
+    pid  = str(player_id)
+    curr = _weekly_stat_snapshots.get(week, {}).get(pid)
+    prev = _weekly_stat_snapshots.get(week - 1, {}).get(pid)
+    if not curr:
+        return zero
+    if not prev:
+        # First week in snapshots — full cumulative total is the game total
+        return {f: curr.get(f, 0) for f in _PADDING_STAT_FIELDS}
+    return {f: max(0, curr.get(f, 0) - prev.get(f, 0)) for f in _PADDING_STAT_FIELDS}
+
+
+def flag_stat_padding(week: int) -> list[dict]:
+    """
+    Scan every player for single-game stat spikes after a given week.
+    Returns list of {player_id, name, team, stat, delta, threshold}.
+
+    Called by blowout_monitor in bot.py every 15 minutes.
+    Returns [] safely if snapshots haven't been populated yet (pre-load_all).
+    """
+    if not _weekly_stat_snapshots:
+        return []
+
+    flags: list[dict] = []
+    for p in _players_cache:
+        pid = p.get("rosterId")
+        if not pid:
+            continue
+        name  = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+        team  = p.get("teamName", "?")
+        delta = get_stat_delta(int(pid), week)
+
+        for stat, threshold in _PADDING_THRESHOLDS.items():
+            if delta.get(stat, 0) > threshold:
+                flags.append({
+                    "player_id": pid,
+                    "name":      name,
+                    "team":      team,
+                    "stat":      stat,
+                    "delta":     delta[stat],
+                    "threshold": threshold,
+                })
+    return flags

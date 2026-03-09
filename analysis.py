@@ -104,10 +104,15 @@ def player_profile(full_name: str) -> dict:
         "abilities": [],
     }
 
-    # Roster bio
-    profile = dm.get_player_profile(full_name)
+    # Roster bio — search _players_cache directly (dm.get_player_profile doesn't exist)
+    profile = None
+    for p in dm.get_players():
+        pname = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+        if pname.lower() == full_name.lower() or (p.get("extendedName") or "").lower() == full_name.lower():
+            profile = p
+            break
     if profile:
-        result["name"]  = profile.get("fullName", full_name)
+        result["name"]  = f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip()
         result["team"]  = profile.get("teamName", "")
         result["pos"]   = profile.get("pos", "")
         result["bio"]   = {
@@ -116,10 +121,16 @@ def player_profile(full_name: str) -> dict:
             "OVR":             profile.get("playerBestOvr"),
             "Speed":           profile.get("speedRating"),
             "Jersey":          profile.get("jerseyNum"),
-            "Contract":        f"${profile.get('contractSalary', 0):,.0f} / {profile.get('contractYearsLeft', 0)}yr",
-            "Cap Hit":         f"${profile.get('capHit', 0):,.0f}",
+            "Contract":        f"{profile.get('contractYearsLeft', 0)}yr",
+            "Cap Hit":         str(profile.get('capHit', '?')),
         }
-        result["abilities"] = dm.get_player_abilities(result["name"])
+        # Abilities: filter full cache by player name
+        abilities_raw = dm.get_player_abilities()
+        result["abilities"] = [
+            a.get("title", "") for a in abilities_raw
+            if f"{a.get('firstName', '')} {a.get('lastName', '')}".strip().lower() == full_name.lower()
+            and a.get("title")
+        ]
 
     # Offense stats
     for df in [dm.df_offense]:
@@ -340,11 +351,20 @@ def weekly_recap(week: int = None) -> dict:
 # ── Recent trades ─────────────────────────────────────────────────────────────
 
 def recent_trades(season: int = None, n: int = 5) -> dict:
-    trades = dm.get_trades(season=season or dm.CURRENT_SEASON, status="accepted")
+    target_season = season or dm.CURRENT_SEASON
+    if dm.df_trades.empty:
+        return {"type": "trades", "season": target_season, "trades": []}
+    df = dm.df_trades.copy()
+    if "seasonIndex" in df.columns:
+        df["seasonIndex"] = pd.to_numeric(df["seasonIndex"], errors="coerce")
+        df = df[df["seasonIndex"] == target_season]
+    if "status" in df.columns:
+        df = df[df["status"].str.lower() == "accepted"]
+    trades = df.head(n).to_dict("records")
     return {
         "type":   "trades",
-        "season": season or dm.CURRENT_SEASON,
-        "trades": trades[:n],
+        "season": target_season,
+        "trades": trades,
     }
 
 
@@ -354,7 +374,7 @@ def route_query(query: str) -> dict:
     """
     Master router. Returns a structured dict describing what was found.
     The 'type' key tells embeds.py how to render it.
-    Falls back to a keyword stat block for WittGPT's text response.
+    Falls back to a keyword stat block for ATLAS's text response.
     """
     q = query.lower()
 
@@ -479,7 +499,7 @@ def _keyword_stats(q: str) -> dict:
 def build_context_string(data: dict) -> str:
     """
     Converts the structured data dict into a plain-text context block
-    for WittGPT's Gemini prompt.
+    for ATLAS's Gemini prompt.
     """
     t = data.get("type", "")
 
@@ -535,7 +555,10 @@ def build_context_string(data: dict) -> str:
         if d["defense"]:   lines.append("Defense: "   + " | ".join(f"{k}: {v}" for k, v in d["defense"].items()))
         if d["top_players"]: lines.append("Key Players: " + " | ".join(f"{k}: {v}" for k, v in d["top_players"].items()))
         if d["recent"]:
-            form = " ".join("W" if g["win"] else "L" for g in d["recent"])
+            form = " ".join(
+                "W" if g.get("home_score", 0) > g.get("away_score", 0) else "L"
+                for g in d["recent"]
+            )
             lines.append(f"Last 5 form: {form}")
         return "\n".join(lines)
 
@@ -567,12 +590,12 @@ def build_context_string(data: dict) -> str:
 
     return "(No data found)"
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-import io
-
 def generate_bar_chart(df, x_col, y_col, title="TSL Stat Comparison"):
     """Generates a bar chart and returns an io.BytesIO buffer."""
+    import io
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
     plt.figure(figsize=(10, 6))
     sns.set_theme(style="darkgrid")
     
