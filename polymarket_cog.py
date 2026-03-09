@@ -789,13 +789,14 @@ class MarketBrowserView(discord.ui.View):
         start = self.page * MARKETS_PER_PAGE
         chunk = markets[start : start + MARKETS_PER_PAGE]
 
-        # Rows 1-3: YES / NO buttons per market card
+        # Rows 1-3: YES / NO buttons per market card (numbered to match)
         for i, m in enumerate(chunk):
             row = i + 1  # rows 1, 2, 3
             yes_p = m.get("yes_price", 0.5)
             no_p = m.get("no_price", 0.5)
-
             num = NUMBER_EMOJIS[i] if i < len(NUMBER_EMOJIS) else ""
+            short_title = m.get("title", "")[:18]
+
             yes_btn = discord.ui.Button(
                 label=f"{num} YES {yes_p:.0%}",
                 style=discord.ButtonStyle.success,
@@ -844,16 +845,30 @@ class MarketBrowserView(discord.ui.View):
     def _make_bet_cb(self, market: dict, side: str):
         """Closure-safe callback: open modal instantly, live odds fetched in on_submit."""
         async def callback(interaction: discord.Interaction):
-            price = market["yes_price"] if side == "YES" else market["no_price"]
-            modal = WagerModal(
-                market_id=market["market_id"],
-                slug=market["slug"],
-                side=side,
-                price=price,
-                title=market["title"],
-                cog=self.cog,
-            )
-            await interaction.response.send_modal(modal)
+            try:
+                price = market["yes_price"] if side == "YES" else market["no_price"]
+                modal = WagerModal(
+                    market_id=market["market_id"],
+                    slug=market["slug"],
+                    side=side,
+                    price=price,
+                    title=market["title"],
+                    cog=self.cog,
+                )
+                await interaction.response.send_modal(modal)
+            except Exception as e:
+                log.error(f"Bet button callback error: {e}")
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message(
+                            f"❌ Error opening bet modal: {e}", ephemeral=True
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f"❌ Error opening bet modal: {e}", ephemeral=True
+                        )
+                except Exception:
+                    pass
         return callback
 
     # ── Navigation / Filter callbacks ──
@@ -894,34 +909,13 @@ class MarketBrowserView(discord.ui.View):
             color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
         )
 
-        header_title = "🔥 TRENDING" if self.filter == "hot" else cat_label.upper()
-        embed.description = (
-            f"```\n"
-            f"{header_title}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 {total} markets  •  Page {self.page+1}/{self._max_page()+1}\n"
-            f"```"
-        )
+        # Build description with market cards inline
+        # This way the text flows directly into the buttons below
+        lines = [
+            f"**{cat_label}** · {total} markets · Page {self.page+1}/{self._max_page()+1}",
+            "",
+        ]
 
-        # Hot markets banner — only on page 0 of "all" filter
-        if self.page == 0 and self.filter == "all" and self.hot_markets:
-            hot_lines = []
-            for hm in self.hot_markets[:HOT_MARKETS_COUNT]:
-                vol_24h = hm.get("volume_24hr", 0)
-                yes_p = hm.get("yes_price", 0.5)
-                heat = hot_label(vol_24h)
-                hot_lines.append(
-                    f"{heat} **{hm['title'][:50]}** — "
-                    f"YES {yes_p:.0%} · 24h: {fmt_volume(vol_24h)}"
-                )
-            if hot_lines:
-                embed.add_field(
-                    name="🔥 Trending Now",
-                    value="\n".join(hot_lines),
-                    inline=False,
-                )
-
-        # Market cards (one per row, matching the YES/NO buttons below)
         for i, m in enumerate(chunk):
             yes_p = m.get("yes_price", 0.5)
             no_p = m.get("no_price", 0.5)
@@ -937,28 +931,23 @@ class MarketBrowserView(discord.ui.View):
                 end_str = "No end date"
 
             heat = hot_label(vol_24h)
-            heat_prefix = f"{heat} " if heat else ""
+            heat_suffix = f" {heat}" if heat else ""
             vol_str = fmt_volume(m.get("volume", 0))
             num = NUMBER_EMOJIS[i] if i < len(NUMBER_EMOJIS) else ""
 
-            # Compact market card
-            embed.add_field(
-                name=f"{num} {cat}  {heat_prefix}{m['title'][:50]}",
-                value=(
-                    f"**YES {yes_p:.0%}**  ·  **NO {no_p:.0%}**  ·  "
-                    f"Vol: {vol_str}  ·  {end_str}"
-                ),
-                inline=False,
+            lines.append(
+                f"{num} **{m['title'][:55]}**{heat_suffix}\n"
+                f"　　YES **{yes_p:.0%}** · NO **{no_p:.0%}** · "
+                f"{vol_str} · {end_str}\n"
+                f"　　⬇️ *Use buttons below to bet*"
             )
+            lines.append("")  # spacing between cards
 
         if not chunk:
-            embed.add_field(
-                name="No markets found",
-                value="Try a different category or check back later.",
-                inline=False,
-            )
+            lines.append("*No markets found — try a different category.*")
 
-        embed.set_footer(text="Click YES or NO below to bet · Odds fetched live · ATLAS Flow Casino")
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Odds fetched live on bet · ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
         return embed
 
