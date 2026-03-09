@@ -46,15 +46,44 @@ PREDICTION_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
 PAYOUT_SCALE = 100
 
 # Category mapping: Polymarket categories → display labels
+# Keys are lowercase — map_category() lowercases + normalizes hyphens before lookup
 CATEGORY_MAP = {
-    "politics":    "🏛️ Politics",
-    "sports":      "⚽ Sports",
-    "pop culture": "🎬 Entertainment",
-    "crypto":      "🪙 Crypto",
-    "business":    "📈 Economics",
-    "science":     "🔬 Science",
-    "tech":        "💻 Tech",
-    "world":       "🌍 World",
+    # Core
+    "politics":            "🏛️ Politics",
+    "sports":              "⚽ Sports",
+    "pop culture":         "🎬 Entertainment",
+    "pop-culture":         "🎬 Entertainment",
+    "entertainment":       "🎬 Entertainment",
+    "culture":             "🎬 Entertainment",
+    "crypto":              "🪙 Crypto",
+    "business":            "📈 Economics",
+    "finance":             "📈 Economics",
+    "economics":           "📈 Economics",
+    "science":             "🔬 Science",
+    "health":              "🔬 Science",
+    "tech":                "💻 Tech",
+    "ai":                  "🤖 AI",
+    "artificial intelligence": "🤖 AI",
+    "world":               "🌍 World",
+    "climate":             "🌍 World",
+    # Politics variants
+    "us-current-affairs":  "🏛️ Politics",
+    "us current affairs":  "🏛️ Politics",
+    "elections":           "🏛️ Politics",
+    # Sports sub-categories
+    "nfl":                 "🏈 NFL",
+    "nba":                 "🏀 NBA",
+    "mlb":                 "⚾ MLB",
+    "soccer":              "⚽ Sports",
+    "football":            "🏈 NFL",
+    "basketball":          "🏀 NBA",
+    "baseball":            "⚾ MLB",
+    "mma":                 "🥊 MMA",
+    "boxing":              "🥊 MMA",
+    "chess":               "♟️ Chess",
+    # Gaming
+    "gaming":              "🎮 Gaming",
+    "esports":             "🎮 Gaming",
 }
 
 CATEGORY_COLORS = {
@@ -62,14 +91,23 @@ CATEGORY_COLORS = {
     "⚽ Sports":        0x2ECC71,
     "🎬 Entertainment": 0xE91E63,
     "🪙 Crypto":        0xF39C12,
-    "📈 Economics":     0x2ECC71,
+    "📈 Economics":     0x27AE60,
     "🔬 Science":       0x9B59B6,
     "💻 Tech":          0x1ABC9C,
+    "🤖 AI":            0x00CED1,
     "🌍 World":         0xE67E22,
+    "🏈 NFL":           0x013369,
+    "🏀 NBA":           0xC9082A,
+    "⚾ MLB":           0x002D72,
+    "🥊 MMA":           0xD4AF37,
+    "♟️ Chess":         0x8B4513,
+    "🎮 Gaming":        0x7B68EE,
     "🌐 Other":         0x95A5A6,
 }
 
-MARKETS_PER_PAGE = 5   # Embeds shown per browse page
+MARKETS_PER_PAGE = 5         # Market cards shown per browse page
+LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
+HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
 
 # ─────────────────────────────────────────────
 # DATABASE SETUP
@@ -120,6 +158,16 @@ async def init_prediction_db(db_path: str = DB_PATH):
             CREATE INDEX IF NOT EXISTS idx_pred_markets_status
                 ON prediction_markets(status, category);
         """)
+
+        # Migrations: add columns for trending/hot support
+        for col, default in [("volume_24hr", "0"), ("featured", "0")]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE prediction_markets ADD COLUMN {col} REAL DEFAULT {default}"
+                )
+            except Exception:
+                pass  # Column already exists
+
     log.info("Prediction market DB tables ready.")
 
 
@@ -208,11 +256,13 @@ class PolymarketClient:
     # ── Public API methods ────────────────────────────────────────────────
 
     async def fetch_active_events(self, limit: int = 100) -> list[dict]:
-        """Fetch active events with their nested markets."""
+        """Fetch active events with their nested markets, sorted by volume."""
         data = await self._get("/events", params={
             "active": "true",
             "limit": limit,
             "closed": "false",
+            "order": "volume24hr",
+            "ascending": "false",
         })
         return data if isinstance(data, list) else []
 
@@ -223,6 +273,17 @@ class PolymarketClient:
             "closed": "false",
             "limit": limit,
             "offset": offset,
+        })
+        return data if isinstance(data, list) else []
+
+    async def fetch_trending_markets(self, limit: int = 20) -> list[dict]:
+        """Fetch markets sorted by 24-hour volume (trending/hot)."""
+        data = await self._get("/markets", params={
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "order": "volume24hr",
+            "ascending": "false",
         })
         return data if isinstance(data, list) else []
 
@@ -295,7 +356,15 @@ def map_category(raw_category: str) -> str:
     if not raw_category:
         return "🌐 Other"
     key = raw_category.lower().strip()
-    return CATEGORY_MAP.get(key, f"🌐 {raw_category.title()}")
+    # Try exact match first
+    result = CATEGORY_MAP.get(key)
+    if result:
+        return result
+    # Try with hyphens replaced by spaces
+    result = CATEGORY_MAP.get(key.replace("-", " "))
+    if result:
+        return result
+    return f"🌐 {raw_category.title()}"
 
 
 def market_status(market: dict) -> str:
@@ -336,12 +405,47 @@ def fmt_volume(vol) -> str:
     try:
         v = float(vol or 0)
     except (ValueError, TypeError):
-        return "0"
+        return "$0"
     if v >= 1_000_000:
         return f"${v/1_000_000:.1f}M"
     if v >= 1_000:
         return f"${v/1_000:.1f}K"
     return f"${v:.0f}"
+
+
+def probability_bar(yes_price: float, width: int = 10) -> str:
+    """Render a visual probability bar: 🟩🟩🟩🟩🟩🟩⬜⬜⬜⬜ 62%"""
+    pct = max(0, min(100, round(yes_price * 100)))
+    filled = round(yes_price * width)
+    bar = "🟩" * filled + "⬜" * (width - filled)
+    return f"{bar} {pct}%"
+
+
+def is_lopsided(yes_price: float, no_price: float) -> bool:
+    """Return True if market is too one-sided to be interesting."""
+    return yes_price > LOPSIDED_THRESHOLD or no_price > LOPSIDED_THRESHOLD
+
+
+def hot_label(volume_24hr: float) -> str:
+    """Return heat emoji(s) based on 24hr volume."""
+    try:
+        v = float(volume_24hr or 0)
+    except (ValueError, TypeError):
+        return ""
+    if v >= 500_000:
+        return "🔥🔥🔥"
+    if v >= 100_000:
+        return "🔥🔥"
+    if v >= 10_000:
+        return "🔥"
+    return ""
+
+
+def truncate_slug(slug: str, max_len: int = 35) -> str:
+    """Truncate long slugs for display."""
+    if len(slug) <= max_len:
+        return slug
+    return slug[:max_len - 3] + "..."
 
 
 # ─────────────────────────────────────────────
@@ -417,17 +521,20 @@ class WagerModal(discord.ui.Modal):
 
         color  = 0x2ECC71 if self.side == "YES" else 0xE74C3C
         symbol = "✅" if self.side == "YES" else "❌"
+        profit = payout - cost_bucks
         embed  = discord.Embed(
             title=f"{symbol} Contract Purchased",
             color=color,
             description=(
-                f"**{self.market_title}**\n"
+                f"**{self.market_title}**\n\n"
                 f"Side: **{self.side}** · Price: **{self.price:.1%}** each\n"
-                f"Quantity: **{quantity}** · Cost: **{cost_bucks:,} TSL Bucks**\n"
-                f"Potential payout: **{payout:,} TSL Bucks** if {self.side} wins"
+                f"Qty: **{quantity}** · Cost: **{cost_bucks:,} TSL Bucks**\n"
+                f"Potential: **{payout:,} TSL Bucks** if {self.side} wins\n\n"
+                f"*Profit if correct: +{profit:,} TSL Bucks*"
             ),
         )
-        embed.set_footer(text="Use /portfolio to view your open contracts.")
+        embed.set_footer(text="Use /portfolio to view your positions · ATLAS Flow Casino")
+        embed.timestamp = datetime.now(timezone.utc)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -463,10 +570,31 @@ class BetButtonView(discord.ui.View):
 class CategorySelect(discord.ui.Select):
     """Dropdown to filter markets by category."""
 
-    def __init__(self, categories: list[str], parent_view):
-        options = [discord.SelectOption(label="All Categories", value="all", default=True)]
+    def __init__(self, categories: list[str], parent_view,
+                 category_counts: dict | None = None):
+        counts = category_counts or {}
+        total = sum(counts.values()) if counts else 0
+
+        options = [discord.SelectOption(
+            label="All Categories",
+            value="all",
+            description=f"{total} markets" if total else None,
+            default=True,
+        )]
+        # Hot / Trending option
+        options.append(discord.SelectOption(
+            label="Hot / Trending",
+            value="hot",
+            emoji="🔥",
+            description="Sorted by 24h volume",
+        ))
         for cat in categories:
-            options.append(discord.SelectOption(label=cat, value=cat))
+            count = counts.get(cat, 0)
+            options.append(discord.SelectOption(
+                label=cat,
+                value=cat,
+                description=f"{count} markets" if count else None,
+            ))
         super().__init__(
             placeholder="Filter by category…",
             options=options[:25],
@@ -481,20 +609,32 @@ class CategorySelect(discord.ui.Select):
 
 
 class MarketBrowserView(discord.ui.View):
-    """Full market browser: category filter + page navigation."""
+    """Full market browser: category filter + hot markets + page navigation."""
 
-    def __init__(self, all_markets: list[dict], categories: list[str]):
+    def __init__(self, all_markets: list[dict], categories: list[str],
+                 hot_markets: list[dict] | None = None,
+                 category_counts: dict | None = None):
         super().__init__(timeout=600)
-        self.all_markets = all_markets
-        self.categories  = categories
-        self.filter      = "all"
-        self.page        = 0
+        self.all_markets    = all_markets
+        self.categories     = categories
+        self.hot_markets    = hot_markets or []
+        self.category_counts = category_counts or {}
+        self.filter         = "all"
+        self.page           = 0
 
-        self.cat_select = CategorySelect(categories, parent_view=self)
+        self.cat_select = CategorySelect(
+            categories, parent_view=self, category_counts=self.category_counts
+        )
         self.add_item(self.cat_select)
         self._build_nav()
 
     def _filtered(self) -> list[dict]:
+        if self.filter == "hot":
+            return sorted(
+                self.all_markets,
+                key=lambda m: m.get("volume_24hr", 0),
+                reverse=True,
+            )
         if self.filter == "all":
             return self.all_markets
         return [m for m in self.all_markets if m.get("category") == self.filter]
@@ -549,34 +689,82 @@ class MarketBrowserView(discord.ui.View):
         start   = self.page * MARKETS_PER_PAGE
         chunk   = markets[start : start + MARKETS_PER_PAGE]
 
-        cat_label = self.filter if self.filter != "all" else "All Categories"
+        if self.filter == "hot":
+            cat_label = "🔥 Hot / Trending"
+        elif self.filter == "all":
+            cat_label = "All Categories"
+        else:
+            cat_label = self.filter
+
         embed = discord.Embed(
-            title="📊 ATLAS Flow — Prediction Markets (Polymarket)",
-            description=(
-                f"**{cat_label}** · {total} active markets · "
-                f"Page {self.page+1}/{self._max_page()+1}"
-            ),
-            color=CATEGORY_COLORS.get(cat_label, 0x7289DA),
+            title="📊 ATLAS Flow — Prediction Markets",
+            color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
         )
 
+        # Header block
+        header_title = "🔥 TRENDING" if self.filter == "hot" else cat_label.upper()
+        embed.description = (
+            f"```\n"
+            f"{header_title}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 {total} markets  •  Page {self.page+1}/{self._max_page()+1}\n"
+            f"```"
+        )
+
+        # Hot markets banner — only on page 0 of "all" filter
+        if (self.page == 0 and self.filter == "all"
+                and self.hot_markets):
+            hot_lines = []
+            for hm in self.hot_markets[:HOT_MARKETS_COUNT]:
+                vol_24h = hm.get("volume_24hr", 0)
+                yes_p = hm.get("yes_price", 0.5)
+                heat = hot_label(vol_24h)
+                hot_lines.append(
+                    f"{heat} **{hm['title'][:45]}**\n"
+                    f"　{probability_bar(yes_p)} · 24h: {fmt_volume(vol_24h)}"
+                )
+            if hot_lines:
+                embed.add_field(
+                    name="🔥 Hot Markets",
+                    value="\n".join(hot_lines),
+                    inline=False,
+                )
+
+        # Market cards
         for m in chunk:
-            yes_bucks = price_to_bucks(m["yes_price"])
-            no_bucks  = price_to_bucks(m["no_price"])
+            yes_p = m.get("yes_price", 0.5)
+            no_p  = m.get("no_price", 0.5)
+            yes_bucks = price_to_bucks(yes_p)
+            no_bucks  = price_to_bucks(no_p)
+            vol_24h = m.get("volume_24hr", 0)
+            cat = m.get("category", "🌐 Other")
+
+            # End date
             end = m.get("end_date", "")
             try:
                 end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
                 end_str = f"<t:{int(end_dt.timestamp())}:R>"
             except Exception:
-                end_str = end or "No expiry"
+                end_str = "No expiry"
+
+            # Heat indicator
+            heat = hot_label(vol_24h)
+            heat_prefix = f"{heat} " if heat else ""
+
+            # Volume display
+            vol_str = fmt_volume(m.get("volume", 0))
+            vol_line = f"Vol: {vol_str}"
+            if vol_24h and vol_24h > 0:
+                vol_line += f" · 24h: {fmt_volume(vol_24h)}"
 
             embed.add_field(
-                name=f"{m.get('category', '🌐 Other')}  {m['title'][:60]}",
+                name=f"{cat}  {heat_prefix}{m['title'][:55]}",
                 value=(
-                    f"ID: `{m['slug'][:50]}`\n"
-                    f"YES: **{yes_bucks}¢** ({m['yes_price']:.0%}) · "
-                    f"NO: **{no_bucks}¢** ({m['no_price']:.0%}) · "
-                    f"Vol: {fmt_volume(m.get('volume', 0))}\n"
-                    f"Ends: {end_str}"
+                    f"{probability_bar(yes_p)}\n"
+                    f"✅ YES **{yes_bucks}¢** ({yes_p:.0%})  ·  "
+                    f"❌ NO **{no_bucks}¢** ({no_p:.0%})\n"
+                    f"{vol_line}  ·  Ends: {end_str}\n"
+                    f"`/bet {truncate_slug(m['slug'])}`"
                 ),
                 inline=False,
             )
@@ -584,11 +772,12 @@ class MarketBrowserView(discord.ui.View):
         if not chunk:
             embed.add_field(
                 name="No markets found",
-                value="Try a different category.",
+                value="Try a different category or check back later.",
                 inline=False,
             )
 
-        embed.set_footer(text="Use /bet <slug> to place a wager on any market.")
+        embed.set_footer(text="ATLAS Flow Casino · Polymarket · /bet <slug> to wager")
+        embed.timestamp = datetime.now(timezone.utc)
         return embed
 
 
@@ -660,37 +849,41 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     end_date = mkt.get("endDate", "") or mkt.get("end_date_iso", "")
                     volume = mkt.get("volumeNum") or mkt.get("volume") or 0
                     liquidity = mkt.get("liquidityNum") or mkt.get("liquidity") or 0
+                    volume_24hr = mkt.get("volume24hr") or mkt.get("volume24Hr") or 0
+                    featured = 1 if mkt.get("featured") else 0
 
-                    try:
-                        volume = float(volume)
-                    except (ValueError, TypeError):
-                        volume = 0
-                    try:
-                        liquidity = float(liquidity)
-                    except (ValueError, TypeError):
-                        liquidity = 0
+                    try: volume = float(volume)
+                    except (ValueError, TypeError): volume = 0
+                    try: liquidity = float(liquidity)
+                    except (ValueError, TypeError): liquidity = 0
+                    try: volume_24hr = float(volume_24hr)
+                    except (ValueError, TypeError): volume_24hr = 0
 
                     await db.execute("""
                         INSERT INTO prediction_markets
                             (market_id, event_id, slug, title, category,
                              yes_price, no_price, volume, liquidity,
+                             volume_24hr, featured,
                              end_date, status, last_synced)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(market_id) DO UPDATE SET
-                            slug       = excluded.slug,
-                            title      = excluded.title,
-                            category   = excluded.category,
-                            yes_price  = excluded.yes_price,
-                            no_price   = excluded.no_price,
-                            volume     = excluded.volume,
-                            liquidity  = excluded.liquidity,
-                            end_date   = excluded.end_date,
-                            status     = excluded.status,
-                            last_synced= excluded.last_synced
+                            slug        = excluded.slug,
+                            title       = excluded.title,
+                            category    = excluded.category,
+                            yes_price   = excluded.yes_price,
+                            no_price    = excluded.no_price,
+                            volume      = excluded.volume,
+                            liquidity   = excluded.liquidity,
+                            volume_24hr = excluded.volume_24hr,
+                            featured    = excluded.featured,
+                            end_date    = excluded.end_date,
+                            status      = excluded.status,
+                            last_synced = excluded.last_synced
                     """, (
                         market_id, event_id, slug, title, category,
                         prices["yes_price"], prices["no_price"],
-                        volume, liquidity, end_date, status, now,
+                        volume, liquidity, volume_24hr, featured,
+                        end_date, status, now,
                     ))
                     upserted += 1
 
@@ -896,12 +1089,15 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("""
                 SELECT market_id, slug, title, category,
-                       yes_price, no_price, volume, end_date
+                       yes_price, no_price, volume, end_date,
+                       COALESCE(volume_24hr, 0), COALESCE(featured, 0), liquidity
                 FROM prediction_markets
                 WHERE status = 'active'
+                  AND yes_price <= ?
+                  AND no_price  <= ?
                 ORDER BY volume DESC
                 LIMIT 200
-            """) as cursor:
+            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD)) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
@@ -913,20 +1109,40 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         markets = [
             {
-                "market_id": r[0],
-                "slug":      r[1],
-                "title":     r[2],
-                "category":  r[3],
-                "yes_price": r[4] if r[4] is not None else 0.5,
-                "no_price":  r[5] if r[5] is not None else 0.5,
-                "volume":    r[6] or 0,
-                "end_date":  r[7] or "",
+                "market_id":   r[0],
+                "slug":        r[1],
+                "title":       r[2],
+                "category":    r[3],
+                "yes_price":   r[4] if r[4] is not None else 0.5,
+                "no_price":    r[5] if r[5] is not None else 0.5,
+                "volume":      r[6] or 0,
+                "end_date":    r[7] or "",
+                "volume_24hr": r[8] or 0,
+                "featured":    r[9] or 0,
+                "liquidity":   r[10] or 0,
             }
             for r in rows
         ]
 
+        # Hot markets: top by 24hr volume
+        hot_markets = sorted(
+            markets,
+            key=lambda m: m.get("volume_24hr", 0),
+            reverse=True,
+        )[:HOT_MARKETS_COUNT]
+
+        # Category counts for the select menu
+        category_counts: dict[str, int] = {}
+        for m in markets:
+            cat = m.get("category", "🌐 Other")
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+
         categories = sorted({m["category"] for m in markets})
-        view       = MarketBrowserView(markets, categories)
+        view = MarketBrowserView(
+            markets, categories,
+            hot_markets=hot_markets,
+            category_counts=category_counts,
+        )
 
         await interaction.followup.send(embed=view._embed(), view=view, ephemeral=True)
 
@@ -993,25 +1209,31 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         embed = discord.Embed(
             title=f"📊 {title}",
             color=color,
-            description=(
-                f"**ID:** `{mkt_slug[:60]}`\n"
-                f"**Category:** {category}\n"
-                f"**Ends:** {end_str}\n"
-                f"**Volume:** {fmt_volume(volume)}\n\n"
-                f"Each contract pays out **{PAYOUT_SCALE} TSL Bucks** if your side wins."
-            ),
+        )
+        embed.description = (
+            f"**{category}**\n\n"
+            f"{probability_bar(yes_price)}\n\n"
+            f"Ends: {end_str}  ·  Volume: {fmt_volume(volume)}\n"
+            f"Each contract pays **{PAYOUT_SCALE} TSL Bucks** if your side wins."
         )
         embed.add_field(
             name="✅ Buy YES",
-            value=f"**{yes_bucks} TSL Bucks** per contract\n*(implied: {yes_price:.1%})*",
+            value=(
+                f"**{yes_bucks} TSL Bucks** / contract\n"
+                f"Implied: {yes_price:.1%}"
+            ),
             inline=True,
         )
         embed.add_field(
             name="❌ Buy NO",
-            value=f"**{no_bucks} TSL Bucks** per contract\n*(implied: {no_price:.1%})*",
+            value=(
+                f"**{no_bucks} TSL Bucks** / contract\n"
+                f"Implied: {no_price:.1%}"
+            ),
             inline=True,
         )
-        embed.set_footer(text="Click a button below to open the wager modal.")
+        embed.set_footer(text="Click a button below · ATLAS Flow Casino")
+        embed.timestamp = datetime.now(timezone.utc)
 
         view = BetButtonView(
             market_id=market_id, slug=mkt_slug, title=title,
