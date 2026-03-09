@@ -1,0 +1,3612 @@
+"""
+oracle_cog.py — ATLAS · Oracle Module v1.0
+─────────────────────────────────────────────────────────────────────────────
+ATLAS Oracle is the stats intelligence and analytics system.
+
+Consolidated from: analytics_cog, stats_hub_cog
+
+Register in bot.py setup_hook():
+    await bot.load_extension("oracle_cog")
+
+Slash commands:
+  /stats hub               — Stats Hub navigation panel
+  /stats hotcold [player]  — Hot/Cold report (league-wide or single player)
+  /stats clutch [margin]   — Clutch rankings
+  /stats draft [season]    — Draft class report
+  /stats power             — Live power rankings
+  /stats recap [week]      — Weekly game recap
+  /stats team <name>       — Team stat card
+  /stats owner [user]      — Owner profile card
+  /stats player <name>     — Player hot/cold breakdown
+─────────────────────────────────────────────────────────────────────────────
+"""
+
+from __future__ import annotations
+
+# ── Unified imports ───────────────────────────────────────────────────────────
+import asyncio
+import datetime
+import json
+import os
+import re
+import sqlite3
+from collections import Counter
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+import analysis as an
+import data_manager as dm
+import intelligence as ig
+
+ADMIN_USER_IDS = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ORACLE · ANALYTICS HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+# NOTE: Color palette (C_HOT, C_COLD, etc.), _season_label(), _rank_emoji(),
+# _trend_bar(), _dev_emoji(), _grade_color(), _winpct_bar(), _record_str(),
+# _ai_blurb(), and ATLAS_ICON_URL are defined once in the Stats Hub section
+# below (lines ~800+). Do NOT duplicate them here.
+
+
+def _get_user_tier(bot: commands.Bot, user_id: int) -> str:
+    """Fetches user tier from SupportCog. Defaults to 'Elite' if missing to prevent breaks."""
+    support_cog = bot.get_cog("SupportCog")
+    if support_cog and hasattr(support_cog, "get_user_tier"):
+        return support_cog.get_user_tier(user_id)
+    return "Elite"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  HOT / COLD
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_hotcold_single(data: dict) -> discord.Embed:
+    """Embed for a single player's hot/cold breakdown."""
+    trend = data.get("trend", "➡️ NEUTRAL")
+    name  = data.get("name", "Unknown")
+    team  = data.get("team", "")
+    pos   = data.get("pos", "")
+    n     = data.get("last_n", 3)
+
+    if "HOT" in trend:
+        color, flame = C_HOT,  "🔥"
+    elif "COLD" in trend:
+        color, flame = C_COLD, "🥶"
+    else:
+        color, flame = C_NEUTRAL, "➡️"
+
+    embed = discord.Embed(
+        title=f"{flame} {name} — {trend}",
+        description=f"**{pos}** · {team} · Last {n} vs Season Avg",
+        color=color,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    season_avg = data.get("season_avg", {})
+    last_n_avg = data.get("last_n_avg", {})
+    deltas     = data.get("deltas", {})
+
+    STAT_LABELS = {
+        "passYds": "Pass Yds", "passTDs": "Pass TDs", "passInts": "INTs",
+        "passCompPct": "Comp %", "rushYds": "Rush Yds", "rushTDs": "Rush TDs",
+        "recYds": "Rec Yds", "recTDs": "Rec TDs", "recCatches": "Catches",
+        "defTotalTackles": "Tackles", "defSacks": "Sacks", "defInts": "DEF INTs",
+        "defForcedFum": "FF",
+    }
+    NEG_STATS = {"passInts", "rushFum", "recDrops"}
+
+    rows = []
+    for col, label in STAT_LABELS.items():
+        if col not in season_avg:
+            continue
+        s_val = season_avg[col]
+        l_val = last_n_avg.get(col, s_val)
+        d     = deltas.get(col, 0)
+        if s_val == 0 and l_val == 0:
+            continue
+        arrow = "▲" if d > 0 else ("▼" if d < 0 else "—")
+        is_neg = col in NEG_STATS
+        if (d > 0 and not is_neg) or (d < 0 and is_neg):
+            arrow = f"🟢 {arrow}"
+        elif (d < 0 and not is_neg) or (d > 0 and is_neg):
+            arrow = f"🔴 {arrow}"
+        bar = _trend_bar(d if not is_neg else -d)
+        rows.append(f"`{label:<12}` Avg: **{s_val}** → L{n}: **{l_val}** {arrow} ({d:+.0f}%)\n`{bar}`")
+
+    if rows:
+        embed.add_field(name="📊 Stat Trends", value="\n".join(rows[:5]), inline=False)
+
+    games = data.get("last_n_games", [])
+    if games:
+        game_lines = []
+        for g in games:
+            wk = g.get("weekIndex", "?")
+            stats_parts = []
+            for col, label in STAT_LABELS.items():
+                if col in g and g[col] != 0:
+                    stats_parts.append(f"{label}: {g[col]}")
+            game_lines.append(f"**Wk {wk}** — " + " | ".join(stats_parts[:4]))
+        embed.add_field(name=f"🗂️ Last {n} Games", value="\n".join(game_lines), inline=False)
+
+    embed.set_footer(text=f"TSL Analytics · {_season_label()}")
+    return embed
+
+
+def _build_hotcold_league(top_n: int = 5) -> discord.Embed:
+    embed = discord.Embed(
+        title="🔥🥶 TSL Hot / Cold Report",
+        description=f"League-wide performance trends — {_season_label()}",
+        color=C_HOT,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    hot_players, cold_players = [], []
+    target_players = []
+    
+    for df, col, min_col, min_val in [
+        (dm.df_offense, "passYds",    "passAtt",    50),
+        (dm.df_offense, "rushYds",    "rushAtt",    20),
+        (dm.df_offense, "recYds",     "recCatches", 10),
+        (dm.df_defense, "defSacks",   None,         0),
+        (dm.df_defense, "defInts",    None,         0),
+    ]:
+        leaders = an.stat_leaders(df, col, top_n=top_n, min_col=min_col, min_val=min_val)
+        for r in leaders:
+            if r["name"] not in [p["name"] for p in target_players]:
+                target_players.append(r)
+
+    for player_info in target_players[:20]:
+        result = ig.get_hot_cold(player_info["name"], last_n=3)
+        if "error" in result:
+            continue
+        score = result.get("trend_score", 0)
+        entry = {
+            "name":  result.get("name", player_info["name"]),
+            "team":  result.get("team", player_info["team"]),
+            "pos":   result.get("pos",  player_info["pos"]),
+            "score": score,
+            "trend": result.get("trend", ""),
+        }
+        if score > 15:
+            hot_players.append(entry)
+        elif score < -15:
+            cold_players.append(entry)
+
+    hot_players.sort(key=lambda x: x["score"], reverse=True)
+    cold_players.sort(key=lambda x: x["score"])
+
+    if hot_players:
+        lines = []
+        for p in hot_players[:5]:
+            lines.append(f"🔥 **{p['name']}** ({p['pos']}, {p['team']}) — score: +{p['score']:.0f}")
+        embed.add_field(name="🔥 On Fire", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="🔥 On Fire", value="_No standout performers this week_", inline=False)
+
+    if cold_players:
+        lines = []
+        for p in cold_players[:5]:
+            lines.append(f"🥶 **{p['name']}** ({p['pos']}, {p['team']}) — score: {p['score']:.0f}")
+        embed.add_field(name="🥶 Ice Cold", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="🥶 Ice Cold", value="_Everyone holding steady_", inline=False)
+
+    embed.set_footer(text="Use /stats hotcold [player name] for a detailed breakdown")
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CLUTCH RANKINGS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_clutch_embed(margin: int = 7) -> discord.Embed:
+    data = ig.get_clutch_records(margin=margin)
+
+    if "error" in data:
+        return discord.Embed(title="⚡ Clutch Rankings", description=f"❌ {data['error']}", color=C_RED)
+
+    records = data.get("records", [])
+    most    = data.get("most_clutch",  "?")
+    least   = data.get("least_clutch", "?")
+
+    embed = discord.Embed(
+        title=f"⚡ TSL Clutch Rankings — Games Decided by ≤{margin} Points",
+        description=f"👑 **Most Clutch:** {most}\n💀 **Least Clutch:** {least}\n\n*{_season_label()}*",
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    ranked = sorted(
+        [r for r in records if r.get("clutch_games", 0) > 0],
+        key=lambda r: (r["clutch_winpct"], r["clutch_wins"]),
+        reverse=True
+    )
+
+    top_lines, bot_lines = [], []
+    for i, r in enumerate(ranked, 1):
+        cw, cl, pct = r["clutch_wins"], r["clutch_losses"], r["clutch_winpct"]
+        ow, ol = r["overall_wins"], r["overall_losses"]
+        bar = _winpct_bar(cw, cl, width=6)
+        team = r["team"][:12]
+
+        line = f"{_rank_emoji(i)} **{team}**\n`{bar}` {cw}-{cl} ({pct:.0%})\nOverall: {ow}-{ol}"
+        if i <= 5: top_lines.append(line)
+        elif i >= len(ranked) - 4: bot_lines.append(line)
+
+    if top_lines: embed.add_field(name="💎 Most Clutch", value="\n\n".join(top_lines), inline=True)
+    if bot_lines: embed.add_field(name="💸 Choke Artists", value="\n\n".join(bot_lines), inline=True)
+
+    no_close = [r for r in records if r.get("clutch_games", 0) == 0]
+    if no_close:
+        names = ", ".join(r["team"] for r in no_close[:6])
+        embed.add_field(name="🛡️ Living Comfortably (No Close Games)", value=names, inline=False)
+
+    divergent = []
+    for r in records:
+        if r.get("clutch_games", 0) < 2: continue
+        ov_total = r["overall_wins"] + r["overall_losses"]
+        if ov_total == 0: continue
+        ov_pct, clutch_pct = r["overall_wins"] / ov_total, r["clutch_winpct"]
+        divergent.append((r["team"], clutch_pct - ov_pct, clutch_pct, ov_pct))
+
+    divergent.sort(key=lambda x: abs(x[1]), reverse=True)
+    if divergent:
+        lines = []
+        for team, delta, cpct, opct in divergent[:4]:
+            sign = "▲" if delta > 0 else "▼"
+            lines.append(f"**{team}** — Overall: {opct:.0%} → Clutch: {cpct:.0%} {sign} {abs(delta):.0%}")
+        embed.add_field(name="📈 Biggest Clutch Swing (vs Overall Record)", value="\n".join(lines), inline=False)
+
+    embed.set_footer(text=f"Clutch = games decided by ≤{margin} points · TSL Analytics")
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DRAFT CLASS REPORT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_draft_embed(season: int) -> list[discord.Embed]:
+    data = ig.get_draft_class(season)
+
+    if "error" in data:
+        return [discord.Embed(title=f"📋 Draft Class — Season {season}", description=f"❌ {data['error']}", color=C_RED)]
+
+    grade, grade_score = data["letter_grade"], data["grade_score"]
+    dev_counts, avg_ovr, total_picks = data.get("dev_counts", {}), data.get("avg_ovr", 0), data.get("total_picks", 0)
+    color = _grade_color(grade)
+
+    e1 = discord.Embed(
+        title=f"📋 Season {season} Draft Class — Grade: **{grade}**",
+        description=f"**{total_picks} picks** | Avg OVR: **{avg_ovr}** | Score: **{grade_score:.2f}**\n*{_season_label()}*",
+        color=color,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    xf, ss = dev_counts.get("Superstar X-Factor", 0), dev_counts.get("Superstar", 0)
+    st, nm = dev_counts.get("Star", 0), dev_counts.get("Normal", 0)
+    e1.add_field(
+        name="⚡ Dev Trait Breakdown",
+        value=f"⚡ X-Factor: **{xf}**\n🌟 Superstar: **{ss}**\n⭐ Star: **{st}**\n◦ Normal: **{nm}**",
+        inline=True,
+    )
+
+    grade_context = {
+        "A+": "Historic class. Franchise-altering picks.",
+        "A":  "Elite class. Multiple future cornerstones.",
+        "A-": "Very strong. Several high-upside picks.",
+        "B+": "Solid class with notable hits.",
+        "B":  "Average-to-good. Some contributors.",
+        "B-": "Below average. Thin on upside.",
+        "C+": "Mostly depth. A steal or two buried.",
+        "C":  "Forgettable. Few contributors.",
+        "C-": "Rough class. Limited long-term impact.",
+        "D":  "Disaster. Picks that never panned out.",
+    }
+    e1.add_field(name="📝 Verdict", value=grade_context.get(grade, "Class grade computed."), inline=True)
+
+    top = data.get("top_picks", [])
+    if top:
+        lines = []
+        for p in top[:6]:
+            lines.append(f"{_dev_emoji(p.get('dev', 'Normal'))} **{p.get('extendedName', 'Unknown')}** ({p.get('pos', '')}, OVR {p.get('playerBestOvr', 0)}) — {p.get('roundLabel', '?')} Pick {p.get('draftPick', '?')} · {p.get('teamName', '')}")
+        e1.add_field(name="🏆 Top Picks (by Current OVR)", value="\n".join(lines), inline=False)
+
+    steals = data.get("steals", [])
+    if steals:
+        lines = []
+        for p in steals[:4]:
+            lines.append(f"{_dev_emoji(p.get('dev', 'Normal'))} **{p.get('extendedName', 'Unknown')}** ({p.get('pos', '')}, OVR {p.get('playerBestOvr', 0)}) — {p.get('roundLabel', '?')} Pick {p.get('draftPick', '?')}")
+        e1.add_field(name="💎 Steals", value="\n".join(lines), inline=True)
+
+    busts = data.get("busts", [])
+    if busts:
+        lines = []
+        for p in busts[:4]:
+            lines.append(f"💀 **{p.get('extendedName', 'Unknown')}** ({p.get('pos', '')}, OVR {p.get('playerBestOvr', 0)}) — {p.get('roundLabel', '?')} Pick {p.get('draftPick', '?')}")
+        e1.add_field(name="💀 Busts (Early Picks, Low Dev)", value="\n".join(lines), inline=True)
+
+    e1.set_footer(text=f"Draft Class Analysis · Season {season} · TSL Analytics")
+
+    team_grades = data.get("team_grades", [])
+    if not team_grades:
+        return [e1]
+
+    e2 = discord.Embed(title=f"📋 Season {season} — Team Draft Grades", color=color)
+
+    top_teams = team_grades[:5]
+    bot_teams = sorted(team_grades, key=lambda x: x.get("gradeScore", 0))[:5]
+
+    def _team_grade_line(tg: dict) -> str:
+        team, grade, picks = tg.get("teamName", "?")[:14], tg.get("grade", "?"), tg.get("picks", 0)
+        xf, ss, st, ovr = tg.get("xfactors", 0), tg.get("superstars", 0), tg.get("stars", 0), tg.get("avgOVR", 0)
+        devs = f"⚡{xf} 🌟{ss} ⭐{st}" if xf + ss + st else "◦ all normal"
+        return f"**{team}** — **{grade}** | {picks} picks | Avg OVR {ovr:.0f} | {devs}"
+
+    if top_teams: e2.add_field(name="🏆 Best Drafting Teams", value="\n".join(_team_grade_line(t) for t in top_teams), inline=False)
+    if bot_teams: e2.add_field(name="💸 Worst Drafting Teams", value="\n".join(_team_grade_line(t) for t in bot_teams), inline=False)
+
+    e2.set_footer(text=f"Graded on dev trait + OVR composite · Season {season}")
+    return [e1, e2]
+
+
+def _build_draft_comparison_embed() -> discord.Embed:
+    data = ig.compare_draft_classes()
+    classes = data.get("classes", [])
+
+    embed = discord.Embed(
+        title="📋 TSL Draft Class History — All Seasons",
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    if not classes:
+        embed.description = "No draft class data available."
+        return embed
+
+    lines = []
+    for c in sorted(classes, key=lambda x: x["season"]):
+        lines.append(f"**S{c['season']}** — **{c['grade']}** | Avg OVR {c['avg_ovr']} | {c['total_picks']} picks | ⚡{c['xfactors']} 🌟{c['superstars']} ⭐{c['stars']}")
+    embed.description = "\n".join(lines)
+
+    best = max(classes, key=lambda x: x.get("grade", "D"))
+    worst = min(classes, key=lambda x: x.get("grade", "A"))
+    embed.add_field(name="🏆 Best Class", value=f"Season {best['season']} — **{best['grade']}**", inline=True)
+    embed.add_field(name="💀 Weakest Class", value=f"Season {worst['season']} — **{worst['grade']}**", inline=True)
+    embed.set_footer(text="Use /stats draft [season] for full breakdown · TSL Analytics")
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OWNER PROFILE
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _build_owner_embed(
+    target: discord.Member,
+    guild: discord.Guild,
+    tier: str = "Basic",
+) -> discord.Embed:
+
+    discord_id   = target.id
+    username     = target.name
+    display_name = target.display_name
+
+    profile  = ig.get_or_create_profile(discord_id, username)
+    nickname = profile.get("nickname") or display_name
+    team     = profile.get("team")
+
+    # Add elite badge if applicable
+    title_prefix = "👑 " if tier == "Elite" else "👤 "
+    embed = discord.Embed(
+        title=f"{title_prefix}{nickname}",
+        color=C_PURPLE,
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    id_lines = [f"**Discord:** {target.mention}"]
+    if nickname != display_name:
+        id_lines.append(f"**TSL Name:** {nickname}")
+    embed.add_field(name="🪪 Identity", value="\n".join(id_lines), inline=True)
+
+    if not team:
+        embed.add_field(name="🏟️ Team", value="_Not in league / team unknown_", inline=True)
+        embed.set_footer(text="TSL Analytics · Owner Profile")
+        return embed
+
+    embed.add_field(name="🏟️ Team", value=f"**{team}**", inline=True)
+    record = dm.get_team_record(team)
+    embed.add_field(name="📋 Record", value=f"**{record}**", inline=True)
+
+    if not dm.df_standings.empty:
+        import pandas as pd
+        row = dm.df_standings[dm.df_standings["teamName"].str.lower().str.contains(team.lower(), na=False)]
+        if not row.empty:
+            r = row.iloc[0]
+            w, l = int(r.get("totalWins", 0)), int(r.get("totalLosses", 0))
+            embed.add_field(
+                name="📊 Team Stats",
+                value=f"Rank: **#{int(r.get('rank', 0))}**\n`{_winpct_bar(w, l, width=10)}` {w}-{l}\nNet Pts: **{int(r.get('netPts', 0)):+d}** | TO Diff: **{int(r.get('tODiff', 0)):+d}**",
+                inline=True,
+            )
+            embed.add_field(
+                name="⚡ Offense / Defense",
+                value=f"Off Yds: **{r.get('offTotalYds', '?')}** (Rank #{int(r.get('offTotalYdsRank', 0))})\nDef Yds: **{r.get('defTotalYds', '?')}** (Rank #{int(r.get('defTotalYdsRank', 0))})",
+                inline=True,
+            )
+
+    recent = dm.get_last_n_games(team, 5)
+    if recent:
+        form_parts = []
+        for g in recent:
+            is_home = str(g.get("home", "")).lower().find(team.lower()) != -1
+            my_score, their_score = (g.get("home_score"), g.get("away_score")) if is_home else (g.get("away_score"), g.get("home_score"))
+            opp, won = g.get("away") if is_home else g.get("home"), (my_score or 0) > (their_score or 0)
+            form_parts.append(f"{'🟢' if won else '🔴'} {'W' if won else 'L'} vs {opp} ({my_score}-{their_score})")
+        embed.add_field(name="📅 Last 5 Games", value="\n".join(form_parts), inline=False)
+
+    beefs = profile.get("beefs", [])
+    if beefs:
+        beef_lines = []
+        for b in sorted(beefs, key=lambda x: x["count"], reverse=True)[:4]:
+            opp_member = guild.get_member(b["opponent_id"])
+            opp_nick = ig.get_nickname(b["opponent_id"]) or (opp_member.display_name if opp_member else str(b["opponent_id"]))
+            opp_team = ig.KNOWN_MEMBER_TEAMS.get(b["opponent_id"], "")
+            h2h_str = f" | H2H: {dm.get_h2h_record(team, opp_team).get('a_wins',0)}-{dm.get_h2h_record(team, opp_team).get('b_wins',0)}" if team and opp_team else ""
+            beef_lines.append(f"🥊 **{opp_nick}** ({opp_team or '?'}) — {b['count']} recorded beef(s){h2h_str}")
+        embed.add_field(name="🥩 Beef Mode History", value="\n".join(beef_lines), inline=False)
+
+    embed.add_field(
+        name="🔬 ATLAS Oracle",
+        value=f"Total queries: **{profile.get('interactions', 0)}**\nTimes roasted: **{profile.get('roast_count', 0)}**",
+        inline=True,
+    )
+
+    clutch_data = ig.get_clutch_records(margin=7)
+    if "records" in clutch_data:
+        team_clutch = next((r for r in clutch_data["records"] if r.get("team", "").lower() == team.lower()), None)
+        if team_clutch and team_clutch.get("clutch_games", 0) > 0:
+            cw, cl, cpct = team_clutch["clutch_wins"], team_clutch["clutch_losses"], team_clutch["clutch_winpct"]
+            embed.add_field(name="⚡ Clutch Record (≤7pt games)", value=f"`{_winpct_bar(cw, cl, width=8)}` **{cw}-{cl}** ({cpct:.0%})", inline=True)
+
+    if GEMINI_API_KEY and not dm.df_team_stats.empty:
+        if tier == "Elite":
+            try:
+                import pandas as pd
+                ts_row = dm.df_team_stats[dm.df_team_stats["teamName"].str.lower().str.contains(team.lower(), na=False)]
+                if not ts_row.empty:
+                    r = ts_row.iloc[0]
+                    stats_snapshot = f"passRatio={float(r.get('offPassYds',0)) / max(float(r.get('offPassYds',0))+float(r.get('offRushYds',0)),1):.2f}, penalties={r.get('penalties','?')}, tOGiveAways={r.get('tOGiveAways','?')}, off3rdDownConvPct={r.get('off3rdDownConvPct','?')}, off4thDownAtt={r.get('off4thDownAtt','?')}"
+                    prompt = f"You are ATLAS Echo, the TSL league intelligence system. In ONE sharp sentence, describe {nickname}'s ({team}) playstyle tendencies. Be brutal and specific. Stats: {stats_snapshot}"
+                    blurb = await _ai_blurb(prompt, max_tokens=80)
+                    if blurb: embed.add_field(name="🔬 ATLAS Oracle · Tendency", value=f"*{blurb}*", inline=False)
+            except Exception:
+                pass
+        else:
+            embed.add_field(
+                name="🔬 ATLAS Oracle · Tendency", 
+                value="🔒 *Upgrade to the Elite tier to view AI playstyle analysis.*", 
+                inline=False
+            )
+
+    embed.set_footer(text=f"TSL Analytics · Owner Profile · {_season_label()} · Tier: {tier}")
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POWER RANKINGS EMBED
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_power_embed() -> discord.Embed:
+    rankings = an.power_rankings()
+    if not rankings:
+        return discord.Embed(title="📊 Power Rankings", description="No data available.", color=C_NEUTRAL)
+
+    embed = discord.Embed(title=f"📊 TSL Power Rankings — {_season_label()}", color=C_GOLD, timestamp=datetime.datetime.utcnow())
+
+    top10, rest = rankings[:10], rankings[10:]
+
+    lines = []
+    for r in top10:
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(r["rank"], f"**#{r['rank']}**")
+        lines.append(f"{medal} **{r['team']}** ({r['owner']}) — {r['record']}\n    Score: **{r['score']}** | Net: {r['net_pts']:+d} | TO: {r['to_diff']:+d}")
+    embed.add_field(name="🏆 Top 10", value="\n".join(lines), inline=False)
+
+    if rest:
+        lines2 = [f"**#{r['rank']}** {r['team']} — {r['record']} (score: {r['score']})" for r in rest]
+        embed.add_field(name="📋 11–32", value="\n".join(lines2), inline=False)
+
+    embed.set_footer(text="Score = Win% × 40 + Net Pts × 30 + TO Diff × 15 + Off/Def Rank × 15")
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  WEEKLY RECAP EMBED
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_recap_embed(week: int | None = None) -> discord.Embed:
+    data = an.weekly_recap(week=week)
+
+    if not data.get("games"):
+        return discord.Embed(title=f"📅 Week {week or dm.CURRENT_WEEK} Recap", description="No completed games found for this week.", color=C_NEUTRAL)
+
+    actual_week, games, highlights = data["week"], data["games"], data.get("highlights", {})
+
+    embed = discord.Embed(
+        title=f"📅 TSL Week {actual_week} Recap",
+        description=f"*{len(games)} games played · {_season_label()}*",
+        color=C_BLUE,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    score_lines = []
+    for g in sorted(games, key=lambda x: abs(x.get("home_score",0) - x.get("away_score",0)), reverse=True):
+        hs, aws, home, away = g.get("home_score", 0), g.get("away_score", 0), g.get("home", "?"), g.get("away", "?")
+        diff = abs(hs - aws)
+        tag = "⚡" if diff <= 7 else ("💥" if diff >= 21 else "  ")
+        score_lines.append(f"{tag} **{home}** {hs} – {aws} {away}" if hs > aws else f"{tag} {home} {hs} – {aws} **{away}** ")
+    embed.add_field(name="🏈 Scores", value="\n".join(score_lines), inline=False)
+
+    if highlights.get("biggest_win"): embed.add_field(name="💥 Biggest Win", value=highlights["biggest_win"], inline=True)
+    if highlights.get("closest_game"): embed.add_field(name="⚡ Closest Game", value=highlights["closest_game"], inline=True)
+
+    embed.set_footer(text="⚡ = Close game (≤7pts)  💥 = Blowout (21+ pts)")
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  NAVIGATION VIEW (shared across all report types)
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: First AnalyticsNav class was removed — it was an exact duplicate
+# immediately overwritten by the second definition below.
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COG
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AnalyticsNav(discord.ui.View):
+    """Persistent tab bar allowing quick navigation between Analytics reports."""
+
+    def __init__(self, bot: commands.Bot, origin_user_id: int):
+        super().__init__(timeout=300)
+        self.bot_ref        = bot
+        self.origin_user_id = origin_user_id
+
+    @discord.ui.button(label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_hotcold(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_hotcold_league() # Keeping league view free for everyone
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="⚡ Clutch", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_clutch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tier = _get_user_tier(self.bot_ref, interaction.user.id)
+        if tier not in ["Pro", "Elite"]:
+            await interaction.response.send_message("🔒 **Pro Tier Required.** Use `/membership info` to unlock Clutch Rankings.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_clutch_embed()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="📊 Power", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_power(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_power_embed()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="📋 Draft History", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_draft(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_draft_comparison_embed() # Keeping overview free
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="📅 Recap", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_recap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_recap_embed()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="👤 My Profile", style=discord.ButtonStyle.primary, row=1)
+    async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        tier = _get_user_tier(self.bot_ref, interaction.user.id)
+        embed = await _build_owner_embed(interaction.user, interaction.guild, tier=tier)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COG
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ORACLE · STATS HUB
+# ══════════════════════════════════════════════════════════════════════════════
+
+# analysis and intelligence already imported at top of file
+# Re-check availability for graceful degradation
+_ANALYSIS_OK = an is not None
+_INTEL_OK = ig is not None
+
+# ── Optional history_cog pipeline (SQL + Gemini NL queries) ──────────────────
+try:
+    from history_cog import (
+        gemini_sql,
+        gemini_answer,
+        run_sql,
+        extract_sql,
+        fuzzy_resolve_user,
+        resolve_names_in_question,
+        DB_SCHEMA,
+        KNOWN_USERS,
+    )
+    _HISTORY_OK = True
+except ImportError:
+    _HISTORY_OK = False
+
+
+# ── ATLAS branding constants ──────────────────────────────────────────────────
+ATLAS_ICON_URL = (
+    "https://cdn.discordapp.com/attachments/977007320259244055/"
+    "1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3"
+    "&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
+)
+ATLAS_GOLD = discord.Color.from_rgb(201, 150, 42)
+
+# ── Module-level cached Gemini client (avoids spinning up a new client per call)
+_GEMINI_CLIENT = None
+
+def _get_gemini_client():
+    """Return the cached Gemini client, creating it once if needed."""
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is not None:
+        return _GEMINI_CLIENT
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        from google import genai
+        _GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
+        return _GEMINI_CLIENT
+    except Exception:
+        return None
+
+# ── Color palette ─────────────────────────────────────────────────────────────
+C_HOT     = discord.Color.from_rgb(255, 87,  51)   # fire orange
+C_COLD    = discord.Color.from_rgb(82,  172, 240)   # ice blue
+C_NEUTRAL = discord.Color.from_rgb(148, 163, 184)   # slate
+C_GOLD    = discord.Color.from_rgb(250, 189, 47)    # championship gold
+C_GREEN   = discord.Color.from_rgb(34,  197, 94)
+C_RED     = discord.Color.from_rgb(239, 68,  68)
+C_PURPLE  = discord.Color.from_rgb(139, 92,  246)
+C_BLUE    = discord.Color.from_rgb(59,  130, 246)
+C_DARK    = discord.Color.from_rgb(26,  26,  46)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  NFL TEAM IDENTITY  (colors + ESPN logo CDN)
+# ─────────────────────────────────────────────────────────────────────────────
+_NFL_IDENTITY: dict[str, dict] = {
+    "Cardinals":  {"rgb": (151,  35,  63), "abbrev": "ari"},
+    "Falcons":    {"rgb": (167,  25,  48), "abbrev": "atl"},
+    "Ravens":     {"rgb": ( 26,  25,  95), "abbrev": "bal"},
+    "Bills":      {"rgb": (  0,  51, 141), "abbrev": "buf"},
+    "Panthers":   {"rgb": (  0, 133, 202), "abbrev": "car"},
+    "Bears":      {"rgb": ( 11,  22,  42), "abbrev": "chi"},
+    "Bengals":    {"rgb": (251,  79,  20), "abbrev": "cin"},
+    "Browns":     {"rgb": ( 49,  29,   0), "abbrev": "cle"},
+    "Cowboys":    {"rgb": (  0,  34,  68), "abbrev": "dal"},
+    "Broncos":    {"rgb": (251,  79,  20), "abbrev": "den"},
+    "Lions":      {"rgb": (  0, 118, 182), "abbrev": "det"},
+    "Packers":    {"rgb": ( 24,  48,  40), "abbrev": "gb"},
+    "Texans":     {"rgb": (  3,  32,  47), "abbrev": "hou"},
+    "Colts":      {"rgb": (  0,  44,  95), "abbrev": "ind"},
+    "Jaguars":    {"rgb": (  0, 103, 120), "abbrev": "jax"},
+    "Chiefs":     {"rgb": (227,  24,  55), "abbrev": "kc"},
+    "Raiders":    {"rgb": (165, 172, 175), "abbrev": "lv"},
+    "Chargers":   {"rgb": (  0, 128, 198), "abbrev": "lac"},
+    "Rams":       {"rgb": (  0,  53, 148), "abbrev": "lar"},
+    "Dolphins":   {"rgb": (  0, 142, 151), "abbrev": "mia"},
+    "Vikings":    {"rgb": ( 79,  38, 131), "abbrev": "min"},
+    "Patriots":   {"rgb": (  0,  34,  68), "abbrev": "ne"},
+    "Saints":     {"rgb": (175, 141,  64), "abbrev": "no"},
+    "Giants":     {"rgb": (  1,  35,  82), "abbrev": "nyg"},
+    "Jets":       {"rgb": ( 18,  87,  64), "abbrev": "nyj"},
+    "Eagles":     {"rgb": (  0,  76,  84), "abbrev": "phi"},
+    "Steelers":   {"rgb": ( 16,  24,  32), "abbrev": "pit"},
+    "49ers":      {"rgb": (170,   0,   0), "abbrev": "sf"},
+    "Seahawks":   {"rgb": (  0,  34,  68), "abbrev": "sea"},
+    "Buccaneers": {"rgb": (213,  10,  10), "abbrev": "tb"},
+    "Titans":     {"rgb": ( 75, 146, 219), "abbrev": "ten"},
+    "Commanders": {"rgb": ( 90,  20,  20), "abbrev": "wsh"},
+    "Washington": {"rgb": ( 90,  20,  20), "abbrev": "wsh"},
+}
+
+def _team_ident(team_name: str) -> dict:
+    for key, val in _NFL_IDENTITY.items():
+        if key.lower() in team_name.lower():
+            return val
+    return {"rgb": (59, 130, 246), "abbrev": None}
+
+def _team_color(team_name: str) -> discord.Color:
+    return discord.Color.from_rgb(*_team_ident(team_name)["rgb"])
+
+def _team_logo(team_name: str) -> Optional[str]:
+    abbrev = _team_ident(team_name).get("abbrev")
+    return f"https://a.espncdn.com/i/teamlogos/nfl/500/{abbrev}.png" if abbrev else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TSL ALL-TIME CHAMPIONSHIP DATA
+# ─────────────────────────────────────────────────────────────────────────────
+_SB_WINNERS: dict[int, str] = {
+    1:"PNick",2:"Chok",3:"Hester",4:"Unbeatable",5:"Shelly",6:"Witt",7:"Killa",8:"Witt",
+    9:"Epone",10:"Remo",11:"Chok",12:"PNick",13:"Remo",14:"Witt",15:"PNick",16:"Strikernaut",
+    17:"Killa",18:"Killa",19:"Bdiddy",20:"Rahj",21:"PNick",22:"Killa",23:"PNick",24:"Pope",
+    25:"Killa",26:"Stutts",27:"Jorge",28:"LTH",29:"Killa",30:"Airflight",31:"Jo",32:"Jorge",
+    33:"LTH",34:"Killa",35:"RobbyD",36:"JT",37:"Jorge",38:"JT",39:"Ken",40:"JT",
+    41:"LTH",42:"Rahj",43:"Rahj",44:"Sharlond",45:"Ruck",46:"Baez",47:"MrCanada",48:"Ken",
+    49:"MrCanada",50:"Ken",51:"MrCanada",52:"Ken",53:"Killa",54:"JT",55:"MrCanada",56:"JT",
+    57:"Nova",58:"Baez",59:"Baez",60:"John",61:"Ken",62:"John",63:"John",64:"John",65:"JT",
+    66:"Jo",67:"JT",68:"JT",69:"Jo",70:"Keem",71:"KG",72:"Jo",73:"Killa",74:"Jo",
+    75:"Nova",76:"Nova",77:"Khaled",78:"Eric",79:"JT",80:"Keem",
+    81:"Neff",82:"Killa",83:"Nova",84:"Nova",85:"Killa",86:"Jorge",87:"JT",88:"Nova",
+    89:"JT",90:"Killa",91:"JT",92:"Chok",93:"JT",94:"JT",95:"Ron",
+}
+_RINGS_BY_NICK: dict[str, list[int]] = {}
+for _sb, _nick in _SB_WINNERS.items():
+    _RINGS_BY_NICK.setdefault(_nick, []).append(_sb)
+
+# ── Username → nickname map — pulled live from member registry ────────────────
+# Falls back to the hardcoded dict if build_member_db isn't available yet.
+try:
+    from build_member_db import get_username_to_nick_map
+    _USERNAME_TO_NICK: dict[str, str] = get_username_to_nick_map()
+except Exception:
+    _USERNAME_TO_NICK: dict[str, str] = {
+        "TROMBETTATHANYOU":"JT",    "KillaE94":"Killa",       "PLAYERNOVA1":"Nova",
+        "PNick12":"PNick",          "KJJ205":"Ken",            "OLIVEIRAYOURFACE":"Jo",
+        "MR_C-A-N-A-D-A":"MrCanada","AFFINIZE":"John",        "NUTSONJORGE":"Jorge",
+        "TheWitt":"Witt",           "SBAEZ":"Baez",            "Rahjeet":"Rahj",
+        "DANGERESQUE_2":"LTH",      "ChokolateThunda":"Chok",  "WithoutRemorse":"Remo",
+        "KEEM":"Keem",              "DoceQuatro24":"Pope",     "BDiddy86":"Bdiddy",
+        "SHARLOND":"Sharlond",      "RONFK":"Ron",             "Hester2003":"Hester",
+        "Unbeatable00":"Unbeatable","ShellyShell":"Shelly",    "Epone":"Epone",
+        "MStutts2799":"Stutts",     "AIRFLIGHT_OC":"Airflight","Strikernaut":"Strikernaut",
+        "ROBBYD192":"RobbyD",       "RUCKDOESWORK":"Ruck",     "THE_KG_518":"KG",
+        "Khaled":"Khaled",          "ERIC":"Eric",             "NEFF":"Neff",
+    }
+
+def _to_roman(n: int) -> str:
+    vals = [(1000,"M"),(900,"CM"),(500,"D"),(400,"CD"),(100,"C"),(90,"XC"),
+            (50,"L"),(40,"XL"),(10,"X"),(9,"IX"),(5,"V"),(4,"IV"),(1,"I")]
+    out = ""
+    for v, s in vals:
+        while n >= v:
+            out += s; n -= v
+    return out
+
+def _ring_info(username: str) -> dict:
+    """Ring data for a Discord username. Always safe."""
+    nick  = _USERNAME_TO_NICK.get(username, "")
+    rings = sorted(_RINGS_BY_NICK.get(nick, []))
+    count = len(rings)
+    last  = rings[-1] if rings else None
+
+    # Consecutive streak detection
+    max_streak = streak = 1
+    for i in range(1, len(rings)):
+        if rings[i] == rings[i - 1] + 1:
+            streak += 1; max_streak = max(max_streak, streak)
+        else:
+            streak = 1
+
+    if   count >= 10: tier = "🐐 GOAT TIER"
+    elif count >= 5:  tier = "👑 DYNASTY"
+    elif count >= 3:  tier = "💎 ELITE"
+    elif count >= 1:  tier = "🏆 CHAMPION"
+    else:             tier = "💀 STILL HUNTING"
+
+    return {
+        "nick": nick, "count": count, "rings": rings,
+        "last": last, "tier": tier, "max_streak": max_streak,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  HISTORICAL SQL HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _safe_sql(query: str) -> list[dict]:
+    """Execute a SQL query if history DB is available; return [] on any error."""
+    if not _HISTORY_OK:
+        return []
+    rows, err = run_sql(query)
+    return rows if not err else []
+
+def _franchise_alltime(tn: str) -> dict:
+    rows = _safe_sql(f"""
+        SELECT
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as losses
+        FROM games
+        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+          AND status IN ('2','3') AND stageIndex='1'
+    """)
+    r = rows[0] if rows else {}
+    return {"wins": int(r.get("wins") or 0), "losses": int(r.get("losses") or 0)}
+
+def _franchise_by_season(tn: str) -> list[dict]:
+    return _safe_sql(f"""
+        SELECT seasonIndex,
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as losses
+        FROM games
+        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+          AND status IN ('2','3') AND stageIndex='1'
+        GROUP BY seasonIndex ORDER BY CAST(seasonIndex AS INT)
+    """)
+
+def _franchise_nemesis(tn: str) -> Optional[dict]:
+    """Franchise's worst all-time opponent (min 4 games)."""
+    rows = _safe_sql(f"""
+        SELECT
+          CASE WHEN homeTeamName LIKE '%{tn}%' THEN awayTeamName ELSE homeTeamName END as opp,
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as losses,
+          COUNT(*) as games
+        FROM games
+        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+          AND status IN ('2','3') AND stageIndex='1'
+        GROUP BY opp HAVING games >= 4
+        ORDER BY CAST(wins AS FLOAT)/CAST(games AS FLOAT) ASC LIMIT 1
+    """)
+    return rows[0] if rows else None
+
+def _franchise_punching_bag(tn: str) -> Optional[dict]:
+    """Franchise's best all-time record vs any opponent (min 4 games)."""
+    rows = _safe_sql(f"""
+        SELECT
+          CASE WHEN homeTeamName LIKE '%{tn}%' THEN awayTeamName ELSE homeTeamName END as opp,
+          SUM(CASE WHEN
+            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+          THEN 1 ELSE 0 END) as wins,
+          COUNT(*) as games
+        FROM games
+        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+          AND status IN ('2','3') AND stageIndex='1'
+        GROUP BY opp HAVING games >= 4
+        ORDER BY CAST(wins AS FLOAT)/CAST(games AS FLOAT) DESC LIMIT 1
+    """)
+    return rows[0] if rows else None
+
+def _franchise_signature_moments(tn: str) -> tuple[Optional[dict], Optional[dict]]:
+    """(biggest_win, worst_loss) all-time."""
+    big_w = _safe_sql(f"""
+        SELECT homeTeamName,awayTeamName,homeScore,awayScore,
+               ABS(CAST(homeScore AS INT)-CAST(awayScore AS INT)) as margin,
+               seasonIndex,weekIndex
+        FROM games
+        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+          AND status IN ('2','3') AND stageIndex='1'
+          AND ((homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT)))
+        ORDER BY margin DESC LIMIT 1
+    """)
+    worst_l = _safe_sql(f"""
+        SELECT homeTeamName,awayTeamName,homeScore,awayScore,
+               ABS(CAST(homeScore AS INT)-CAST(awayScore AS INT)) as margin,
+               seasonIndex,weekIndex
+        FROM games
+        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+          AND status IN ('2','3') AND stageIndex='1'
+          AND ((homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT)))
+        ORDER BY margin DESC LIMIT 1
+    """)
+    return (big_w[0] if big_w else None), (worst_l[0] if worst_l else None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DNA + COMPOSITE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _trend_sparkline(win_log: list[bool]) -> str:
+    """Convert list of True/False results into a rising/falling sparkline."""
+    blocks = "▁▂▃▄▅▆▇█"
+    if not win_log:
+        return "▁▁▁▁▁"
+    momentum, out = 3, []
+    for won in win_log:
+        momentum = min(7, momentum + 2) if won else max(0, momentum - 2)
+        out.append(blocks[momentum])
+    return "".join(out)
+
+def _playstyle_tags(st_row, ts_row, clutch_winpct: float) -> list[str]:
+    tags = []
+    try:
+        p = float(st_row.get("offPassYds", 0))
+        r = float(st_row.get("offRushYds", 0))
+        ratio = p / (p + r) if (p + r) > 0 else 0.5
+        if   ratio > 0.63: tags.append("#AirRaid")
+        elif ratio < 0.44: tags.append("#RunFirst")
+        else:              tags.append("#Balanced")
+    except Exception:
+        pass
+    if   clutch_winpct >= 0.65: tags.append("#ClutchKing")
+    elif clutch_winpct <= 0.33: tags.append("#TiltMachine")
+    try:
+        tod = int(st_row.get("tODiff", 0))
+        if   tod >= 6:  tags.append("#TurnoverKing")
+        elif tod <= -4: tags.append("#TurnoverProne")
+    except Exception:
+        pass
+    try:
+        dr = int(st_row.get("defTotalYdsRank", 16))
+        if   dr <= 5:  tags.append("#IronCurtain")
+        elif dr >= 28: tags.append("#Sieve")
+    except Exception:
+        pass
+    if ts_row is not None:
+        try:
+            pen = int(ts_row.get("penalties", 0))
+            if   pen >= 80: tags.append("#PenaltyMachine")
+            elif pen <= 35: tags.append("#Disciplined")
+        except Exception:
+            pass
+    try:
+        net = int(st_row.get("netPts", 0))
+        gms = int(st_row.get("totalWins", 0)) + int(st_row.get("totalLosses", 0))
+        if gms > 0:
+            npg = net / gms
+            if   npg >= 10: tags.append("#Dominant")
+            elif npg <= -10: tags.append("#Struggling")
+    except Exception:
+        pass
+    return tags[:4]
+
+
+# ── Player stat menu definitions ──────────────────────────────────────────────
+#   Format: { "POSITION_GROUP": [ (db_column, display_label), ... ] }
+PLAYER_STAT_MAP: dict[str, list[tuple[str, str]]] = {
+    "QB": [
+        ("passYds",      "Pass Yards"),
+        ("passTDs",      "Pass TDs"),
+        ("passCompPct",  "Comp %"),
+        ("passerRating", "Passer Rating"),
+        ("passInts",     "INTs"),
+        ("rushYds",      "Rush Yards"),
+    ],
+    "RB": [
+        ("rushYds",            "Rush Yards"),
+        ("rushTDs",            "Rush TDs"),
+        ("rushYdsPerAtt",      "Yards/Carry"),
+        ("rushBrokenTackles",  "Broken Tackles"),
+        ("recYds",             "Rec Yards"),
+        ("recTDs",             "Rec TDs"),
+    ],
+    "WR": [
+        ("recYds",        "Rec Yards"),
+        ("recTDs",        "Rec TDs"),
+        ("recCatches",    "Receptions"),
+        ("recYdsPerCatch","Yards/Catch"),
+        ("recDrops",      "Drops"),
+    ],
+    "TE": [
+        ("recYds",        "Rec Yards"),
+        ("recTDs",        "Rec TDs"),
+        ("recCatches",    "Receptions"),
+        ("recYdsPerCatch","Yards/Catch"),
+    ],
+    "DL": [
+        ("defSacks",      "Sacks"),
+        ("defTotalTackles","Tackles"),
+        ("defForcedFum",  "Forced Fumbles"),
+        ("defFumRec",     "Fumble Rec"),
+    ],
+    "LB": [
+        ("defTotalTackles","Tackles"),
+        ("defSacks",       "Sacks"),
+        ("defInts",        "INTs"),
+        ("defForcedFum",   "Forced Fumbles"),
+        ("defDeflections", "Pass Deflections"),
+    ],
+    "DB": [
+        ("defInts",        "INTs"),
+        ("defTotalTackles","Tackles"),
+        ("defDeflections", "Pass Deflections"),
+        ("defSacks",       "Sacks"),
+        ("defForcedFum",   "Forced Fumbles"),
+    ],
+}
+
+# DB positions that map to each group
+_POS_GROUP_MAP: dict[str, list[str]] = {
+    "QB": ["QB"],
+    "RB": ["HB", "FB"],
+    "WR": ["WR"],
+    "TE": ["TE"],
+    "DL": ["DT", "LE", "RE"],
+    "LB": ["LOLB", "MLB", "ROLB"],
+    "DB": ["CB", "FS", "SS"],
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  UNIVERSAL HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _season_label() -> str:
+    return f"Season {dm.CURRENT_SEASON} | Week {dm.CURRENT_WEEK}"
+
+
+def _rank_emoji(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"`#{rank}`")
+
+
+def _winpct_bar(wins: int, losses: int, width: int = 10) -> str:
+    total = wins + losses
+    if total == 0:
+        return "░" * width
+    filled = round((wins / total) * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _trend_bar(delta_pct: float, width: int = 8) -> str:
+    filled = min(abs(int(delta_pct / 10)), width // 2)
+    if delta_pct > 0:
+        return "░" * (width // 2) + "█" * filled + "░" * (width // 2 - filled)
+    return "░" * (width // 2 - filled) + "█" * filled + "░" * (width // 2)
+
+
+def _record_str(wins: int, losses: int, ties: int = 0) -> str:
+    return f"{wins}-{losses}-{ties}" if ties else f"{wins}-{losses}"
+
+
+def _dev_emoji(dev: str) -> str:
+    return {
+        "Superstar X-Factor": "⚡",
+        "Superstar":          "🌟",
+        "Star":               "⭐",
+        "Normal":             "◦",
+    }.get(dev or "", "◦")
+
+
+def _grade_color(grade: str) -> discord.Color:
+    if grade.startswith("A"): return C_GREEN
+    if grade.startswith("B"): return C_BLUE
+    if grade.startswith("C"): return C_NEUTRAL
+    return C_RED
+
+
+def _resolve_owner_team(
+    interaction: discord.Interaction,
+    override: Optional[discord.Member] = None,
+) -> tuple[str, str]:
+    """
+    Universal auto-detect resolver.
+    Returns (discord_username, team_name) for the interaction caller or override member.
+    Used by every button that has a personal/team context.
+    """
+    target  = override or interaction.user
+    profile = ig.get_or_create_profile(target.id, target.name)
+    return target.name, profile.get("team") or ""
+
+
+async def _ai_blurb(prompt: str, max_tokens: int = 120) -> str:
+    client = _get_gemini_client()
+    if not client:
+        return ""
+    try:
+        from google.genai import types
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model="gemini-2.0-flash",
+                config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=max_tokens),
+                contents=prompt,
+            ),
+        )
+        return response.text.strip()
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  EMBED BUILDERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_hub_embed() -> discord.Embed:
+    """Live watercooler landing embed — refreshes every time /stats hub is called."""
+    embed = discord.Embed(
+        title=f"📊 TSL Stats Hub — {_season_label()}",
+        description=(
+            "Your league. Your data. One place.\n"
+            "Drill-downs are **private to you** — no channel flood.\n\u200b"
+        ),
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    # ── Watercooler snapshots ─────────────────────────────────────────────
+    try:
+        rankings = an.power_rankings()
+        if rankings:
+            ldr = rankings[0]
+            embed.add_field(
+                name="🏆 Power Leader",
+                value=f"**{ldr['team']}** ({ldr['record']}) — Score: {ldr['score']}",
+                inline=True,
+            )
+    except Exception:
+        pass
+
+    try:
+        clutch = ig.get_clutch_records(margin=7)
+        most   = clutch.get("most_clutch",  "?")
+        least  = clutch.get("least_clutch", "?")
+        embed.add_field(
+            name="⚡ Clutch King / Choke",
+            value=f"👑 **{most}**  ·  💀 {least}",
+            inline=True,
+        )
+    except Exception:
+        pass
+
+    try:
+        if not dm.df_standings.empty:
+            worst_name, worst_val = "", 999
+            for _, row in dm.df_standings.iterrows():
+                try:
+                    v = int(str(row.get("winLossStreak", "0")))
+                    if v < worst_val:
+                        worst_val  = v
+                        worst_name = f"{row.get('teamName','?')} ({v})"
+                except Exception:
+                    pass
+            if worst_name:
+                embed.add_field(name="💀 On the Skids", value=f"**{worst_name}**", inline=True)
+    except Exception:
+        pass
+
+    embed.add_field(
+        name="Navigation",
+        value=(
+            "```\n"
+            "🔥 Hot/Cold    ⚡ Clutch    📊 Power      🏆 Standings\n"
+            "👤 My Profile  🆚 H-t-H     📅 Recap      📜 Draft\n"
+            "🎯 Players     🏈 Team      🏛️ All-Time   🔬 Ask ATLAS\n"
+            "```\n"
+            "*Ask ATLAS: 📊 TSL League data · 🌐 Open Intel (general AI)*"
+        ),
+        inline=False,
+    )
+    embed.set_author(name="ATLAS™ Oracle Module", icon_url=ATLAS_ICON_URL)
+    embed.set_footer(text="ATLAS™ Oracle · All drill-downs private to you", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── Hot / Cold ────────────────────────────────────────────────────────────────
+
+def _build_hotcold_league(top_n: int = 5) -> tuple[discord.Embed, list[str]]:
+    """Returns (embed, list_of_player_names) for the drill-down select menu."""
+    embed = discord.Embed(
+        title="🔥🥶 TSL Hot / Cold Report",
+        description=f"League-wide performance trends — {_season_label()}",
+        color=C_HOT,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    hot_players, cold_players = [], []
+    target_players: list[dict] = []
+
+    for df, col, min_col, min_val in [
+        (dm.df_offense, "passYds",  "passAtt",    50),
+        (dm.df_offense, "rushYds",  "rushAtt",    20),
+        (dm.df_offense, "recYds",   "recCatches", 10),
+        (dm.df_defense, "defSacks", None,          0),
+        (dm.df_defense, "defInts",  None,          0),
+    ]:
+        leaders = an.stat_leaders(df, col, top_n=top_n, min_col=min_col, min_val=min_val)
+        for r in leaders:
+            if r["name"] not in [p["name"] for p in target_players]:
+                target_players.append(r)
+
+    for pi in target_players[:20]:
+        result = ig.get_hot_cold(pi["name"], last_n=3)
+        if "error" in result:
+            continue
+        score = result.get("trend_score", 0)
+        entry = {
+            "name":  result.get("name",  pi["name"]),
+            "team":  result.get("team",  pi.get("team", "")),
+            "pos":   result.get("pos",   pi.get("pos",  "")),
+            "score": score,
+        }
+        if score > 15:
+            hot_players.append(entry)
+        elif score < -15:
+            cold_players.append(entry)
+
+    hot_players.sort(key=lambda x: x["score"], reverse=True)
+    cold_players.sort(key=lambda x: x["score"])
+
+    if hot_players:
+        lines = [f"🔥 **{p['name']}** ({p['pos']}, {p['team']}) — score: +{p['score']:.0f}" for p in hot_players[:5]]
+        embed.add_field(name="🔥 On Fire", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="🔥 On Fire", value="_No standout performers this week_", inline=False)
+
+    if cold_players:
+        lines = [f"🥶 **{p['name']}** ({p['pos']}, {p['team']}) — score: {p['score']:.0f}" for p in cold_players[:5]]
+        embed.add_field(name="🥶 Ice Cold", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="🥶 Ice Cold", value="_Everyone holding steady_", inline=False)
+
+    embed.set_footer(text="Select a player below for their Hot/Cold breakdown · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+
+    all_names = [p["name"] for p in (hot_players[:5] + cold_players[:5])]
+    return embed, all_names
+
+
+def _build_hotcold_single(data: dict) -> discord.Embed:
+    trend = data.get("trend", "➡️ NEUTRAL")
+    name  = data.get("name", "Unknown")
+    team  = data.get("team", "")
+    pos   = data.get("pos",  "")
+    n     = data.get("last_n", 3)
+
+    if "HOT"  in trend: color, icon = C_HOT,  "🔥"
+    elif "COLD" in trend: color, icon = C_COLD, "🥶"
+    else:                 color, icon = C_NEUTRAL, "➡️"
+
+    embed = discord.Embed(
+        title=f"{icon} {name} — {trend}",
+        description=f"**{pos}** · {team} · Last {n} vs Season Avg",
+        color=color,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    STAT_LABELS = {
+        "passYds": "Pass Yds", "passTDs": "Pass TDs", "passInts": "INTs",
+        "passCompPct": "Comp %", "rushYds": "Rush Yds", "rushTDs": "Rush TDs",
+        "recYds": "Rec Yds", "recTDs": "Rec TDs", "recCatches": "Catches",
+        "defTotalTackles": "Tackles", "defSacks": "Sacks",
+        "defInts": "DEF INTs", "defForcedFum": "FF",
+    }
+    NEG_STATS = {"passInts", "rushFum", "recDrops"}
+
+    season_avg = data.get("season_avg", {})
+    last_n_avg = data.get("last_n_avg", {})
+    deltas     = data.get("deltas",     {})
+    rows       = []
+
+    for col, label in STAT_LABELS.items():
+        if col not in season_avg:
+            continue
+        s_val = season_avg[col]
+        l_val = last_n_avg.get(col, s_val)
+        d     = deltas.get(col, 0)
+        if s_val == 0 and l_val == 0:
+            continue
+        arrow = "▲" if d > 0 else ("▼" if d < 0 else "—")
+        is_neg = col in NEG_STATS
+        if   (d > 0 and not is_neg) or (d < 0 and is_neg):
+            arrow = f"🟢 {arrow}"
+        elif (d < 0 and not is_neg) or (d > 0 and is_neg):
+            arrow = f"🔴 {arrow}"
+        bar = _trend_bar(d if not is_neg else -d)
+        rows.append(
+            f"`{label:<12}` Avg: **{s_val}** → L{n}: **{l_val}** {arrow} ({d:+.0f}%)\n`{bar}`"
+        )
+
+    if rows:
+        embed.add_field(name="📊 Stat Trends", value="\n".join(rows[:5]), inline=False)
+
+    games = data.get("last_n_games", [])
+    if games:
+        game_lines = []
+        for g in games:
+            wk    = g.get("weekIndex", "?")
+            parts = [f"{lbl}: {g[col]}" for col, lbl in STAT_LABELS.items() if col in g and g[col] != 0]
+            game_lines.append(f"**Wk {wk}** — " + " | ".join(parts[:4]))
+        embed.add_field(name=f"🗂️ Last {n} Games", value="\n".join(game_lines), inline=False)
+
+    embed.set_footer(text=f"ATLAS™ Oracle · {_season_label()}", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── Clutch ────────────────────────────────────────────────────────────────────
+
+def _build_clutch_embed(margin: int = 7, highlight_team: str = "") -> discord.Embed:
+    data = ig.get_clutch_records(margin=margin)
+
+    if "error" in data:
+        return discord.Embed(
+            title="⚡ Clutch Rankings",
+            description=f"❌ {data['error']}",
+            color=C_RED,
+        )
+
+    records = data.get("records", [])
+    most    = data.get("most_clutch",  "?")
+    least   = data.get("least_clutch", "?")
+
+    desc = f"👑 **Most Clutch:** {most}\n💀 **Least Clutch:** {least}\n\n*{_season_label()}*"
+    if highlight_team:
+        desc += f"\n\n*Your team: **{highlight_team}***"
+
+    embed = discord.Embed(
+        title=f"⚡ TSL Clutch Rankings — Games Decided by ≤{margin} Points",
+        description=desc,
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    ranked = sorted(
+        [r for r in records if r.get("clutch_games", 0) > 0],
+        key=lambda r: (r["clutch_winpct"], r["clutch_wins"]),
+        reverse=True,
+    )
+
+    top_lines, bot_lines = [], []
+    for i, r in enumerate(ranked, 1):
+        cw, cl, pct = r["clutch_wins"], r["clutch_losses"], r["clutch_winpct"]
+        ow, ol      = r["overall_wins"],  r["overall_losses"]
+        bar  = _winpct_bar(cw, cl, width=6)
+        team = r["team"][:12]
+        mark = " ◄" if highlight_team and highlight_team.lower() in r["team"].lower() else ""
+        line = f"{_rank_emoji(i)} **{team}**{mark}\n`{bar}` {cw}-{cl} ({pct:.0%})\nOverall: {ow}-{ol}"
+        if   i <= 5:              top_lines.append(line)
+        elif i >= len(ranked) - 4: bot_lines.append(line)
+
+    if top_lines: embed.add_field(name="💎 Most Clutch",   value="\n\n".join(top_lines), inline=True)
+    if bot_lines: embed.add_field(name="💸 Choke Artists", value="\n\n".join(bot_lines), inline=True)
+
+    no_close = [r for r in records if r.get("clutch_games", 0) == 0]
+    if no_close:
+        embed.add_field(
+            name="🛡️ Living Comfortably (No Close Games)",
+            value=", ".join(r["team"] for r in no_close[:6]),
+            inline=False,
+        )
+
+    divergent = []
+    for r in records:
+        if r.get("clutch_games", 0) < 2:
+            continue
+        ov_total = r["overall_wins"] + r["overall_losses"]
+        if ov_total == 0:
+            continue
+        ov_pct = r["overall_wins"] / ov_total
+        divergent.append((r["team"], r["clutch_winpct"] - ov_pct, r["clutch_winpct"], ov_pct))
+
+    divergent.sort(key=lambda x: abs(x[1]), reverse=True)
+    if divergent:
+        lines = [
+            f"**{t}** — Overall: {op:.0%} → Clutch: {cp:.0%} {'▲' if d > 0 else '▼'} {abs(d):.0%}"
+            for t, d, cp, op in divergent[:4]
+        ]
+        embed.add_field(name="📈 Biggest Clutch Swing", value="\n".join(lines), inline=False)
+
+    embed.set_footer(text=f"Clutch = games decided by ≤{margin} pts · ◄ = Your team · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── Power Rankings ────────────────────────────────────────────────────────────
+
+def _build_power_embed() -> discord.Embed:
+    rankings = an.power_rankings()
+    if not rankings:
+        return discord.Embed(title="📊 Power Rankings", description="No data available.", color=C_NEUTRAL)
+
+    embed = discord.Embed(
+        title=f"📊 TSL Power Rankings — {_season_label()}",
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    top10, rest = rankings[:10], rankings[10:]
+    lines = []
+    for r in top10:
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(r["rank"], f"**#{r['rank']}**")
+        lines.append(
+            f"{medal} **{r['team']}** ({r['owner']}) — {r['record']}\n"
+            f"    Score: **{r['score']}** | Net: {r['net_pts']:+d} | TO: {r['to_diff']:+d}"
+        )
+    embed.add_field(name="🏆 Top 10", value="\n".join(lines), inline=False)
+
+    if rest:
+        lines2 = [f"**#{r['rank']}** {r['team']} — {r['record']} (score: {r['score']})" for r in rest]
+        embed.add_field(name="📋 11–32", value="\n".join(lines2), inline=False)
+
+    embed.set_footer(text="Score = Win% × 40 + Net Pts × 30 + TO Diff × 15 + Off/Def Rank × 15", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── Standings ─────────────────────────────────────────────────────────────────
+
+def _build_standings_embed(caller_team: str = "") -> discord.Embed:
+    if dm.df_standings.empty:
+        return discord.Embed(
+            title="🏆 TSL Standings",
+            description="No standings data available.",
+            color=C_NEUTRAL,
+        )
+
+    embed = discord.Embed(
+        title=f"🏆 TSL Standings — {_season_label()}",
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    divs: dict[str, list] = {}
+    for _, row in dm.df_standings.iterrows():
+        div = str(row.get("divisionName", "Unknown"))
+        divs.setdefault(div, []).append(row)
+
+    for div_name, teams in sorted(divs.items()):
+        sorted_teams = sorted(teams, key=lambda r: int(r.get("totalWins", 0)), reverse=True)
+        lines = []
+        for r in sorted_teams:
+            team   = str(r.get("teamName", "?"))
+            w      = int(r.get("totalWins",   0))
+            l      = int(r.get("totalLosses", 0))
+            t      = int(r.get("totalTies",   0))
+            pf     = int(r.get("ptsFor",      0))
+            pa     = int(r.get("ptsAgainst",  0))
+            streak = str(r.get("winLossStreak", ""))
+            arrow  = " ◄" if caller_team and caller_team.lower() in team.lower() else ""
+            lines.append(f"**{team}**{arrow}  {_record_str(w, l, t)}  PF:{pf} PA:{pa}  {streak}")
+        embed.add_field(name=f"📍 {div_name}", value="\n".join(lines), inline=False)
+
+    footer = "◄ = Your team · ATLAS™ Oracle"
+    if not caller_team:
+        footer = "ATLAS™ Oracle · Run /stats hub to see your team highlighted"
+    embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── Owner Profile ─────────────────────────────────────────────────────────────
+
+async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> discord.Embed:
+    profile      = ig.get_or_create_profile(target.id, target.name)
+    nickname     = profile.get("nickname") or target.display_name
+    team         = profile.get("team") or ""
+    display_name = target.display_name
+
+    embed = discord.Embed(
+        title=f"👤 {nickname}",
+        color=C_PURPLE,
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    id_lines = [f"**Discord:** {target.mention}"]
+    if nickname != display_name:
+        id_lines.append(f"**TSL Name:** {nickname}")
+    embed.add_field(name="🪪 Identity", value="\n".join(id_lines), inline=True)
+
+    if not team:
+        embed.add_field(name="🏟️ Team", value="_Not in league / team unknown_", inline=True)
+        embed.set_footer(text="ATLAS™ Oracle · Owner Profile", icon_url=ATLAS_ICON_URL)
+        return embed
+
+    embed.add_field(name="🏟️ Team", value=f"**{team}**", inline=True)
+    record = dm.get_team_record(team)
+    embed.add_field(name="📋 Record", value=f"**{record}**", inline=True)
+
+    if not dm.df_standings.empty:
+        row = dm.df_standings[dm.df_standings["teamName"].str.lower().str.contains(team.lower(), na=False)]
+        if not row.empty:
+            r = row.iloc[0]
+            w, l = int(r.get("totalWins", 0)), int(r.get("totalLosses", 0))
+            embed.add_field(
+                name="📊 Team Stats",
+                value=(
+                    f"Rank: **#{int(r.get('rank', 0))}**\n"
+                    f"`{_winpct_bar(w, l, width=10)}` {w}-{l}\n"
+                    f"Net Pts: **{int(r.get('netPts', 0)):+d}** | TO Diff: **{int(r.get('tODiff', 0)):+d}**"
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="⚡ Off / Def",
+                value=(
+                    f"Off Yds: **{r.get('offTotalYds','?')}** (#{int(r.get('offTotalYdsRank', 0))})\n"
+                    f"Def Yds: **{r.get('defTotalYds','?')}** (#{int(r.get('defTotalYdsRank', 0))})"
+                ),
+                inline=True,
+            )
+
+    recent = dm.get_last_n_games(team, 5)
+    if recent:
+        form_parts = []
+        for g in recent:
+            is_home     = str(g.get("home", "")).lower().find(team.lower()) != -1
+            my_score    = g.get("home_score") if is_home else g.get("away_score")
+            their_score = g.get("away_score") if is_home else g.get("home_score")
+            opp         = g.get("away")       if is_home else g.get("home")
+            won         = (my_score or 0) > (their_score or 0)
+            form_parts.append(
+                f"{'🟢' if won else '🔴'} {'W' if won else 'L'} vs {opp} ({my_score}-{their_score})"
+            )
+        embed.add_field(name="📅 Last 5 Games", value="\n".join(form_parts), inline=False)
+
+    beefs = profile.get("beefs", [])
+    if beefs:
+        beef_lines = []
+        for b in sorted(beefs, key=lambda x: x["count"], reverse=True)[:4]:
+            opp_member = guild.get_member(b["opponent_id"])
+            opp_nick   = (
+                ig.get_nickname(b["opponent_id"])
+                or (opp_member.display_name if opp_member else str(b["opponent_id"]))
+            )
+            opp_team  = ig.KNOWN_MEMBER_TEAMS.get(b["opponent_id"], "")
+            h2h_str   = ""
+            if team and opp_team:
+                h2h = dm.get_h2h_record(team, opp_team)
+                h2h_str = f" | H2H: {h2h.get('a_wins', 0)}-{h2h.get('b_wins', 0)}"
+            beef_lines.append(f"🥊 **{opp_nick}** ({opp_team or '?'}) — {b['count']} beef(s){h2h_str}")
+        embed.add_field(name="🥩 Beef Mode History", value="\n".join(beef_lines), inline=False)
+
+    clutch_data = ig.get_clutch_records(margin=7)
+    if "records" in clutch_data:
+        tc = next(
+            (r for r in clutch_data["records"] if r.get("team", "").lower() == team.lower()),
+            None,
+        )
+        if tc and tc.get("clutch_games", 0) > 0:
+            cw, cl, cpct = tc["clutch_wins"], tc["clutch_losses"], tc["clutch_winpct"]
+            embed.add_field(
+                name="⚡ Clutch Record (≤7pt games)",
+                value=f"`{_winpct_bar(cw, cl, width=8)}` **{cw}-{cl}** ({cpct:.0%})",
+                inline=True,
+            )
+
+    embed.add_field(
+        name="🔬 ATLAS Oracle",
+        value=(
+            f"Total queries: **{profile.get('interactions', 0)}**\n"
+            f"Times roasted: **{profile.get('roast_count', 0)}**"
+        ),
+        inline=True,
+    )
+
+    # AI tendency blurb
+    if GEMINI_API_KEY and not dm.df_team_stats.empty:
+        try:
+            ts_row = dm.df_team_stats[
+                dm.df_team_stats["teamName"].str.lower().str.contains(team.lower(), na=False)
+            ]
+            if not ts_row.empty:
+                r = ts_row.iloc[0]
+                pass_ratio = float(r.get("offPassYds", 0)) / max(
+                    float(r.get("offPassYds", 0)) + float(r.get("offRushYds", 0)), 1
+                )
+                stats_snap = (
+                    f"passRatio={pass_ratio:.2f}, "
+                    f"penalties={r.get('penalties','?')}, "
+                    f"tOGiveAways={r.get('tOGiveAways','?')}, "
+                    f"off3rdDownConvPct={r.get('off3rdDownConvPct','?')}"
+                )
+                prompt = (
+                    f"You are ATLAS Oracle, TSL analytics intelligence. In ONE sharp sentence, "
+                    f"describe {nickname}'s ({team}) playstyle. Be brutal and specific. "
+                    f"Stats: {stats_snap}"
+                )
+                blurb = await _ai_blurb(prompt, max_tokens=80)
+                if blurb:
+                    embed.add_field(
+                        name="🔬 ATLAS Oracle · Tendency",
+                        value=f"*{blurb}*",
+                        inline=False,
+                    )
+        except Exception:
+            pass
+
+    embed.set_footer(text=f"ATLAS™ Oracle · Owner Profile · {_season_label()}", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── Weekly Recap ──────────────────────────────────────────────────────────────
+
+def _build_recap_embed(week: int | None = None) -> discord.Embed:
+    data = an.weekly_recap(week=week)
+    if not data.get("games"):
+        return discord.Embed(
+            title=f"📅 Week {week or dm.CURRENT_WEEK} Recap",
+            description="No completed games found for this week.",
+            color=C_NEUTRAL,
+        )
+
+    actual_week = data["week"]
+    games       = data["games"]
+    highlights  = data.get("highlights", {})
+
+    embed = discord.Embed(
+        title=f"📅 TSL Week {actual_week} Recap",
+        description=f"*{len(games)} games played · {_season_label()}*",
+        color=C_BLUE,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    score_lines = []
+    for g in sorted(games, key=lambda x: abs(x.get("home_score", 0) - x.get("away_score", 0)), reverse=True):
+        hs, aws        = g.get("home_score", 0), g.get("away_score", 0)
+        home, away     = g.get("home", "?"),     g.get("away", "?")
+        diff           = abs(hs - aws)
+        tag            = "⚡" if diff <= 7 else ("💥" if diff >= 21 else "  ")
+        if hs > aws:
+            score_lines.append(f"{tag} **{home}** {hs} – {aws} {away}")
+        else:
+            score_lines.append(f"{tag} {home} {hs} – {aws} **{away}**")
+    embed.add_field(name="🏈 Scores", value="\n".join(score_lines), inline=False)
+
+    if highlights.get("biggest_win"):
+        embed.add_field(name="💥 Biggest Win",  value=highlights["biggest_win"],  inline=True)
+    if highlights.get("closest_game"):
+        embed.add_field(name="⚡ Closest Game", value=highlights["closest_game"], inline=True)
+
+    embed.set_footer(text="⚡ = Close game (≤7pts, icon_url=ATLAS_ICON_URL)  💥 = Blowout (21+ pts) · ATLAS™ Oracle")
+    return embed
+
+
+# ── Draft History ─────────────────────────────────────────────────────────────
+
+def _build_draft_overview_embed() -> discord.Embed:
+    data    = ig.compare_draft_classes()
+    classes = data.get("classes", [])
+
+    embed = discord.Embed(
+        title="📜 TSL Draft Class History — All Seasons",
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    if not classes:
+        embed.description = "No draft class data available."
+        return embed
+
+    lines = []
+    for c in sorted(classes, key=lambda x: x["season"]):
+        lines.append(
+            f"**S{c['season']}** — **{c['grade']}** | "
+            f"Avg OVR {c['avg_ovr']} | {c['total_picks']} picks | "
+            f"⚡{c['xfactors']} 🌟{c['superstars']} ⭐{c['stars']}"
+        )
+    embed.description = "\n".join(lines)
+
+    try:
+        best  = max(classes, key=lambda x: x.get("grade_score", 0))
+        worst = min(classes, key=lambda x: x.get("grade_score", 999))
+        embed.add_field(name="🏆 Best Class",    value=f"Season {best['season']} — **{best['grade']}**",  inline=True)
+        embed.add_field(name="💀 Weakest Class", value=f"Season {worst['season']} — **{worst['grade']}**", inline=True)
+    except Exception:
+        pass
+
+    embed.set_footer(text="Select a season below for a full breakdown · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+def _build_draft_season_embeds(season: int) -> list[discord.Embed]:
+    data = ig.get_draft_class(season)
+
+    if "error" in data:
+        return [discord.Embed(
+            title=f"📜 Draft Class — Season {season}",
+            description=f"❌ {data['error']}",
+            color=C_RED,
+        )]
+
+    grade, score_val = data["letter_grade"], data["grade_score"]
+    dev_counts  = data.get("dev_counts", {})
+    avg_ovr     = data.get("avg_ovr", 0)
+    total_picks = data.get("total_picks", 0)
+    color       = _grade_color(grade)
+
+    e1 = discord.Embed(
+        title=f"📜 Season {season} Draft Class — Grade: **{grade}**",
+        description=(
+            f"**{total_picks} picks** | Avg OVR: **{avg_ovr}** | Score: **{score_val:.2f}**\n"
+            f"*{_season_label()}*"
+        ),
+        color=color,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    xf = dev_counts.get("Superstar X-Factor", 0)
+    ss = dev_counts.get("Superstar", 0)
+    st = dev_counts.get("Star", 0)
+    nm = dev_counts.get("Normal", 0)
+    e1.add_field(
+        name="⚡ Dev Trait Breakdown",
+        value=f"⚡ X-Factor: **{xf}**\n🌟 Superstar: **{ss}**\n⭐ Star: **{st}**\n◦ Normal: **{nm}**",
+        inline=True,
+    )
+
+    grade_context = {
+        "A+": "Historic class. Franchise-altering picks.",
+        "A":  "Elite class. Multiple future cornerstones.",
+        "A-": "Very strong. Several high-upside picks.",
+        "B+": "Solid class with notable hits.",
+        "B":  "Average-to-good. Some contributors.",
+        "B-": "Below average. Thin on upside.",
+        "C+": "Mostly depth. A steal or two buried.",
+        "C":  "Forgettable. Few contributors.",
+        "C-": "Rough class. Limited long-term impact.",
+        "D":  "Disaster. Picks that never panned out.",
+    }
+    e1.add_field(name="📝 Verdict", value=grade_context.get(grade, "Class grade computed."), inline=True)
+
+    top = data.get("top_picks", [])
+    if top:
+        lines = [
+            f"{_dev_emoji(p.get('dev','Normal'))} **{p.get('extendedName', 'Unknown')}** "
+            f"({p.get('pos','')}, OVR {p.get('playerBestOvr',0)}) — "
+            f"{p.get('roundLabel','?')} Pick {p.get('draftPick','?')} · {p.get('teamName','')}"
+            for p in top[:6]
+        ]
+        e1.add_field(name="🏆 Top Picks (by Current OVR)", value="\n".join(lines), inline=False)
+
+    steals = data.get("steals", [])
+    if steals:
+        lines = [
+            f"{_dev_emoji(p.get('dev','Normal'))} **{p.get('extendedName', 'Unknown')}** "
+            f"({p.get('pos','')}, OVR {p.get('playerBestOvr',0)}) — "
+            f"{p.get('roundLabel','?')} Pick {p.get('draftPick','?')}"
+            for p in steals[:4]
+        ]
+        e1.add_field(name="💎 Steals", value="\n".join(lines), inline=True)
+
+    busts = data.get("busts", [])
+    if busts:
+        lines = [
+            f"💀 **{p.get('extendedName', 'Unknown')}** "
+            f"({p.get('pos','')}, OVR {p.get('playerBestOvr',0)}) — "
+            f"{p.get('roundLabel','?')} Pick {p.get('draftPick','?')}"
+            for p in busts[:4]
+        ]
+        e1.add_field(name="💀 Busts", value="\n".join(lines), inline=True)
+
+    e1.set_footer(text=f"Draft Class Analysis · Season {season} · ATLAS™ Oracle")
+    return [e1]
+
+
+# ── Player Leaders ────────────────────────────────────────────────────────────
+
+def _build_player_leaders_embed(
+    position: str, stat_col: str, stat_label: str
+) -> tuple[discord.Embed, list[str]]:
+    """
+    Returns (embed, player_name_list).
+    player_name_list feeds into PlayerDrillView's select menu for Hot/Cold drill-down.
+
+    FIX: df_offense / df_defense only have rosterId + stat columns.
+    We join with df_players to get fullName, teamName, pos.
+    """
+    try:
+        import pandas as pd
+
+        # ── Select the right stats table ──────────────────────────────────────
+        df_stats = dm.df_defense if position in ("DL", "LB", "DB") else dm.df_offense
+
+        if df_stats is None or df_stats.empty:
+            return (
+                discord.Embed(title=f"🎯 {position} Leaders", description="No stat data available. Run `/wittsync` first.", color=C_NEUTRAL),
+                [],
+            )
+
+        if stat_col not in df_stats.columns:
+            available = ", ".join(df_stats.columns[:10].tolist())
+            return (
+                discord.Embed(
+                    title=f"🎯 {position} {stat_label} Leaders",
+                    description=f"Column `{stat_col}` not found.\nAvailable: `{available}`",
+                    color=C_NEUTRAL,
+                ),
+                [],
+            )
+
+        # ── Build player lookup from df_players ───────────────────────────────
+        if dm.df_players is None or dm.df_players.empty:
+            return (
+                discord.Embed(title=f"🎯 {position} Leaders", description="No roster data. Run `/wittsync` first.", color=C_NEUTRAL),
+                [],
+            )
+
+        # Identify the join key — MaddenStats exports use rosterId
+        stats_id_col   = next((c for c in ("rosterId", "playerid", "player_id", "id") if c in df_stats.columns), None)
+        players_id_col = next((c for c in ("rosterId", "playerid", "player_id", "id") if c in dm.df_players.columns), None)
+
+        if not stats_id_col or not players_id_col:
+            return (
+                discord.Embed(title="❌ Schema Error", description=f"Cannot join stats to roster. Stats key: `{stats_id_col}`, Players key: `{players_id_col}`", color=C_RED),
+                [],
+            )
+
+        # Build a lightweight lookup: rosterId → {firstName, lastName, teamName, pos}
+        name_a = next((c for c in ("firstName", "first_name") if c in dm.df_players.columns), None)
+        name_b = next((c for c in ("lastName",  "last_name")  if c in dm.df_players.columns), None)
+        full_col = next((c for c in ("fullName", "displayName") if c in dm.df_players.columns), None)
+        pos_col  = next((c for c in ("pos", "position") if c in dm.df_players.columns), None)
+        team_col = next((c for c in ("teamName", "team", "displayName") if c in dm.df_players.columns), None)
+
+        keep_cols = [players_id_col]
+        if name_a: keep_cols.append(name_a)
+        if name_b: keep_cols.append(name_b)
+        if full_col and full_col != players_id_col: keep_cols.append(full_col)
+        if pos_col:  keep_cols.append(pos_col)
+        if team_col and team_col not in keep_cols: keep_cols.append(team_col)
+
+        roster = dm.df_players[keep_cols].drop_duplicates(subset=[players_id_col]).copy()
+
+        # Build fullName if not present
+        if full_col not in roster.columns and name_a and name_b:
+            roster["_fullName"] = (
+                roster[name_a].fillna("").str.strip() + " " +
+                roster[name_b].fillna("").str.strip()
+            ).str.strip()
+            full_col = "_fullName"
+        elif full_col not in roster.columns:
+            roster["_fullName"] = roster[players_id_col].astype(str)
+            full_col = "_fullName"
+
+        # ── Join stats + roster ───────────────────────────────────────────────
+        df_merged = df_stats.merge(roster, left_on=stats_id_col, right_on=players_id_col, how="left")
+
+        # ── Filter by position group ──────────────────────────────────────────
+        valid_pos = _POS_GROUP_MAP.get(position, [position])
+        if pos_col and pos_col in df_merged.columns:
+            df_merged = df_merged[df_merged[pos_col].isin(valid_pos)].copy()
+
+        if df_merged.empty:
+            return (
+                discord.Embed(
+                    title=f"🎯 {position} {stat_label} Leaders",
+                    description=f"No players found for position group **{position}** (`{', '.join(valid_pos)}`).\nCheck position names in the export.",
+                    color=C_NEUTRAL,
+                ),
+                [],
+            )
+
+        # ── Aggregate by player (sum across games) ────────────────────────────
+        df_merged[stat_col] = pd.to_numeric(df_merged[stat_col], errors="coerce").fillna(0)
+        group_keys = [full_col] + ([team_col] if team_col and team_col in df_merged.columns else []) + ([pos_col] if pos_col and pos_col in df_merged.columns else [])
+        group_keys = list(dict.fromkeys(group_keys))  # dedupe
+
+        agg = (
+            df_merged.groupby(group_keys, dropna=False)[stat_col]
+            .sum()
+            .reset_index()
+            .sort_values(stat_col, ascending=(stat_label in ("INTs", "Drops")))
+            .head(10)
+        )
+
+        embed = discord.Embed(
+            title=f"🎯 {position} — {stat_label} Leaders",
+            description=f"Top 10 · Season totals · {_season_label()}",
+            color=C_BLUE,
+            timestamp=datetime.datetime.utcnow(),
+        )
+
+        lines, player_names = [], []
+        for i, (_, row) in enumerate(agg.iterrows(), 1):
+            name = str(row.get(full_col, "?")).strip() or "?"
+            team = str(row.get(team_col, "?")).strip() if team_col and team_col in row else "?"
+            pos  = str(row.get(pos_col,  position)).strip() if pos_col and pos_col in row else position
+            val  = row[stat_col]
+            fmt  = f"{val:.1f}" if isinstance(val, float) and val != int(val) else f"{int(val)}"
+            lines.append(f"{_rank_emoji(i)} **{name}** ({pos}, {team}) — **{fmt}** {stat_label}")
+            if name and name != "?":
+                player_names.append(name)
+
+        embed.add_field(
+            name=f"📊 {stat_label}",
+            value="\n".join(lines) if lines else "_No results_",
+            inline=False,
+        )
+        embed.set_footer(text="Select a player below for their Hot/Cold breakdown · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+        return embed, player_names
+
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        return (
+            discord.Embed(title="❌ Error", description=f"`{type(e).__name__}: {e}`", color=C_RED),
+            [],
+        )
+
+
+# ── Team Stats ────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TEAM CARD v2 — TRI-MODE SYSTEM
+#  Mode 1: Snapshot  (async — includes AI projection)
+#  Mode 2: History   (franchise timeline + rivalries)
+#  Mode 3: Scouting  (exploit map + momentum read)
+#  Mode 4: Matchup   (H2H comparison + AI prediction)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _build_team_card_snapshot(
+    team_name: str,
+    caller_team: str = "",
+    owner_username: str = "",
+) -> discord.Embed:
+    """
+    The new team card — data storytelling, not data reporting.
+    Dynamic color, NFL logo thumbnail, DNA bars, rings, AI projection.
+    """
+    is_yours = caller_team and caller_team.lower() in team_name.lower()
+
+    embed = discord.Embed(
+        title=f"🏈  {team_name}{'  ◄  Your Team' if is_yours else ''}",
+        color=_team_color(team_name),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    logo = _team_logo(team_name)
+    if logo:
+        embed.set_thumbnail(url=logo)
+
+    # ── Pull standings row ────────────────────────────────────────────────────
+    st_row = ts_row = None
+    w = l = pf = pa = net = rank = seed = 0
+    off_yds = off_rank = def_yds = def_rank = 0
+    off_pass = off_rush = def_pass = def_rush = 0
+    to_diff = 0
+    streak_raw = ""
+    sos = "?"
+
+    if not dm.df_standings.empty:
+        m = dm.df_standings[
+            dm.df_standings["teamName"].str.lower().str.contains(team_name.lower(), na=False)
+        ]
+        if not m.empty:
+            st_row   = m.iloc[0]
+            w        = int(st_row.get("totalWins",       0))
+            l        = int(st_row.get("totalLosses",     0))
+            pf       = int(st_row.get("ptsFor",          0))
+            pa       = int(st_row.get("ptsAgainst",      0))
+            net      = int(st_row.get("netPts",          0))
+            rank     = int(st_row.get("rank",            0))
+            seed     = int(st_row.get("seed",            0))
+            off_yds  = st_row.get("offTotalYds",   "?")
+            off_rank = int(st_row.get("offTotalYdsRank", 0))
+            def_yds  = st_row.get("defTotalYds",   "?")
+            def_rank = int(st_row.get("defTotalYdsRank", 0))
+            off_pass = st_row.get("offPassYds", 0)
+            off_rush = st_row.get("offRushYds", 0)
+            def_pass = st_row.get("defPassYds", 0)
+            def_rush = st_row.get("defRushYds", 0)
+            to_diff  = int(st_row.get("tODiff",          0))
+            streak_raw = str(st_row.get("winLossStreak", ""))
+            sos      = st_row.get("totalSoS", "?")
+
+    if not dm.df_team_stats.empty:
+        tsm = dm.df_team_stats[
+            dm.df_team_stats["teamName"].str.lower().str.contains(team_name.lower(), na=False)
+        ]
+        if not tsm.empty:
+            ts_row = tsm.iloc[0]
+
+    total_gms  = w + l
+    net_per_gm = net / total_gms if total_gms > 0 else 0
+
+    # ── Streak display ────────────────────────────────────────────────────────
+    streak_disp = ""
+    try:
+        sv = int(streak_raw)
+        streak_disp = f"{'W' if sv > 0 else 'L'}{abs(sv)}"
+    except Exception:
+        streak_disp = streak_raw
+
+    # ── Lede description ──────────────────────────────────────────────────────
+    lede = [f"**{w}–{l}**"]
+    if rank:         lede.append(f"#**{rank}** Power")
+    if seed:         lede.append(f"#**{seed}** Seed")
+    if streak_disp:  lede.append(f"Streak: **{streak_disp}**")
+    if total_gms:    lede.append(f"**{net_per_gm:+.1f}** pts/gm")
+    embed.description = f"*{_season_label()}*\n" + "  ·  ".join(lede)
+
+    # ── 🏆 FRANCHISE — rings + owner identity ─────────────────────────────────
+    ri = _ring_info(owner_username) if owner_username else None
+    if ri and ri["nick"]:
+        nick, count, tier, last = ri["nick"], ri["count"], ri["tier"], ri["last"]
+        if count > 0:
+            ring_dots = "💍" * min(count, 5) + ("+" if count > 5 else "")
+            last_roman = _to_roman(last) if last else "?"
+            ring_lines = [
+                f"**{nick}**  ·  {tier}",
+                ring_dots,
+                f"**{count}** rings  ·  Last: SB **{last_roman}**",
+            ]
+            if ri["max_streak"] >= 2:
+                ring_lines.append(f"⚡ {ri['max_streak']}× back-to-back")
+        else:
+            ring_lines = [
+                f"**{nick}**  ·  {tier}",
+                "💀 Still hunting · 0 rings",
+            ]
+        embed.add_field(name="🏆 FRANCHISE", value="\n".join(ring_lines), inline=True)
+
+    # ── 📋 THIS SEASON ────────────────────────────────────────────────────────
+    if st_row is not None:
+        pct_str = f"{w / total_gms * 100:.0f}%" if total_gms else "—"
+        embed.add_field(
+            name="📋 THIS SEASON",
+            value=(
+                f"`{_winpct_bar(w, l, width=10)}`  **{pct_str}**\n"
+                f"PF **{pf}**  ·  PA **{pa}**  ·  Net **{net:+d}**\n"
+                f"Rank **#{rank}**  ·  Seed **#{seed}**  ·  SoS **{sos}**"
+            ),
+            inline=True,
+        )
+
+    # ── ⚡ CLUTCH ─────────────────────────────────────────────────────────────
+    clutch_winpct = 0.0
+    cd = ig.get_clutch_records(margin=7)
+    if "records" in cd:
+        tc = next(
+            (r for r in cd["records"] if r.get("team", "").lower() in team_name.lower()),
+            None,
+        )
+        if tc and tc.get("clutch_games", 0) > 0:
+            cw  = tc["clutch_wins"]
+            ccl = tc["clutch_losses"]
+            clutch_winpct = float(tc.get("clutch_winpct", 0))
+            cs  = round(clutch_winpct * 100)
+            if   cs >= 70: c_badge = "🔥 Elite Closer"
+            elif cs >= 55: c_badge = "✅ Clutch"
+            elif cs >= 45: c_badge = "😐 Average"
+            elif cs >= 30: c_badge = "😰 Shaky"
+            else:          c_badge = "💀 Choke Artist"
+            embed.add_field(
+                name="⚡ CLUTCH",
+                value=(
+                    f"**{cw}–{ccl}** ({clutch_winpct:.0%}) ≤7pt\n"
+                    f"`{_winpct_bar(cw, ccl, width=8)}`\n"
+                    f"{c_badge}  ·  **{cs}**/100"
+                ),
+                inline=True,
+            )
+
+    # ── 🧬 TEAM DNA ───────────────────────────────────────────────────────────
+    if st_row is not None:
+        try:
+            p_y = float(off_pass or 0)
+            r_y = float(off_rush or 0)
+            tot = p_y + r_y
+            pass_ratio = p_y / tot if tot > 0 else 0.5
+            # off_dominance: 1.0 = elite offense (rank 1), 0.0 = elite defense (rank 1)
+            off_dom = 1 - (off_rank / 32) if off_rank else 0.5
+
+            filled_pass = round(pass_ratio * 10)
+            filled_off  = round(off_dom    * 10)
+            run_bar  = "█" * (10 - filled_pass) + "░" * filled_pass
+            pass_bar = "░" * (10 - filled_pass) + "█" * filled_pass  # noqa — just for display
+            # single bidirectional bar: left = RUN, right = PASS
+            dna_rp  = "█" * filled_pass + "░" * (10 - filled_pass)
+            dna_od  = "█" * filled_off  + "░" * (10 - filled_off)
+
+            tags = _playstyle_tags(st_row, ts_row, clutch_winpct)
+            tag_str = "  ".join(tags) if tags else ""
+
+            dna_block = (
+                f"```\n"
+                f"RUN  {dna_rp}  PASS\n"
+                f"OFF  {dna_od}  DEF\n"
+                f"```"
+                f"{tag_str}"
+            )
+            embed.add_field(name="🧬 TEAM DNA", value=dna_block, inline=False)
+        except Exception:
+            pass
+
+    # ── ⚔️ OFFENSE  +  🛡️ DEFENSE ─────────────────────────────────────────────
+    if st_row is not None:
+        o_arr = "↑" if off_rank <= 10 else ("↓" if off_rank >= 23 else "→")
+        d_arr = "↑" if def_rank <= 10 else ("↓" if def_rank >= 23 else "→")
+
+        third_pct = rz_pct = None
+        if ts_row is not None:
+            try:
+                v = float(ts_row.get("off3rdDownConvPct", 0))
+                if v > 0: third_pct = v
+            except Exception:
+                pass
+            try:
+                v = float(ts_row.get("offRedZonePct", 0))
+                if v > 0: rz_pct = v
+            except Exception:
+                pass
+
+        off_lines = [
+            f"Yds: **{off_yds}** (#{off_rank}) {o_arr}",
+            f"Pass **{off_pass}**  ·  Rush **{off_rush}**",
+        ]
+        if third_pct:
+            eff_str = f"3rd: **{third_pct:.0f}%**"
+            if rz_pct: eff_str += f"  RZ: **{rz_pct:.0f}%**"
+            off_lines.append(eff_str)
+
+        def_lines = [
+            f"Allow: **{def_yds}** (#{def_rank}) {d_arr}",
+            f"Pass **{def_pass}**  ·  Rush **{def_rush}**",
+            f"TO Diff: **{to_diff:+d}**",
+        ]
+        if ts_row is not None:
+            try:
+                pen = int(ts_row.get("penalties", 0))
+                pyd = ts_row.get("penaltyYds", "?")
+                if pen > 0:
+                    def_lines.append(f"Penalties: **{pen}** ({pyd} yds)")
+            except Exception:
+                pass
+
+        embed.add_field(name="⚔️ OFFENSE", value="\n".join(off_lines), inline=True)
+        embed.add_field(name="🛡️ DEFENSE", value="\n".join(def_lines), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)  # 3-col spacer
+
+    # ── 📅 FORM — last 5 with sparkline ──────────────────────────────────────
+    recent = dm.get_last_n_games(team_name, 5)
+    if recent:
+        dots, score_lines, win_log = [], [], []
+        for g in recent:
+            is_home   = team_name.lower() in str(g.get("home", "")).lower()
+            my_score  = int(g.get("home_score", 0) if is_home else g.get("away_score", 0))
+            opp_score = int(g.get("away_score", 0) if is_home else g.get("home_score", 0))
+            opp_name  = str(g.get("away", "?") if is_home else g.get("home", "?"))
+            won       = my_score > opp_score
+            win_log.append(won)
+            dots.append("🟢" if won else "🔴")
+            score_lines.append(
+                f"`{'W' if won else 'L'} {my_score:>2}–{opp_score:<2}  vs {opp_name[:12]}`"
+            )
+        spark = _trend_sparkline(win_log)
+        embed.add_field(
+            name="📅 FORM — Last 5",
+            value=f"{''.join(dots)}  `{spark}`\n" + "\n".join(score_lines),
+            inline=False,
+        )
+
+    # ── 🔬 ATLAS Oracle · Projection ────────────────────────────────────────────────
+    if GEMINI_API_KEY and st_row is not None:
+        try:
+            games_left = 18 - total_gms
+            prompt = (
+                f"You are ATLAS Oracle, TSL predictive intelligence. In exactly 2 sentences max, "
+                f"give a savage but accurate season projection for the {team_name}. "
+                f"Record: {w}-{l}. Power rank: #{rank}. Seed: #{seed}. "
+                f"Net pts/game: {net_per_gm:+.1f}. Streak: {streak_disp or 'none'}. "
+                f"Off rank: #{off_rank}. Def rank: #{def_rank}. TO diff: {to_diff:+d}. "
+                f"Clutch: {clutch_winpct:.0%}. Games remaining: {games_left}. "
+                f"TSL Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK}. "
+                f"Be specific. Be ruthless. No sugarcoating."
+            )
+            projection = await _ai_blurb(prompt, max_tokens=100)
+            if projection:
+                embed.add_field(
+                    name="🔬 ATLAS Oracle · Projection",
+                    value=f"*{projection}*",
+                    inline=False,
+                )
+        except Exception:
+            pass
+
+    embed.set_footer(
+        text=f"ATLAS™ Oracle · Team Card v2  ·  {_season_label()}  ·  ◄ = Your team", icon_url=ATLAS_ICON_URL
+    )
+    return embed
+
+
+def _build_team_card_history(team_name: str) -> discord.Embed:
+    """
+    Deep Dive: Franchise timeline, all-time record, signature moments, rivalries.
+    """
+    embed = discord.Embed(
+        title=f"📖  {team_name} — Franchise History",
+        color=_team_color(team_name),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    logo = _team_logo(team_name)
+    if logo:
+        embed.set_thumbnail(url=logo)
+
+    # ── Season-by-season timeline ─────────────────────────────────────────────
+    seasons = _franchise_by_season(team_name)
+    alltime = _franchise_alltime(team_name)
+    aw, al  = alltime["wins"], alltime["losses"]
+
+    if seasons:
+        max_w  = max(int(r.get("wins", 0)) for r in seasons) or 1
+        lines  = []
+        for r in seasons:
+            s   = int(r.get("seasonIndex", 0)) + 1
+            sw  = int(r.get("wins",   0))
+            sl  = int(r.get("losses", 0))
+            bar = "█" * round((sw / max_w) * 12) + "░" * (12 - round((sw / max_w) * 12))
+            peak_tag = "  ← PEAK" if sw == max_w else ""
+            lines.append(f"S{s}  `{bar}`  **{sw}–{sl}**{peak_tag}")
+        ag   = aw + al
+        apct = f"{aw / ag * 100:.1f}%" if ag else "—"
+        embed.add_field(
+            name=f"📈 Franchise Timeline  |  {aw}–{al} all-time  ({apct})",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    # ── Signature moments ─────────────────────────────────────────────────────
+    big_w, worst_l = _franchise_signature_moments(team_name)
+    moments = []
+    if big_w:
+        ht, at = big_w["homeTeamName"], big_w["awayTeamName"]
+        hs, as_ = big_w["homeScore"], big_w["awayScore"]
+        m  = big_w["margin"]
+        s  = int(big_w.get("seasonIndex", 0)) + 1
+        wk = int(big_w.get("weekIndex",   0)) + 1
+        moments.append(f"🏆 **Biggest W:** {ht} **{hs}**–{as_} {at}  (+{m} · S{s} Wk{wk})")
+    if worst_l:
+        ht, at = worst_l["homeTeamName"], worst_l["awayTeamName"]
+        hs, as_ = worst_l["homeScore"], worst_l["awayScore"]
+        m  = worst_l["margin"]
+        s  = int(worst_l.get("seasonIndex", 0)) + 1
+        wk = int(worst_l.get("weekIndex",   0)) + 1
+        moments.append(f"💀 **Worst L:** {ht} {hs}–**{as_}** {at}  (–{m} · S{s} Wk{wk})")
+    if moments:
+        embed.add_field(name="🎭 Signature Moments", value="\n".join(moments), inline=False)
+
+    # ── Eternal rivalries ─────────────────────────────────────────────────────
+    nemesis     = _franchise_nemesis(team_name)
+    punching_bag = _franchise_punching_bag(team_name)
+    rival_lines = []
+    if nemesis:
+        nw = int(nemesis.get("wins",   0))
+        nl = int(nemesis.get("losses", 0))
+        ng = int(nemesis.get("games",  0))
+        opp = str(nemesis.get("opp", "?"))[:22]
+        rival_lines.append(
+            f"👻 **Nemesis:** {opp}  —  {nw}–{nl} ({nw/ng:.0%} win rate over {ng} games)"
+        )
+    if punching_bag:
+        pw = int(punching_bag.get("wins",  0))
+        pg = int(punching_bag.get("games", 0))
+        opp = str(punching_bag.get("opp", "?"))[:22]
+        rival_lines.append(
+            f"💪 **Punching Bag:** {opp}  —  {pw}–{pg-pw} ({pw/pg:.0%} win rate over {pg} games)"
+        )
+    if rival_lines:
+        embed.add_field(name="⚔️ Eternal Rivalries", value="\n".join(rival_lines), inline=False)
+
+    embed.set_footer(text="ATLAS™ Oracle · Franchise History · All 6 Seasons · Regular Season", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+def _build_team_card_scouting(team_name: str) -> discord.Embed:
+    """
+    Deep Dive: Scouting report — exploit map, momentum, vulnerability analysis.
+    """
+    embed = discord.Embed(
+        title=f"🔬  {team_name} — Scouting Report",
+        description="*How to beat this team. Don't share this with them.*",
+        color=_team_color(team_name),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    logo = _team_logo(team_name)
+    if logo:
+        embed.set_thumbnail(url=logo)
+
+    st_row = None
+    if not dm.df_standings.empty:
+        m = dm.df_standings[
+            dm.df_standings["teamName"].str.lower().str.contains(team_name.lower(), na=False)
+        ]
+        if not m.empty:
+            st_row = m.iloc[0]
+
+    # ── Exploit map ───────────────────────────────────────────────────────────
+    if st_row is not None:
+        exploits = []
+        try:
+            tod = int(st_row.get("tODiff", 0))
+            if tod >= 4:
+                exploits.append(
+                    f"✅ **Turnover Machine:** +{tod} TO diff. They live off mistakes — protect the ball."
+                )
+            elif tod <= -3:
+                exploits.append(
+                    f"⚠️ **Turnover Prone:** {tod:+d} TO diff. Force chaos — this game ends fast."
+                )
+        except Exception:
+            pass
+
+        try:
+            off_r = int(st_row.get("offTotalYdsRank", 16))
+            def_r = int(st_row.get("defTotalYdsRank", 16))
+            if off_r < def_r - 8:
+                exploits.append(
+                    f"🎯 **Offense-Dependent:** OFF #{off_r} but DEF #{def_r}. "
+                    f"Score fast and force them to play catch-up."
+                )
+            elif def_r < off_r - 8:
+                exploits.append(
+                    f"🛡️ **Defense-First:** DEF #{def_r} but OFF #{off_r}. "
+                    f"Play ball control. Grind it out. They'll run out of ideas."
+                )
+        except Exception:
+            pass
+
+        try:
+            d_pass = float(st_row.get("defPassYds", 0))
+            d_rush = float(st_row.get("defRushYds", 0))
+            if d_pass > 0 and d_rush > 0:
+                ratio = d_pass / (d_pass + d_rush)
+                if ratio > 0.62:
+                    exploits.append(
+                        f"🚀 **Pass to Win:** They surrender {d_pass:.0f} pass yds vs {d_rush:.0f} rush. "
+                        f"Air it out early and often."
+                    )
+                elif ratio < 0.42:
+                    exploits.append(
+                        f"🏃 **Run to Win:** They surrender {d_rush:.0f} rush yds vs {d_pass:.0f} pass. "
+                        f"Run it down their throat and don't stop."
+                    )
+        except Exception:
+            pass
+
+        cd = ig.get_clutch_records(margin=7)
+        if "records" in cd:
+            tc = next(
+                (r for r in cd["records"] if r.get("team","").lower() in team_name.lower()),
+                None,
+            )
+            if tc and tc.get("clutch_games", 0) >= 2:
+                cpct = float(tc.get("clutch_winpct", 0.5))
+                if cpct <= 0.35:
+                    exploits.append(
+                        f"⚡ **Clutch Liability:** {cpct:.0%} in ≤7pt games. Keep it tight — they fold."
+                    )
+                elif cpct >= 0.70:
+                    exploits.append(
+                        f"⚡ **Clutch Threat:** {cpct:.0%} in ≤7pt games. Do NOT let this game be close."
+                    )
+
+        if exploits:
+            embed.add_field(
+                name="🎯 Exploit Map",
+                value="\n".join(exploits),
+                inline=False,
+            )
+
+    # ── Momentum read ─────────────────────────────────────────────────────────
+    recent = dm.get_last_n_games(team_name, 5)
+    if recent:
+        diffs, wins_l5 = [], []
+        for g in recent:
+            is_home   = team_name.lower() in str(g.get("home", "")).lower()
+            my_s      = int(g.get("home_score", 0) if is_home else g.get("away_score", 0))
+            opp_s     = int(g.get("away_score", 0) if is_home else g.get("home_score", 0))
+            wins_l5.append(my_s > opp_s)
+            diffs.append(my_s - opp_s)
+        wc  = sum(wins_l5)
+        avg = sum(diffs) / len(diffs)
+        if   wc >= 4: mood = f"🔥 **Hot streak:** {wc}–{5 - wc} L5"
+        elif wc <= 1: mood = f"❄️ **Ice cold:** {wc}–{5 - wc} L5"
+        else:         mood = f"📊 **Inconsistent:** {wc}–{5 - wc} L5"
+
+        embed.add_field(
+            name="📈 Momentum Read",
+            value=(
+                f"{mood}  ·  Avg margin: **{avg:+.0f}**\n"
+                f"Best result L5: **{max(diffs):+d}**  ·  Worst: **{min(diffs):+d}**"
+            ),
+            inline=False,
+        )
+
+    # ── Floor / Ceiling ───────────────────────────────────────────────────────
+    big_w, worst_l = _franchise_signature_moments(team_name)
+    fc_lines = []
+    if big_w:
+        fc_lines.append(f"🏆 All-time best win: **+{big_w['margin']}** pts")
+    if worst_l:
+        fc_lines.append(f"💀 All-time worst loss: **–{worst_l['margin']}** pts")
+    if fc_lines:
+        embed.add_field(name="📚 Franchise Floor / Ceiling", value="\n".join(fc_lines), inline=True)
+
+    embed.set_footer(text="ATLAS™ Oracle · Scouting Report · For your eyes only", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+async def _build_team_matchup_embed(team_a: str, team_b: str) -> discord.Embed:
+    """
+    Head-to-head matchup intel: H2H history, side-by-side comparison, AI prediction.
+    """
+    embed = discord.Embed(
+        title=f"⚔️  {team_a}  vs  {team_b}",
+        color=_team_color(team_a),
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    # ── All-time H2H ──────────────────────────────────────────────────────────
+    h2h   = dm.get_h2h_record(team_a, team_b)
+    a_w   = h2h.get("a_wins", 0)
+    b_w   = h2h.get("b_wins", 0)
+    total = a_w + b_w
+    if total > 0:
+        embed.add_field(
+            name="📊 All-Time H2H",
+            value=(
+                f"**{team_a[:16]}:** {a_w} wins\n"
+                f"**{team_b[:16]}:** {b_w} wins\n"
+                f"`{_winpct_bar(a_w, b_w, width=10)}`"
+            ),
+            inline=True,
+        )
+    else:
+        embed.add_field(
+            name="📊 All-Time H2H",
+            value="No completed games on record.",
+            inline=True,
+        )
+
+    # ── Side-by-side comparison ────────────────────────────────────────────────
+    a_row = b_row = None
+    if not dm.df_standings.empty:
+        am = dm.df_standings[dm.df_standings["teamName"].str.lower().str.contains(team_a.lower(), na=False)]
+        bm = dm.df_standings[dm.df_standings["teamName"].str.lower().str.contains(team_b.lower(), na=False)]
+        if not am.empty: a_row = am.iloc[0]
+        if not bm.empty: b_row = bm.iloc[0]
+
+    if a_row is not None and b_row is not None:
+        def _edge(av, bv, lower_better=False) -> str:
+            try:
+                a, b = float(av), float(bv)
+                better_a = a < b if lower_better else a > b
+                return "✅" if better_a else ("❌" if a != b else "➖")
+            except Exception:
+                return "➖"
+
+        aw = int(a_row.get("totalWins",0)); al = int(a_row.get("totalLosses",0))
+        bw = int(b_row.get("totalWins",0)); bl = int(b_row.get("totalLosses",0))
+        ao = a_row.get("offTotalYdsRank","?"); bo = b_row.get("offTotalYdsRank","?")
+        ad = a_row.get("defTotalYdsRank","?"); bd = b_row.get("defTotalYdsRank","?")
+        at_ = int(a_row.get("tODiff",0)); bt = int(b_row.get("tODiff",0))
+        an_ = int(a_row.get("netPts",0)); bn = int(b_row.get("netPts",0))
+
+        na = team_a[:9]; nb = team_b[:9]
+        lines = [
+            f"```",
+            f"{'Metric':<14} {na:<11} {nb:<11}",
+            f"{'─'*36}",
+            f"{'Record':<14} {f'{aw}-{al}':<11} {f'{bw}-{bl}':<11}",
+            f"{'Off Rank':<14} {f'#{ao}':<11} {f'#{bo}':<11}",
+            f"{'Def Rank':<14} {f'#{ad}':<11} {f'#{bd}':<11}",
+            f"{'TO Diff':<14} {f'{at_:+d}':<11} {f'{bt:+d}':<11}",
+            f"{'Net Pts':<14} {f'{an_:+d}':<11} {f'{bn:+d}':<11}",
+            f"```",
+        ]
+        embed.add_field(
+            name="📈 Season Comparison",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    # ── AI matchup prediction ─────────────────────────────────────────────────
+    if GEMINI_API_KEY and a_row is not None and b_row is not None:
+        try:
+            aw2 = int(a_row.get("totalWins",0)); al2 = int(a_row.get("totalLosses",0))
+            bw2 = int(b_row.get("totalWins",0)); bl2 = int(b_row.get("totalLosses",0))
+            h2h_ctx = f"{a_w}–{b_w} all-time H2H" if total > 0 else "no prior H2H"
+            prompt = (
+                f"You are ATLAS Oracle, TSL matchup intelligence. In exactly 2 sentences, "
+                f"predict {team_a} ({aw2}-{al2}) vs {team_b} ({bw2}-{bl2}). "
+                f"H2H: {h2h_ctx}. "
+                f"{team_a} OFF #{a_row.get('offTotalYdsRank','?')} DEF #{a_row.get('defTotalYdsRank','?')} "
+                f"TO {int(a_row.get('tODiff',0)):+d}. "
+                f"{team_b} OFF #{b_row.get('offTotalYdsRank','?')} DEF #{b_row.get('defTotalYdsRank','?')} "
+                f"TO {int(b_row.get('tODiff',0)):+d}. "
+                f"Name a winner. Give a score prediction. Be decisive."
+            )
+            pred = await _ai_blurb(prompt, max_tokens=110)
+            if pred:
+                embed.add_field(
+                    name="🔬 ATLAS Oracle · Prediction",
+                    value=f"*{pred}*",
+                    inline=False,
+                )
+        except Exception:
+            pass
+
+    embed.set_footer(text="ATLAS™ Oracle · Matchup Intel · Ephemeral", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ── All-Time Records ──────────────────────────────────────────────────────────
+
+def _build_alltime_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🏛️ TSL All-Time Records",
+        description="6 seasons of history — regular season",
+        color=C_GOLD,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    if not _HISTORY_OK:
+        embed.description = "⚠️ History database not available."
+        return embed
+
+    try:
+        # All-time win leaders
+        rows, _ = run_sql("""
+            SELECT winner_user, COUNT(*) AS wins
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex='1'
+              AND winner_user IS NOT NULL AND winner_user != ''
+            GROUP BY winner_user
+            ORDER BY wins DESC
+            LIMIT 5
+        """)
+        if rows:
+            lines = [f"{_rank_emoji(i)} **{r['winner_user']}** — {r['wins']} wins" for i, r in enumerate(rows, 1)]
+            embed.add_field(name="🏆 All-Time Win Leaders", value="\n".join(lines), inline=True)
+
+        # All-time loss leaders (most losses = most games played usually)
+        rows2, _ = run_sql("""
+            SELECT loser_user, COUNT(*) AS losses
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex='1'
+              AND loser_user IS NOT NULL AND loser_user != ''
+            GROUP BY loser_user
+            ORDER BY losses DESC
+            LIMIT 5
+        """)
+        if rows2:
+            lines2 = [f"{_rank_emoji(i)} **{r['loser_user']}** — {r['losses']} losses" for i, r in enumerate(rows2, 1)]
+            embed.add_field(name="💀 Most Losses", value="\n".join(lines2), inline=True)
+
+        # Highest scoring game ever
+        rows3, _ = run_sql("""
+            SELECT homeTeamName, awayTeamName, homeScore, awayScore,
+                   (CAST(homeScore AS INTEGER) + CAST(awayScore AS INTEGER)) AS total,
+                   seasonIndex, weekIndex
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex='1'
+            ORDER BY total DESC
+            LIMIT 1
+        """)
+        if rows3:
+            r = rows3[0]
+            embed.add_field(
+                name="💥 Highest Scoring Game",
+                value=(
+                    f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
+                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['total']} total pts"
+                ),
+                inline=False,
+            )
+
+        # Biggest blowout
+        rows4, _ = run_sql("""
+            SELECT homeTeamName, awayTeamName, homeScore, awayScore,
+                   ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin,
+                   seasonIndex, weekIndex
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex='1'
+            ORDER BY margin DESC
+            LIMIT 1
+        """)
+        if rows4:
+            r = rows4[0]
+            embed.add_field(
+                name="🔨 Biggest Blowout",
+                value=(
+                    f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
+                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['margin']} pt margin"
+                ),
+                inline=True,
+            )
+
+        # Closest game ever
+        rows5, _ = run_sql("""
+            SELECT homeTeamName, awayTeamName, homeScore, awayScore,
+                   ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin,
+                   seasonIndex, weekIndex
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex='1'
+              AND CAST(homeScore AS INTEGER) > 0
+            ORDER BY margin ASC
+            LIMIT 1
+        """)
+        if rows5:
+            r = rows5[0]
+            embed.add_field(
+                name="⚡ Closest Game Ever",
+                value=(
+                    f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
+                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['margin']} pt margin"
+                ),
+                inline=True,
+            )
+
+        # Most active owners (games played)
+        rows6, _ = run_sql("""
+            SELECT owner, COUNT(*) AS games FROM (
+                SELECT homeUser AS owner FROM games WHERE status IN ('2','3') AND stageIndex='1'
+                UNION ALL
+                SELECT awayUser AS owner FROM games WHERE status IN ('2','3') AND stageIndex='1'
+            )
+            WHERE owner IS NOT NULL AND owner != ''
+            GROUP BY owner
+            ORDER BY games DESC
+            LIMIT 5
+        """)
+        if rows6:
+            lines6 = [f"**{r['owner']}** — {r['games']} games" for r in rows6]
+            embed.add_field(name="🎮 Most Active Owners", value="\n".join(lines6), inline=True)
+
+    except Exception as e:
+        embed.add_field(name="⚠️ Error", value=str(e), inline=False)
+
+    embed.set_footer(text="ATLAS™ Oracle · All-Time Records · Seasons 1–6 · Regular Season Only", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TEAM CARD VIEWS + MODALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TeamCardView(discord.ui.View):
+    """
+    Persistent button strip under every team card.
+    Four modes: History · Scouting · Matchup · Refresh
+    """
+
+    def __init__(self, team_name: str, caller_team: str = "", owner_username: str = ""):
+        super().__init__(timeout=300)
+        self.team_name      = team_name
+        self.caller_team    = caller_team
+        self.owner_username = owner_username
+
+    @discord.ui.button(label="📖 History", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_history(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = _build_team_card_history(self.team_name)
+        await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+
+    @discord.ui.button(label="🔬 Scouting", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_scouting(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = _build_team_card_scouting(self.team_name)
+        await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+
+    @discord.ui.button(label="⚔️ Matchup", style=discord.ButtonStyle.primary, row=0)
+    async def btn_matchup(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(
+            TeamMatchupModal(self.team_name, self.caller_team)
+        )
+
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=0)
+    async def btn_refresh(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = await _build_team_card_snapshot(
+            self.team_name, self.caller_team, self.owner_username
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=TeamCardView(self.team_name, self.caller_team, self.owner_username),
+            ephemeral=True,
+        )
+
+
+class TeamMatchupModal(discord.ui.Modal, title="⚔️ Matchup Intel"):
+    opponent = discord.ui.TextInput(
+        label="Opponent Team Name",
+        placeholder="e.g. Cowboys, Ravens, 49ers...",
+        required=True,
+        max_length=50,
+    )
+
+    def __init__(self, team_name: str, caller_team: str = ""):
+        super().__init__()
+        self.team_name   = team_name
+        self.caller_team = caller_team
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = await _build_team_matchup_embed(
+            self.team_name, self.opponent.value.strip()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class TeamSearchModal(discord.ui.Modal, title="🏈 Team Stats Lookup"):
+    """Fallback modal when team can't be auto-detected from profile."""
+    team_name_input = discord.ui.TextInput(
+        label="Team Name",
+        placeholder="e.g. Cowboys, Ravens, 49ers...",
+        required=True,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        name = self.team_name_input.value.strip()
+        embed = await _build_team_card_snapshot(name, caller_team=name)
+        await interaction.followup.send(
+            embed=embed,
+            view=TeamCardView(name, caller_team=name),
+            ephemeral=True,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  MODALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
+    owner1 = discord.ui.TextInput(
+        label="Owner 1",
+        placeholder="Your username or nickname",
+        required=True,
+        max_length=50,
+    )
+    owner2 = discord.ui.TextInput(
+        label="Owner 2",
+        placeholder="Opponent username or nickname",
+        required=True,
+        max_length=50,
+    )
+
+    def __init__(self, default_owner: str):
+        super().__init__()
+        self.owner1.default = default_owner
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Immediate defer — Gemini will take > 3 sec
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        if not _HISTORY_OK:
+            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
+            return
+
+        u1 = fuzzy_resolve_user(self.owner1.value.strip())
+        u2 = fuzzy_resolve_user(self.owner2.value.strip())
+
+        if not u1:
+            await interaction.followup.send(f"❓ Couldn't find `{self.owner1.value}`. Check spelling.", ephemeral=True)
+            return
+        if not u2:
+            await interaction.followup.send(f"❓ Couldn't find `{self.owner2.value}`. Check spelling.", ephemeral=True)
+            return
+
+        rows, err = run_sql(f"""
+            SELECT
+                seasonIndex,
+                SUM(CASE WHEN winner_user='{u1}' THEN 1 ELSE 0 END) AS u1_wins,
+                SUM(CASE WHEN winner_user='{u2}' THEN 1 ELSE 0 END) AS u2_wins,
+                COUNT(*) AS games_played
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex='1'
+              AND ((homeUser='{u1}' AND awayUser='{u2}')
+                OR (homeUser='{u2}' AND awayUser='{u1}'))
+            GROUP BY seasonIndex
+            ORDER BY CAST(seasonIndex AS INTEGER)
+        """)
+
+        embed = discord.Embed(
+            title=f"⚔️ Rivalry Report: {u1} vs {u2}",
+            color=C_RED,
+            timestamp=datetime.datetime.utcnow(),
+        )
+
+        if err or not rows or all(int(r.get("games_played", 0)) == 0 for r in rows):
+            embed.description = (
+                f"📋 No completed regular season games found between **{u1}** and **{u2}**.\n"
+                f"The rivalry that hasn't happened yet..."
+            )
+        else:
+            total_u1    = sum(int(r["u1_wins"]    or 0) for r in rows)
+            total_u2    = sum(int(r["u2_wins"]    or 0) for r in rows)
+            total_games = sum(int(r["games_played"] or 0) for r in rows)
+
+            embed.add_field(
+                name="📊 All-Time Record (Regular Season)",
+                value=f"**{u1}**: {total_u1}W  |  **{u2}**: {total_u2}W  |  {total_games} games",
+                inline=False,
+            )
+
+            breakdown = ""
+            for r in rows:
+                w1 = int(r["u1_wins"] or 0)
+                w2 = int(r["u2_wins"] or 0)
+                marker = "🏆" if w1 > w2 else ("💀" if w2 > w1 else "🤝")
+                breakdown += f"Season {r['seasonIndex']}: **{u1}** {w1}–{w2} **{u2}** {marker}\n"
+            embed.add_field(name="📅 Season-by-Season", value=breakdown or "No data", inline=False)
+
+            # ATLAS flair — non-blocking
+            try:
+                client = _get_gemini_client()
+                if client:
+                    prompt = (
+                        f"You are ATLAS Echo. Write a punchy 2–3 sentence rivalry summary. "
+                        f"{u1} all-time wins: {total_u1}. {u2} all-time wins: {total_u2}. "
+                        f"{total_games} total games. Make it entertaining and use football slang."
+                    )
+                    loop = asyncio.get_running_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: client.models.generate_content(
+                            model="gemini-2.0-flash", contents=prompt
+                        ),
+                    )
+                    embed.add_field(name="🎙️ ATLAS Echo", value=response.text.strip()[:900], inline=False)
+            except Exception:
+                pass
+
+        embed.set_footer(text="Regular season only · All 6 seasons · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ASK ATLAS — MODE SELECTOR + TWO MODALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AskModeView(discord.ui.View):
+    """
+    Step 1: shown when user clicks 🔬 Ask ATLAS.
+    📊 TSL League  → SQL pipeline against tsl_history.db (Codex mode)
+    🌐 Open Intel  → Straight Gemini + web search, no DB (general AI mode)
+    """
+
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="📊 TSL League", style=discord.ButtonStyle.primary, row=0)
+    async def btn_tsl(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(AskTSLModal())
+
+    @discord.ui.button(label="🌐 Open Intel", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_open(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(AskOpenModal())
+
+
+class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
+    """TSL League mode: natural language → SQL → Gemini answer against tsl_history.db."""
+
+    question = discord.ui.TextInput(
+        label="Your TSL Question",
+        placeholder="e.g. Who has the most all-time wins? What's Killa's record vs JT?",
+        required=True,
+        max_length=300,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # CRITICAL: Immediate defer — Gemini always takes > 3 sec
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        if not _HISTORY_OK:
+            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
+            return
+
+        q = self.question.value.strip()
+
+        try:
+            annotated, alias_map = resolve_names_in_question(q)
+            client = _get_gemini_client()
+            if not client:
+                await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
+                return
+
+            sql = await gemini_sql(annotated, client, alias_map)
+            if not sql:
+                await interaction.followup.send(
+                    "📊 Couldn't generate a query for that. Try rephrasing — "
+                    "be specific about player names, seasons, or owners.",
+                    ephemeral=True,
+                )
+                return
+
+            rows, error = run_sql(sql)
+            if error:
+                fix_prompt = (
+                    f"This SQLite query failed:\n{sql}\n\nError: {error}\n\n"
+                    f"Fix it. Return only valid SQLite SQL.\n\nSchema:\n{DB_SCHEMA}"
+                )
+                loop = asyncio.get_running_loop()
+                fix_response = await loop.run_in_executor(
+                    None,
+                    lambda: client.models.generate_content(
+                        model="gemini-2.0-flash", contents=fix_prompt
+                    ),
+                )
+                sql = extract_sql(fix_response.text) or sql
+                rows, error = run_sql(sql)
+                if error:
+                    await interaction.followup.send(
+                        "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
+                    )
+                    return
+
+            answer = await gemini_answer(q, sql, rows, client)
+
+            embed = discord.Embed(
+                title="🔬 ATLAS Intelligence — TSL League",
+                description=answer,
+                color=C_DARK,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            footer_parts = [f"🔍 {len(rows)} records analyzed"]
+            if alias_map:
+                footer_parts.append(
+                    f"🔎 Resolved: {', '.join(f'{k}→{v}' for k, v in alias_map.items())}"
+                )
+            embed.set_footer(
+                text=" | ".join(footer_parts) + " · ATLAS™ Codex",
+                icon_url=ATLAS_ICON_URL,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+
+
+class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
+    """Open Intel mode: straight Gemini + web search. No DB. General knowledge."""
+
+    question = discord.ui.TextInput(
+        label="Your Question",
+        placeholder="e.g. Who is better, Luka or Jokic? Latest NFL news?",
+        required=True,
+        max_length=300,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        q = self.question.value.strip()
+        client = _get_gemini_client()
+        if not client:
+            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
+            return
+
+        try:
+            from google.genai import types
+
+            system_instruction = (
+                "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
+                "You are in Open Intel mode — answering general knowledge and sports questions "
+                "outside the TSL database. "
+                "Always refer to yourself as ATLAS. Keep responses concise and direct (3–5 sentences max). "
+                "Use web search when you need current or factual information. "
+                "Be confident, sharp, and authoritative."
+            )
+
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.5,
+                        tools=[{"google_search": {}}],
+                    ),
+                    contents=q,
+                ),
+            )
+
+            answer = (
+                response.text.strip()
+                if response.text
+                else "ATLAS couldn't pull a response on that one."
+            )
+
+            embed = discord.Embed(
+                title="🌐 ATLAS Intelligence — Open Intel",
+                description=answer,
+                color=C_BLUE,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            embed.set_footer(
+                text="Open Intel mode · Web search enabled · ATLAS™ Oracle",
+                icon_url=ATLAS_ICON_URL,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CASCADING SELECT VIEWS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ClutchMarginView(discord.ui.View):
+    """Clutch margin selector, shown immediately after clicking ⚡ Clutch."""
+
+    def __init__(self, caller_team: str = ""):
+        super().__init__(timeout=120)
+        self.caller_team = caller_team
+
+    @discord.ui.select(
+        placeholder="Select clutch margin...",
+        options=[
+            discord.SelectOption(label="≤1 pt  — Nail-biters only",  value="1"),
+            discord.SelectOption(label="≤3 pts — Super Clutch",       value="3"),
+            discord.SelectOption(label="≤7 pts — Standard",           value="7", default=True),
+            discord.SelectOption(label="≤14 pts — Broad",             value="14"),
+        ],
+    )
+    async def margin_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = _build_clutch_embed(margin=int(select.values[0]), highlight_team=self.caller_team)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class PlayerPositionView(discord.ui.View):
+    """Step 1 of Player Leaders: pick a position group."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.select(
+        placeholder="Select position group...",
+        options=[
+            discord.SelectOption(label="QB — Quarterbacks",   value="QB", emoji="🎯"),
+            discord.SelectOption(label="RB — Running Backs",  value="RB", emoji="🏃"),
+            discord.SelectOption(label="WR — Wide Receivers", value="WR", emoji="🙌"),
+            discord.SelectOption(label="TE — Tight Ends",     value="TE", emoji="🔵"),
+            discord.SelectOption(label="DL — Defensive Line", value="DL", emoji="💪"),
+            discord.SelectOption(label="LB — Linebackers",    value="LB", emoji="⚡"),
+            discord.SelectOption(label="DB — Defensive Backs",value="DB", emoji="🛡️"),
+        ],
+    )
+    async def position_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        position = select.values[0]
+        stats    = PLAYER_STAT_MAP.get(position, [])
+        await interaction.response.send_message(
+            f"**🎯 {position} — Choose a stat category:**",
+            view=PlayerStatView(position, stats),
+            ephemeral=True,
+        )
+
+
+class PlayerStatView(discord.ui.View):
+    """Step 2: pick a stat after choosing position group."""
+
+    def __init__(self, position: str, stats: list[tuple[str, str]]):
+        super().__init__(timeout=120)
+        self.position = position
+        # Dynamically set options based on position
+        self.stat_select.options = [
+            discord.SelectOption(label=label, value=col) for col, label in stats[:25]
+        ]
+
+    @discord.ui.select(
+        placeholder="Select stat...",
+        options=[discord.SelectOption(label="Loading...", value="_placeholder")],
+    )
+    async def stat_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        stat_col   = select.values[0]
+        stat_label = next(
+            (label for col, label in PLAYER_STAT_MAP.get(self.position, []) if col == stat_col),
+            stat_col,
+        )
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        embed, player_names = _build_player_leaders_embed(self.position, stat_col, stat_label)
+        if player_names:
+            await interaction.followup.send(embed=embed, view=PlayerDrillView(player_names), ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class PlayerDrillView(discord.ui.View):
+    """Step 3: select a player from the top-10 for a Hot/Cold deep dive."""
+
+    def __init__(self, player_names: list[str]):
+        super().__init__(timeout=120)
+        self.player_select.options = [
+            discord.SelectOption(label=name[:100], value=name[:100])
+            for name in player_names[:25]
+        ]
+
+    @discord.ui.select(placeholder="Drill into a player's Hot/Cold...")
+    async def player_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        player_name = select.values[0]
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        data = ig.get_hot_cold(player_name, last_n=3)
+        if "error" in data:
+            await interaction.followup.send(f"❌ {data['error']}", ephemeral=True)
+            return
+
+        embed = _build_hotcold_single(data)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class DraftSeasonView(discord.ui.View):
+    """Season selector for Draft History."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+        options = [discord.SelectOption(label="All Seasons Overview", value="0")] + [
+            discord.SelectOption(label=f"Season {s}", value=str(s))
+            for s in range(1, dm.CURRENT_SEASON + 1)
+        ]
+        self.season_select.options = options
+
+    @discord.ui.select(placeholder="Select season...")
+    async def season_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        season = int(select.values[0])
+        if season == 0:
+            embed  = _build_draft_overview_embed()
+            embeds = [embed]
+        else:
+            embeds = _build_draft_season_embeds(season)
+        await interaction.followup.send(embeds=embeds, view=DraftSeasonView(), ephemeral=True)
+
+
+class WeekRecapView(discord.ui.View):
+    """Week selector for Recap."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+        options = [
+            discord.SelectOption(label=f"Week {w}", value=str(w))
+            for w in range(1, dm.CURRENT_WEEK + 1)
+        ]
+        # Only send the 25 most recent weeks (Discord limit)
+        self.week_select.options = options[-25:] if options else [
+            discord.SelectOption(label="Week 1", value="1")
+        ]
+
+    @discord.ui.select(placeholder="Select a week...")
+    async def week_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = _build_recap_embed(week=int(select.values[0]))
+        await interaction.followup.send(embed=embed, view=WeekRecapView(), ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SEASON RECAP MODAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
+    season = discord.ui.TextInput(
+        label="Season Number",
+        placeholder=f"1–{dm.CURRENT_SEASON}",
+        required=True,
+        max_length=3,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            season_num = int(self.season.value.strip())
+        except ValueError:
+            await interaction.followup.send("❌ Please enter a valid season number.", ephemeral=True)
+            return
+
+        if season_num < 1 or season_num > dm.CURRENT_SEASON:
+            await interaction.followup.send(
+                f"❌ Valid seasons are **1** through **{dm.CURRENT_SEASON}**.", ephemeral=True
+            )
+            return
+
+        if not _HISTORY_OK:
+            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
+            return
+
+        rows, _ = run_sql(f"""
+            SELECT winner_user, loser_user, winner_team, loser_team,
+                   homeScore, awayScore, weekIndex
+            FROM games
+            WHERE seasonIndex='{season_num}' AND stageIndex='1' AND status IN ('2','3')
+            ORDER BY CAST(weekIndex AS INTEGER)
+        """)
+
+        wins: Counter = Counter()
+        losses: Counter = Counter()
+        for r in rows or []:
+            if r.get("winner_user"):
+                wins[r["winner_user"]] += 1
+            if r.get("loser_user"):
+                losses[r["loser_user"]] += 1
+
+        leaderboard = sorted(wins.keys(), key=lambda u: wins[u], reverse=True)[:5]
+        top_str = "\n".join(f"**{u}**: {wins[u]}W–{losses.get(u, 0)}L" for u in leaderboard)
+
+        embed = discord.Embed(
+            title=f"📅 TSL Season {season_num} Recap",
+            color=ATLAS_GOLD,
+            timestamp=datetime.datetime.utcnow(),
+        )
+
+        if not rows:
+            embed.description = f"No completed regular-season games found for Season {season_num}."
+        else:
+            embed.add_field(
+                name="🏆 Top 5 Records",
+                value=top_str or "No data",
+                inline=False,
+            )
+            embed.add_field(
+                name="📊 Games Played",
+                value=f"{len(rows)} regular-season games",
+                inline=False,
+            )
+
+            # ATLAS AI flair — non-blocking
+            try:
+                client = _get_gemini_client()
+                if client:
+                    prompt = (
+                        f"You are ATLAS Echo. Write a vivid 3–4 sentence recap of TSL Season {season_num}. "
+                        f"Total games: {len(rows)}. Top records:\n{top_str}\n"
+                        f"Highlight who dominated, any notable storylines, and tease the playoff picture. "
+                        f"Keep it punchy and entertaining."
+                    )
+                    loop = asyncio.get_running_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: client.models.generate_content(
+                            model="gemini-2.0-flash", contents=prompt
+                        ),
+                    )
+                    embed.add_field(
+                        name="🎙️ ATLAS Echo",
+                        value=response.text.strip()[:900],
+                        inline=False,
+                    )
+            except Exception:
+                pass
+
+        embed.set_footer(
+            text=f"ATLAS™ Oracle · Season {season_num} · Regular season only",
+            icon_url=ATLAS_ICON_URL,
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  HUB VIEW — persistent button navigation
+#  timeout=None + custom_id on every button = survives bot restarts
+# ─────────────────────────────────────────────────────────────────────────────
+
+class HubView(discord.ui.View):
+    """
+    Persistent 13-button navigation view.
+    - timeout=None              buttons never expire on their own
+    - custom_id on each button  bot can re-register on restart
+    - All drill-downs ephemeral no channel flood
+    """
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    # ── Row 0: League-wide ────────────────────────────────────────────────────
+
+    @discord.ui.button(
+        label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:hotcold",
+    )
+    async def btn_hotcold(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed, player_names = _build_hotcold_league()
+        if player_names:
+            await interaction.followup.send(embed=embed, view=PlayerDrillView(player_names), ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="⚡ Clutch", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:clutch",
+    )
+    async def btn_clutch(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        _, caller_team = _resolve_owner_team(interaction)
+        await interaction.response.send_message(
+            "**⚡ Clutch Rankings — Select a margin:**",
+            view=ClutchMarginView(caller_team=caller_team),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="📊 Power", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:power",
+    )
+    async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.followup.send(embed=_build_power_embed(), ephemeral=True)
+
+    @discord.ui.button(
+        label="🏆 Standings", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:standings",
+    )
+    async def btn_standings(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        _, caller_team = _resolve_owner_team(interaction)
+        await interaction.followup.send(
+            embed=_build_standings_embed(caller_team=caller_team), ephemeral=True
+        )
+
+    # ── Row 1: Personal / Matchups ────────────────────────────────────────────
+
+    @discord.ui.button(
+        label="👤 My Profile", style=discord.ButtonStyle.primary,
+        row=1, custom_id="hub:profile",
+    )
+    async def btn_profile(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = await _build_owner_embed(interaction.user, interaction.guild)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="🆚 Head-to-Head", style=discord.ButtonStyle.primary,
+        row=1, custom_id="oracle:h2h",
+    )
+    async def btn_h2h(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        # Modal handles its own defer — send modal directly, no defer before
+        await interaction.response.send_modal(H2HModal(default_owner=interaction.user.name))
+
+    @discord.ui.button(
+        label="📅 Recap", style=discord.ButtonStyle.secondary,
+        row=1, custom_id="hub:recap",
+    )
+    async def btn_recap(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = _build_recap_embed()
+        await interaction.followup.send(embed=embed, view=WeekRecapView(), ephemeral=True)
+
+    @discord.ui.button(
+        label="📜 Draft", style=discord.ButtonStyle.secondary,
+        row=1, custom_id="hub:draft",
+    )
+    async def btn_draft(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        embed = _build_draft_overview_embed()
+        await interaction.followup.send(embed=embed, view=DraftSeasonView(), ephemeral=True)
+
+    # ── Row 2: Deep Dives ─────────────────────────────────────────────────────
+
+    @discord.ui.button(
+        label="🎯 Players", style=discord.ButtonStyle.secondary,
+        row=2, custom_id="hub:players",
+    )
+    async def btn_players(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_message(
+            "**🎯 Player Leaders — Select a position group:**",
+            view=PlayerPositionView(),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="🏈 Team Stats", style=discord.ButtonStyle.secondary,
+        row=2, custom_id="hub:teamstats",
+    )
+    async def btn_teamstats(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        username, caller_team = _resolve_owner_team(interaction)
+        if caller_team:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            embed = await _build_team_card_snapshot(
+                caller_team, caller_team=caller_team, owner_username=username
+            )
+            await interaction.followup.send(
+                embed=embed,
+                view=TeamCardView(caller_team, caller_team=caller_team, owner_username=username),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_modal(TeamSearchModal())
+
+    @discord.ui.button(
+        label="🏛️ All-Time", style=discord.ButtonStyle.secondary,
+        row=2, custom_id="hub:alltime",
+    )
+    async def btn_alltime(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.followup.send(embed=_build_alltime_embed(), ephemeral=True)
+
+    @discord.ui.button(
+        label="📅 Season Recap", style=discord.ButtonStyle.success,
+        row=2, custom_id="oracle:season_recap",
+    )
+    async def btn_season_recap(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(SeasonRecapModal())
+
+    @discord.ui.button(
+        label="🔬 Ask ATLAS", style=discord.ButtonStyle.success,
+        row=3, custom_id="hub:ask",
+    )
+    async def btn_ask(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        # Show mode selector — user picks TSL League or Open Intel before typing question
+        await interaction.response.send_message(
+            "**🔬 Ask ATLAS — Choose your mode:**\n"
+            "`📊 TSL League` — Query the TSL history database\n"
+            "`🌐 Open Intel` — General knowledge, sports, anything",
+            view=AskModeView(),
+            ephemeral=True,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COG
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StatsHubCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        # Re-register HubView on startup so persistent buttons survive restarts
+        self.bot.add_view(HubView(bot))
+
+    stats = app_commands.Group(
+        name="stats",
+        description="TSL Stats Hub — stats, profiles, history, and AI queries.",
+    )
+
+    # ── /stats hub ─────────────────────────────────────────────────────────────
+    @stats.command(name="hub", description="Open the TSL Stats Hub (public).")
+    async def hub(self, interaction: discord.Interaction):
+        embed = _build_hub_embed()
+        view  = HubView(self.bot)
+        await interaction.response.send_message(embed=embed, view=view)  # PUBLIC — no ephemeral
+
+    # ── /stats team ────────────────────────────────────────────────────────────
+    @stats.command(name="team", description="Look up any team's stat card.")
+    @app_commands.describe(team="Team name (partial match OK)")
+    async def team(self, interaction: discord.Interaction, team: str):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        username, caller_team = _resolve_owner_team(interaction)
+        team_name = team.strip()
+        embed = await _build_team_card_snapshot(
+            team_name, caller_team=caller_team, owner_username=username
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=TeamCardView(team_name, caller_team=caller_team, owner_username=username),
+            ephemeral=True,
+        )
+
+    # ── /stats owner ───────────────────────────────────────────────────────────
+    @stats.command(name="owner", description="Look up an owner's profile card.")
+    @app_commands.describe(user="Discord user (leave blank for yourself)")
+    async def owner(
+        self,
+        interaction: discord.Interaction,
+        user: Optional[discord.Member] = None,
+    ):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        target = user or interaction.user
+        embed  = await _build_owner_embed(target, interaction.guild)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── /stats hotcold ────────────────────────────────────────────────────────
+
+    @stats.command(name="hotcold", description="Hot/Cold report — league-wide or single player trend.")
+    @app_commands.describe(player="Player name (leave blank for league-wide report)")
+    async def hotcold(self, interaction: discord.Interaction, player: Optional[str] = None):
+        if player:
+            tier = _get_user_tier(self.bot, interaction.user.id)
+            if tier not in ["Pro", "Elite"]:
+                await interaction.response.send_message("🔒 **Pro Tier Required.** Use `/membership info` to unlock deep-dive player trend analysis.", ephemeral=True)
+                return
+            
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            data = ig.get_hot_cold(player.strip(), last_n=3)
+            if "error" in data:
+                return await interaction.followup.send(
+                    f"❌ {data['error']}\n\nTry a full or partial player name.",
+                    ephemeral=True
+                )
+            embed = _build_hotcold_single(data)
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            embed = _build_hotcold_league()
+
+        view = AnalyticsNav(self.bot, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /stats clutch ─────────────────────────────────────────────────────────
+
+    @stats.command(name="clutch", description="Clutch rankings — records in close games (Pro/Elite).")
+    @app_commands.describe(margin="Point margin for 'clutch' games (default: 7)")
+    async def clutch(self, interaction: discord.Interaction, margin: Optional[int] = 7):
+        tier = _get_user_tier(self.bot, interaction.user.id)
+        if tier not in ["Pro", "Elite"]:
+            await interaction.response.send_message("🔒 **Pro Tier Required.** Use `/membership info` to unlock Clutch Rankings.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_clutch_embed(margin=margin or 7)
+        view  = AnalyticsNav(self.bot, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /stats draft ──────────────────────────────────────────────────────────
+
+    @stats.command(name="draft", description="Draft class report — grades, steals, busts.")
+    @app_commands.describe(season="Season number (leave blank for all-class comparison)")
+    async def draft(self, interaction: discord.Interaction, season: Optional[int] = None):
+        if season:
+            tier = _get_user_tier(self.bot, interaction.user.id)
+            if tier not in ["Pro", "Elite"]:
+                await interaction.response.send_message("🔒 **Pro Tier Required.** Use `/membership info` to unlock specific Draft Class deep-dives.", ephemeral=True)
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            embeds = _build_draft_embed(season)
+            view   = AnalyticsNav(self.bot, interaction.user.id)
+            await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            embed = _build_draft_comparison_embed()
+            view  = AnalyticsNav(self.bot, interaction.user.id)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /stats power ──────────────────────────────────────────────────────────
+
+    @stats.command(name="power", description="Live composite power rankings for all 32 teams.")
+    async def power(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_power_embed()
+        view  = AnalyticsNav(self.bot, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /stats recap ──────────────────────────────────────────────────────────
+
+    @stats.command(name="recap", description="Weekly game recap with scores and highlights.")
+    @app_commands.describe(week="Week number (leave blank for most recent)")
+    async def recap(self, interaction: discord.Interaction, week: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_recap_embed(week=week)
+        view  = AnalyticsNav(self.bot, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+    # ── /stats player ──────────────────────────────────────────────────────────
+    @stats.command(name="player", description="Hot/Cold breakdown for a specific player.")
+    @app_commands.describe(player="Player name (partial match OK)")
+    async def player(self, interaction: discord.Interaction, player: str):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        data = ig.get_hot_cold(player.strip(), last_n=3)
+        if "error" in data:
+            await interaction.followup.send(
+                f"❌ {data['error']}\n\nTry a full or partial player name.", ephemeral=True
+            )
+            return
+        embed = _build_hotcold_single(data)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SETUP
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(StatsHubCog(bot))
+    print("ATLAS: Oracle Module loaded. 🔬")

@@ -1,2 +1,20 @@
 
 .env
+__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+*.db.tmp
+.echo_cache/
+.tmp.driveupload/
+.claude/
+db_backups/
+ngrok.exe
+ATLAS_Full_Code.txt
+WittGPT_Full_Code.txt
+nightly-session-*.md
+standings.json
+trade_state.json
+polls_state.json
+Quarantine_Archive/

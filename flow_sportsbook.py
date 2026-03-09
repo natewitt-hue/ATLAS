@@ -1,0 +1,2535 @@
+"""
+flow_sportsbook.py — ATLAS · Flow Module · Sportsbook v5.0
+─────────────────────────────────────────────────────────────────────────────
+ODDS ENGINE v5 — Elo-Based Power Rankings
+  · _compute_elo_ratings(): processes tsl_history.db games chronologically,
+    builds per-owner Elo ratings with margin-of-victory multiplier,
+    K-factor scaling, and season regression. Filters out CPU games.
+  · _team_quality_score(): current team quality from OVR + off/def ranks
+  · _combined_power(): 80% owner Elo + 20% team quality → 0-100 power score
+  · _calc_spread(): (away_power - home_power) / scaling_factor, HFE only
+    when home is already favored, capped ±21.0
+  · _spread_to_ml(): spread → American ML odds (extended table)
+  · _calc_ou(): owner historical avg pts ± rank adjustments, ceiling 99.5
+  · _build_game_lines(): admin line_overrides applied first, engine fallback
+
+ADMIN MANAGEMENT SUITE (Commissioner role or ADMIN_USER_IDS):
+  /sb_status    — Overview of all current-week games, lines, locks, bet counts
+  /sb_lines     — Debug view: per-game power ratings + component breakdown
+  /sb_setspread — Override spread (auto-recalculates ML from new spread)
+  /sb_setml     — Override moneylines manually
+  /sb_setou     — Override O/U total
+  /sb_lock      — Lock / unlock a single game
+  /sb_lockall   — Lock all current-week games at once
+  /sb_unlockall — Unlock all current-week games at once
+  /sb_cancelgame — Void & refund all pending bets on one game
+  /sb_refund    — Refund a single bet by ID
+  /sb_balance   — Manually adjust a member's TSL Bucks
+  /sb_resetlines — Wipe all admin line overrides for the current week
+  /sb_addprop   — Create a custom prop bet with two options
+  /sb_settleprop — Settle a prop bet and pay out winners
+  /grade_bets   — Manual commissioner bet settlement (unchanged)
+
+USER COMMANDS:
+  /sportsbook   — Current-week betting board (spread, ML, O/U, parlay)
+                  Board buttons: My Bets · History · Leaderboard · Props
+
+CHANGES v5.0 vs v4.0:
+  BREAK ENTIRE odds engine replaced with Elo-based power rankings
+  BREAK spread sign convention FIXED (was inverted — wrong team was favored)
+  BREAK HOME_FIELD_EDGE now conditional (only applied when home is favored)
+  BREAK SPREAD_CAP raised 14.5 → 21.0 (Madden has wider margins)
+  BREAK O/U ceiling raised 72.0 → 99.5 (high-scoring Madden games hit 90+)
+  BREAK O/U multipliers boosted (off: 0.28→0.35, def: 0.18→0.22)
+  ADD  _compute_elo_ratings() — full Elo system from tsl_history.db
+  ADD  _team_quality_score() — OVR + off/def rank composite
+  ADD  _combined_power() — 80% owner Elo + 20% team quality
+  ADD  _safe_float()/_safe_int() — fixes Python `or` falsiness bug where
+       0.0 win% or 0 rank was silently replaced with defaults
+  FIX  CPU games filtered from Elo history (98 games were inflating stats)
+  FIX  Only status='3' (final) games used in Elo computation
+  FIX  ML table extended for spreads up to 21+ points
+  KEEP all admin commands, UI components, grading logic unchanged
+─────────────────────────────────────────────────────────────────────────────
+"""
+
+import asyncio
+import json
+import math
+import os
+import sqlite3
+import uuid
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+import data_manager as dm
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+_DIR              = os.path.dirname(os.path.abspath(__file__))
+DB_PATH           = os.path.join(_DIR, "sportsbook.db")
+HISTORY_DB_PATH   = os.path.join(_DIR, "tsl_history.db")
+
+TSL_GOLD          = 0xD4AF37
+TSL_BLACK         = 0x1A1A1A
+TSL_RED           = 0xC0392B
+TSL_GREEN         = 0x27AE60
+
+ADMIN_ROLE_NAME   = "Commissioner"
+ADMIN_USER_IDS    = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+
+STARTING_BALANCE  = 1000
+MIN_BET           = 10
+MAX_PARLAY_LEGS   = 6
+HOME_FIELD_EDGE   = 2.0       # pts advantage — only applied when home is already favored
+SPREAD_CAP        = 21.0      # max absolute spread value (Madden has wider margins)
+OU_FLOOR          = 35.0      # minimum O/U total
+OU_CEILING        = 99.5      # maximum O/U total (Madden games can hit 90+)
+_DB_TIMEOUT       = 10
+
+# Elo system constants
+ELO_INITIAL       = 1500
+ELO_K_NEW         = 32        # K-factor for owners with < 20 games
+ELO_K_MID         = 24        # K-factor for owners with 20-50 games
+ELO_K_EST         = 20        # K-factor for owners with 50+ games
+ELO_SEASON_REGRESS = 0.75     # regress 25% toward 1500 each new season
+ELO_OWNER_WEIGHT  = 0.80      # owner skill weight in combined power
+ELO_TEAM_WEIGHT   = 0.20      # team quality weight in combined power
+SPREAD_SCALING    = 4.0       # divisor: Elo-based power diff → spread points
+
+SPORTSBOOK_VERSION = "v5.0"
+print(f"[SPORTSBOOK] Loading {SPORTSBOOK_VERSION}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  ADMIN HELPER
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _is_admin(interaction: discord.Interaction) -> bool:
+    """True if user has Commissioner role OR is in ADMIN_USER_IDS."""
+    if interaction.user.id in ADMIN_USER_IDS:
+        return True
+    return any(r.name == ADMIN_ROLE_NAME for r in getattr(interaction.user, "roles", []))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  DATABASE SETUP
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _db_con() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT)
+    con.execute("PRAGMA journal_mode=WAL")
+    return con
+
+
+def setup_db():
+    with _db_con() as con:
+        # ── Core tables ───────────────────────────────────────────────────
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS users_table (
+                discord_id           INTEGER PRIMARY KEY,
+                balance              INTEGER DEFAULT 1000,
+                season_start_balance INTEGER DEFAULT 1000
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS bets_table (
+                bet_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id   INTEGER,
+                week         INTEGER,
+                matchup      TEXT,
+                bet_type     TEXT,
+                wager_amount INTEGER,
+                odds         INTEGER,
+                pick         TEXT,
+                line         REAL,
+                status       TEXT DEFAULT 'Pending',
+                parlay_id    TEXT DEFAULT NULL,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS parlays_table (
+                parlay_id     TEXT PRIMARY KEY,
+                discord_id    INTEGER,
+                week          INTEGER,
+                legs          TEXT,
+                combined_odds INTEGER,
+                wager_amount  INTEGER,
+                status        TEXT DEFAULT 'Pending',
+                created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS games_state (
+                game_id TEXT PRIMARY KEY,
+                locked  INTEGER DEFAULT 0
+            )
+        """)
+
+        # ── NEW v4.0: Line override table ─────────────────────────────────
+        # Stores admin-set lines; NULL = use engine value
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS line_overrides (
+                game_id     TEXT PRIMARY KEY,
+                home_spread REAL    DEFAULT NULL,
+                away_spread REAL    DEFAULT NULL,
+                home_ml     INTEGER DEFAULT NULL,
+                away_ml     INTEGER DEFAULT NULL,
+                ou_line     REAL    DEFAULT NULL,
+                set_by      TEXT    DEFAULT NULL,
+                set_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── NEW v4.0: Prop bets ───────────────────────────────────────────
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS prop_bets (
+                prop_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                week        INTEGER,
+                description TEXT,
+                option_a    TEXT,
+                option_b    TEXT,
+                odds_a      INTEGER DEFAULT -110,
+                odds_b      INTEGER DEFAULT -110,
+                status      TEXT    DEFAULT 'Open',
+                result      TEXT    DEFAULT NULL,
+                created_by  TEXT    DEFAULT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS prop_wagers (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                prop_id      INTEGER,
+                discord_id   INTEGER,
+                pick         TEXT,
+                wager_amount INTEGER,
+                odds         INTEGER,
+                status       TEXT DEFAULT 'Pending',
+                placed_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # ── Migration guards ──────────────────────────────────────────────
+        for stmt in [
+            "ALTER TABLE users_table ADD COLUMN season_start_balance INTEGER DEFAULT 1000",
+            "ALTER TABLE bets_table ADD COLUMN parlay_id TEXT DEFAULT NULL",
+            "ALTER TABLE bets_table ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        ]:
+            try:
+                con.execute(stmt)
+            except Exception:
+                pass
+
+        # Migrate old ou_line column from games_state → line_overrides
+        try:
+            old_rows = con.execute(
+                "SELECT game_id, ou_line FROM games_state WHERE ou_line IS NOT NULL AND ou_line > 0"
+            ).fetchall()
+            for gid, ou in old_rows:
+                con.execute(
+                    "INSERT OR IGNORE INTO line_overrides (game_id, ou_line, set_by) VALUES (?, ?, 'migrated')",
+                    (gid, ou)
+                )
+            if old_rows:
+                print(f"[SB] Migrated {len(old_rows)} ou_line entries → line_overrides")
+        except Exception:
+            pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  DB HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _get_balance(uid: int) -> int:
+    with _db_con() as con:
+        res = con.execute("SELECT balance FROM users_table WHERE discord_id=?", (uid,)).fetchone()
+        if not res:
+            con.execute(
+                "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?, ?, ?)",
+                (uid, STARTING_BALANCE, STARTING_BALANCE)
+            )
+            return STARTING_BALANCE
+        return res[0]
+
+
+def _update_balance(uid: int, delta: int, con=None):
+    def _run(c):
+        if not c.execute("SELECT 1 FROM users_table WHERE discord_id=?", (uid,)).fetchone():
+            c.execute(
+                "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?, ?, ?)",
+                (uid, STARTING_BALANCE + delta, STARTING_BALANCE)
+            )
+        else:
+            c.execute("UPDATE users_table SET balance = balance + ? WHERE discord_id=?", (delta, uid))
+    if con:
+        _run(con)
+    else:
+        with _db_con() as c:
+            _run(c)
+
+
+def _is_locked(game_id: str) -> bool:
+    with _db_con() as con:
+        res = con.execute("SELECT locked FROM games_state WHERE game_id=?", (game_id,)).fetchone()
+        return bool(res[0]) if res else False
+
+
+def _set_locked(game_id: str, locked: bool):
+    with _db_con() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO games_state (game_id, locked) VALUES (?, ?)",
+            (game_id, int(locked))
+        )
+
+
+def _get_line_override(game_id: str) -> dict | None:
+    """Return admin line overrides for a game, or None if not set."""
+    with _db_con() as con:
+        res = con.execute(
+            "SELECT home_spread, away_spread, home_ml, away_ml, ou_line "
+            "FROM line_overrides WHERE game_id=?",
+            (game_id,)
+        ).fetchone()
+    if not res:
+        return None
+    return {
+        "home_spread": res[0],
+        "away_spread": res[1],
+        "home_ml":     res[2],
+        "away_ml":     res[3],
+        "ou_line":     res[4],
+    }
+
+
+def _set_line_override(game_id: str, set_by: str, **kwargs):
+    """
+    Upsert line override fields. Pass only the fields you want to change.
+    Accepted kwargs: home_spread, away_spread, home_ml, away_ml, ou_line
+    """
+    allowed = {"home_spread", "away_spread", "home_ml", "away_ml", "ou_line"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return
+
+    with _db_con() as con:
+        con.execute(
+            "INSERT OR IGNORE INTO line_overrides (game_id, set_by) VALUES (?, ?)",
+            (game_id, set_by)
+        )
+        for col, val in updates.items():
+            con.execute(
+                f"UPDATE line_overrides SET {col}=?, set_by=?, set_at=CURRENT_TIMESTAMP "
+                f"WHERE game_id=?",
+                (val, set_by, game_id)
+            )
+
+
+def _clear_line_overrides_for_week(week: int):
+    """Remove all line overrides for games in the given week (uses game_id prefix match)."""
+    # game_ids are stored as strings matching game API IDs; we clear by scanning games_state
+    with _db_con() as con:
+        con.execute("DELETE FROM line_overrides")
+    print(f"[SB] Cleared all line overrides")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  ODDS ENGINE v5 — Elo-Based Power Rankings
+# ═════════════════════════════════════════════════════════════════════════════
+
+_ELO_CACHE: dict          = {}     # { userName: elo_rating }
+_OWNER_SCORING_CACHE: dict = {}    # { userName: { avg_scored, avg_allowed, games } }
+_LEAGUE_AVG_SCORE: float  = 30.0   # per-team avg, calibrated from history DB
+_MIDPOINT_RANK            = 16.5   # midpoint of 1–32
+
+
+def _invalidate_elo_cache():
+    global _ELO_CACHE, _OWNER_SCORING_CACHE
+    _ELO_CACHE = {}
+    _OWNER_SCORING_CACHE = {}
+
+
+def _compute_elo_ratings() -> dict:
+    """
+    Build Elo ratings for all owners from tsl_history.db.
+
+    Processes every completed game chronologically, updating owner Elo after each.
+    Applies season regression (25% toward 1500) at each season boundary.
+
+    Filters:
+      - Only status='3' (final) games
+      - Excludes CPU games and games with empty owners
+
+    Returns { userName: elo_float } and populates _OWNER_SCORING_CACHE as side-effect.
+    """
+    global _ELO_CACHE, _OWNER_SCORING_CACHE, _LEAGUE_AVG_SCORE
+    if _ELO_CACHE:
+        return _ELO_CACHE
+
+    elo: dict[str, float]  = {}    # userName → current Elo
+    games_played: dict[str, int] = {}  # userName → total games processed
+    scoring: dict[str, dict] = {}  # userName → { pts_scored, pts_allowed, games }
+
+    try:
+        con = sqlite3.connect(HISTORY_DB_PATH, timeout=5)
+        con.execute("PRAGMA journal_mode=WAL")
+
+        rows = con.execute("""
+            SELECT homeUser, awayUser,
+                   CAST(homeScore AS INTEGER) AS hs,
+                   CAST(awayScore AS INTEGER) AS aws,
+                   CAST(seasonIndex AS INTEGER) AS season,
+                   CAST(weekIndex AS INTEGER) AS week
+            FROM games
+            WHERE CAST(status AS TEXT) = '3'
+              AND homeUser IS NOT NULL AND homeUser != '' AND homeUser != 'CPU'
+              AND awayUser IS NOT NULL AND awayUser != '' AND awayUser != 'CPU'
+              AND homeScore IS NOT NULL AND CAST(homeScore AS INTEGER) >= 0
+            ORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)
+        """).fetchall()
+        con.close()
+
+        total_pts = 0
+        total_games = 0
+        prev_season = None
+
+        for home_user, away_user, hs, aws, season, week in rows:
+            # Season regression at boundary
+            if prev_season is not None and season != prev_season:
+                for user in elo:
+                    elo[user] = ELO_INITIAL + ELO_SEASON_REGRESS * (elo[user] - ELO_INITIAL)
+            prev_season = season
+
+            # Initialize new owners
+            for user in (home_user, away_user):
+                if user not in elo:
+                    elo[user] = ELO_INITIAL
+                    games_played[user] = 0
+
+            # Get current Elos
+            h_elo = elo[home_user]
+            a_elo = elo[away_user]
+
+            # Expected scores (standard Elo formula)
+            exp_h = 1.0 / (1.0 + 10.0 ** ((a_elo - h_elo) / 400.0))
+            exp_a = 1.0 - exp_h
+
+            # Actual outcome
+            if hs > aws:
+                act_h, act_a = 1.0, 0.0
+            elif aws > hs:
+                act_h, act_a = 0.0, 1.0
+            else:
+                act_h, act_a = 0.5, 0.5
+
+            # Margin of Victory multiplier (dampens blowouts)
+            margin = abs(hs - aws)
+            mov_mult = math.log(margin + 1) * 0.8 if margin > 0 else 0.5
+
+            # K-factor based on games played
+            for user, actual, expected in [
+                (home_user, act_h, exp_h),
+                (away_user, act_a, exp_a),
+            ]:
+                gp = games_played[user]
+                if gp < 20:
+                    k = ELO_K_NEW
+                elif gp < 50:
+                    k = ELO_K_MID
+                else:
+                    k = ELO_K_EST
+                elo[user] += k * mov_mult * (actual - expected)
+                games_played[user] += 1
+
+            # Track scoring stats for O/U
+            for user, scored, allowed in [
+                (home_user, hs, aws),
+                (away_user, aws, hs),
+            ]:
+                d = scoring.setdefault(user, {"pts_scored": 0, "pts_allowed": 0, "games": 0})
+                d["pts_scored"]  += scored
+                d["pts_allowed"] += allowed
+                d["games"]       += 1
+
+            total_pts   += hs + aws
+            total_games += 1
+
+        # Calibrate league average from actual data
+        if total_games >= 10:
+            _LEAGUE_AVG_SCORE = round((total_pts / total_games) / 2, 2)
+            print(f"[ELO] League avg pts/team: {_LEAGUE_AVG_SCORE:.1f} ({total_games} games)")
+        else:
+            _LEAGUE_AVG_SCORE = 30.0
+            print(f"[ELO] Not enough history — using fallback {_LEAGUE_AVG_SCORE}")
+
+    except Exception as e:
+        print(f"[ELO] History query failed: {e}")
+        _LEAGUE_AVG_SCORE = 30.0
+
+    # Compute per-owner derived scoring stats
+    for user, d in scoring.items():
+        g = max(d["games"], 1)
+        d["avg_pts_scored"]  = round(d["pts_scored"]  / g, 2)
+        d["avg_pts_allowed"] = round(d["pts_allowed"] / g, 2)
+
+    _ELO_CACHE = elo
+    _OWNER_SCORING_CACHE = scoring
+
+    # Log top/bottom Elo ratings
+    sorted_elo = sorted(elo.items(), key=lambda x: x[1], reverse=True)
+    print(f"[ELO] Ratings computed for {len(elo)} owners")
+    for user, rating in sorted_elo[:5]:
+        gp = games_played.get(user, 0)
+        print(f"  TOP  {user}: {rating:.0f} ({gp} games)")
+    for user, rating in sorted_elo[-3:]:
+        gp = games_played.get(user, 0)
+        print(f"  BOT  {user}: {rating:.0f} ({gp} games)")
+
+    return elo
+
+
+def _safe_float(val, default: float) -> float:
+    """Convert value to float, returning default only if val is None or empty string."""
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val, default: int) -> int:
+    """Convert value to int, returning default only if val is None or empty string."""
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _resolve_elo(username: str, elo_map: dict) -> float:
+    """Fuzzy username lookup for Elo — handles underscore/case differences."""
+    if not username:
+        return ELO_INITIAL
+    if username in elo_map:
+        return elo_map[username]
+    norm = username.lower().replace("_", "").replace(" ", "")
+    for key, val in elo_map.items():
+        if key.lower().replace("_", "").replace(" ", "") == norm:
+            return val
+    return ELO_INITIAL
+
+
+def _resolve_scoring(username: str) -> dict:
+    """Get owner scoring stats, with fuzzy matching."""
+    defaults = {"avg_pts_scored": _LEAGUE_AVG_SCORE, "avg_pts_allowed": _LEAGUE_AVG_SCORE, "games": 0}
+    if not username:
+        return defaults
+    cache = _OWNER_SCORING_CACHE
+    if username in cache:
+        return cache[username]
+    norm = username.lower().replace("_", "").replace(" ", "")
+    for key, val in cache.items():
+        if key.lower().replace("_", "").replace(" ", "") == norm:
+            return val
+    return defaults
+
+
+def _get_power_map() -> dict:
+    """Build { teamName: { ovr, win_pct, rank, off_rank, def_rank, userName } } from df_power.
+
+    Uses _safe_float/_safe_int to avoid the Python `or` falsiness bug where
+    legitimate 0 values (e.g. 0.000 win%) were silently replaced with defaults.
+    """
+    pm = {}
+    if dm.df_power.empty:
+        return pm
+    for _, row in dm.df_power.iterrows():
+        name = row.get("teamName", "")
+        if not name:
+            continue
+        pm[name] = {
+            "ovr":      _safe_float(row.get("ovrRating"),     78.0),
+            "win_pct":  _safe_float(row.get("winPct"),         0.5),
+            "rank":     _safe_int(row.get("rank"),              16),
+            "off_rank": _safe_int(row.get("offTotalRank"),      16),
+            "def_rank": _safe_int(row.get("defTotalRank"),      16),
+            "userName": str(row.get("userName", "") or ""),
+        }
+    return pm
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEAM QUALITY SCORE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _team_quality_score(team_data: dict) -> float:
+    """
+    Compute a 0-100 team quality score from current API data.
+
+    Components (weighted):
+      50% — OVR rating   (normalized: 65-95 → 0-100)
+      30% — Offense rank  (1=best → 100, 32=worst → 0)
+      20% — Defense rank  (1=best → 100, 32=worst → 0)
+    """
+    ovr = team_data.get("ovr", 78.0)
+    ovr_norm = max(0.0, min(100.0, (ovr - 65.0) / 30.0 * 100.0))
+
+    off_rank = team_data.get("off_rank", 16)
+    off_norm = max(0.0, min(100.0, (32 - off_rank) / 31.0 * 100.0))
+
+    def_rank = team_data.get("def_rank", 16)
+    def_norm = max(0.0, min(100.0, (32 - def_rank) / 31.0 * 100.0))
+
+    return 0.50 * ovr_norm + 0.30 * off_norm + 0.20 * def_norm
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMBINED POWER RATING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _combined_power(owner_elo: float, team_data: dict) -> float:
+    """
+    Blend owner Elo (80%) with team quality (20%) into a single power number.
+
+    Owner Elo is normalized: 1200-1800 → 0-100.
+    Team quality is already 0-100.
+    Result range: 0-100.
+    """
+    elo_norm = max(0.0, min(100.0, (owner_elo - 1200.0) / 6.0))
+    team_q   = _team_quality_score(team_data)
+    return ELO_OWNER_WEIGHT * elo_norm + ELO_TEAM_WEIGHT * team_q
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPREAD, ML, O/U
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _calc_spread(home_power: float, away_power: float) -> float:
+    """
+    Calculate point spread from HOME team's perspective.
+    Negative = home favored. Positive = away favored.
+
+    HOME_FIELD_EDGE is only added when home is already favored (per league rules:
+    no phantom advantage in Madden where both players play remotely).
+
+    Example: home_power = 65, away_power = 50
+             raw = (50 - 65) / 4.0 = -3.75 → home is favored
+             with HFE: -3.75 - 2.0 = -5.75 → rounds to home -6.0
+    """
+    raw = (away_power - home_power) / SPREAD_SCALING
+    if raw < 0:  # home is already favored — add HFE to widen
+        raw -= HOME_FIELD_EDGE
+    spread = round(raw * 2) / 2
+    return max(-SPREAD_CAP, min(SPREAD_CAP, spread))
+
+
+def _spread_to_ml(spread: float) -> int:
+    """
+    Convert a point spread to American moneyline for that team.
+    Negative spread (favored) → negative ML. Positive spread (dog) → positive ML.
+
+    Calibrated to real NFL implied-probability curves.
+    """
+    if spread == 0:
+        return -110
+    abs_s = abs(spread)
+    if   abs_s <= 1.0:  base = 115
+    elif abs_s <= 2.0:  base = 125
+    elif abs_s <= 3.0:  base = 145
+    elif abs_s <= 4.0:  base = 165
+    elif abs_s <= 5.0:  base = 185
+    elif abs_s <= 6.5:  base = 200 + int((abs_s - 5.0) * 10)
+    elif abs_s <= 10.0: base = 215 + int((abs_s - 6.5) * 12)
+    elif abs_s <= 14.0: base = 257 + int((abs_s - 10.0) * 12)
+    else:               base = 305 + int((abs_s - 14.0) * 10)
+    base = min(base, 800)
+    return -base if spread < 0 else base
+
+
+def _calc_ou(home_data: dict, away_data: dict,
+             home_owner_scoring: dict, away_owner_scoring: dict) -> float:
+    """
+    Over/Under total points.
+
+    Each team's expected score = owner's historical avg pts (or league avg if < 5 games)
+      + offensive rank bonus/penalty  (0.35 per rank above/below midpoint)
+      - opponent defensive rank penalty (0.22 per rank above/below midpoint)
+
+    Total clamped to [35.0, 99.5] and rounded to nearest 0.5.
+    Madden games average ~60 total pts but high-scoring matchups can hit 90+.
+    """
+    LAR = _MIDPOINT_RANK
+
+    h_games = home_owner_scoring.get("games", 0)
+    a_games = away_owner_scoring.get("games", 0)
+    h_base = home_owner_scoring["avg_pts_scored"] if h_games >= 5 else _LEAGUE_AVG_SCORE
+    a_base = away_owner_scoring["avg_pts_scored"] if a_games >= 5 else _LEAGUE_AVG_SCORE
+
+    h_off_adj = (LAR - home_data["off_rank"]) * 0.35
+    a_off_adj = (LAR - away_data["off_rank"]) * 0.35
+
+    h_def_qual = (LAR - home_data["def_rank"]) * 0.22
+    a_def_qual = (LAR - away_data["def_rank"]) * 0.22
+
+    home_expected = max(7.0, h_base + h_off_adj - a_def_qual)
+    away_expected = max(7.0, a_base + a_off_adj - h_def_qual)
+
+    total = round((home_expected + away_expected) * 2) / 2
+    return max(OU_FLOOR, min(OU_CEILING, total))
+
+
+def _american_to_str(odds: int) -> str:
+    return f"+{odds}" if odds > 0 else str(odds)
+
+
+def _payout_calc(wager: int, odds: int) -> int:
+    """Return total payout (wager + profit)."""
+    odds = int(odds)
+    if odds == 0:
+        return wager
+    if odds > 0:
+        return int(wager + wager * (odds / 100))
+    return int(wager + wager * (100 / abs(odds)))
+
+
+def _combine_parlay_odds(odds_list: list[int]) -> int:
+    """Combine multiple American odds into a single parlay American odds value."""
+    decimal = 1.0
+    for o in odds_list:
+        o = int(o)
+        decimal *= (1 + o / 100) if o > 0 else (1 + 100 / abs(o))
+    return int((decimal - 1) * 100) if decimal >= 2.0 else int(-100 / (decimal - 1))
+
+
+def _build_game_lines(games_raw: list) -> list[dict]:
+    """
+    Build fully-calculated game lines using Elo-based power ratings.
+    Admin line_overrides applied first; engine calculates any field not overridden.
+    """
+    power_map = _get_power_map()
+    elo_map   = _compute_elo_ratings()
+
+    _FALLBACK_TEAM = {
+        "ovr": 78.0, "win_pct": 0.5, "rank": 16,
+        "off_rank": 16, "def_rank": 16, "userName": ""
+    }
+
+    def fmt_spread(s: float) -> str:
+        if s == 0: return "PK"
+        return f"+{s}" if s > 0 else str(s)
+
+    ui_games = []
+
+    for rg in games_raw:
+        home     = rg.get("homeTeamName", rg.get("home", ""))
+        away     = rg.get("awayTeamName", rg.get("away", ""))
+        game_id  = str(rg.get("gameId", rg.get("id", rg.get("matchup_key", f"{away}@{home}"))))
+        status   = _safe_int(rg.get("status", 1), 1)
+        week_idx = _safe_int(rg.get("weekIndex", 99), 99)
+
+        # Auto-lock finished or past-week games
+        if status >= 2 or week_idx < dm.CURRENT_WEEK:
+            _set_locked(game_id, True)
+
+        home_data = power_map.get(home, _FALLBACK_TEAM)
+        away_data = power_map.get(away, _FALLBACK_TEAM)
+
+        # Resolve Elo ratings and scoring stats for each owner
+        home_user = home_data["userName"]
+        away_user = away_data["userName"]
+        home_elo  = _resolve_elo(home_user, elo_map)
+        away_elo  = _resolve_elo(away_user, elo_map)
+        home_scoring = _resolve_scoring(home_user)
+        away_scoring = _resolve_scoring(away_user)
+
+        # Combined power: 80% Elo + 20% team quality
+        home_power = _combined_power(home_elo, home_data)
+        away_power = _combined_power(away_elo, away_data)
+
+        # ── Compute engine values ────────────────────────────────────────
+        engine_home_spread = _calc_spread(home_power, away_power)
+        engine_away_spread = -engine_home_spread
+        engine_home_ml     = _spread_to_ml(engine_home_spread)
+        engine_away_ml     = _spread_to_ml(engine_away_spread)
+        engine_ou          = _calc_ou(home_data, away_data, home_scoring, away_scoring)
+
+        # ── Apply admin overrides ────────────────────────────────────────
+        ov = _get_line_override(game_id) or {}
+
+        if ov.get("home_spread") is not None and ov.get("home_ml") is None:
+            ov["home_spread"] = float(ov["home_spread"])
+            ov["away_spread"] = -ov["home_spread"]
+            ov["home_ml"]     = _spread_to_ml(ov["home_spread"])
+            ov["away_ml"]     = _spread_to_ml(ov["away_spread"])
+
+        home_spread = ov.get("home_spread") if ov.get("home_spread") is not None else engine_home_spread
+        away_spread = ov.get("away_spread") if ov.get("away_spread") is not None else engine_away_spread
+        home_ml     = ov.get("home_ml")     if ov.get("home_ml")     is not None else engine_home_ml
+        away_ml     = ov.get("away_ml")     if ov.get("away_ml")     is not None else engine_away_ml
+        ou_line     = ov.get("ou_line")     if ov.get("ou_line")     is not None else engine_ou
+
+        print(
+            f"[ELO] {away}({away_user} Elo={away_elo:.0f} P={away_power:.1f}) "
+            f"@ {home}({home_user} Elo={home_elo:.0f} P={home_power:.1f}) "
+            f"→ spread {fmt_spread(home_spread)}  O/U {ou_line}"
+            + (" [OVERRIDE]" if ov else "")
+        )
+
+        ui_games.append({
+            "game_id":         game_id,
+            "away":            away,
+            "home":            home,
+            "away_spread":     fmt_spread(away_spread),
+            "home_spread":     fmt_spread(home_spread),
+            "away_spread_val": away_spread,
+            "home_spread_val": home_spread,
+            "away_ml":         _american_to_str(away_ml),
+            "home_ml":         _american_to_str(home_ml),
+            "away_ml_val":     away_ml,
+            "home_ml_val":     home_ml,
+            "ou_line":         ou_line,
+            "matchup_key":     f"{away} @ {home}",
+            "status":          status,
+            "bet_week":        dm.CURRENT_WEEK + 1,
+            # Engine debug values
+            "_engine_spread":  engine_home_spread,
+            "_away_power":     away_power,
+            "_home_power":     home_power,
+            "_away_elo":       away_elo,
+            "_home_elo":       home_elo,
+            "_overridden":     bool(ov),
+        })
+
+    return ui_games
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PARLAY CART
+# ═════════════════════════════════════════════════════════════════════════════
+
+_parlay_carts: dict[int, list[dict]] = {}
+
+def _get_cart(uid):    return _parlay_carts.setdefault(uid, [])
+def _clear_cart(uid):  _parlay_carts[uid] = []
+
+def _add_to_cart(uid: int, leg: dict) -> int:
+    cart = _get_cart(uid)
+    if any(e["game_id"] == leg["game_id"] for e in cart):
+        return -1
+    cart.append(leg)
+    return len(cart)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  GRADING LOGIC
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_score_lookup(week: int) -> dict:
+    results = dm.get_weekly_results(week)
+    lookup  = {}
+    fuzzy   = []
+    for g in results:
+        home = str(g.get("home", "")).strip()
+        away = str(g.get("away", "")).strip()
+        if not home or not away:
+            continue
+        key = f"{away} @ {home}".lower().strip()
+        lookup[key] = g
+        lookup[f"{home} @ {away}".lower().strip()] = g
+        fuzzy.append((set(home.lower().split()), set(away.lower().split()), g))
+    lookup["__fuzzy__"] = fuzzy
+    return lookup
+
+
+def _fuzzy_match(matchup_key: str, lookup: dict) -> dict | None:
+    key = matchup_key.lower().strip()
+    if key in lookup:
+        return lookup[key]
+    query = set(key.replace(" @ ", " ").split())
+    for home_toks, away_toks, game in lookup.get("__fuzzy__", []):
+        if (query & home_toks) and (query & away_toks):
+            return game
+    return None
+
+
+def _grade_single_bet(bet_type: str, pick: str, line: float,
+                      home_name: str, away_name: str,
+                      h_score: int, a_score: int) -> str:
+    """Grade one bet. Returns 'Won', 'Lost', 'Push', or 'Pending'."""
+    if bet_type == "Moneyline":
+        if h_score == a_score:
+            return "Push"
+        winner = home_name if h_score > a_score else away_name
+        return "Won" if pick.strip().lower() == winner.strip().lower() else "Lost"
+
+    elif bet_type == "Spread":
+        pick_l  = pick.strip().lower()
+        home_l  = home_name.strip().lower()
+        away_l  = away_name.strip().lower()
+        if   pick_l == away_l:          covered = (a_score + line) - h_score
+        elif pick_l == home_l:          covered = (h_score + line) - a_score
+        elif pick_l in away_l:          covered = (a_score + line) - h_score
+        elif pick_l in home_l:          covered = (h_score + line) - a_score
+        else:                           return "Pending"
+        if covered > 0:  return "Won"
+        if covered < 0:  return "Lost"
+        return "Push"
+
+    elif bet_type == "Over":
+        total = h_score + a_score
+        if total > line: return "Won"
+        if total < line: return "Lost"
+        return "Push"
+
+    elif bet_type == "Under":
+        total = h_score + a_score
+        if total < line: return "Won"
+        if total > line: return "Lost"
+        return "Push"
+
+    return "Pending"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  AUTO-GRADE
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _run_autograde(bot) -> None:
+    def _grade_sync():
+        results = []
+        try:
+            with _db_con() as con:
+                ungraded = con.execute(
+                    "SELECT DISTINCT week FROM bets_table "
+                    "WHERE status NOT IN ('Won','Lost','Push','Cancelled') AND week <= ?",
+                    (dm.CURRENT_WEEK,)
+                ).fetchall()
+            if not ungraded:
+                return results
+
+            for (week,) in ungraded:
+                scores     = _build_score_lookup(week)
+                real_games = len([k for k in scores if k != "__fuzzy__"])
+                if real_games == 0:
+                    continue
+
+                settled = wins = losses = pushes = 0
+                total_paid = 0
+
+                with _db_con() as con:
+                    pending = con.execute(
+                        "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
+                        "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
+                        (week,)
+                    ).fetchall()
+
+                    for b in pending:
+                        bid, uid, matchup, btype, amt, odds, pick, line = b
+                        gd = _fuzzy_match(matchup.lower().strip(), scores)
+                        if not gd:
+                            continue
+                        try:
+                            line_val = float(line)
+                        except (ValueError, TypeError):
+                            line_val = 0.0
+                        res = _grade_single_bet(btype, pick, line_val,
+                                                gd["home"], gd["away"],
+                                                gd["home_score"], gd["away_score"])
+                        if res == "Pending":
+                            continue
+                        if res == "Won":
+                            payout = _payout_calc(amt, int(odds))
+                            _update_balance(uid, payout, con)
+                            total_paid += payout - amt
+                            wins += 1
+                        elif res == "Push":
+                            _update_balance(uid, amt, con)
+                            pushes += 1
+                        elif res == "Lost":
+                            losses += 1
+                        con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
+                        settled += 1
+
+                    # ── Parlays ───────────────────────────────────────────
+                    parlays = con.execute(
+                        "SELECT parlay_id, discord_id, legs, combined_odds, wager_amount "
+                        "FROM parlays_table WHERE week=? AND status='Pending'",
+                        (week,)
+                    ).fetchall()
+
+                    for pid, uid, legs_json, c_odds, amt in parlays:
+                        try:
+                            legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else legs_json
+                            if not isinstance(legs, list) or not legs:
+                                con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
+                                continue
+                        except Exception:
+                            continue
+
+                        all_won    = True
+                        any_lost   = False
+                        unresolved = 0
+                        any_pushed = False
+
+                        for leg in legs:
+                            gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
+                            if not gd:
+                                unresolved += 1
+                                all_won = False
+                                continue
+                            res = _grade_single_bet(
+                                leg["bet_type"], leg["pick"], float(leg.get("line", 0)),
+                                gd["home"], gd["away"], gd["home_score"], gd["away_score"]
+                            )
+                            if res == "Lost":
+                                all_won  = False
+                                any_lost = True
+                                break
+                            elif res == "Push":
+                                all_won    = False
+                                any_pushed = True
+                            elif res == "Pending":
+                                all_won    = False
+                                unresolved += 1
+
+                        # Leave Pending if any leg still unresolved (not yet final)
+                        if unresolved > 0 and not any_lost:
+                            continue
+
+                        if all_won:
+                            payout = _payout_calc(amt, c_odds)
+                            _update_balance(uid, payout, con)
+                            total_paid += payout - amt
+                            con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
+                            wins += 1
+                        elif any_lost:
+                            con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
+                            losses += 1
+                        elif any_pushed:
+                            # One leg pushed, rest won → return wager (standard parlay push rule)
+                            _update_balance(uid, amt, con)
+                            con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
+                            pushes += 1
+
+                if settled > 0 or wins + losses + pushes > 0:
+                    results.append({
+                        "week": week, "settled": settled,
+                        "wins": wins, "losses": losses, "pushes": pushes,
+                        "total_paid": total_paid,
+                    })
+        except Exception as e:
+            print(f"[AUTO-GRADE] Error: {e}")
+        return results
+
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(None, _grade_sync)
+
+    for r in results:
+        print(
+            f"[AUTO-GRADE] Week {r['week']} — Settled {r['settled']} | "
+            f"W{r['wins']} L{r['losses']} P{r['pushes']} | Paid ${r['total_paid']:,}"
+        )
+        try:
+            from setup_cog import get_channel_id as _get_ch_id
+            ch_id = _get_ch_id("sportsbook")
+            channel = bot.get_channel(ch_id) if ch_id else None
+        except ImportError:
+            channel = discord.utils.get(bot.get_all_channels(), name="sportsbook")
+        if channel:
+            try:
+                embed = discord.Embed(
+                    title=f"✅ Week {r['week']} Bets Auto-Graded", color=TSL_GOLD
+                )
+                embed.add_field(name="Settled",      value=str(r["settled"]),       inline=True)
+                embed.add_field(name="✅ Won",       value=str(r["wins"]),          inline=True)
+                embed.add_field(name="❌ Lost",      value=str(r["losses"]),        inline=True)
+                embed.add_field(name="🔁 Push",     value=str(r["pushes"]),        inline=True)
+                embed.add_field(name="💸 Paid Out", value=f"${r['total_paid']:,}", inline=True)
+                embed.set_footer(text="TSL Sportsbook • Auto-graded")
+                await channel.send(embed=embed)
+            except Exception:
+                pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  UI COMPONENTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+class BetSlipModal(discord.ui.Modal):
+    def __init__(self, team, line, odds, game_id, bet_type,
+                 matchup_key, away_name, home_name, bet_week=None):
+        super().__init__(title=f"📋 Bet Slip — {bet_type}")
+        self.team        = team
+        self.line        = line
+        self.odds        = odds
+        self.game_id     = game_id
+        self.bet_type    = bet_type
+        self.matchup_key = matchup_key
+        self.away_name   = away_name
+        self.home_name   = home_name
+        self.bet_week    = bet_week if bet_week is not None else (dm.CURRENT_WEEK + 1)
+
+        self.amount_input = discord.ui.TextInput(
+            label=f"Wager Amount  |  Odds: {_american_to_str(odds)}",
+            placeholder=f"Min ${MIN_BET}  —  Pick: {team}",
+            min_length=1, max_length=8
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if _is_locked(self.game_id):
+            return await interaction.response.send_message(
+                "🔴 Game is **locked**.", ephemeral=True
+            )
+        try:
+            amt = int(self.amount_input.value.replace(",", "").replace("$", ""))
+        except ValueError:
+            return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
+
+        balance = _get_balance(interaction.user.id)
+        if amt < MIN_BET:
+            return await interaction.response.send_message(f"❌ Minimum bet is **${MIN_BET}**.", ephemeral=True)
+        if amt > balance:
+            return await interaction.response.send_message(
+                f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True
+            )
+
+        with _db_con() as con:
+            _update_balance(interaction.user.id, -amt, con)
+            safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
+            con.execute(
+                "INSERT INTO bets_table "
+                "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(interaction.user.id), int(self.bet_week), self.matchup_key,
+                 self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
+            )
+
+        profit  = _payout_calc(amt, self.odds) - amt
+        new_bal = balance - amt
+
+        embed = discord.Embed(title="✅ Bet Confirmed", color=TSL_GOLD)
+        embed.add_field(name="Pick",    value=f"**{self.team}**",          inline=True)
+        embed.add_field(name="Type",    value=self.bet_type,               inline=True)
+        embed.add_field(name="Odds",    value=_american_to_str(self.odds), inline=True)
+        embed.add_field(name="Risk",    value=f"**${amt:,}**",             inline=True)
+        embed.add_field(name="To Win",  value=f"**${profit:,}**",          inline=True)
+        embed.add_field(name="Balance", value=f"${new_bal:,}",             inline=True)
+        embed.set_footer(text=f"TSL Sportsbook • Week {self.bet_week}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ParlayWagerModal(discord.ui.Modal):
+    def __init__(self, uid, legs, combined_odds):
+        super().__init__(title=f"🎰 Submit Parlay ({len(legs)} Legs)")
+        self.uid           = uid
+        self.legs          = legs
+        self.combined_odds = combined_odds
+
+        leg_summary = " | ".join(l["pick"] for l in legs)
+        self.amount_input = discord.ui.TextInput(
+            label=f"Wager  |  Combined Odds: {_american_to_str(combined_odds)}",
+            placeholder=f"Legs: {leg_summary[:60]}",
+            min_length=1, max_length=8
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amt = int(self.amount_input.value.replace(",", "").replace("$", ""))
+        except ValueError:
+            return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
+
+        balance = _get_balance(interaction.user.id)
+        if amt < MIN_BET:
+            return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
+        if amt > balance:
+            return await interaction.response.send_message(
+                f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
+            )
+
+        parlay_id = str(uuid.uuid4())[:8].upper()
+        with _db_con() as con:
+            _update_balance(interaction.user.id, -amt, con)
+            con.execute(
+                "INSERT INTO parlays_table "
+                "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
+                (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
+                 json.dumps(self.legs), int(self.combined_odds), int(amt))
+            )
+
+        potential = _payout_calc(amt, self.combined_odds) - amt
+        embed = discord.Embed(title="🎰 Parlay Confirmed!", color=TSL_GOLD)
+        embed.description = f"**Parlay ID:** `{parlay_id}`"
+        for i, leg in enumerate(self.legs, 1):
+            embed.add_field(
+                name=f"Leg {i}: {leg['matchup']}",
+                value=f"**{leg['pick']}** ({leg['bet_type']}) @ {_american_to_str(leg['odds'])}",
+                inline=False
+            )
+        embed.add_field(name="Combined Odds", value=_american_to_str(self.combined_odds), inline=True)
+        embed.add_field(name="Risk",          value=f"**${amt:,}**",                      inline=True)
+        embed.add_field(name="To Win",        value=f"**${potential:,}**",                inline=True)
+        embed.set_footer(text=f"TSL Sportsbook • Week {dm.CURRENT_WEEK + 1} • All legs must hit")
+        _clear_cart(interaction.user.id)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class PropBetModal(discord.ui.Modal):
+    """Modal for placing a prop bet wager."""
+    def __init__(self, prop_id, description, pick, odds):
+        super().__init__(title=f"📋 Prop Bet — {pick}")
+        self.prop_id     = prop_id
+        self.description = description
+        self.pick        = pick
+        self.odds        = odds
+
+        self.amount_input = discord.ui.TextInput(
+            label=f"Wager Amount  |  Odds: {_american_to_str(odds)}",
+            placeholder=f"Min ${MIN_BET}  —  Pick: {pick}",
+            min_length=1, max_length=8
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amt = int(self.amount_input.value.replace(",", "").replace("$", ""))
+        except ValueError:
+            return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
+
+        balance = _get_balance(interaction.user.id)
+        if amt < MIN_BET:
+            return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
+        if amt > balance:
+            return await interaction.response.send_message(
+                f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
+            )
+
+        # Verify prop is still open
+        with _db_con() as con:
+            prop = con.execute(
+                "SELECT status FROM prop_bets WHERE prop_id=?", (self.prop_id,)
+            ).fetchone()
+            if not prop or prop[0] != 'Open':
+                return await interaction.response.send_message(
+                    "❌ This prop bet is no longer open.", ephemeral=True
+                )
+            _update_balance(interaction.user.id, -amt, con)
+            con.execute(
+                "INSERT INTO prop_wagers (prop_id, discord_id, pick, wager_amount, odds) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self.prop_id, int(interaction.user.id), self.pick, int(amt), int(self.odds))
+            )
+
+        profit = _payout_calc(amt, self.odds) - amt
+        embed = discord.Embed(title="✅ Prop Bet Confirmed", color=TSL_GOLD)
+        embed.add_field(name="Prop",    value=self.description[:50], inline=False)
+        embed.add_field(name="Pick",    value=f"**{self.pick}**",    inline=True)
+        embed.add_field(name="Odds",    value=_american_to_str(self.odds), inline=True)
+        embed.add_field(name="Risk",    value=f"**${amt:,}**",       inline=True)
+        embed.add_field(name="To Win",  value=f"**${profit:,}**",    inline=True)
+        embed.add_field(name="Balance", value=f"${balance - amt:,}", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class GameCardViewWithParlay(discord.ui.View):
+    """Full game card with straight + parlay buttons."""
+    def __init__(self, game: dict):
+        super().__init__(timeout=180)
+        self.game    = game
+        self.game_id = game["game_id"]
+
+        away, home = game["away"], game["home"]
+        ou = game["ou_line"]
+
+        bets = [
+            (f"{away} {game['away_spread']} (−110)", away,         game["away_spread_val"], -110,               "Spread",    0),
+            (f"{home} {game['home_spread']} (−110)", home,         game["home_spread_val"], -110,               "Spread",    0),
+            (f"{away} ML {game['away_ml']}",         away,         0.0,                    game["away_ml_val"], "Moneyline", 1),
+            (f"{home} ML {game['home_ml']}",         home,         0.0,                    game["home_ml_val"], "Moneyline", 1),
+            (f"OVER {ou} (−110)",                    f"OVER {ou}", ou,                     -110,                "Over",      2),
+            (f"UNDER {ou} (−110)",                   f"UNDER {ou}",ou,                     -110,                "Under",     2),
+        ]
+
+        for label, pick, line, odds, bet_type, row in bets:
+            btn = discord.ui.Button(
+                label=label[:80],
+                style=(discord.ButtonStyle.secondary if row == 0 else
+                       discord.ButtonStyle.primary   if row == 1 else
+                       discord.ButtonStyle.success   if "OVER" in label else
+                       discord.ButtonStyle.danger),
+                row=row
+            )
+            btn.callback = self._make_straight_cb(pick, line, odds, bet_type)
+            self.add_item(btn)
+
+            p_btn = discord.ui.Button(label="🎰+", style=discord.ButtonStyle.secondary, row=row)
+            p_btn.callback = self._make_parlay_cb(pick, line, odds, bet_type)
+            self.add_item(p_btn)
+
+    def _make_straight_cb(self, pick, line, odds, bet_type):
+        game = self.game
+        async def callback(interaction: discord.Interaction):
+            if _is_locked(game["game_id"]):
+                return await interaction.response.send_message("🔴 Game is **locked**.", ephemeral=True)
+            modal = BetSlipModal(
+                team=pick, line=line, odds=odds, game_id=game["game_id"],
+                bet_type=bet_type, matchup_key=game["matchup_key"],
+                away_name=game["away"], home_name=game["home"],
+                bet_week=game.get("bet_week", dm.CURRENT_WEEK + 1)
+            )
+            await interaction.response.send_modal(modal)
+        return callback
+
+    def _make_parlay_cb(self, pick, line, odds, bet_type):
+        game = self.game
+        async def callback(interaction: discord.Interaction):
+            if _is_locked(game["game_id"]):
+                return await interaction.response.send_message("🔴 Game is **locked**.", ephemeral=True)
+            uid = interaction.user.id
+            leg = {"game_id": game["game_id"], "matchup": game["matchup_key"],
+                   "pick": pick, "line": line, "odds": odds, "bet_type": bet_type}
+            result = _add_to_cart(uid, leg)
+            if result == -1:
+                return await interaction.response.send_message(
+                    "⚠️ You already have a leg from this game in your parlay cart.", ephemeral=True
+                )
+            cart     = _get_cart(uid)
+            combined = _combine_parlay_odds([l["odds"] for l in cart])
+            legs_text = "\n".join(
+                f"**{i+1}.** {l['pick']} ({l['bet_type']}) @ {_american_to_str(l['odds'])}"
+                for i, l in enumerate(cart)
+            )
+            embed = discord.Embed(title="🎰 Parlay Cart", color=TSL_GOLD)
+            embed.description = legs_text
+            embed.add_field(name="Legs",          value=str(len(cart)),             inline=True)
+            embed.add_field(name="Combined Odds", value=_american_to_str(combined), inline=True)
+            view = ParlayCartView(uid, cart, combined)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        return callback
+
+
+class ParlayCartView(discord.ui.View):
+    def __init__(self, uid, cart, combined_odds):
+        super().__init__(timeout=120)
+        self.uid           = uid
+        self.cart          = cart
+        self.combined_odds = combined_odds
+
+    @discord.ui.button(label="💰 Submit Parlay", style=discord.ButtonStyle.success, row=0)
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.cart) < 2:
+            return await interaction.response.send_message(
+                "❌ A parlay requires at least **2 legs**.", ephemeral=True
+            )
+        await interaction.response.send_modal(
+            ParlayWagerModal(self.uid, self.cart, self.combined_odds)
+        )
+
+    @discord.ui.button(label="🗑️ Clear Cart", style=discord.ButtonStyle.danger, row=0)
+    async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _clear_cart(self.uid)
+        await interaction.response.send_message("🗑️ Parlay cart cleared.", ephemeral=True)
+
+
+class SportsbookSelectView(discord.ui.View):
+    def __init__(self, games: list[dict], cog: "SportsbookCog"):
+        super().__init__(timeout=None)
+        self.games = games
+        self.cog   = cog
+
+        options = []
+        for i, g in enumerate(games):
+            locked  = "🔴 " if _is_locked(g["game_id"]) else "🟢 "
+            over    = " ⚠️" if g.get("_overridden") else ""
+            options.append(discord.SelectOption(
+                label=f"{locked}{g['away']} @ {g['home']}{over}",
+                value=str(i),
+                description=f"Spread: {g['away']} {g['away_spread']} | O/U {g['ou_line']}"
+            ))
+
+        sel = discord.ui.Select(
+            placeholder="━━ SELECT A GAME TO BET ━━",
+            options=options[:25],
+            min_values=1, max_values=1
+        )
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+        # ── Quick-action buttons (row 1) ──────────────────────────────────
+        btn_mybets = discord.ui.Button(
+            label="My Bets", style=discord.ButtonStyle.gray,
+            custom_id="sb:mybets", row=1
+        )
+        btn_mybets.callback = self._on_mybets
+        self.add_item(btn_mybets)
+
+        btn_history = discord.ui.Button(
+            label="History", style=discord.ButtonStyle.gray,
+            custom_id="sb:history", row=1
+        )
+        btn_history.callback = self._on_history
+        self.add_item(btn_history)
+
+        btn_leaderboard = discord.ui.Button(
+            label="Leaderboard", style=discord.ButtonStyle.green,
+            custom_id="sb:leaderboard", row=1
+        )
+        btn_leaderboard.callback = self._on_leaderboard
+        self.add_item(btn_leaderboard)
+
+        btn_props = discord.ui.Button(
+            label="Props", style=discord.ButtonStyle.blurple,
+            custom_id="sb:props", row=1
+        )
+        btn_props.callback = self._on_props
+        self.add_item(btn_props)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        game = self.games[int(interaction.data["values"][0])]
+        locked_str = ("🔴 **LOCKED — Betting Closed**"
+                      if _is_locked(game["game_id"]) else "🟢 **OPEN — Place Your Bets**")
+        admin_note = " *(line adjusted)*" if game.get("_overridden") else ""
+
+        embed = discord.Embed(
+            title=f"🏟️  {game['away']} @ {game['home']}",
+            color=TSL_RED if _is_locked(game["game_id"]) else TSL_GOLD
+        )
+        embed.add_field(
+            name="📊 Spread",
+            value=(f"`{game['away']}` **{game['away_spread']}** (-110)\n"
+                   f"`{game['home']}` **{game['home_spread']}** (-110)"),
+            inline=True
+        )
+        embed.add_field(
+            name="💰 Moneyline",
+            value=(f"`{game['away']}` **{game['away_ml']}**\n"
+                   f"`{game['home']}` **{game['home_ml']}**"),
+            inline=True
+        )
+        embed.add_field(
+            name="🎯 Over/Under",
+            value=f"**{game['ou_line']}** pts\nOver / Under (-110 each)",
+            inline=True
+        )
+        embed.add_field(name="Status", value=locked_str + admin_note, inline=False)
+        embed.set_footer(text="Click a bet button below  •  🎰+ adds to your parlay cart")
+
+        await interaction.response.send_message(
+            embed=embed, view=GameCardViewWithParlay(game), ephemeral=True
+        )
+
+    async def _on_mybets(self, interaction: discord.Interaction):
+        try:
+            await self.cog._mybets_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    async def _on_history(self, interaction: discord.Interaction):
+        try:
+            await self.cog._bethistory_impl(interaction, weeks=99)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    async def _on_leaderboard(self, interaction: discord.Interaction):
+        try:
+            await self.cog._leaderboard_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    async def _on_props(self, interaction: discord.Interaction):
+        try:
+            await self.cog._props_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PROP BET UI
+# ═════════════════════════════════════════════════════════════════════════════
+
+class PropListView(discord.ui.View):
+    """Select menu showing open prop bets."""
+    def __init__(self, props: list):
+        super().__init__(timeout=120)
+        self.props = props
+
+        if not props:
+            return
+
+        options = [
+            discord.SelectOption(
+                label=f"#{p[0]}: {p[2][:50]}",
+                value=str(i),
+                description=f"{p[3]} vs {p[4]}"
+            )
+            for i, p in enumerate(props)
+        ]
+        sel = discord.ui.Select(
+            placeholder="━━ SELECT A PROP BET ━━",
+            options=options[:25],
+            min_values=1, max_values=1
+        )
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        prop = self.props[int(interaction.data["values"][0])]
+        pid, week, desc, opt_a, opt_b, odds_a, odds_b = prop[:7]
+
+        embed = discord.Embed(title=f"📋  Prop #{pid}", color=TSL_GOLD)
+        embed.description = f"**{desc}**"
+        embed.add_field(name=f"Option A: {opt_a}", value=f"Odds: {_american_to_str(odds_a)}", inline=True)
+        embed.add_field(name=f"Option B: {opt_b}", value=f"Odds: {_american_to_str(odds_b)}", inline=True)
+        embed.set_footer(text=f"Week {week} Prop")
+
+        view = PropBetButtons(pid, desc, opt_a, opt_b, odds_a, odds_b)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class PropBetButtons(discord.ui.View):
+    def __init__(self, prop_id, description, opt_a, opt_b, odds_a, odds_b):
+        super().__init__(timeout=60)
+        self.prop_id     = prop_id
+        self.description = description
+
+        btn_a = discord.ui.Button(
+            label=f"{opt_a} ({_american_to_str(odds_a)})",
+            style=discord.ButtonStyle.primary, row=0
+        )
+        btn_b = discord.ui.Button(
+            label=f"{opt_b} ({_american_to_str(odds_b)})",
+            style=discord.ButtonStyle.secondary, row=0
+        )
+        btn_a.callback = self._make_bet_cb(opt_a, odds_a)
+        btn_b.callback = self._make_bet_cb(opt_b, odds_b)
+        self.add_item(btn_a)
+        self.add_item(btn_b)
+
+    def _make_bet_cb(self, pick, odds):
+        async def callback(interaction: discord.Interaction):
+            modal = PropBetModal(self.prop_id, self.description, pick, odds)
+            await interaction.response.send_modal(modal)
+        return callback
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  THE COG
+# ═════════════════════════════════════════════════════════════════════════════
+
+class SportsbookCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        setup_db()
+        dm._autograde_callback = self._on_data_refresh
+        self.auto_grade.start()
+
+    def cog_unload(self):
+        self.auto_grade.cancel()
+        dm._autograde_callback = None
+
+    async def _on_data_refresh(self):
+        _invalidate_elo_cache()
+        await _run_autograde(self.bot)
+
+    @tasks.loop(minutes=60)
+    async def auto_grade(self):
+        await _run_autograde(self.bot)
+
+    @auto_grade.before_loop
+    async def before_auto_grade(self):
+        await self.bot.wait_until_ready()
+        await discord.utils.sleep_until(
+            discord.utils.utcnow().replace(minute=0, second=0, microsecond=0)
+        )
+
+    # ── Autocomplete helper ───────────────────────────────────────────────────
+    async def _matchup_autocomplete(self, interaction: discord.Interaction, current: str):
+        if dm.df_games.empty:
+            return []
+        choices = []
+        for _, g in dm.df_games.iterrows():
+            key = str(g.get("matchup_key", ""))
+            if not key:
+                continue
+            if current.lower() in key.lower():
+                choices.append(app_commands.Choice(name=key[:100], value=key[:100]))
+        return choices[:25]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # USER COMMANDS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="sportsbook", description="Open the TSL Interactive Sportsbook")
+    async def sportsbook(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        try:
+            bet_week = dm.CURRENT_WEEK + 1
+            src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+            if src.empty:
+                return await interaction.followup.send("❌ No game data loaded. Try again shortly.")
+
+            df = src.copy()
+            for col in ["weekIndex", "seasonIndex", "stageIndex"]:
+                if col in df.columns:
+                    df[col] = df[col].apply(
+                        lambda x: int(float(x)) if x not in (None, "", "nan") else -1
+                    )
+
+            if "weekIndex" in df.columns:
+                mask = df["weekIndex"] == (bet_week - 1)
+                if "seasonIndex" in df.columns:
+                    mask = mask & (df["seasonIndex"] == dm.CURRENT_SEASON)
+                games_df = df[mask]
+            elif "week" in df.columns:
+                games_df = df[df["week"].apply(
+                    lambda x: int(float(x)) if x not in (None, "") else -1
+                ) == bet_week]
+            else:
+                games_df = df
+
+            raw_games = games_df.to_dict("records")
+            if not raw_games:
+                return await interaction.followup.send(
+                    f"❌ No games found for Week {bet_week}. Schedule may not be posted yet."
+                )
+
+            loop = asyncio.get_running_loop()
+            ui_games = await loop.run_in_executor(None, _build_game_lines, raw_games)
+
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Error loading games: `{e}`")
+
+        balance = _get_balance(interaction.user.id)
+        embed = discord.Embed(title="🏆  TSL GLOBAL SPORTSBOOK", color=TSL_GOLD)
+        if interaction.guild and interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+        embed.description = (
+            f"```\n"
+            f"WEEK {bet_week} BOARD  •  SEASON {dm.CURRENT_SEASON}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Your Balance:  ${balance:,}\n"
+            f"🎮 Games:         {len(ui_games)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELECT A GAME TO PLACE WAGER\n"
+            f"```"
+        )
+        embed.set_footer(
+            text="Lines: Season W% · Power Rank · OVR · Off/Def Rank · Career W% · Home Edge"
+        )
+        await interaction.followup.send(embed=embed, view=SportsbookSelectView(ui_games, self))
+
+    # ── User-facing _impl methods (called by board buttons) ────────────────
+
+    async def _mybets_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        uid     = interaction.user.id
+        balance = _get_balance(uid)
+
+        with _db_con() as con:
+            straight = con.execute(
+                "SELECT matchup, bet_type, pick, wager_amount, odds, line, status, week "
+                "FROM bets_table WHERE discord_id=? AND status='Pending' ORDER BY bet_id DESC",
+                (uid,)
+            ).fetchall()
+            parlays = con.execute(
+                "SELECT parlay_id, week, legs, combined_odds, wager_amount, status "
+                "FROM parlays_table WHERE discord_id=? AND status='Pending' ORDER BY rowid DESC",
+                (uid,)
+            ).fetchall()
+
+        embed = discord.Embed(
+            title=f"📋  {interaction.user.display_name}'s Active Bets", color=TSL_GOLD
+        )
+        embed.add_field(name="💰 Balance", value=f"**${balance:,}**",                        inline=True)
+        embed.add_field(name="🎯 Pending", value=f"**{len(straight) + len(parlays)}** bets", inline=True)
+
+        if not straight and not parlays:
+            embed.description = "_No pending bets. Hit `/sportsbook` to place some!_"
+        else:
+            if straight:
+                lines = []
+                for b in straight[:8]:
+                    matchup, btype, pick, amt, odds, line, status, week = b
+                    profit = _payout_calc(amt, odds) - amt
+                    lines.append(
+                        f"**{pick}** ({btype}) @ {_american_to_str(int(odds))} | "
+                        f"${amt:,} → +${profit:,} | W{week}"
+                    )
+                embed.add_field(name="🎯 Straight Bets", value="\n".join(lines), inline=False)
+            if parlays:
+                lines = []
+                for p in parlays[:4]:
+                    pid, week, legs_json, c_odds, amt, status = p
+                    try:
+                        legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
+                    except Exception:
+                        legs = []
+                    potential = _payout_calc(amt, c_odds) - amt
+                    picks = ", ".join(l["pick"] for l in legs) if legs else "—"
+                    lines.append(
+                        f"`{pid}` — {len(legs)} legs ({picks[:40]}) | ${amt:,} → +${potential:,}"
+                    )
+                embed.add_field(name="🎰 Parlays", value="\n".join(lines), inline=False)
+
+        cart = _get_cart(uid)
+        if cart:
+            combined = _combine_parlay_odds([l["odds"] for l in cart])
+            embed.add_field(
+                name="🛒 Parlay Cart",
+                value=(f"{len(cart)} leg(s) in cart | Combined: {_american_to_str(combined)}\n"
+                       "Use **🎰+** buttons in `/sportsbook` to submit."),
+                inline=False
+            )
+        embed.set_footer(text="TSL Sportsbook — Pending bets only")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _bethistory_impl(self, interaction: discord.Interaction, weeks: int = 99):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        uid = interaction.user.id
+
+        with _db_con() as con:
+            bets = con.execute(
+                "SELECT matchup, bet_type, pick, wager_amount, odds, status, week "
+                "FROM bets_table WHERE discord_id=? AND week >= ? ORDER BY week DESC, bet_id DESC",
+                (uid, max(1, dm.CURRENT_WEEK - weeks))
+            ).fetchall()
+            parlays = con.execute(
+                "SELECT parlay_id, week, legs, combined_odds, wager_amount, status "
+                "FROM parlays_table WHERE discord_id=? AND week >= ? ORDER BY week DESC",
+                (uid, max(1, dm.CURRENT_WEEK - weeks))
+            ).fetchall()
+
+        total_wagered = total_profit = wins = losses = pushes = 0
+        for b in bets:
+            matchup, btype, pick, amt, odds, status, week = b
+            total_wagered += amt
+            if status == "Won":
+                total_profit += _payout_calc(amt, int(odds)) - amt; wins += 1
+            elif status == "Lost":
+                total_profit -= amt; losses += 1
+            elif status == "Push":
+                pushes += 1
+
+        for p in parlays:
+            pid, week, legs_json, c_odds, amt, status = p
+            total_wagered += amt
+            if status == "Won":
+                total_profit += _payout_calc(amt, c_odds) - amt; wins += 1
+            elif status == "Lost":
+                total_profit -= amt; losses += 1
+
+        embed = discord.Embed(
+            title=f"📊  {interaction.user.display_name}'s Bet History", color=TSL_GOLD
+        )
+        embed.add_field(name="🏆 Record",     value=f"**{wins}W - {losses}L - {pushes}P**", inline=True)
+        embed.add_field(name="💸 Total Risk", value=f"${total_wagered:,}",                   inline=True)
+        net_icon = "📈" if total_profit >= 0 else "📉"
+        embed.add_field(name=f"{net_icon} Net P&L", value=f"**${total_profit:+,}**",          inline=True)
+
+        if bets:
+            lines = []
+            for b in bets[:10]:
+                matchup, btype, pick, amt, odds, status, week = b
+                icon = {"Won": "✅", "Lost": "❌", "Push": "🔁", "Pending": "⏳"}.get(status, "•")
+                lines.append(
+                    f"{icon} W{week} | **{pick}** ({btype}) | ${amt:,} | {_american_to_str(int(odds))}"
+                )
+            embed.add_field(name="🕐 Recent Bets", value="\n".join(lines), inline=False)
+
+        embed.set_footer(text="TSL Sportsbook • Season History")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _leaderboard_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        with _db_con() as con:
+            users = con.execute(
+                "SELECT discord_id, balance, season_start_balance "
+                "FROM users_table ORDER BY balance DESC"
+            ).fetchall()
+
+        if not users:
+            return await interaction.followup.send("No bettors found yet.", ephemeral=True)
+
+        embed = discord.Embed(title="🏆  TSL SPORTSBOOK LEADERBOARD", color=TSL_GOLD)
+        embed.description = f"**Season {dm.CURRENT_SEASON} • Week {dm.CURRENT_WEEK}**\n"
+
+        medals = ["🥇", "🥈", "🥉"]
+        lines  = []
+        for i, (uid, balance, start) in enumerate(users[:15]):
+            pnl    = balance - (start or STARTING_BALANCE)
+            sign   = "+" if pnl >= 0 else ""
+            arrow  = "📈" if pnl >= 0 else "📉"
+            medal  = medals[i] if i < 3 else f"**#{i+1}**"
+            member = interaction.guild.get_member(uid) if interaction.guild else None
+            name   = member.display_name if member else f"<@{uid}>"
+            lines.append(f"{medal} {name}\n   💰 ${balance:,}  •  {arrow} {sign}${pnl:,}")
+
+        embed.description += "\n".join(lines)
+        embed.set_footer(text=f"Starting balance: ${STARTING_BALANCE:,} • Updated live")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _props_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        with _db_con() as con:
+            prop_list = con.execute(
+                "SELECT prop_id, week, description, option_a, option_b, odds_a, odds_b "
+                "FROM prop_bets WHERE status='Open' ORDER BY prop_id DESC"
+            ).fetchall()
+
+        if not prop_list:
+            return await interaction.followup.send(
+                "No open prop bets right now. Check back later!", ephemeral=True
+            )
+
+        embed = discord.Embed(title="📋  TSL Prop Bets", color=TSL_GOLD)
+        embed.description = f"**{len(prop_list)} open prop(s)** — select one below to bet"
+        embed.set_footer(text="TSL Sportsbook • Prop Bets")
+
+        await interaction.followup.send(
+            embed=embed, view=PropListView(prop_list), ephemeral=True
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SETTLEMENT COMMANDS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _grade_bets_impl(self, interaction: discord.Interaction, week: int):
+        await interaction.response.defer(thinking=True)
+        scores     = _build_score_lookup(week)
+        real_games = len([k for k in scores if k != "__fuzzy__"])
+        if real_games == 0:
+            return await interaction.followup.send(
+                f"❌ No final scores found for Week {week}. "
+                f"Check that games are status==3 in the MM export."
+            )
+
+        settled = wins = losses = pushes = 0
+        total_paid = 0
+        bet_log    = []
+
+        with _db_con() as con:
+            pending = con.execute(
+                "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
+                "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
+                (week,)
+            ).fetchall()
+            print(f"[GRADE] {len(pending)} ungraded bets for week {week}")
+
+            for b in pending:
+                bid, uid, matchup, btype, amt, odds, pick, line = b
+                key = matchup.lower().strip()
+                gd  = _fuzzy_match(key, scores)
+                if not gd:
+                    continue
+                try:
+                    line_val = float(line)
+                except (ValueError, TypeError):
+                    line_val = 0.0
+                res = _grade_single_bet(btype, pick, line_val,
+                                        gd["home"], gd["away"],
+                                        gd["home_score"], gd["away_score"])
+                print(f"[GRADE] bid={bid} {btype} pick='{pick}' → {res}")
+                if res == "Pending":
+                    continue
+                if res == "Won":
+                    payout = _payout_calc(amt, int(odds))
+                    _update_balance(uid, payout, con)
+                    total_paid += payout - amt
+                    wins += 1
+                elif res == "Push":
+                    _update_balance(uid, amt, con)
+                    pushes += 1
+                elif res == "Lost":
+                    losses += 1
+                con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
+                settled += 1
+                profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else 0
+                bet_log.append({"uid": uid, "result": res, "pick": pick,
+                                  "bet_type": btype, "matchup": matchup,
+                                  "wager": amt, "profit": profit})
+
+            # Grade parlays
+            parlays = con.execute(
+                "SELECT parlay_id, discord_id, legs, combined_odds, wager_amount "
+                "FROM parlays_table WHERE week=? AND status='Pending'",
+                (week,)
+            ).fetchall()
+            for pid, uid, legs_json, c_odds, amt in parlays:
+                try:
+                    legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else legs_json
+                    if not isinstance(legs, list):
+                        continue
+                except Exception:
+                    continue
+
+                all_won = True; any_lost = False; unresolved = 0; any_pushed = False
+                for leg in legs:
+                    gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
+                    if not gd:
+                        all_won = False; unresolved += 1; continue
+                    res = _grade_single_bet(
+                        leg["bet_type"], leg["pick"], float(leg.get("line", 0)),
+                        gd["home"], gd["away"], gd["home_score"], gd["away_score"]
+                    )
+                    if res == "Lost":
+                        all_won = False; any_lost = True; break
+                    elif res == "Push":
+                        all_won = False; any_pushed = True
+                    elif res == "Pending":
+                        all_won = False; unresolved += 1
+
+                if unresolved > 0 and not any_lost:
+                    continue
+                if all_won:
+                    payout = _payout_calc(amt, c_odds)
+                    _update_balance(uid, payout, con)
+                    total_paid += payout - amt
+                    con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
+                    wins += 1
+                elif any_lost:
+                    con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
+                    losses += 1
+                elif any_pushed:
+                    _update_balance(uid, amt, con)
+                    con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
+                    pushes += 1
+
+        embed = discord.Embed(title=f"✅  Week {week} Bets Graded", color=TSL_GOLD)
+        embed.add_field(name="Settled",      value=str(settled),       inline=True)
+        embed.add_field(name="✅ Won",       value=str(wins),          inline=True)
+        embed.add_field(name="❌ Lost",      value=str(losses),        inline=True)
+        embed.add_field(name="🔁 Push",     value=str(pushes),        inline=True)
+        embed.add_field(name="💸 Paid Out", value=f"${total_paid:,}", inline=True)
+        embed.add_field(name="\u200b",      value="\u200b",           inline=True)
+
+        if bet_log:
+            lines = []
+            for entry in bet_log[:15]:
+                icon   = {"Won": "✅", "Lost": "❌", "Push": "🔁"}.get(entry["result"], "•")
+                member = interaction.guild.get_member(entry["uid"]) if interaction.guild else None
+                name   = member.display_name if member else f"<@{entry['uid']}>"
+                money  = (f"+${entry['profit']:,}" if entry["result"] == "Won"
+                          else f"-${entry['wager']:,}" if entry["result"] == "Lost"
+                          else f"↩️ ${entry['wager']:,}")
+                lines.append(
+                    f"{icon} **{name}** — {entry['pick']} ({entry['bet_type']}) | "
+                    f"{entry['matchup']} | {money}"
+                )
+            embed.add_field(name="📋 Bet Results", value="\n".join(lines), inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="grade_bets", description="[Deprecated] Use /commish sb grade_bets instead.")
+    @app_commands.describe(week="Week number to settle")
+    async def grade_bets(self, interaction: discord.Interaction, week: int):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._grade_bets_impl(interaction, week)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADMIN — OVERVIEW
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _sb_status_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        bet_week = dm.CURRENT_WEEK + 1
+        try:
+            src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+            df  = src.copy()
+            for col in ["weekIndex", "seasonIndex", "stageIndex"]:
+                if col in df.columns:
+                    df[col] = df[col].apply(
+                        lambda x: int(float(x)) if x not in (None, "", "nan") else -1
+                    )
+            if "weekIndex" in df.columns:
+                mask = df["weekIndex"] == (bet_week - 1)
+                if "seasonIndex" in df.columns:
+                    mask = mask & (df["seasonIndex"] == dm.CURRENT_SEASON)
+                games_df = df[mask]
+            else:
+                games_df = df
+            raw_games = games_df.to_dict("records")
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Error loading games: `{e}`", ephemeral=True)
+
+        loop = asyncio.get_running_loop()
+        ui_games = await loop.run_in_executor(None, _build_game_lines, raw_games)
+
+        with _db_con() as con:
+            bet_counts = {}
+            for (matchup, cnt) in con.execute(
+                "SELECT matchup, COUNT(*) FROM bets_table WHERE week=? AND status='Pending' "
+                "GROUP BY matchup",
+                (bet_week,)
+            ).fetchall():
+                bet_counts[matchup.lower().strip()] = cnt
+
+        embed = discord.Embed(
+            title=f"📊  SPORTSBOOK STATUS — Week {bet_week}",
+            color=TSL_GOLD
+        )
+        embed.description = f"Season {dm.CURRENT_SEASON}  •  League Avg: **{_LEAGUE_AVG_SCORE:.1f} pts/team**\n"
+
+        lines = []
+        for g in ui_games:
+            lock = "🔴" if _is_locked(g["game_id"]) else "🟢"
+            ov   = " ⚡" if g.get("_overridden") else ""
+            key  = g["matchup_key"].lower().strip()
+            bets = bet_counts.get(key, 0)
+
+            lines.append(
+                f"{lock} **{g['away']}** @ **{g['home']}**{ov}\n"
+                f"   Spread: `{g['away']} {g['away_spread']}` / `{g['home']} {g['home_spread']}`\n"
+                f"   ML: `{g['away']} {g['away_ml']}` / `{g['home']} {g['home_ml']}`\n"
+                f"   O/U: **{g['ou_line']}**  •  Pending bets: **{bets}**"
+            )
+
+        if lines:
+            # Split into chunks to avoid field length limit
+            chunk = []
+            for line in lines:
+                chunk.append(line)
+                if len(chunk) == 4:
+                    embed.add_field(name="\u200b", value="\n\n".join(chunk), inline=False)
+                    chunk = []
+            if chunk:
+                embed.add_field(name="\u200b", value="\n\n".join(chunk), inline=False)
+
+        embed.set_footer(text="🟢 = Open  🔴 = Locked  ⚡ = Admin Override")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="sb_status", description="[Deprecated] Use /commish sb status instead.")
+    async def sb_status(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_status_impl(interaction)
+
+    async def _sb_lines_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        bet_week = dm.CURRENT_WEEK + 1
+        try:
+            src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+            df  = src.copy()
+            for col in ["weekIndex", "seasonIndex"]:
+                if col in df.columns:
+                    df[col] = df[col].apply(
+                        lambda x: int(float(x)) if x not in (None, "", "nan") else -1
+                    )
+            if "weekIndex" in df.columns:
+                mask = df["weekIndex"] == (bet_week - 1)
+                if "seasonIndex" in df.columns:
+                    mask = mask & (df["seasonIndex"] == dm.CURRENT_SEASON)
+                raw_games = df[mask].to_dict("records")
+            else:
+                raw_games = df.to_dict("records")
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+        loop = asyncio.get_running_loop()
+        ui_games = await loop.run_in_executor(None, _build_game_lines, raw_games)
+
+        embed = discord.Embed(
+            title=f"🔬  Line Debug — Week {bet_week}  (Elo Engine {SPORTSBOOK_VERSION})",
+            color=discord.Color.blurple()
+        )
+        for g in ui_games[:8]:   # Discord embed field limit
+            ov_note = " **[OVERRIDE]**" if g.get("_overridden") else ""
+            h_elo = g.get("_home_elo", 1500)
+            a_elo = g.get("_away_elo", 1500)
+            h_pow = g.get("_home_power", 50)
+            a_pow = g.get("_away_power", 50)
+
+            embed.add_field(
+                name=f"{g['away']} @ {g['home']}{ov_note}",
+                value=(
+                    f"Elo: **{g['away']}** {a_elo:.0f} vs **{g['home']}** {h_elo:.0f}\n"
+                    f"Power: {a_pow:.1f} vs {h_pow:.1f}\n"
+                    f"Spread: home {g['home_spread']} (engine {g['_engine_spread']:+.1f})\n"
+                    f"ML: {g['away']} {g['away_ml']} / {g['home']} {g['home_ml']}\n"
+                    f"O/U: {g['ou_line']}"
+                ),
+                inline=False
+            )
+
+        embed.set_footer(
+            text=f"Elo Engine {SPORTSBOOK_VERSION}  •  League Avg: {_LEAGUE_AVG_SCORE:.1f} pts/team"
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="sb_lines", description="[Deprecated] Use /commish sb lines instead.")
+    async def sb_lines(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_lines_impl(interaction)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADMIN — LINE OVERRIDES
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _sb_setspread_impl(self, interaction: discord.Interaction,
+                                 matchup: str, home_spread: float):
+        away_spread = -home_spread
+        home_ml     = _spread_to_ml(home_spread)
+        away_ml     = _spread_to_ml(away_spread)
+
+        _set_line_override(
+            matchup.strip(),
+            set_by=interaction.user.display_name,
+            home_spread=home_spread,
+            away_spread=away_spread,
+            home_ml=home_ml,
+            away_ml=away_ml,
+        )
+
+        def fmt(s):
+            return "PK" if s == 0 else (f"+{s}" if s > 0 else str(s))
+
+        await interaction.response.send_message(
+            f"✅ **Spread override set** for `{matchup}`\n"
+            f"Home: **{fmt(home_spread)}** ({_american_to_str(home_ml)})\n"
+            f"Away: **{fmt(away_spread)}** ({_american_to_str(away_ml)})\n"
+            f"*(ML auto-calculated from spread)*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_setspread", description="[Deprecated] Use /commish sb setspread instead.")
+    @app_commands.describe(
+        matchup="e.g. 'Cowboys @ Eagles'",
+        home_spread="Home team's spread (negative = home favored, e.g. -3.5)"
+    )
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_setspread(self, interaction: discord.Interaction,
+                           matchup: str, home_spread: float):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_setspread_impl(interaction, matchup, home_spread)
+
+    async def _sb_setml_impl(self, interaction: discord.Interaction,
+                             matchup: str, home_ml: int, away_ml: int):
+        _set_line_override(
+            matchup.strip(),
+            set_by=interaction.user.display_name,
+            home_ml=home_ml,
+            away_ml=away_ml,
+        )
+        await interaction.response.send_message(
+            f"✅ **ML override set** for `{matchup}`\n"
+            f"Home: **{_american_to_str(home_ml)}**  |  Away: **{_american_to_str(away_ml)}**",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_setml", description="[Deprecated] Use /commish sb setml instead.")
+    @app_commands.describe(
+        matchup="e.g. 'Cowboys @ Eagles'",
+        home_ml="Home team moneyline (e.g. -145 or +125)",
+        away_ml="Away team moneyline (e.g. +125 or -145)"
+    )
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_setml(self, interaction: discord.Interaction,
+                       matchup: str, home_ml: int, away_ml: int):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_setml_impl(interaction, matchup, home_ml, away_ml)
+
+    async def _sb_setou_impl(self, interaction: discord.Interaction, matchup: str, ou_line: float):
+        _set_line_override(
+            matchup.strip(),
+            set_by=interaction.user.display_name,
+            ou_line=ou_line,
+        )
+        await interaction.response.send_message(
+            f"✅ **O/U override set** for `{matchup}`: **{ou_line}**",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_setou", description="[Deprecated] Use /commish sb setou instead.")
+    @app_commands.describe(
+        matchup="e.g. 'Cowboys @ Eagles'",
+        ou_line="Over/Under total points (e.g. 47.5)"
+    )
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_setou(self, interaction: discord.Interaction, matchup: str, ou_line: float):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_setou_impl(interaction, matchup, ou_line)
+
+    async def _sb_resetlines_impl(self, interaction: discord.Interaction):
+        with _db_con() as con:
+            count = con.execute("SELECT COUNT(*) FROM line_overrides").fetchone()[0]
+            con.execute("DELETE FROM line_overrides")
+
+        await interaction.response.send_message(
+            f"✅ Cleared **{count}** line override(s). All games now use the ATLAS odds engine.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_resetlines", description="[Deprecated] Use /commish sb resetlines instead.")
+    async def sb_resetlines(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_resetlines_impl(interaction)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADMIN — GAME LOCKS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _sb_lock_impl(self, interaction: discord.Interaction, matchup: str, locked: bool):
+        _set_locked(matchup.strip(), locked)
+        status = "🔴 **LOCKED**" if locked else "🟢 **UNLOCKED**"
+        await interaction.response.send_message(
+            f"{status} — `{matchup}` betting is now {'closed' if locked else 'open'}.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_lock", description="[Deprecated] Use /commish sb lock instead.")
+    @app_commands.describe(
+        matchup="Game ID or 'Away @ Home'",
+        locked="True to lock, False to unlock"
+    )
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_lock(self, interaction: discord.Interaction, matchup: str, locked: bool):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_lock_impl(interaction, matchup, locked)
+
+    async def _sb_lockall_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+        if src.empty:
+            return await interaction.followup.send("❌ No game data loaded.", ephemeral=True)
+
+        bet_week = dm.CURRENT_WEEK + 1
+        df = src.copy()
+        for col in ["weekIndex", "seasonIndex"]:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: int(float(x)) if x not in (None, "", "nan") else -1
+                )
+        if "weekIndex" in df.columns:
+            mask = df["weekIndex"] == (bet_week - 1)
+            if "seasonIndex" in df.columns:
+                mask = mask & (df["seasonIndex"] == dm.CURRENT_SEASON)
+            games_df = df[mask]
+        else:
+            games_df = df
+
+        count = 0
+        for _, g in games_df.iterrows():
+            game_id = str(g.get("gameId", g.get("id", g.get("matchup_key", ""))))
+            if game_id:
+                _set_locked(game_id, True)
+                count += 1
+
+        await interaction.followup.send(
+            f"🔴 **Locked {count} game(s)** for Week {bet_week}. No new bets accepted.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_lockall", description="[Deprecated] Use /commish sb lockall instead.")
+    async def sb_lockall(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_lockall_impl(interaction)
+
+    async def _sb_unlockall_impl(self, interaction: discord.Interaction):
+        with _db_con() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM games_state WHERE locked=1"
+            ).fetchone()[0]
+            con.execute("UPDATE games_state SET locked=0")
+
+        await interaction.response.send_message(
+            f"🟢 **Unlocked {count} game(s)**. Betting is now open.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_unlockall", description="[Deprecated] Use /commish sb unlockall instead.")
+    async def sb_unlockall(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_unlockall_impl(interaction)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADMIN — BET MANAGEMENT
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _sb_cancelgame_impl(self, interaction: discord.Interaction, matchup: str):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        key = matchup.strip().lower()
+        refunded = 0
+        total_refunded = 0
+
+        with _db_con() as con:
+            pending = con.execute(
+                "SELECT bet_id, discord_id, wager_amount "
+                "FROM bets_table WHERE LOWER(matchup)=? AND status='Pending'",
+                (key,)
+            ).fetchall()
+            for bid, uid, amt in pending:
+                _update_balance(uid, amt, con)
+                con.execute(
+                    "UPDATE bets_table SET status='Cancelled' WHERE bet_id=?", (bid,)
+                )
+                refunded      += 1
+                total_refunded += amt
+
+            # Also refund parlays containing this matchup
+            parlay_rows = con.execute(
+                "SELECT parlay_id, discord_id, legs, wager_amount "
+                "FROM parlays_table WHERE status='Pending'"
+            ).fetchall()
+            parlay_refunds = 0
+            for pid, uid, legs_json, amt in parlay_rows:
+                try:
+                    legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
+                except Exception:
+                    continue
+                if any(key in leg.get("matchup", "").lower() for leg in legs):
+                    _update_balance(uid, amt, con)
+                    con.execute(
+                        "UPDATE parlays_table SET status='Cancelled' WHERE parlay_id=?", (pid,)
+                    )
+                    parlay_refunds += 1
+                    total_refunded += amt
+
+            # Lock the game so no new bets come in
+            _set_locked(matchup.strip(), True)
+
+        await interaction.followup.send(
+            f"✅ **Cancelled & refunded** bets for `{matchup}`\n"
+            f"Straight bets: **{refunded}** refunded\n"
+            f"Parlays: **{parlay_refunds}** refunded\n"
+            f"Total returned: **${total_refunded:,}**\n"
+            f"*(Game has been locked)*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_cancelgame",
+                          description="[Deprecated] Use /commish sb cancelgame instead.")
+    @app_commands.describe(matchup="Matchup key, e.g. 'Cowboys @ Eagles'")
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_cancelgame(self, interaction: discord.Interaction, matchup: str):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_cancelgame_impl(interaction, matchup)
+
+    async def _sb_refund_impl(self, interaction: discord.Interaction, bet_id: int):
+        with _db_con() as con:
+            bet = con.execute(
+                "SELECT discord_id, wager_amount, pick, bet_type, matchup, status "
+                "FROM bets_table WHERE bet_id=?",
+                (bet_id,)
+            ).fetchone()
+            if not bet:
+                return await interaction.response.send_message(
+                    f"❌ Bet ID `{bet_id}` not found.", ephemeral=True
+                )
+            uid, amt, pick, btype, matchup, status = bet
+            if status not in ('Pending',):
+                return await interaction.response.send_message(
+                    f"❌ Bet `{bet_id}` is already **{status}** and cannot be refunded.",
+                    ephemeral=True
+                )
+            _update_balance(uid, amt, con)
+            con.execute(
+                "UPDATE bets_table SET status='Cancelled' WHERE bet_id=?", (bet_id,)
+            )
+
+        member = interaction.guild.get_member(uid) if interaction.guild else None
+        name   = member.display_name if member else f"<@{uid}>"
+        await interaction.response.send_message(
+            f"✅ Refunded bet `#{bet_id}` — **{name}** gets **${amt:,}** back\n"
+            f"*(was: {pick} {btype} on {matchup})*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_refund", description="[Deprecated] Use /commish sb refund instead.")
+    @app_commands.describe(bet_id="Bet ID number (from /mybets or the DB)")
+    async def sb_refund(self, interaction: discord.Interaction, bet_id: int):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_refund_impl(interaction, bet_id)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADMIN — BALANCE MANAGEMENT
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _sb_balance_impl(self, interaction: discord.Interaction,
+                               member: discord.Member,
+                               adjustment: int,
+                               reason: str = "Commissioner adjustment"):
+        old_balance = _get_balance(member.id)
+        _update_balance(member.id, adjustment)
+        new_balance = _get_balance(member.id)
+
+        sign = f"+${adjustment:,}" if adjustment >= 0 else f"-${abs(adjustment):,}"
+        await interaction.response.send_message(
+            f"✅ Balance adjusted for **{member.display_name}**\n"
+            f"${old_balance:,} → **${new_balance:,}** ({sign})\n"
+            f"Reason: *{reason}*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_balance", description="[Deprecated] Use /commish sb balance instead.")
+    @app_commands.describe(
+        member="Discord member to adjust",
+        adjustment="Amount to add (positive) or remove (negative)",
+        reason="Optional reason for the audit log"
+    )
+    async def sb_balance(self, interaction: discord.Interaction,
+                         member: discord.Member,
+                         adjustment: int,
+                         reason: str = "Commissioner adjustment"):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_balance_impl(interaction, member, adjustment, reason)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ADMIN — PROP BET MANAGEMENT
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _sb_addprop_impl(self, interaction: discord.Interaction,
+                               description: str,
+                               option_a: str,
+                               option_b: str,
+                               odds_a: int = -110,
+                               odds_b: int = -110):
+        with _db_con() as con:
+            cur = con.execute(
+                "INSERT INTO prop_bets (week, description, option_a, option_b, odds_a, odds_b, created_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (dm.CURRENT_WEEK + 1, description, option_a, option_b,
+                 odds_a, odds_b, interaction.user.display_name)
+            )
+            prop_id = cur.lastrowid
+
+        await interaction.response.send_message(
+            f"✅ **Prop bet #{prop_id} created!**\n"
+            f"**{description}**\n"
+            f"A: **{option_a}** ({_american_to_str(odds_a)})\n"
+            f"B: **{option_b}** ({_american_to_str(odds_b)})\n\n"
+            f"Members can bet via `/props`.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_addprop",
+                          description="[Deprecated] Use /commish sb addprop instead.")
+    @app_commands.describe(
+        description="Full prop bet description, e.g. 'Will JT score 30+ pts this week?'",
+        option_a="First option label (e.g. 'Yes' or 'Ravens win big')",
+        option_b="Second option label (e.g. 'No' or 'Ravens win close')",
+        odds_a="American odds for Option A (default -110)",
+        odds_b="American odds for Option B (default -110)"
+    )
+    async def sb_addprop(self, interaction: discord.Interaction,
+                         description: str,
+                         option_a: str,
+                         option_b: str,
+                         odds_a: int = -110,
+                         odds_b: int = -110):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_addprop_impl(interaction, description, option_a, option_b, odds_a, odds_b)
+
+    async def _sb_settleprop_impl(self, interaction: discord.Interaction,
+                                  prop_id: int, result: str):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        with _db_con() as con:
+            prop = con.execute(
+                "SELECT description, option_a, option_b, odds_a, odds_b, status "
+                "FROM prop_bets WHERE prop_id=?",
+                (prop_id,)
+            ).fetchone()
+            if not prop:
+                return await interaction.followup.send(
+                    f"❌ Prop #{prop_id} not found.", ephemeral=True
+                )
+            desc, opt_a, opt_b, odds_a, odds_b, status = prop
+            if status != 'Open':
+                return await interaction.followup.send(
+                    f"❌ Prop #{prop_id} is already **{status}**.", ephemeral=True
+                )
+
+            wagers = con.execute(
+                "SELECT id, discord_id, pick, wager_amount, odds "
+                "FROM prop_wagers WHERE prop_id=? AND status='Pending'",
+                (prop_id,)
+            ).fetchall()
+
+            wins = losses = pushes = 0
+            total_paid = 0
+
+            for wid, uid, pick, amt, odds in wagers:
+                pick_lower = pick.lower().strip()
+                if result == "push":
+                    _update_balance(uid, amt, con)
+                    con.execute("UPDATE prop_wagers SET status='Push' WHERE id=?", (wid,))
+                    pushes += 1
+                else:
+                    winning_pick = opt_a if result == "a" else opt_b
+                    if pick_lower == winning_pick.lower().strip():
+                        payout = _payout_calc(amt, int(odds))
+                        _update_balance(uid, payout, con)
+                        total_paid += payout - amt
+                        con.execute("UPDATE prop_wagers SET status='Won' WHERE id=?", (wid,))
+                        wins += 1
+                    else:
+                        con.execute("UPDATE prop_wagers SET status='Lost' WHERE id=?", (wid,))
+                        losses += 1
+
+            result_label = (opt_a if result == "a" else opt_b if result == "b" else "PUSH")
+            con.execute(
+                "UPDATE prop_bets SET status='Settled', result=? WHERE prop_id=?",
+                (result_label, prop_id)
+            )
+
+        embed = discord.Embed(title=f"✅  Prop #{prop_id} Settled", color=TSL_GREEN)
+        embed.description = f"**{desc}**\n**Result: {result_label}**"
+        embed.add_field(name="✅ Won",       value=str(wins),           inline=True)
+        embed.add_field(name="❌ Lost",      value=str(losses),         inline=True)
+        embed.add_field(name="🔁 Push",     value=str(pushes),         inline=True)
+        embed.add_field(name="💸 Paid Out", value=f"${total_paid:,}",  inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="sb_settleprop",
+                          description="[Deprecated] Use /commish sb settleprop instead.")
+    @app_commands.describe(
+        prop_id="Prop bet ID number",
+        result="Winning option: 'a', 'b', or 'push'"
+    )
+    @app_commands.choices(result=[
+        app_commands.Choice(name="Option A wins",  value="a"),
+        app_commands.Choice(name="Option B wins",  value="b"),
+        app_commands.Choice(name="Push (refund all)", value="push"),
+    ])
+    async def sb_settleprop(self, interaction: discord.Interaction,
+                            prop_id: int, result: str):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_settleprop_impl(interaction, prop_id, result)
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(SportsbookCog(bot))

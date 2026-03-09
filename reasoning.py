@@ -1,26 +1,55 @@
 """
-reasoning.py
-
-Two-phase Gemini reasoning engine:
-
+reasoning.py — ATLAS Two-Phase Gemini Reasoning Engine
+─────────────────────────────────────────────────────────────────────────────
 Phase 1 — ANALYST:
   Gemini receives the question + full dataframe schemas + sample data.
   It writes Python code to query the dataframes and compute an answer.
   The code is executed in a sandboxed environment.
 
-Phase 2 — WITTGPT:
-  The execution result feeds into WittGPT's persona prompt.
-  WittGPT delivers the answer as a trash-talking commissioner.
+Phase 2 — ATLAS:
+  The execution result feeds into ATLAS's persona prompt.
+  ATLAS delivers the answer as a trash-talking commissioner.
 
 Falls back to analysis.route_query() if code generation or execution fails.
+
+Fixes applied (v2):
+  - _SCHEMA_CACHE now uses a 5-minute TTL (_SCHEMA_TIMESTAMP) so the schema
+    automatically refreshes after every sync cycle without requiring a restart.
+    bot.py also explicitly resets _SCHEMA_CACHE / _SCHEMA_TIMESTAMP after
+    every successful _run_sync() call for immediate invalidation.
+  - get_schema() now always regenerates if DataFrames are all empty (startup
+    race condition where schema was cached before load_all() ran).
+  - All original pre-built metric functions, REASONING_TRIGGERS, Text-to-SQL
+    pipeline, and self-correcting execution loop are fully preserved.
+
+Fixes applied (v3):
+  - dm.df_trades now exists in data_manager — build_schema_prompt() and
+    build_exec_env() no longer crash with AttributeError.
+  - discord_db_exists(), get_discord_db_schema(), _get_discord_db() are now
+    proper functions in data_manager — Text-to-SQL pipeline is fully wired.
+
+Fixes applied (v4 — WittGPT Code Review rebuild):
+  - FIX #10: exec() sandbox now restricts __builtins__ to a safe whitelist.
+             If Gemini hallucinates `import os; os.system(...)`, the sandbox
+             blocks it instead of executing arbitrary system commands.
+─────────────────────────────────────────────────────────────────────────────
 """
 
 import traceback
+import time
+import re as _re
+import sqlite3
 import pandas as pd
 import numpy as np
 import data_manager as dm
 
-# ── Schema snapshot (generated once at import) ────────────────────────────────
+# ── Schema cache with TTL ─────────────────────────────────────────────────────
+_SCHEMA_CACHE:     str   = ""
+_SCHEMA_TIMESTAMP: float = 0.0
+_SCHEMA_TTL:       int   = 300   # seconds — rebuild schema if older than 5 min
+
+
+# ── Schema snapshot helpers ───────────────────────────────────────────────────
 
 def _schema_for(name: str, df: pd.DataFrame, sample_rows: int = 3) -> str:
     if df.empty:
@@ -37,7 +66,7 @@ def _schema_for(name: str, df: pd.DataFrame, sample_rows: int = 3) -> str:
 
 
 def build_schema_prompt() -> str:
-    """Full schema description passed to the analyst."""
+    """Full schema description passed to the analyst phase."""
     sections = [
         _schema_for("df_offense",    dm.df_offense,    3),
         _schema_for("df_defense",    dm.df_defense,    3),
@@ -51,18 +80,40 @@ def build_schema_prompt() -> str:
     return "\n\n".join(sections)
 
 
-# Cache schema so it's only computed once
-_SCHEMA_CACHE: str = ""
+def _all_dfs_empty() -> bool:
+    """True if every DataFrame is still empty — indicates load_all() hasn't run yet."""
+    return all(
+        df.empty for df in [
+            dm.df_offense, dm.df_defense, dm.df_team_stats,
+            dm.df_standings, dm.df_teams, dm.df_players,
+        ]
+    )
 
 
 def get_schema() -> str:
-    global _SCHEMA_CACHE
-    if not _SCHEMA_CACHE:
-        _SCHEMA_CACHE = build_schema_prompt()
+    """
+    Return the cached DataFrame schema string, rebuilding it when:
+      - The cache is empty (first call or explicit invalidation by bot.py)
+      - The TTL has expired (default: 5 minutes)
+      - All DataFrames are empty (load_all() hasn't run yet — defer caching)
+    """
+    global _SCHEMA_CACHE, _SCHEMA_TIMESTAMP
+
+    cache_stale  = (time.time() - _SCHEMA_TIMESTAMP) > _SCHEMA_TTL
+    data_missing = _all_dfs_empty()
+
+    if not _SCHEMA_CACHE or cache_stale:
+        if data_missing:
+            return "(DataFrames not yet loaded — sync in progress)"
+        _SCHEMA_CACHE     = build_schema_prompt()
+        _SCHEMA_TIMESTAMP = time.time()
+
     return _SCHEMA_CACHE
 
 
-# ── Pre-built composite metrics (always available to generated code) ──────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  PRE-BUILT COMPOSITE METRICS  (injected into generated code sandbox)
+# ═════════════════════════════════════════════════════════════════════════════
 
 PREBUILT_METRICS_CODE = """
 import pandas as pd
@@ -75,10 +126,7 @@ def _norm(series):
 # ── TEAM METRICS ──────────────────────────────────────────────────────────────
 
 def compute_spam_scores(df_team_stats):
-    \"\"\"
-    Spam score = how pass-heavy, red-zone-hungry, turnover-prone, and penalty-ridden a team is.
-    Higher = more spam.
-    \"\"\"
+    \"\"\"Spam score = how pass-heavy, red-zone-hungry, turnover-prone, penalty-ridden a team is.\"\"\"
     ts = df_team_stats.copy()
     ts['passRatio'] = ts['offPassYds'] / (ts['offPassYds'] + ts['offRushYds'] + 1e-9)
     ts['spamScore'] = (
@@ -91,10 +139,7 @@ def compute_spam_scores(df_team_stats):
     return ts[['teamName','spamScore','passRatio','offRedZones','off4thDownAtt','tOGiveAways','penalties']]
 
 def compute_sim_scores(df_team_stats):
-    \"\"\"
-    Sim score = balanced play-calling, low penalties, low turnovers, efficient 3rd down.
-    Higher = more sim.
-    \"\"\"
+    \"\"\"Sim score = balanced play-calling, low penalties, low turnovers, efficient 3rd down.\"\"\"
     ts = df_team_stats.copy()
     ts['passRatio'] = ts['offPassYds'] / (ts['offPassYds'] + ts['offRushYds'] + 1e-9)
     ts['simScore'] = (
@@ -106,10 +151,7 @@ def compute_sim_scores(df_team_stats):
     return ts[['teamName','simScore','passRatio','penalties','tOGiveAways','off3rdDownConvPct']]
 
 def compute_cheese_scores(df_team_stats):
-    \"\"\"
-    Cheese score = high 4th down aggression + tons of red zone trips + poor 3rd down efficiency
-    (suggesting they're skipping 3rd down management) + high penalty count.
-    \"\"\"
+    \"\"\"Cheese score = 4th-down aggression + red-zone trips + poor 3rd down + penalties.\"\"\"
     ts = df_team_stats.copy()
     ts['cheeseScore'] = (
         _norm(ts['off4thDownAtt'])              * 35 +
@@ -135,10 +177,7 @@ def compute_power_scores(df_standings):
 # ── PLAYER METRICS ────────────────────────────────────────────────────────────
 
 def compute_qb_scores(df_offense, min_att=50):
-    \"\"\"
-    QB composite score: TDs, yards, comp%, penalizes INTs and sacks.
-    Only includes QBs with min_att attempts.
-    \"\"\"
+    \"\"\"QB composite: TDs, yards, comp%, penalises INTs and sacks.\"\"\"
     qbs = df_offense[(df_offense['pos'] == 'QB') & (df_offense['passAtt'] >= min_att)].copy()
     qbs['tdRate']   = qbs['passTDs']  / (qbs['passAtt'] + 1e-9)
     qbs['intRate']  = qbs['passInts'] / (qbs['passAtt'] + 1e-9)
@@ -153,7 +192,7 @@ def compute_qb_scores(df_offense, min_att=50):
     return qbs[['extendedName','teamName','passAtt','passYds','passTDs','passInts','passCompPct','qbScore']]
 
 def compute_rb_scores(df_offense, min_att=20):
-    \"\"\"RB composite: yards, TDs, broken tackles, penalizes fumbles.\"\"\"
+    \"\"\"RB composite: yards, TDs, broken tackles, penalises fumbles.\"\"\"
     rbs = df_offense[(df_offense['pos'] == 'HB') & (df_offense['rushAtt'] >= min_att)].copy()
     rbs['ypc']      = rbs['rushYds'] / (rbs['rushAtt'] + 1e-9)
     rbs['fumRate']  = rbs['rushFum'] / (rbs['rushAtt'] + 1e-9)
@@ -167,7 +206,7 @@ def compute_rb_scores(df_offense, min_att=20):
     return rbs[['extendedName','teamName','rushAtt','rushYds','rushTDs','rushBrokenTackles','rushFum','rbScore']]
 
 def compute_wr_scores(df_offense, min_catches=10):
-    \"\"\"WR/TE composite: yards, TDs, YPC, penalizes drops.\"\"\"
+    \"\"\"WR/TE composite: yards, TDs, YPC, penalises drops.\"\"\"
     wrs = df_offense[
         (df_offense['pos'].isin(['WR','TE'])) & (df_offense['recCatches'] >= min_catches)
     ].copy()
@@ -181,17 +220,9 @@ def compute_wr_scores(df_offense, min_catches=10):
     return wrs[['extendedName','teamName','recCatches','recYds','recTDs','recDrops','wrScore']]
 
 def compute_sim_players(df_offense, df_defense):
-    \"\"\"
-    Sim player score: Players who put up stats without spammy behavior.
-    QBs: high comp%, low INT rate, balanced pass/rush.
-    RBs: high YPC, low fumbles.
-    WRs: low drop rate, consistent catches.
-    Defenders: high tackle count relative to their position's expectation.
-    Returns a combined ranked list.
-    \"\"\"
+    \"\"\"Most sim players by position — low spam indicators, consistent production.\"\"\"
     results = []
 
-    # QBs
     qbs = df_offense[(df_offense['pos'] == 'QB') & (df_offense['passAtt'] >= 50)].copy()
     if not qbs.empty:
         qbs['intRate'] = qbs['passInts'] / (qbs['passAtt'] + 1e-9)
@@ -204,7 +235,6 @@ def compute_sim_players(df_offense, df_defense):
         top = top.rename(columns={'simQB': 'simScore'})
         results.append(top)
 
-    # RBs
     rbs = df_offense[(df_offense['pos'] == 'HB') & (df_offense['rushAtt'] >= 20)].copy()
     if not rbs.empty:
         rbs['fumRate'] = rbs['rushFum'] / (rbs['rushAtt'] + 1e-9)
@@ -218,7 +248,6 @@ def compute_sim_players(df_offense, df_defense):
         top = top.rename(columns={'simRB': 'simScore'})
         results.append(top)
 
-    # WRs
     wrs = df_offense[(df_offense['pos'] == 'WR') & (df_offense['recCatches'] >= 10)].copy()
     if not wrs.empty:
         wrs['dropRate'] = wrs['recDrops'] / (wrs['recCatches'] + wrs['recDrops'] + 1e-9)
@@ -237,14 +266,70 @@ def compute_sim_players(df_offense, df_defense):
     return pd.DataFrame()
 """
 
-# ── Sandboxed execution environment ──────────────────────────────────────────
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  FIX #10: SAFE BUILTINS WHITELIST FOR EXEC SANDBOX
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Without this, Gemini-generated code has access to ALL Python builtins
+# including __import__, open(), exec(), eval(), compile(), etc.
+# If Gemini hallucinates `import os; os.system("rm -rf /")`, the original
+# code would have executed it.
+#
+# This whitelist allows only safe, computation-oriented builtins.
+# __import__ is explicitly excluded — the sandbox pre-loads pd and np,
+# and the PREBUILT_METRICS_CODE handles its own imports internally.
+
+_SAFE_BUILTINS = {
+    # Type constructors
+    "int": int, "float": float, "str": str, "bool": bool,
+    "list": list, "dict": dict, "tuple": tuple, "set": set,
+    "frozenset": frozenset, "bytes": bytes, "bytearray": bytearray,
+    "complex": complex,
+    # Iteration & comprehension
+    "range": range, "enumerate": enumerate, "zip": zip,
+    "map": map, "filter": filter, "reversed": reversed,
+    "iter": iter, "next": next,
+    # Aggregation & comparison
+    "len": len, "sum": sum, "min": min, "max": max,
+    "abs": abs, "round": round, "pow": pow, "divmod": divmod,
+    "sorted": sorted, "any": any, "all": all,
+    # Type checking
+    "isinstance": isinstance, "issubclass": issubclass, "type": type,
+    "callable": callable, "hasattr": hasattr, "getattr": getattr,
+    # String & repr
+    "repr": repr, "format": format, "chr": chr, "ord": ord,
+    "hex": hex, "oct": oct, "bin": bin, "ascii": ascii,
+    # Output (safe — just prints to stdout, which we capture)
+    "print": print,
+    # Misc safe
+    "id": id, "hash": hash,
+    "staticmethod": staticmethod, "classmethod": classmethod,
+    "property": property, "super": super, "object": object,
+    # Exceptions (needed for try/except in generated code)
+    "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
+    "KeyError": KeyError, "IndexError": IndexError, "AttributeError": AttributeError,
+    "ZeroDivisionError": ZeroDivisionError, "RuntimeError": RuntimeError,
+    "StopIteration": StopIteration, "NotImplementedError": NotImplementedError,
+}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  SANDBOXED EXECUTION
+# ═════════════════════════════════════════════════════════════════════════════
 
 def build_exec_env() -> dict:
     """
     Returns the globals dict available to generated code.
-    Includes all dataframes, helper functions, pandas, numpy.
+    Always takes a fresh copy of each DataFrame so sandbox mutations
+    don't affect the live data_manager state.
+
+    FIX #10: __builtins__ is now restricted to _SAFE_BUILTINS.
+    This prevents generated code from calling __import__, open(),
+    exec(), eval(), compile(), or any other dangerous builtin.
     """
     env = {
+        "__builtins__": _SAFE_BUILTINS,   # FIX #10: restricted builtins
         "pd": pd,
         "np": np,
         "df_offense":    dm.df_offense.copy(),
@@ -255,16 +340,27 @@ def build_exec_env() -> dict:
         "df_players":    dm.df_players.copy(),
         "df_games":      dm.df_games.copy(),
         "df_trades":     dm.df_trades.copy(),
-        "result":        None,  # generated code MUST set this
+        "result":        None,   # generated code MUST assign this
     }
-    # Inject pre-built metrics into env
-    exec(PREBUILT_METRICS_CODE, env)
+    # PREBUILT_METRICS_CODE uses `import pandas as pd` and `import numpy as np`
+    # internally. We exec it in a SEPARATE env with FULL builtins (intentional —
+    # this is our own trusted code, not LLM-generated) so those imports work,
+    # then inject only the resulting functions into the restricted sandbox.
+    prebuilt_env = {"pd": pd, "np": np}
+    exec(PREBUILT_METRICS_CODE, prebuilt_env)
+    # Copy only the functions we defined (skip __builtins__, pd, np)
+    for key, val in prebuilt_env.items():
+        if callable(val) and not key.startswith("_") and key not in ("pd", "np"):
+            env[key] = val
+    # Also inject the _norm helper since metric functions reference it
+    if "_norm" in prebuilt_env:
+        env["_norm"] = prebuilt_env["_norm"]
     return env
 
 
 def safe_exec(code: str) -> tuple[any, str]:
     """
-    Executes generated code in a sandboxed env.
+    Execute generated code in a sandboxed env.
     Returns (result, error_message).
     result is whatever the code assigned to the `result` variable.
     """
@@ -272,7 +368,6 @@ def safe_exec(code: str) -> tuple[any, str]:
     try:
         exec(code, env)
         result = env.get("result")
-        # Convert DataFrames to string for context
         if isinstance(result, pd.DataFrame):
             result = result.head(15).to_string(index=False)
         elif isinstance(result, pd.Series):
@@ -282,7 +377,9 @@ def safe_exec(code: str) -> tuple[any, str]:
         return None, traceback.format_exc()
 
 
-# ── Analyst prompt ────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  ANALYST PROMPTS
+# ═════════════════════════════════════════════════════════════════════════════
 
 ANALYST_SYSTEM = """
 You are a precise Python data analyst for the TSL Madden Franchise league.
@@ -293,13 +390,13 @@ RULES:
 1. You have access to these DataFrames (already loaded, do NOT re-load any files):
    df_offense, df_defense, df_team_stats, df_standings, df_teams, df_players, df_games, df_trades
 2. You also have these pre-built metric functions ready to call:
-   - compute_spam_scores(df_team_stats)       → team spam scores
-   - compute_sim_scores(df_team_stats)        → team sim scores  
-   - compute_cheese_scores(df_team_stats)     → team cheese scores
-   - compute_power_scores(df_standings)       → team power scores
-   - compute_qb_scores(df_offense)            → QB composite scores
-   - compute_rb_scores(df_offense)            → RB composite scores
-   - compute_wr_scores(df_offense)            → WR composite scores
+   - compute_spam_scores(df_team_stats)          → team spam scores
+   - compute_sim_scores(df_team_stats)           → team sim scores
+   - compute_cheese_scores(df_team_stats)        → team cheese scores
+   - compute_power_scores(df_standings)          → team power scores
+   - compute_qb_scores(df_offense)               → QB composite scores
+   - compute_rb_scores(df_offense)               → RB composite scores
+   - compute_wr_scores(df_offense)               → WR composite scores
    - compute_sim_players(df_offense, df_defense) → most sim players by position
 3. You have pandas (pd) and numpy (np) available.
 4. ALWAYS assign your final answer to a variable called `result`.
@@ -309,16 +406,18 @@ RULES:
 7. For "least sim stats" → use compute_sim_players or compute_sim_scores, sort ascending, head(5)
 8. For "who would win X vs Y" → compare their powerScore, offTotalYds, defTotalYds, netPts, tODiff
 9. For player comparisons → join df_offense or df_defense, compute relevant rates, compare side by side
-10. For "most improved" → you'd need to compare seasons — df_games and df_standings have seasonIndex
+10. For "most improved" → df_games and df_standings have seasonIndex
 11. ONLY output Python code. No explanation. No markdown. No imports. Just raw executable Python.
-12. If you're unsure, compute multiple angles and combine them into result.
+12. If unsure, compute multiple angles and combine them into result.
+13. Do NOT use import statements — all libraries (pd, np) and functions are pre-loaded.
 
 IMPORTANT COLUMN NOTES:
-- df_offense has passAtt (NOT passAtts), passCompPct is already computed as a float
+- df_offense has passAtt (NOT passAtts), passCompPct is already a float
 - df_defense stats like defTotalTackles are already numeric (pre-cast)
 - df_team_stats has both offPassYds and offRushYds for pass ratio calculations
 - df_standings winPct is a string — cast with pd.to_numeric() before math
 - df_players has playerBestOvr, dev, age, contractSalary, capHit, value
+- df_games uses homeTeamName/awayTeamName and homeTeamScore/awayTeamScore
 """
 
 ANALYST_USER_TEMPLATE = """
@@ -331,40 +430,20 @@ Write Python code to answer this. Assign the answer to `result`.
 """
 
 
-# ── Gemini call (analyst phase) ───────────────────────────────────────────────
-
-async def generate_analysis_code(question: str, gemini_client) -> str:
-    """
-    Phase 1: Ask Gemini to write Python code to answer the question.
-    Delegates to _call_analyst for consistent code-fence stripping and error handling.
-    Returns the raw code string.
-    """
-    prompt = ANALYST_USER_TEMPLATE.format(
-        schema=get_schema(),
-        question=question,
-    )
-    return await _call_analyst(prompt, gemini_client, temperature=0.2)
-
-
-# ── Self-Correcting Execution Loop ────────────────────────────────────────────
-
-MAX_RETRIES = 2   # Hard cap: max 2 retries before graceful failure
-
+# ═════════════════════════════════════════════════════════════════════════════
+#  GEMINI CALL HELPER
+# ═════════════════════════════════════════════════════════════════════════════
 
 async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) -> str:
     """
     Single Gemini call for the analyst persona.
-    Strips markdown code fences from response.
-
-    Args:
-        prompt:        Full user-turn prompt to send.
-        gemini_client: Initialized google.genai Client.
-        temperature:   Sampling temperature (lower = more deterministic).
-
-    Returns:
-        Raw Python code string, or empty string on failure.
+    Strips markdown code fences from the response.
+    Returns raw Python code string, or empty string on failure.
     """
     from google.genai import types
+    import logging
+    log = logging.getLogger(__name__)
+
     try:
         response = gemini_client.models.generate_content(
             model="gemini-2.0-flash",
@@ -378,7 +457,6 @@ async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) ->
         if not response.text:
             return ""
         code = response.text.strip()
-        # Strip markdown fences (```python ... ``` or ``` ... ```)
         if code.startswith("```"):
             lines = code.split("\n")
             code  = "\n".join(
@@ -387,9 +465,21 @@ async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) ->
             )
         return code.strip()
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"[Reasoning] Gemini analyst call failed: {e}")
+        log.error(f"[Reasoning] Gemini analyst call failed: {e}")
         return ""
+
+
+async def generate_analysis_code(question: str, gemini_client) -> str:
+    """Phase 1: Ask Gemini to write Python code to answer the question."""
+    prompt = ANALYST_USER_TEMPLATE.format(schema=get_schema(), question=question)
+    return await _call_analyst(prompt, gemini_client, temperature=0.2)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  SELF-CORRECTING REASONING PIPELINE
+# ═════════════════════════════════════════════════════════════════════════════
+
+MAX_RETRIES = 2   # hard cap: max 2 retries before graceful failure
 
 
 async def reason(question: str, gemini_client) -> dict:
@@ -400,32 +490,20 @@ async def reason(question: str, gemini_client) -> dict:
     Phase 2: Execute the code. On failure, feed the full Python traceback
              back to Gemini and ask it to rewrite — up to MAX_RETRIES times.
 
-    Flow:
-        attempt 0 → initial code generation + execution
-        attempt 1 → retry with traceback from attempt 0
-        attempt 2 → final retry with traceback from attempt 1
-
-    If all attempts fail, returns success=False with the final error.
-    If any attempt succeeds, returns success=True immediately.
-
     Returns:
         dict: {
             'success':  bool,
-            'code':     str  (the last code attempted),
-            'result':   str  (stringified result value),
-            'error':    str  (final error, or "" on success),
+            'code':     str,
+            'result':   str,
+            'error':    str,
             'question': str,
-            'attempts': int  (1 = first try, 2 = one retry, 3 = two retries),
+            'attempts': int,
         }
     """
     import logging
     log = logging.getLogger(__name__)
 
-    # Phase 1: generate initial code
-    initial_prompt = ANALYST_USER_TEMPLATE.format(
-        schema=get_schema(),
-        question=question,
-    )
+    initial_prompt = ANALYST_USER_TEMPLATE.format(schema=get_schema(), question=question)
     code = await _call_analyst(initial_prompt, gemini_client, temperature=0.2)
 
     if not code:
@@ -440,11 +518,9 @@ async def reason(question: str, gemini_client) -> dict:
 
     last_error = ""
     for attempt in range(1, MAX_RETRIES + 2):   # attempts: 1, 2, 3
-        # Phase 2: execute
         result, error = safe_exec(code)
 
         if not error:
-            # ✅ Success
             log.info(f"[Reasoning] '{question[:60]}' succeeded on attempt {attempt}.")
             return {
                 "success":  True,
@@ -455,7 +531,6 @@ async def reason(question: str, gemini_client) -> dict:
                 "attempts": attempt,
             }
 
-        # ❌ Execution failed — capture full traceback
         last_error = error
         log.warning(
             f"[Reasoning] Attempt {attempt}/{MAX_RETRIES + 1} failed for "
@@ -463,10 +538,8 @@ async def reason(question: str, gemini_client) -> dict:
         )
 
         if attempt > MAX_RETRIES:
-            # We've exhausted all retries
             break
 
-        # Build self-correction prompt with the full traceback
         retry_prompt = (
             f"Your previous Python code failed with the following error:\n"
             f"```\n{error}\n```\n\n"
@@ -474,24 +547,22 @@ async def reason(question: str, gemini_client) -> dict:
             f"Previous (broken) code:\n"
             f"```python\n{code}\n```\n\n"
             f"Available DataFrames and columns:\n{get_schema()}\n\n"
-            f"TASK: Rewrite the code to fix the error. "
+            f"TASK: Rewrite the code to fix the error.\n"
             f"Common fixes:\n"
-            f"  - KeyError → check the schema above for exact column names\n"
-            f"  - AttributeError → cast to numeric with pd.to_numeric() first\n"
+            f"  - KeyError → check exact column names in schema above\n"
+            f"  - AttributeError → cast with pd.to_numeric() first\n"
             f"  - ValueError → handle NaN/empty DataFrames before operating\n"
             f"  - NameError → all data is already loaded; do NOT import or re-read files\n"
             f"Output ONLY raw Python code. No explanations. Assign result."
         )
 
-        # Lower temperature on retries → more conservative/correct code
-        retry_temp = 0.05 * attempt   # 0.05 on retry 1, 0.10 on retry 2
+        retry_temp = 0.05 * attempt
         code = await _call_analyst(retry_prompt, gemini_client, temperature=retry_temp)
 
         if not code:
             log.error(f"[Reasoning] Gemini returned no code on retry {attempt}.")
             break
 
-    # All attempts exhausted
     log.error(f"[Reasoning] All {MAX_RETRIES + 1} attempts failed for: '{question[:60]}'")
     return {
         "success":  False,
@@ -503,7 +574,9 @@ async def reason(question: str, gemini_client) -> dict:
     }
 
 
-# ── Decide: use reasoning or standard routing? ────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  ROUTING HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 
 REASONING_TRIGGERS = [
     # Playstyle
@@ -520,7 +593,7 @@ REASONING_TRIGGERS = [
     "why", "how come", "explain", "breakdown", "analyze", "analysis",
     "trend", "pattern", "consistent", "clutch", "choke",
     "cap space", "most expensive", "best value", "overpaid",
-    # Questions that imply computation
+    # Computation-implied
     "ratio", "rate", "per game", "average", "efficiency",
     "what are the odds", "chance", "likely",
 ]
@@ -532,31 +605,30 @@ def should_reason(query: str) -> bool:
     return any(trigger in q for trigger in REASONING_TRIGGERS)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TEXT-TO-SQL PIPELINE — Discord History Querying
-# ═══════════════════════════════════════════════════════════════════════════════
-"""
-Text-to-SQL engine for querying the discord_history.db SQLite database.
+def get_intent(user_input: str) -> str:
+    """
+    Lightweight keyword-based intent classifier.
+    Used as a fast pre-filter before calling Gemini for classification.
+    Returns: STATS | HISTORY | LORE | RULES | OTHER
+    """
+    q = user_input.lower()
+    if any(k in q for k in ["how many times", "how often", "who said", "what did", "when did",
+                              "discord history", "chat log", "archive", "ever say"]):
+        return "HISTORY"
+    if any(k in q for k in ["rule", "setting", "penalty", "allowed", "banned", "legal"]):
+        return "RULES"
+    if any(k in q for k in ["standings", "stats", "yards", "touchdowns", "roster", "trade",
+                              "draft", "record", "season", "week"]):
+        return "STATS"
+    if any(k in q for k in ["beef", "rivalry", "drama", "lore", "remember"]):
+        return "LORE"
+    return "OTHER"
 
-Architecture:
-  1. should_sql_query()    — classifier: does this question need SQL?
-  2. generate_sql()        — LLM writes a SELECT query from natural language
-  3. execute_sql_safe()    — runs query read-only with strict guardrails
-  4. sql_to_context()      — formats rows into LLM-ready context string
-  5. query_discord_history() — full pipeline combining the above steps
 
-Self-correction: if SQL has a syntax error, feed traceback back to LLM
-for up to MAX_SQL_RETRIES rewrites before graceful failure.
+# ═════════════════════════════════════════════════════════════════════════════
+#  TEXT-TO-SQL PIPELINE  (Discord History Querying)
+# ═════════════════════════════════════════════════════════════════════════════
 
-Security model:
-  - DB opened in read-only (immutable URI) mode
-  - All queries validated against a strict allowlist before execution
-  - Any DDL/DML keyword instantly rejected
-  - Result rows always capped at MAX_SQL_ROWS
-"""
-
-import re as _re
-import sqlite3
 import logging as _logging
 
 _sql_log = _logging.getLogger(__name__ + ".sql")
@@ -565,28 +637,20 @@ MAX_SQL_RETRIES = 2
 MAX_SQL_ROWS    = 100
 SQL_TIMEOUT_S   = 8   # seconds before query is cancelled
 
-# ── Trigger classification ─────────────────────────────────────────────────────
+# ── Trigger / exclusion classification ───────────────────────────────────────
 
-# Keywords that suggest a question needs exact counting / date lookup
-# against the raw Discord message archive (not stats DataFrames)
 _SQL_TRIGGERS = [
-    # Counting occurrences
     "how many times", "how often", "count how many", "how frequently",
     "number of times", "times has", "times did", "times have",
-    # Exact phrase retrieval
     "exact words", "exactly said", "what did", "when did", "first time",
     "last time", "ever say", "ever said", "ever called",
-    # Specific insults / beef history
     "called", "said about", "talked about", "mentioned",
-    # Date/timeline queries
     "what date", "when was", "timestamp", "first message",
     "oldest message", "latest message", "archive",
-    # History / lore that needs exact match
     "discord history", "chat log", "message history", "server history",
     "who said", "who wrote", "who called",
 ]
 
-# Keywords that ALSO appear in _SQL_TRIGGERS but don't really need SQL
 _SQL_EXCLUSIONS = [
     "stats", "madden", "game", "season", "draft", "trade", "roster",
     "standings", "points", "touchdowns", "yards",
@@ -597,20 +661,15 @@ def should_sql_query(text: str) -> bool:
     """
     Returns True if the question should be answered via Text-to-SQL
     against the Discord history database.
-
-    Priority: SQL trigger keywords present AND no stats-DB exclusion keywords.
     """
     if not dm.discord_db_exists():
         return False
     q = text.lower()
-    has_trigger = any(t in q for t in _SQL_TRIGGERS)
-    has_exclusion = any(e in q for e in _SQL_EXCLUSIONS)
-    return has_trigger and not has_exclusion
+    return any(t in q for t in _SQL_TRIGGERS) and not any(e in q for e in _SQL_EXCLUSIONS)
 
 
-# ── SQL Safety Guardrails ──────────────────────────────────────────────────────
+# ── SQL security guardrails ───────────────────────────────────────────────────
 
-# Banned SQL keywords — any of these in the generated query = immediate reject
 _BANNED_SQL_KEYWORDS = _re.compile(
     r"\b(DROP|DELETE|UPDATE|INSERT|CREATE|ALTER|ATTACH|DETACH|PRAGMA|"
     r"VACUUM|REINDEX|ANALYZE|REPLACE|UPSERT|GRANT|REVOKE|TRUNCATE|"
@@ -618,16 +677,10 @@ _BANNED_SQL_KEYWORDS = _re.compile(
     _re.IGNORECASE,
 )
 
-# Must start with SELECT (after stripping whitespace/comments)
-_SELECT_PATTERN = _re.compile(r"^\s*(--[^\n]*)?\s*SELECT\b", _re.IGNORECASE | _re.DOTALL)
-
-# Allowed tables — only the messages table and its FTS virtual table
-_ALLOWED_TABLES = {"messages", "messages_fts"}
-
-# Detect table references (simplified — covers most LLM-generated SQL)
+_SELECT_PATTERN    = _re.compile(r"^\s*(--[^\n]*)?\s*SELECT\b", _re.IGNORECASE | _re.DOTALL)
+_ALLOWED_TABLES    = {"messages", "messages_fts"}
 _TABLE_REF_PATTERN = _re.compile(
-    r"\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)"
-    r"|\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+    r"\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)|\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)",
     _re.IGNORECASE,
 )
 
@@ -635,65 +688,45 @@ _TABLE_REF_PATTERN = _re.compile(
 def _validate_sql(sql: str) -> tuple[bool, str]:
     """
     Validate a SQL string against security rules.
-
-    Returns:
-        (is_safe, reason_if_not_safe)
+    Returns (is_safe, detail) where detail is the (possibly patched) SQL
+    on success, or a reason string on failure.
     """
     sql_stripped = sql.strip()
 
-    # Must be a SELECT
     if not _SELECT_PATTERN.match(sql_stripped):
         return False, "Only SELECT statements are permitted."
 
-    # No banned keywords
     banned_match = _BANNED_SQL_KEYWORDS.search(sql_stripped)
     if banned_match:
         return False, f"Banned keyword detected: '{banned_match.group()}'."
 
-    # No subquery writes (e.g. SELECT * FROM (INSERT ...))
-    # Covered by the banned keyword check above.
-
-    # Only allowed tables referenced
     for match in _TABLE_REF_PATTERN.finditer(sql_stripped):
         table = (match.group(1) or match.group(2) or "").lower()
         if table and table not in _ALLOWED_TABLES:
-            return False, f"Unauthorized table reference: '{table}'. Only 'messages' and 'messages_fts' are allowed."
+            return False, f"Unauthorized table: '{table}'. Only 'messages' and 'messages_fts' allowed."
 
-    # Must have a LIMIT clause to prevent runaway queries
     if "LIMIT" not in sql_stripped.upper():
-        # Auto-append limit rather than reject
         sql_stripped = sql_stripped.rstrip(";") + f"\nLIMIT {MAX_SQL_ROWS};"
-        return True, sql_stripped  # Return patched SQL as reason when safe
 
     return True, sql_stripped
 
 
 def _sanitize_sql(sql: str) -> str:
-    """
-    Strip markdown fences from LLM SQL output and return clean SQL.
-    Also ensures a LIMIT clause is present.
-    """
+    """Strip markdown fences and ensure a LIMIT clause is present."""
     sql = sql.strip()
-    # Remove code fences
     if sql.startswith("```"):
-        lines = sql.split("\n")
         sql = "\n".join(
-            l for l in lines
+            l for l in sql.split("\n")
             if not l.strip().startswith("```")
         ).strip()
-
-    # Remove leading 'sql' language tag
     if sql.lower().startswith("sql"):
         sql = sql[3:].strip()
-
-    # Ensure LIMIT
     if "LIMIT" not in sql.upper():
         sql = sql.rstrip(";") + f"\nLIMIT {MAX_SQL_ROWS};"
-
     return sql
 
 
-# ── SQL Generation (LLM Phase 1) ──────────────────────────────────────────────
+# ── SQL generation (LLM phase) ────────────────────────────────────────────────
 
 _SQL_SYSTEM_PROMPT = """You are a precise SQLite query writer for a Discord message archive database.
 
@@ -727,31 +760,19 @@ Write a SQLite SELECT query to answer this. Output ONLY the raw SQL, nothing els
 
 
 async def generate_sql(question: str, gemini_client) -> str:
-    """
-    Ask the LLM to write a SQLite query for the given question.
-
-    Args:
-        question:      Natural language question about Discord history.
-        gemini_client: Initialized google.genai Client.
-
-    Returns:
-        Raw SQL string (may still be invalid — caller must validate).
-    """
+    """Ask the LLM to write a SQLite query for the given question."""
     from google.genai import types
 
     schema = dm.get_discord_db_schema()
-    system = _SQL_SYSTEM_PROMPT.format(schema=schema)
-    user   = _SQL_USER_TEMPLATE.format(question=question)
-
     try:
         response = gemini_client.models.generate_content(
             model="gemini-2.0-flash",
             config=types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=0.05,   # near-zero: SQL needs to be precise
+                system_instruction=_SQL_SYSTEM_PROMPT.format(schema=schema),
+                temperature=0.05,
                 top_p=0.9,
             ),
-            contents=[user],
+            contents=[_SQL_USER_TEMPLATE.format(question=question)],
         )
         raw = response.text.strip() if response.text else ""
         return _sanitize_sql(raw)
@@ -760,55 +781,40 @@ async def generate_sql(question: str, gemini_client) -> str:
         return ""
 
 
-# ── Safe SQL Execution ─────────────────────────────────────────────────────────
+# ── Safe SQL execution ────────────────────────────────────────────────────────
 
 class _SQLResult:
-    """Container for SQL execution results."""
     __slots__ = ("rows", "columns", "error", "row_count", "sql_used")
 
     def __init__(self):
-        self.rows      : list[dict] = []
-        self.columns   : list[str]  = []
-        self.error     : str        = ""
-        self.row_count : int        = 0
-        self.sql_used  : str        = ""
+        self.rows:      list[dict] = []
+        self.columns:   list[str]  = []
+        self.error:     str        = ""
+        self.row_count: int        = 0
+        self.sql_used:  str        = ""
 
 
 def execute_sql_safe(sql: str) -> _SQLResult:
     """
     Execute a validated SQL query against the Discord history DB.
-    Enforces read-only access, row limits, and timeout.
-
-    Args:
-        sql: SQL string (should already be sanitized/validated).
-
-    Returns:
-        _SQLResult with rows as list-of-dicts, or error string on failure.
+    Read-only, row-limited, and timeout-guarded.
     """
-    result = _SQLResult()
+    import threading
+    result          = _SQLResult()
     result.sql_used = sql
 
-    # Validate before touching the DB
     is_safe, detail = _validate_sql(sql)
     if not is_safe:
         result.error = f"SQL security validation failed: {detail}"
-        _sql_log.warning(f"[SQL] Rejected query: {detail}\nSQL: {sql[:200]}")
+        _sql_log.warning(f"[SQL] Rejected: {detail}\nSQL: {sql[:200]}")
         return result
 
-    # Use the patched SQL if validation amended it
-    if is_safe and detail != sql and detail.upper().startswith("ONLY"):
-        # detail contains a reason string, not SQL
-        pass
-    elif is_safe and detail != sql:
-        sql = detail  # Use the patched version (e.g. auto-LIMIT added)
+    if is_safe and detail != sql and not detail.upper().startswith("ONLY"):
+        sql             = detail
         result.sql_used = sql
 
     try:
         conn = dm._get_discord_db(readonly=True)
-        conn.set_progress_handler(None, 0)
-
-        # Enforce timeout via SQLite interrupt
-        import threading
 
         def _timeout():
             try:
@@ -818,10 +824,9 @@ def execute_sql_safe(sql: str) -> _SQLResult:
 
         timer = threading.Timer(SQL_TIMEOUT_S, _timeout)
         timer.start()
-
         try:
-            cursor = conn.execute(sql)
-            columns = [desc[0] for desc in (cursor.description or [])]
+            cursor   = conn.execute(sql)
+            columns  = [desc[0] for desc in (cursor.description or [])]
             raw_rows = cursor.fetchmany(MAX_SQL_ROWS)
         finally:
             timer.cancel()
@@ -845,17 +850,12 @@ def execute_sql_safe(sql: str) -> _SQLResult:
     return result
 
 
-# ── Format result for LLM context ─────────────────────────────────────────────
+# ── Result formatting ─────────────────────────────────────────────────────────
 
 def _format_sql_result(result: _SQLResult, question: str) -> str:
-    """
-    Format SQL result rows into a context string ready for WittGPT.
-
-    Returns:
-        Formatted [DISCORD ARCHIVE QUERY] context block.
-    """
+    """Format SQL result rows into a context string for ATLAS."""
     lines = [
-        f"[DISCORD ARCHIVE QUERY]",
+        "[DISCORD ARCHIVE QUERY]",
         f"Question: {question}",
         f"SQL executed: {result.sql_used}",
     ]
@@ -872,19 +872,16 @@ def _format_sql_result(result: _SQLResult, question: str) -> str:
         lines.append("(The archive has no records matching that query.)")
         return "\n".join(lines)
 
-    # Single-value result (e.g. COUNT)
     if result.row_count == 1 and result.columns and len(result.columns) == 1:
         val = list(result.rows[0].values())[0]
         lines.append(f"RESULT: {result.columns[0]} = {val}")
         return "\n".join(lines)
 
-    # Multi-row / multi-column result
     lines.append("\nRESULTS:")
     for i, row in enumerate(result.rows[:20], 1):
         ts      = row.get("timestamp", "")[:16]
         author  = row.get("author", "")
         content = row.get("content", "")[:200]
-        # Generic fallback for non-message queries (e.g. COUNT GROUP BY)
         if not content and not author:
             lines.append(f"  [{i}] {dict(row)}")
         else:
@@ -896,7 +893,7 @@ def _format_sql_result(result: _SQLResult, question: str) -> str:
     return "\n".join(lines)
 
 
-# ── Self-Correcting SQL Pipeline ──────────────────────────────────────────────
+# ── Full pipeline ─────────────────────────────────────────────────────────────
 
 async def query_discord_history(question: str, gemini_client) -> dict:
     """
@@ -905,34 +902,22 @@ async def query_discord_history(question: str, gemini_client) -> dict:
     Flow:
       1. Generate SQL from natural language
       2. Validate and execute
-      3. On error: feed full error + broken SQL back to LLM, retry (up to MAX_SQL_RETRIES)
+      3. On error: feed full error + broken SQL back to LLM, retry (MAX_SQL_RETRIES)
       4. Format results as LLM-ready context string
 
-    Args:
-        question:      User's natural language question about Discord history.
-        gemini_client: Initialized google.genai Client.
-
     Returns:
-        dict: {
-            'success':  bool,
-            'context':  str   (formatted result for WittGPT),
-            'sql':      str   (final SQL used),
-            'rows':     list  (raw result rows),
-            'error':    str   (final error or ""),
-            'attempts': int,
-        }
+        dict: { 'success', 'context', 'sql', 'rows', 'error', 'attempts' }
     """
     from google.genai import types
 
     sql = await generate_sql(question, gemini_client)
-
     if not sql:
         return {
             "success": False,
             "context": "[DISCORD ARCHIVE QUERY]\nERROR: LLM returned no SQL.",
-            "sql": "",
-            "rows": [],
-            "error": "No SQL generated.",
+            "sql":     "",
+            "rows":    [],
+            "error":   "No SQL generated.",
             "attempts": 0,
         }
 
@@ -941,31 +926,27 @@ async def query_discord_history(question: str, gemini_client) -> dict:
         result = execute_sql_safe(sql)
 
         if not result.error:
-            # Success
             context = _format_sql_result(result, question)
             _sql_log.info(
                 f"[SQL] Success on attempt {attempt}: {result.row_count} rows | "
                 f"Q: '{question[:60]}'"
             )
             return {
-                "success": True,
-                "context": context,
-                "sql": sql,
-                "rows": result.rows,
-                "error": "",
+                "success":  True,
+                "context":  context,
+                "sql":      sql,
+                "rows":     result.rows,
+                "error":    "",
                 "attempts": attempt,
             }
 
         last_error = result.error
-        _sql_log.warning(
-            f"[SQL] Attempt {attempt}/{MAX_SQL_RETRIES + 1} failed: {last_error}"
-        )
+        _sql_log.warning(f"[SQL] Attempt {attempt}/{MAX_SQL_RETRIES + 1} failed: {last_error}")
 
         if attempt > MAX_SQL_RETRIES:
             break
 
-        # Self-correction: ask LLM to fix the SQL
-        schema = dm.get_discord_db_schema()
+        schema     = dm.get_discord_db_schema()
         fix_prompt = (
             f"Your SQL query failed with this error:\n{last_error}\n\n"
             f"Original question: {question}\n\n"
@@ -985,7 +966,7 @@ async def query_discord_history(question: str, gemini_client) -> dict:
                 model="gemini-2.0-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=_SQL_SYSTEM_PROMPT.format(schema=schema),
-                    temperature=0.02,   # even more conservative on retry
+                    temperature=0.02,
                     top_p=0.85,
                 ),
                 contents=[fix_prompt],
@@ -1002,31 +983,14 @@ async def query_discord_history(question: str, gemini_client) -> dict:
 
     _sql_log.error(f"[SQL] All {MAX_SQL_RETRIES + 1} attempts failed for: '{question[:60]}'")
     return {
-        "success": False,
-        "context": f"[DISCORD ARCHIVE QUERY]\nERROR after {MAX_SQL_RETRIES + 1} attempts: {last_error}\n(Couldn't retrieve data — roast them based on what you know.)",
-        "sql": sql,
-        "rows": [],
-        "error": last_error,
+        "success":  False,
+        "context":  (
+            f"[DISCORD ARCHIVE QUERY]\n"
+            f"ERROR after {MAX_SQL_RETRIES + 1} attempts: {last_error}\n"
+            "(Couldn't retrieve data — roast them based on what you know.)"
+        ),
+        "sql":      sql,
+        "rows":     [],
+        "error":    last_error,
         "attempts": MAX_SQL_RETRIES + 1,
     }
-def get_intent(user_input):
-    """Uses Gemini to decide which tool to use."""
-    prompt = f"""
-    Analyze this user query: "{user_input}"
-    Classify it into ONE of these categories:
-    - STATS: Real-time league data (yards, standings, trades, rosters).
-    - HISTORY: Counting occurrences or searching specific old messages in the archive (How many times, what did X say).
-    - LORE: Rivalries, beef, drama, or general league memory.
-    - RULES: Questions about league rules, gameplay settings, or penalties.
-    - OTHER: General chat or trash talk.
-
-    Output ONLY the category name.
-    """
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[prompt]
-        )
-        return response.text.strip().upper()
-    except:
-        return "LORE" # Default fallback
