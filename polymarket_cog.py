@@ -20,7 +20,7 @@ import aiosqlite
 import json
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 import os
 import re
@@ -59,13 +59,8 @@ def _get_gemini_client():
 
 POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
 
-# Channel routing — resolved from setup_cog at runtime
-def _prediction_channel_id() -> int:
-    try:
-        from setup_cog import get_channel_id
-        return get_channel_id("prediction_markets") or 0
-    except ImportError:
-        return int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
+# Channels
+PREDICTION_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
 
 # How many TSL Bucks = 1 full contract payout
 # A YES at $0.65 costs 65 TSL Bucks; pays out 100 TSL Bucks if correct.
@@ -148,7 +143,6 @@ CATEGORY_COLORS = {
 MARKETS_PER_PAGE = 3         # Market cards shown per browse page (fits YES/NO buttons in 5-row limit)
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
 HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
-NUMBER_EMOJIS = ["①", "②", "③", "④", "⑤"]  # Circled numbers for labeled buttons
 
 # ─────────────────────────────────────────────
 # DATABASE SETUP
@@ -201,7 +195,7 @@ async def init_prediction_db(db_path: str = DB_PATH):
         """)
 
         # Migrations: add columns for trending/hot support
-        for col, default in [("volume_24hr", "0"), ("featured", "0"), ("admin_approved", "0")]:
+        for col, default in [("volume_24hr", "0"), ("featured", "0")]:
             try:
                 await db.execute(
                     f"ALTER TABLE prediction_markets ADD COLUMN {col} REAL DEFAULT {default}"
@@ -560,60 +554,31 @@ class WagerModal(discord.ui.Modal):
     """Modal that asks the user how many contracts to buy."""
 
     amount_input = discord.ui.TextInput(
-        label="How many contracts?",
-        placeholder="e.g. 10  (1 contract = 1 TSL Buck unit)",
+        label="How many contracts? (1 contract = 1 TSL Buck unit)",
+        placeholder="e.g. 10",
         min_length=1,
         max_length=6,
         required=True,
     )
 
-    def __init__(self, market_id: str, slug: str, side: str, price: float,
-                 title: str, cog=None):
-        # Discord modal title max = 45 chars. "Buy YES — " = 11 chars → 34 left for title
-        super().__init__(title=f"Buy {side} — {title[:34]}")
+    def __init__(self, market_id: str, slug: str, side: str, price: float, title: str):
+        super().__init__(title=f"Buy {side} — {title[:40]}")
         self.market_id    = market_id
         self.slug         = slug
         self.side         = side
         self.price        = price
         self.market_title = title
-        self.cog          = cog
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
         raw = self.amount_input.value.strip()
         if not raw.isdigit() or int(raw) < 1:
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "❌ Please enter a whole number ≥ 1.", ephemeral=True
             )
             return
 
-        # Fetch live price if cog available (safe to do after defer)
-        live_price = self.price  # fallback to cached
-        if self.cog:
-            try:
-                live = await asyncio.wait_for(
-                    self.cog.client.fetch_market_by_id(self.market_id),
-                    timeout=2.0,
-                )
-                if live:
-                    prices = extract_prices(live)
-                    live_price = prices["yes_price"] if self.side == "YES" else prices["no_price"]
-                    # Update DB cache
-                    now_ts = datetime.now(timezone.utc).isoformat()
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute(
-                            "UPDATE prediction_markets SET yes_price=?, no_price=?, "
-                            "last_synced=? WHERE market_id=?",
-                            (prices["yes_price"], prices["no_price"],
-                             now_ts, self.market_id),
-                        )
-                        await db.commit()
-            except Exception:
-                pass  # use cached price
-
         quantity    = int(raw)
-        cost_bucks  = price_to_bucks(live_price) * quantity
+        cost_bucks  = price_to_bucks(self.price) * quantity
         payout      = PAYOUT_SCALE * quantity
         user_id     = str(interaction.user.id)
 
@@ -624,7 +589,7 @@ class WagerModal(discord.ui.Modal):
             balance = 0
 
         if balance < cost_bucks:
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
                 ephemeral=True,
             )
@@ -634,7 +599,7 @@ class WagerModal(discord.ui.Modal):
         try:
             await update_balance(user_id, -cost_bucks)
         except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
             return
 
         # Write contract to DB
@@ -647,7 +612,7 @@ class WagerModal(discord.ui.Modal):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
             """, (
                 user_id, self.market_id, self.slug,
-                self.side, live_price,
+                self.side, self.price,
                 quantity, cost_bucks, payout, now,
             ))
             await db.commit()
@@ -660,19 +625,19 @@ class WagerModal(discord.ui.Modal):
             color=color,
             description=(
                 f"**{self.market_title}**\n\n"
-                f"Side: **{self.side}** · Price: **{live_price:.1%}** each\n"
+                f"Side: **{self.side}** · Price: **{self.price:.1%}** each\n"
                 f"Qty: **{quantity}** · Cost: **{cost_bucks:,} TSL Bucks**\n"
                 f"Potential: **{payout:,} TSL Bucks** if {self.side} wins\n\n"
                 f"*Profit if correct: +{profit:,} TSL Bucks*"
             ),
         )
-        embed.set_footer(text="Use 📋 My Portfolio in /markets to view your positions · ATLAS Flow Casino")
+        embed.set_footer(text="Use /portfolio to view your positions · ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class BetButtonView(discord.ui.View):
-    """YES / NO buttons on the bet embed — opens modal instantly, live odds in on_submit."""
+    """YES / NO buttons on the /bet embed — fetches live odds before modal."""
 
     def __init__(self, market_id: str, slug: str, title: str,
                  yes_price: float, no_price: float,
@@ -685,19 +650,46 @@ class BetButtonView(discord.ui.View):
         self.no_price  = no_price
         self.cog       = cog
 
+    async def _fetch_live_price(self, side: str) -> float:
+        """Fetch live price from API with 2-second timeout; fallback to cached."""
+        if not self.cog:
+            return self.yes_price if side == "YES" else self.no_price
+        try:
+            live = await asyncio.wait_for(
+                self.cog.client.fetch_market_by_id(self.market_id),
+                timeout=2.0,
+            )
+            if live:
+                prices = extract_prices(live)
+                # Update DB cache
+                now = datetime.now(timezone.utc).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE prediction_markets SET yes_price=?, no_price=?, last_synced=? "
+                        "WHERE market_id=?",
+                        (prices["yes_price"], prices["no_price"], now, self.market_id),
+                    )
+                    await db.commit()
+                return prices["yes_price"] if side == "YES" else prices["no_price"]
+        except Exception:
+            pass
+        return self.yes_price if side == "YES" else self.no_price
+
     @discord.ui.button(label="Buy YES ✅", style=discord.ButtonStyle.success)
     async def buy_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        price = await self._fetch_live_price("YES")
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="YES",
-            price=self.yes_price, title=self.title, cog=self.cog,
+            price=price, title=self.title,
         )
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Buy NO ❌", style=discord.ButtonStyle.danger)
     async def buy_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        price = await self._fetch_live_price("NO")
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="NO",
-            price=self.no_price, title=self.title, cog=self.cog,
+            price=price, title=self.title,
         )
         await interaction.response.send_modal(modal)
 
@@ -794,22 +786,20 @@ class MarketBrowserView(discord.ui.View):
         start = self.page * MARKETS_PER_PAGE
         chunk = markets[start : start + MARKETS_PER_PAGE]
 
-        # Rows 1-3: YES / NO buttons per market card (numbered to match)
+        # Rows 1-3: YES / NO buttons per market card
         for i, m in enumerate(chunk):
             row = i + 1  # rows 1, 2, 3
             yes_p = m.get("yes_price", 0.5)
             no_p = m.get("no_price", 0.5)
-            num = NUMBER_EMOJIS[i] if i < len(NUMBER_EMOJIS) else ""
-            short_title = m.get("title", "")[:18]
 
             yes_btn = discord.ui.Button(
-                label=f"{num} YES {yes_p:.0%}",
+                label=f"YES {yes_p:.0%}",
                 style=discord.ButtonStyle.success,
                 custom_id=f"yes_{i}_{self.page}",
                 row=row,
             )
             no_btn = discord.ui.Button(
-                label=f"{num} NO {no_p:.0%}",
+                label=f"NO {no_p:.0%}",
                 style=discord.ButtonStyle.danger,
                 custom_id=f"no_{i}_{self.page}",
                 row=row,
@@ -841,47 +831,47 @@ class MarketBrowserView(discord.ui.View):
             disabled=self.page >= self._max_page(),
             row=4,
         )
-        portfolio_btn = discord.ui.Button(
-            label="📋 My Portfolio",
-            style=discord.ButtonStyle.primary,
-            custom_id="market:portfolio",
-            row=4,
-        )
-        portfolio_btn.callback = self._portfolio
         prev_btn.callback = self._prev
         next_btn.callback = self._next
         self.add_item(prev_btn)
         self.add_item(page_btn)
         self.add_item(next_btn)
-        self.add_item(portfolio_btn)
 
     def _make_bet_cb(self, market: dict, side: str):
-        """Closure-safe callback: open modal instantly, live odds fetched in on_submit."""
+        """Closure-safe callback: fetch live odds → open wager modal."""
         async def callback(interaction: discord.Interaction):
-            try:
-                price = market["yes_price"] if side == "YES" else market["no_price"]
-                modal = WagerModal(
-                    market_id=market["market_id"],
-                    slug=market["slug"],
-                    side=side,
-                    price=price,
-                    title=market["title"],
-                    cog=self.cog,
-                )
-                await interaction.response.send_modal(modal)
-            except Exception as e:
-                log.error(f"Bet button callback error: {e}")
+            price = market["yes_price"] if side == "YES" else market["no_price"]
+            # Try to fetch live odds (2-second timeout)
+            if self.cog:
                 try:
-                    if not interaction.response.is_done():
-                        await interaction.response.send_message(
-                            f"❌ Error opening bet modal: {e}", ephemeral=True
-                        )
-                    else:
-                        await interaction.followup.send(
-                            f"❌ Error opening bet modal: {e}", ephemeral=True
-                        )
+                    live = await asyncio.wait_for(
+                        self.cog.client.fetch_market_by_id(market["market_id"]),
+                        timeout=2.0,
+                    )
+                    if live:
+                        prices = extract_prices(live)
+                        price = prices["yes_price"] if side == "YES" else prices["no_price"]
+                        # Update DB cache
+                        now = datetime.now(timezone.utc).isoformat()
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE prediction_markets SET yes_price=?, no_price=?, "
+                                "last_synced=? WHERE market_id=?",
+                                (prices["yes_price"], prices["no_price"],
+                                 now, market["market_id"]),
+                            )
+                            await db.commit()
                 except Exception:
-                    pass
+                    pass  # fall back to cached price
+
+            modal = WagerModal(
+                market_id=market["market_id"],
+                slug=market["slug"],
+                side=side,
+                price=price,
+                title=market["title"],
+            )
+            await interaction.response.send_modal(modal)
         return callback
 
     # ── Navigation / Filter callbacks ──
@@ -901,15 +891,6 @@ class MarketBrowserView(discord.ui.View):
         self.page = min(self._max_page(), self.page + 1)
         self._rebuild_buttons()
         await interaction.response.edit_message(embed=self._embed(), view=self)
-
-    async def _portfolio(self, interaction: discord.Interaction):
-        """Show the user's prediction market portfolio as an ephemeral followup."""
-        if self.cog is None:
-            await interaction.response.send_message(
-                "Portfolio unavailable.", ephemeral=True,
-            )
-            return
-        await self.cog._portfolio_impl(interaction)
 
     # ── Embed builder ──
 
@@ -931,13 +912,34 @@ class MarketBrowserView(discord.ui.View):
             color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
         )
 
-        # Build description with market cards inline
-        # This way the text flows directly into the buttons below
-        lines = [
-            f"**{cat_label}** · {total} markets · Page {self.page+1}/{self._max_page()+1}",
-            "",
-        ]
+        header_title = "🔥 TRENDING" if self.filter == "hot" else cat_label.upper()
+        embed.description = (
+            f"```\n"
+            f"{header_title}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 {total} markets  •  Page {self.page+1}/{self._max_page()+1}\n"
+            f"```"
+        )
 
+        # Hot markets banner — only on page 0 of "all" filter
+        if self.page == 0 and self.filter == "all" and self.hot_markets:
+            hot_lines = []
+            for hm in self.hot_markets[:HOT_MARKETS_COUNT]:
+                vol_24h = hm.get("volume_24hr", 0)
+                yes_p = hm.get("yes_price", 0.5)
+                heat = hot_label(vol_24h)
+                hot_lines.append(
+                    f"{heat} **{hm['title'][:50]}** — "
+                    f"YES {yes_p:.0%} · 24h: {fmt_volume(vol_24h)}"
+                )
+            if hot_lines:
+                embed.add_field(
+                    name="🔥 Trending Now",
+                    value="\n".join(hot_lines),
+                    inline=False,
+                )
+
+        # Market cards (one per row, matching the YES/NO buttons below)
         for i, m in enumerate(chunk):
             yes_p = m.get("yes_price", 0.5)
             no_p = m.get("no_price", 0.5)
@@ -953,23 +955,27 @@ class MarketBrowserView(discord.ui.View):
                 end_str = "No end date"
 
             heat = hot_label(vol_24h)
-            heat_suffix = f" {heat}" if heat else ""
+            heat_prefix = f"{heat} " if heat else ""
             vol_str = fmt_volume(m.get("volume", 0))
-            num = NUMBER_EMOJIS[i] if i < len(NUMBER_EMOJIS) else ""
 
-            lines.append(
-                f"{num} **{m['title'][:55]}**{heat_suffix}\n"
-                f"　　YES **{yes_p:.0%}** · NO **{no_p:.0%}** · "
-                f"{vol_str} · {end_str}\n"
-                f"　　⬇️ *Use buttons below to bet*"
+            # Compact market card
+            embed.add_field(
+                name=f"{cat}  {heat_prefix}{m['title'][:55]}",
+                value=(
+                    f"**YES {yes_p:.0%}**  ·  **NO {no_p:.0%}**  ·  "
+                    f"Vol: {vol_str}  ·  {end_str}"
+                ),
+                inline=False,
             )
-            lines.append("")  # spacing between cards
 
         if not chunk:
-            lines.append("*No markets found — try a different category.*")
+            embed.add_field(
+                name="No markets found",
+                value="Try a different category or check back later.",
+                inline=False,
+            )
 
-        embed.description = "\n".join(lines)
-        embed.set_footer(text="Odds fetched live on bet · ATLAS Flow Casino")
+        embed.set_footer(text="Click YES or NO below to bet · Odds fetched live · ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
         return embed
 
@@ -1351,7 +1357,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     # ── Utility ─────────────────────────────────
 
     def _channel(self):
-        return self.bot.get_channel(_prediction_channel_id())
+        return self.bot.get_channel(PREDICTION_CHANNEL_ID)
 
     # ── Slash: /markets ───────────────────────
 
@@ -1360,11 +1366,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         description="Browse live Polymarket prediction markets."
     )
     async def markets_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
         await self._ensure_db()
-
-        # 12-month settlement filter: hide markets that end more than 365 days out
-        max_end = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+        await interaction.response.defer(ephemeral=True)
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("""
@@ -1375,15 +1378,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 WHERE status = 'active'
                   AND yes_price <= ?
                   AND no_price  <= ?
-                  AND (
-                    end_date IS NULL
-                    OR end_date = ''
-                    OR end_date <= ?
-                    OR COALESCE(admin_approved, 0) = 1
-                  )
                 ORDER BY volume DESC
                 LIMIT 200
-            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD, max_end)) as cursor:
+            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD)) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
@@ -1433,14 +1430,131 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         await interaction.followup.send(embed=view._embed(), view=view, ephemeral=True)
 
-    # ── Portfolio implementation (used by MarketBrowserView button) ──
+    # ── Slash: /bet <slug> ──────────────────
 
-    async def _portfolio_impl(self, interaction: discord.Interaction):
-        """Show the calling user's prediction market portfolio.
+    @app_commands.command(
+        name="bet",
+        description="Place a TSL Bucks wager on a prediction market."
+    )
+    @app_commands.describe(slug="The market slug/ID from /markets")
+    async def bet_cmd(self, interaction: discord.Interaction, slug: str):
+        await self._ensure_db()
+        slug = slug.strip().lower()
 
-        Works from both a fresh interaction (slash-command style) and from
-        a button callback where the response may already be consumed.
-        """
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Try exact slug match first, then partial match
+            async with db.execute(
+                "SELECT market_id, slug, title, category, yes_price, no_price, "
+                "volume, end_date, status "
+                "FROM prediction_markets WHERE slug = ?",
+                (slug,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                # Try partial slug match
+                async with db.execute(
+                    "SELECT market_id, slug, title, category, yes_price, no_price, "
+                    "volume, end_date, status "
+                    "FROM prediction_markets WHERE slug LIKE ? AND status = 'active' "
+                    "LIMIT 1",
+                    (f"%{slug}%",)
+                ) as cursor:
+                    row = await cursor.fetchone()
+
+        if not row:
+            await interaction.response.send_message(
+                f"❌ Market `{slug}` not found. Use `/markets` to browse.",
+                ephemeral=True,
+            )
+            return
+
+        market_id, mkt_slug, title, category, yes_price, no_price, volume, end_date, status = row
+
+        if status != "active":
+            await interaction.response.send_message(
+                f"⚠️ Market is **{status}** and not accepting new bets.",
+                ephemeral=True,
+            )
+            return
+
+        yes_price = yes_price if yes_price is not None else 0.5
+        no_price  = no_price  if no_price  is not None else 0.5
+
+        # Fetch live odds from Polymarket API (2-second timeout)
+        try:
+            live_data = await asyncio.wait_for(
+                self.client.fetch_market_by_id(market_id),
+                timeout=2.0,
+            )
+            if live_data:
+                live_prices = extract_prices(live_data)
+                yes_price = live_prices["yes_price"]
+                no_price = live_prices["no_price"]
+                # Update DB cache
+                now = datetime.now(timezone.utc).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE prediction_markets SET yes_price=?, no_price=?, "
+                        "last_synced=? WHERE market_id=?",
+                        (yes_price, no_price, now, market_id),
+                    )
+                    await db.commit()
+        except Exception:
+            pass  # use cached prices
+
+        yes_bucks = price_to_bucks(yes_price)
+        no_bucks  = price_to_bucks(no_price)
+
+        color = CATEGORY_COLORS.get(category, 0xD4AF37)
+        try:
+            end_dt  = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            end_str = f"<t:{int(end_dt.timestamp())}:R>"
+        except Exception:
+            end_str = end_date or "No expiry"
+
+        embed = discord.Embed(
+            title=f"📊 {title[:70]}",
+            color=color,
+        )
+        embed.description = (
+            f"```\n{category.upper()}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n```\n"
+            f"Ends: {end_str}  ·  Volume: {fmt_volume(volume)}\n"
+            f"Each contract pays **{PAYOUT_SCALE} TSL Bucks** if your side wins."
+        )
+        embed.add_field(
+            name="✅ Buy YES",
+            value=(
+                f"**{yes_bucks} TSL Bucks** / contract\n"
+                f"Implied probability: **{yes_price:.1%}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="❌ Buy NO",
+            value=(
+                f"**{no_bucks} TSL Bucks** / contract\n"
+                f"Implied probability: **{no_price:.1%}**"
+            ),
+            inline=True,
+        )
+        embed.set_footer(text="💡 Odds fetched live · Click a button below · ATLAS Flow Casino")
+        embed.timestamp = datetime.now(timezone.utc)
+
+        view = BetButtonView(
+            market_id=market_id, slug=mkt_slug, title=title,
+            yes_price=yes_price, no_price=no_price, cog=self,
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # ── Slash: /portfolio ─────────────────────
+
+    @app_commands.command(
+        name="portfolio",
+        description="View your open prediction market contracts."
+    )
+    async def portfolio_cmd(self, interaction: discord.Interaction):
         await self._ensure_db()
         user_id = str(interaction.user.id)
 
@@ -1457,17 +1571,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             """, (user_id,)) as cursor:
                 rows = await cursor.fetchall()
 
-        # Pick the right send helper depending on whether the interaction
-        # response has already been used (e.g. from a button callback).
-        async def _send(**kwargs):
-            if not interaction.response.is_done():
-                await interaction.response.send_message(**kwargs)
-            else:
-                await interaction.followup.send(**kwargs)
-
         if not rows:
-            await _send(
-                content="You have no prediction market contracts. Use the market browser to place one!",
+            await interaction.response.send_message(
+                "You have no prediction market contracts. Use `/bet` to place one!",
                 ephemeral=True,
             )
             return
@@ -1495,21 +1601,36 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 inline=False,
             )
 
-        await _send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── Admin _impl methods (used by /commish and deprecated wrappers) ───────
+    # ── Slash: /resolve_market (admin) ────────
 
-    async def _resolve_market_impl(self, interaction: discord.Interaction, slug: str, result: str):
+    @app_commands.command(
+        name="resolve_market",
+        description="[Admin] Resolve a prediction market outcome."
+    )
+    @app_commands.describe(
+        slug="Market slug to resolve",
+        result="The winning side: YES or NO, or VOID to refund all",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def resolve_market_cmd(
+        self,
+        interaction: discord.Interaction,
+        slug: str,
+        result: str,
+    ):
         await self._ensure_db()
         slug   = slug.strip().lower()
         result = result.upper().strip()
 
         if result not in ("YES", "NO", "VOID"):
             await interaction.response.send_message(
-                "`result` must be YES, NO, or VOID.", ephemeral=True
+                "❌ `result` must be YES, NO, or VOID.", ephemeral=True
             )
             return
 
+        # Look up market_id from slug
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
                 "SELECT market_id, title FROM prediction_markets WHERE slug = ?",
@@ -1519,7 +1640,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         if not row:
             await interaction.response.send_message(
-                f"Market `{slug}` not found.", ephemeral=True
+                f"❌ Market `{slug}` not found.", ephemeral=True
             )
             return
 
@@ -1536,24 +1657,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         }])
 
         await interaction.followup.send(
-            f"Resolved `{slug}` as **{result}**. "
+            f"✅ Resolved `{slug}` as **{result}**. "
             f"Processed {resolved['won']} winning and {resolved['lost']} losing contracts."
             + (f" Voided {resolved['voided']}." if resolved["voided"] else ""),
             ephemeral=True,
         )
-
-    # Deprecated wrapper (remove in Phase 5)
-    @app_commands.command(
-        name="resolve_market",
-        description="[Deprecated] Use /commish markets resolve instead."
-    )
-    @app_commands.describe(
-        slug="Market slug to resolve",
-        result="The winning side: YES or NO, or VOID to refund all",
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def resolve_market_cmd(self, interaction: discord.Interaction, slug: str, result: str):
-        await self._resolve_market_impl(interaction, slug, result)
 
     async def _resolve(self, market_id: str, result: str,
                        resolved_by: str = "auto") -> dict:
@@ -1610,10 +1718,18 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         log.info(f"_resolve({market_id}, {result}, by={resolved_by}): {counts}")
         return counts
 
-    async def _market_status_impl(self, interaction: discord.Interaction):
+    # ── Slash: /market_status (admin) ─────────
+
+    @app_commands.command(
+        name="market_status",
+        description="[Admin] Show Polymarket sync status and stats."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def market_status_cmd(self, interaction: discord.Interaction):
         await self._ensure_db()
         await interaction.response.defer(ephemeral=True)
 
+        # Test connectivity
         test = await self.client.fetch_active_markets(limit=1)
         api_ok = test is not None
 
@@ -1625,74 +1741,41 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 count, last_sync = await cursor.fetchone()
 
         embed = discord.Embed(
-            title="Polymarket Integration Status",
+            title="📊 Polymarket Integration Status",
             color=0x2ECC71 if api_ok else 0xE74C3C,
         )
-        embed.add_field(name="API", value="Connected" if api_ok else "Failed", inline=True)
-        embed.add_field(name="Synced Markets", value=f"{count or 0} active", inline=True)
-        embed.add_field(name="Last Sync", value=last_sync or "Never", inline=True)
+        embed.add_field(
+            name="Auth Method",
+            value="🔓 Public API (no auth needed)",
+            inline=False,
+        )
+        embed.add_field(
+            name="API Connectivity",
+            value="✅ Connected" if api_ok else "❌ Failed (check network/logs)",
+            inline=True,
+        )
+        embed.add_field(
+            name="Synced Markets",
+            value=f"{count or 0} active",
+            inline=True,
+        )
+        embed.add_field(
+            name="Last Sync",
+            value=last_sync or "Never",
+            inline=True,
+        )
         embed.add_field(
             name="Next Sync",
             value=f"<t:{int((datetime.now(timezone.utc).timestamp() // 300 + 1) * 300)}:R>",
             inline=True,
         )
-        embed.add_field(name="Data Source", value=f"`{POLYMARKET_GAMMA_BASE}`", inline=False)
+        embed.add_field(
+            name="Data Source",
+            value=f"`{POLYMARKET_GAMMA_BASE}`",
+            inline=False,
+        )
         embed.set_footer(text="Polymarket Gamma API — No API key required")
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-    async def _approve_market_impl(self, interaction: discord.Interaction, slug: str):
-        await self._ensure_db()
-        slug = slug.strip().lower()
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT market_id, title, end_date FROM prediction_markets WHERE slug = ?",
-                (slug,)
-            ) as cursor:
-                row = await cursor.fetchone()
-
-            if not row:
-                async with db.execute(
-                    "SELECT market_id, title, end_date FROM prediction_markets "
-                    "WHERE slug LIKE ? AND status = 'active' LIMIT 1",
-                    (f"%{slug}%",)
-                ) as cursor:
-                    row = await cursor.fetchone()
-
-        if not row:
-            await interaction.response.send_message(
-                f"Market `{slug}` not found.", ephemeral=True
-            )
-            return
-
-        market_id, title, end_date = row
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE prediction_markets SET admin_approved = 1 WHERE market_id = ?",
-                (market_id,)
-            )
-            await db.commit()
-
-        end_str = end_date or "No end date"
-        await interaction.response.send_message(
-            f"Approved long-term market: **{title[:60]}**\n"
-            f"End date: `{end_str}`\n"
-            f"This market will now appear in `/markets` regardless of settlement date.",
-            ephemeral=True,
-        )
-
-    # Deprecated wrappers (remove in Phase 5)
-    @app_commands.command(name="market_status", description="[Deprecated] Use /commish markets status instead.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def market_status_cmd(self, interaction: discord.Interaction):
-        await self._market_status_impl(interaction)
-
-    @app_commands.command(name="approve_market", description="[Deprecated] Use /commish markets approve instead.")
-    @app_commands.describe(slug="Market slug to approve")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def approve_market_cmd(self, interaction: discord.Interaction, slug: str):
-        await self._approve_market_impl(interaction, slug)
 
 
 async def setup(bot: commands.Bot):
