@@ -116,6 +116,14 @@ def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
         con.commit()
 
 
+def _clear_guild_config(guild_id: int) -> int:
+    """Delete all server_config rows for a guild. Returns count deleted."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.execute("DELETE FROM server_config WHERE guild_id=?", (guild_id,))
+        con.commit()
+        return cur.rowcount
+
+
 # ── Permission Builders ───────────────────────────────────────────────────────
 
 def _build_overwrites(
@@ -189,6 +197,7 @@ async def _provision_channels(guild: discord.Guild) -> dict:
     Main provisioning function. Returns a results dict for the receipt embed.
     """
     _ensure_table()
+    print(f"[SETUP] Provisioning started for guild '{guild.name}' ({guild.id})")
 
     results = {
         "found":   [],   # (key, channel)  — already existed
@@ -222,6 +231,7 @@ async def _provision_channels(guild: discord.Guild) -> dict:
             # Channel exists — just store the ID
             _save_channel_id(config_key, existing_ch.id, guild.id)
             results["found"].append((config_key, existing_ch))
+            print(f"[SETUP]   Found existing: {config_key} -> #{existing_ch.name} ({existing_ch.id})")
         else:
             # Need to create it
             try:
@@ -229,16 +239,18 @@ async def _provision_channels(guild: discord.Guild) -> dict:
 
                 # If the target category doesn't exist, create it
                 if category is None:
+                    print(f"[SETUP]   Creating category: {category_name}")
                     category = await guild.create_category(category_name)
                     categories[category_name.upper()] = category  # cache for reuse
 
                 overwrites = _build_overwrites(guild, admin_role, read_only, admin_only)
 
+                print(f"[SETUP]   Creating channel: #{channel_name} under '{category_name}'")
                 new_ch = await guild.create_text_channel(
                     name=channel_name,
                     category=category,
                     overwrites=overwrites,
-                    reason="ATLAS auto-setup on join"
+                    reason="ATLAS setup"
                 )
 
                 _save_channel_id(config_key, new_ch.id, guild.id)
@@ -246,9 +258,12 @@ async def _provision_channels(guild: discord.Guild) -> dict:
 
             except discord.Forbidden:
                 results["failed"].append((config_key, "Missing Manage Channels permission"))
+                print(f"[SETUP]   FAILED: {config_key} — Missing Manage Channels permission")
             except Exception as e:
                 results["failed"].append((config_key, str(e)))
+                print(f"[SETUP]   FAILED: {config_key} — {e}")
 
+    print(f"[SETUP] Provisioning complete: {len(results['found'])} found, {len(results['created'])} created, {len(results['failed'])} failed")
     return results
 
 
@@ -329,6 +344,7 @@ class SetupChoiceView(discord.ui.View):
         """Scan for existing channels by name and store their IDs."""
         await interaction.response.defer(thinking=True)
         guild = interaction.guild
+        print(f"[SETUP] Remap button clicked by {interaction.user} in '{guild.name}'")
         results = {"found": [], "missing": []}
 
         existing: dict[str, discord.TextChannel] = {
@@ -375,6 +391,7 @@ class SetupChoiceView(discord.ui.View):
         """Create new category structure and provision all channels."""
         await interaction.response.defer(thinking=True)
         guild = interaction.guild
+        print(f"[SETUP] Create New button clicked by {interaction.user} in '{guild.name}'")
 
         try:
             results = await _provision_channels(guild)
@@ -403,6 +420,41 @@ class SetupChoiceView(discord.ui.View):
         except Exception as e:
             self.stop()
             await interaction.followup.send(f"ATLAS Setup failed: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Delete ATLAS Channels", style=discord.ButtonStyle.danger, row=1)
+    async def nuke_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Delete all WITTGPT and ATLAS categories + their channels."""
+        await interaction.response.defer(thinking=True)
+        guild = interaction.guild
+        print(f"[SETUP] Delete button clicked by {interaction.user} in '{guild.name}'")
+
+        deleted = 0
+        for cat in list(guild.categories):
+            name_upper = cat.name.upper()
+            if "WITTGPT" in name_upper or "ATLAS " in name_upper:
+                print(f"[SETUP]   Deleting category: '{cat.name}' ({len(cat.channels)} channels)")
+                for ch in cat.channels:
+                    try:
+                        await ch.delete(reason="ATLAS cleanup")
+                        deleted += 1
+                    except Exception as e:
+                        print(f"[SETUP]   Failed to delete #{ch.name}: {e}")
+                try:
+                    await cat.delete(reason="ATLAS cleanup")
+                    deleted += 1
+                except Exception as e:
+                    print(f"[SETUP]   Failed to delete category '{cat.name}': {e}")
+
+        cleared = _clear_guild_config(guild.id)
+        print(f"[SETUP] Cleanup complete: {deleted} Discord objects deleted, {cleared} config rows cleared")
+
+        embed = discord.Embed(
+            title="ATLAS Cleanup Complete",
+            description=f"Deleted **{deleted}** channels/categories.\nCleared **{cleared}** config entries.\n\nRun `/setup` again to create fresh ATLAS channels.",
+            color=0xFF4444
+        )
+        self.stop()
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -445,7 +497,8 @@ class SetupCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
-        print(f"ATLAS: Joined guild '{guild.name}' ({guild.id}) — run /setup to configure channels.")
+        print(f"ATLAS: Joined guild '{guild.name}' ({guild.id})")
+        print(f"ATLAS: [on_guild_join] No auto-provisioning. Run /setup to configure channels.")
 
 
 async def setup(bot: commands.Bot):
