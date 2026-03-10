@@ -807,95 +807,166 @@ async def _evaluate_and_post(
 
 # ── Team Select Views (Steps 1 & 2) ──────────────────────────────────────────
 
-def _build_team_options(exclude_id: int | None = None) -> list[discord.SelectOption]:
-    teams = _get_all_teams()
+def _build_conference_team_options(
+    conference: str, exclude_id: int | None = None,
+) -> list[discord.SelectOption]:
+    """Return team select options filtered by conference (AFC or NFC).
+
+    Uses divName field from dm.df_teams (e.g. 'AFC North', 'NFC West').
+    Each conference has 16 teams -- well under Discord's 25-item limit.
+    """
+    conf_upper = conference.upper()
     options = []
-    for t in teams:
-        tid  = int(t.get("id", 0))
+    for t in _get_all_teams():
+        tid = int(t.get("id", 0))
         if exclude_id and tid == exclude_id:
+            continue
+        div_name = str(t.get("divName", ""))
+        if not div_name.upper().startswith(conf_upper):
             continue
         nick  = t.get("nickName", t.get("displayName", "Unknown"))
         owner = t.get("userName", "")
         label = f"{nick} — {owner}" if owner else nick
         options.append(discord.SelectOption(label=label[:100], value=str(tid)))
-    return options[:25]  # Discord per-page max (used for autocomplete fallback)
+    return options
 
 
-class TeamASelect(discord.ui.Select):
-    def __init__(self, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
+def _step_info(step: str) -> tuple[str, str]:
+    """Return (step_number, step_label) for the given step letter."""
+    if step == "A":
+        return "1", "Team A (sending)"
+    return "2", "Team B (receiving)"
+
+
+def _conference_select_embed(step: str, description: str, team_a: dict | None = None) -> discord.Embed:
+    """Build the standard conference-selection embed for a given trade step."""
+    step_num, _ = _step_info(step)
+    if team_a and step == "B":
+        description = f"**Team A:** {_team_label(team_a)}\n\n{description}"
+    return discord.Embed(
+        title=f"💱 Trade Center — Step {step_num}",
+        description=description,
+        color=discord.Color.blurple(),
+    )
+
+
+class ConferenceSelectView(discord.ui.View):
+    """AFC / NFC buttons -- used for both Team A and Team B selection steps."""
+
+    def __init__(
+        self, bot: commands.Bot, proposer_id: int,
+        step: str = "A",
+        team_a: dict | None = None,
+    ):
+        super().__init__(timeout=180)
         self.bot_ref     = bot
         self.proposer_id = proposer_id
-        self.use_picker  = use_picker
-        super().__init__(
-            placeholder="Select Team A (the team sending)...",
-            min_values=1, max_values=1,
-            options=_build_team_options() or [discord.SelectOption(label="Loading...", value="0")],
-        )
+        self.step        = step
+        self.team_a      = team_a
 
-    async def callback(self, interaction: discord.Interaction):
-        team_a_id = int(self.values[0])
-        team_a    = next((t for t in _get_all_teams() if int(t.get("id", 0)) == team_a_id), None)
-        if not team_a:
-            return await interaction.response.send_message("❌ Team not found.", ephemeral=True)
+    @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈")
+    async def afc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_teams(interaction, "AFC")
 
-        embed = discord.Embed(
-            title="💱 Trade Center — Step 2",
-            description=f"**Team A:** {_team_label(team_a)}\n\nNow select **Team B** (the team receiving).",
-            color=discord.Color.blurple(),
+    @discord.ui.button(label="NFC", style=discord.ButtonStyle.secondary, emoji="🏈")
+    async def nfc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_teams(interaction, "NFC")
+
+    async def _show_teams(self, interaction: discord.Interaction, conference: str):
+        exclude_id = int(self.team_a.get("id", 0)) if self.team_a else None
+        options = _build_conference_team_options(conference, exclude_id=exclude_id)
+        if not options:
+            return await interaction.response.send_message(
+                f"❌ No {conference} teams found.", ephemeral=True,
+            )
+        _, step_label = _step_info(self.step)
+        embed = _conference_select_embed(
+            self.step,
+            f"Select **{step_label}** from the **{conference}**.",
+            team_a=self.team_a,
         )
-        view = TeamBView(team_a=team_a, bot=self.bot_ref, proposer_id=self.proposer_id, use_picker=self.use_picker)
+        view = ConferenceTeamSelectView(
+            bot=self.bot_ref, proposer_id=self.proposer_id,
+            step=self.step, team_a=self.team_a, options=options,
+        )
         await interaction.response.edit_message(embed=embed, view=view)
 
 
-class TeamAView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
-        super().__init__(timeout=180)
-        self.add_item(TeamASelect(bot, proposer_id, use_picker=use_picker))
+class ConferenceTeamSelect(discord.ui.Select):
+    """Select menu showing only teams from one conference."""
 
-
-class TeamBSelect(discord.ui.Select):
-    def __init__(self, team_a: dict, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
-        self.team_a      = team_a
+    def __init__(
+        self, bot: commands.Bot, proposer_id: int,
+        step: str, team_a: dict | None,
+        options: list[discord.SelectOption],
+    ):
         self.bot_ref     = bot
         self.proposer_id = proposer_id
-        self.use_picker  = use_picker
-        exclude = int(team_a.get("id", 0))
+        self.step        = step
+        self.team_a      = team_a
+        placeholder = "Select Team A..." if step == "A" else "Select Team B..."
         super().__init__(
-            placeholder="Select Team B (the other team)...",
-            min_values=1, max_values=1,
-            options=_build_team_options(exclude_id=exclude) or [
-                discord.SelectOption(label="Loading...", value="0")
-            ],
+            placeholder=placeholder, min_values=1, max_values=1, options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        team_b_id = int(self.values[0])
-        team_b    = next((t for t in _get_all_teams() if int(t.get("id", 0)) == team_b_id), None)
-        if not team_b:
+        team_id = int(self.values[0])
+        team = next(
+            (t for t in _get_all_teams() if int(t.get("id", 0)) == team_id), None,
+        )
+        if not team:
             return await interaction.response.send_message("❌ Team not found.", ephemeral=True)
 
-        if self.use_picker:
+        if self.step == "A":
+            embed = _conference_select_embed(
+                "B",
+                "Pick a conference to select **Team B** (the team receiving).",
+                team_a=team,
+            )
+            view = ConferenceSelectView(
+                bot=self.bot_ref, proposer_id=self.proposer_id,
+                step="B", team_a=team,
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
             view = PickerTradeView(
-                team_a=self.team_a,
-                team_b=team_b,
-                proposer_id=self.proposer_id,
-                bot=self.bot_ref,
+                team_a=self.team_a, team_b=team,
+                proposer_id=self.proposer_id, bot=self.bot_ref,
             )
             await interaction.response.edit_message(embed=view.step_embed(), view=view)
-        else:
-            modal = TradeDetailModal(
-                team_a=self.team_a,
-                team_b=team_b,
-                proposer_id=self.proposer_id,
-                bot=self.bot_ref,
-            )
-            await interaction.response.send_modal(modal)
 
 
-class TeamBView(discord.ui.View):
-    def __init__(self, team_a: dict, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
+class ConferenceTeamSelectView(discord.ui.View):
+    """Wraps the conference-filtered team select + a Back button."""
+
+    def __init__(
+        self, bot: commands.Bot, proposer_id: int,
+        step: str, team_a: dict | None,
+        options: list[discord.SelectOption],
+    ):
         super().__init__(timeout=180)
-        self.add_item(TeamBSelect(team_a=team_a, bot=bot, proposer_id=proposer_id, use_picker=use_picker))
+        self.bot_ref     = bot
+        self.proposer_id = proposer_id
+        self.step        = step
+        self.team_a      = team_a
+        self.add_item(ConferenceTeamSelect(
+            bot=bot, proposer_id=proposer_id,
+            step=step, team_a=team_a, options=options,
+        ))
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _, step_label = _step_info(self.step)
+        embed = _conference_select_embed(
+            self.step,
+            f"Pick a conference to select **{step_label}**.",
+            team_a=self.team_a,
+        )
+        view = ConferenceSelectView(
+            bot=self.bot_ref, proposer_id=self.proposer_id,
+            step=self.step, team_a=self.team_a,
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 # ── Picker-based Trade Flow ───────────────────────────────────────────────────
@@ -1475,99 +1546,24 @@ class TradeCenterCog(commands.Cog):
 
     @app_commands.command(
         name="trade",
-        description="Open the TSL Trade Center — browse and click to select players.",
+        description="Open the TSL Trade Center — pick a conference, then select teams.",
     )
-    @app_commands.describe(
-        team_a="Team sending assets (type to search)",
-        team_b="Team receiving assets (type to search)",
-    )
-    async def trade(
-        self,
-        interaction: discord.Interaction,
-        team_a: str,
-        team_b: str,
-    ):
-        """
-        Picker-first trade flow with autocomplete team selection.
-        Autocomplete bypasses the 25-option Discord dropdown limit for 32 teams.
-        """
+    async def trade(self, interaction: discord.Interaction):
+        """Conference-button trade flow.  AFC/NFC → 16-team dropdown → picker."""
         if dm.df_teams.empty or not dm.get_players():
             return await interaction.response.send_message(
-                "⚠️ Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True
+                "⚠️ Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True,
             )
-
-        # Resolve team_a and team_b from autocomplete value (team ID string) or name
-        def _resolve_team(val: str) -> dict | None:
-            # Autocomplete passes the team ID as a string
-            if val.isdigit():
-                return next((t for t in _get_all_teams() if str(t.get("id", "")) == val), None)
-            # Fallback: fuzzy name match
-            return _find_team(val)
-
-        ta = _resolve_team(team_a)
-        tb = _resolve_team(team_b)
-
-        if not ta:
-            return await interaction.response.send_message(
-                f"❌ Team not found: `{team_a}`. Start typing to see suggestions.", ephemeral=True
-            )
-        if not tb:
-            return await interaction.response.send_message(
-                f"❌ Team not found: `{team_b}`. Start typing to see suggestions.", ephemeral=True
-            )
-        if ta.get("id") == tb.get("id"):
-            return await interaction.response.send_message(
-                "❌ Team A and Team B must be different teams.", ephemeral=True
-            )
-
-        view = PickerTradeView(
-            team_a=ta,
-            team_b=tb,
-            proposer_id=interaction.user.id,
-            bot=self.bot,
-        )
         embed = discord.Embed(
-            title="💱 TSL Trade Center — Picker Mode",
-            description=(
-                f"**Team A:** {_team_label(ta)}\n"
-                f"**Team B:** {_team_label(tb)}\n\n"
-                "Use the buttons below to select players for each side.\n"
-                "Click **Add Picks** to include draft picks."
-            ),
+            title="💱 Trade Center — Step 1",
+            description="Pick a conference to select **Team A** (the team sending).",
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
-        await interaction.response.send_message(embed=view.step_embed(), view=view, ephemeral=True)
-
-    @trade.autocomplete("team_a")
-    async def _team_a_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        teams = _get_all_teams()
-        current_lower = current.lower()
-        matches = [
-            t for t in teams
-            if current_lower in _team_label(t).lower() or current_lower in str(t.get("nickName","")).lower()
-        ]
-        return [
-            app_commands.Choice(name=_team_label(t)[:100], value=str(t.get("id", 0)))
-            for t in matches[:25]
-        ]
-
-    @trade.autocomplete("team_b")
-    async def _team_b_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        teams = _get_all_teams()
-        current_lower = current.lower()
-        matches = [
-            t for t in teams
-            if current_lower in _team_label(t).lower() or current_lower in str(t.get("nickName","")).lower()
-        ]
-        return [
-            app_commands.Choice(name=_team_label(t)[:100], value=str(t.get("id", 0)))
-            for t in matches[:25]
-        ]
+        view = ConferenceSelectView(
+            bot=self.bot, proposer_id=interaction.user.id, step="A",
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     async def _tradelist_impl(self, interaction: discord.Interaction):
         pending = [t for t in _trades.values() if t.get("status") == "pending"]

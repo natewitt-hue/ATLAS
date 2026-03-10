@@ -12,7 +12,6 @@ Commissioner commands:
   /casino_close         — Close entire casino
   /casino_open_game     — Open a specific game
   /casino_close_game    — Close a specific game
-  /casino_set_channel   — Register a game's designated channel
   /casino_set_limits    — Adjust max bet or daily scratch range
   /casino_house_report  — P&L breakdown by game type
   /casino_clear_session — Force-clear a stuck active blackjack session
@@ -36,10 +35,60 @@ from casino.games.slots     import play_slots, daily_scratch
 from casino.games.crash     import join_crash, active_rounds
 from casino.games.coinflip  import play_coinflip, send_challenge
 from casino.renderer.card_renderer import warm_cache
+from casino.renderer.ledger_renderer import render_ledger_card
 
 ADMIN_ROLE_NAME = "Commissioner"
 
 GAME_CHOICES = typing.Literal["blackjack", "crash", "slots", "coinflip"]
+
+# ── Ledger Feed ───────────────────────────────────────────────────────────────
+
+_OUTCOME_COLOR = {"win": 0x22C55E, "loss": 0xEF4444, "push": 0xF59E0B}
+
+
+async def post_to_ledger(
+    bot: commands.Bot,
+    guild_id: int,
+    discord_id: int,
+    game_type: str,
+    wager: int,
+    outcome: str,
+    payout: int,
+    multiplier: float,
+    new_balance: int,
+) -> None:
+    """Render and post a premium ledger card to #casino-ledger."""
+    try:
+        # Deferred import: setup_cog and casino.py cross-reference each other
+        from setup_cog import get_channel_id
+
+        ledger_ch_id = get_channel_id("casino_ledger", guild_id)
+        if not ledger_ch_id:
+            return
+        channel = bot.get_channel(ledger_ch_id)
+        if not channel:
+            return
+
+        member = channel.guild.get_member(discord_id)
+        display_name = member.display_name if member else f"User {discord_id}"
+
+        buf = render_ledger_card(
+            player_name=display_name,
+            game_type=game_type,
+            wager=wager,
+            outcome=outcome,
+            payout=payout,
+            multiplier=multiplier,
+            new_balance=new_balance,
+        )
+
+        embed = discord.Embed(color=_OUTCOME_COLOR.get(outcome, 0xD4AF37))
+        embed.set_image(url="attachment://ledger.png")
+        await channel.send(embed=embed, file=discord.File(buf, filename="ledger.png"))
+    except Exception as e:
+        print(f"[LEDGER] Failed to post ledger entry: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _is_admin(interaction: discord.Interaction) -> bool:
@@ -315,46 +364,6 @@ class CasinoCog(commands.Cog):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
         await self._casino_close_game_impl(interaction, game)
-
-    async def _casino_set_channel_impl(
-        self,
-        interaction: discord.Interaction,
-        game:    GAME_CHOICES,
-        channel: discord.TextChannel,
-    ):
-        await db.set_setting(f"casino_{game}_channel", str(channel.id))
-        await interaction.response.send_message(
-            f"✅ **{game.capitalize()}** assigned to {channel.mention}.",
-            ephemeral=True
-        )
-
-    @app_commands.command(name="casino_set_channel", description="[Deprecated] Use /commish casino set_channel instead.")
-    @app_commands.describe(
-        game    = "Which game",
-        channel = "The channel to assign"
-    )
-    async def casino_set_channel(
-        self,
-        interaction: discord.Interaction,
-        game:    GAME_CHOICES,
-        channel: discord.TextChannel,
-    ):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_set_channel_impl(interaction, game, channel)
-
-    async def _casino_set_hub_impl(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        await db.set_setting("casino_hub_channel", str(channel.id))
-        await interaction.response.send_message(
-            f"✅ Casino hub set to {channel.mention}.", ephemeral=True
-        )
-
-    @app_commands.command(name="casino_set_hub", description="[Deprecated] Use /commish casino set_hub instead.")
-    @app_commands.describe(channel="The hub channel")
-    async def casino_set_hub(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_set_hub_impl(interaction, channel)
 
     async def _casino_set_limits_impl(
         self,

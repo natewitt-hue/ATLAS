@@ -140,6 +140,13 @@ try: import lore_rag
 except ImportError: lore_rag = None
 
 try:
+    import affinity as affinity_mod
+    _affinity_available = True
+except ImportError:
+    affinity_mod = None
+    _affinity_available = False
+
+try:
     from echo_loader import load_all_personas, get_persona, infer_context
     _echo_available = True
 except ImportError:
@@ -198,6 +205,7 @@ async def setup_hook():
         "awards_cog",         # ATLAS Core — awards & voting
         "codex_cog",          # ATLAS Codex — historical AI (/ask, /h2h)
         "polymarket_cog",     # ATLAS Flow — Polymarket prediction markets
+        "economy_cog",        # ATLAS Economy — money management & stipends
         "commish_cog",        # ATLAS Commissioner — unified admin commands
     ]
 
@@ -207,6 +215,14 @@ async def setup_hook():
         except Exception as e:
             print(f"ATLAS Error loading {ext}: {e}")
             traceback.print_exc()
+
+    # Affinity DB table setup (safe to call every startup)
+    if _affinity_available:
+        try:
+            await affinity_mod.setup_affinity_db()
+            print("ATLAS: User affinity system initialized.")
+        except Exception as e:
+            print(f"ATLAS: Affinity DB setup failed: {e}")
 
     # FIX #9: Only sync command tree on initial boot (setup_hook runs once).
     # This avoids burning Discord's 200 syncs/day rate limit during debugging.
@@ -376,29 +392,45 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    # If ATLAS is mentioned, trigger the AI reasoning engine
     if bot.user.mentioned_in(message):
         user_input = re.sub(r'<@!?\d+>', '', message.content).strip()
         async with message.channel.typing():
             try:
-                # Get intent mapping (get_intent takes only the query string)
-                intent = reasoning.get_intent(user_input) if hasattr(reasoning, 'get_intent') else "GENERAL"
-
-                # Infer Echo persona from channel name
                 persona_type = infer_context(channel_name=message.channel.name)
 
-                # Build context if RAG is available (async to avoid CPU blocking)
+                # ── Affinity lookup ────────────────────────────────
+                affinity_instruction = ""
+                if _affinity_available:
+                    try:
+                        score = await affinity_mod.get_affinity(message.author.id)
+                        affinity_instruction = affinity_mod.get_affinity_instruction(score)
+                    except Exception:
+                        pass
+
+                # ── Lore RAG context (async to avoid CPU blocking) ─
                 if lore_rag and hasattr(lore_rag, 'build_lore_context_async'):
                     context = await lore_rag.build_lore_context_async(user_input)
                 elif lore_rag:
-                    loop = asyncio.get_running_loop()
-                    context = await loop.run_in_executor(None, lore_rag.build_lore_context, user_input)
+                    context = await asyncio.get_running_loop().run_in_executor(
+                        None, lore_rag.build_lore_context, user_input,
+                    )
                 else:
                     context = ""
 
-                # Fetch persona response (now non-blocking via run_in_executor)
+                if affinity_instruction:
+                    context = f"{affinity_instruction}\n\n{context}"
+
                 wit = await call_atlas(user_input, context, persona_type=persona_type)
                 await message.reply(wit)
+
+                # ── Post-interaction affinity update ───────────────
+                if _affinity_available:
+                    try:
+                        sentiment = affinity_mod.analyze_sentiment(user_input)
+                        await affinity_mod.update_affinity(message.author.id, sentiment)
+                    except Exception:
+                        pass
+
             except Exception as e:
                 print(f"Message Processing Error: {e}")
                 await message.reply("ATLAS is currently undergoing maintenance. Try again later.")
@@ -472,6 +504,30 @@ async def atlas_status(interaction: discord.Interaction):
             pass
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@atlas_group.command(name="affinity", description="View or reset a user's ATLAS affinity score.")
+@app_commands.describe(user="The user to check", reset="Reset their score to 0?")
+async def atlas_affinity(interaction: discord.Interaction, user: discord.Member, reset: bool = False):
+    if not _affinity_available:
+        return await interaction.response.send_message(
+            "❌ Affinity system not loaded.", ephemeral=True,
+        )
+    if reset:
+        await affinity_mod.reset_affinity(user.id)
+        await interaction.response.send_message(
+            f"🔄 Reset affinity for **{user.display_name}** to 0.", ephemeral=True,
+        )
+    else:
+        score = await affinity_mod.get_affinity(user.id)
+        tier = affinity_mod.get_tier_label(score)
+        embed = discord.Embed(
+            title=f"User Affinity — {user.display_name}",
+            color=ATLAS_GOLD,
+        )
+        embed.add_field(name="Score", value=f"`{score:.1f}`", inline=True)
+        embed.add_field(name="Tier", value=tier, inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 bot.tree.add_command(atlas_group)

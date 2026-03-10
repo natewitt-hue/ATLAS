@@ -49,9 +49,13 @@ REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
     ("compliance",      "compliance",      "ATLAS — Sentinel", True,  False),
     ("force_request",   "force-request",   "ATLAS — Sentinel", False, False),
     # ── ATLAS — Casino (economy, games, markets) ──
-    ("casino",          "casino",          "ATLAS — Casino", False, False),
-    ("sportsbook",      "sportsbook",      "ATLAS — Casino", False, False),
-    ("prediction_markets", "prediction-markets", "ATLAS — Casino", False, False),
+    ("casino_ledger",      "casino-ledger",      "ATLAS — Casino", True,  False),
+    ("blackjack",          "blackjack",           "ATLAS — Casino", False, False),
+    ("slots",              "slots",               "ATLAS — Casino", False, False),
+    ("crash",              "crash",               "ATLAS — Casino", False, False),
+    ("coinflip",           "coinflip",            "ATLAS — Casino", False, False),
+    ("sportsbook",         "sportsbook",          "ATLAS — Casino", False, False),
+    ("prediction_markets", "prediction-markets",  "ATLAS — Casino", False, False),
 ]
 
 # Legacy channel name aliases for remap (old name → config_key)
@@ -62,6 +66,14 @@ _CHANNEL_ALIASES: dict[str, str] = {
 # Channels where /complaint and /forcerequest are silently routed to DM → admin-chat.
 # These command names are enforced in their respective cogs using get_channel_id().
 PRIVATE_ROUTING_COMMANDS = {"complaint", "forcerequest"}
+
+# Maps setup_cog config keys to casino_db setting names for channel sync.
+_CASINO_BRIDGE = {
+    "blackjack": "casino_blackjack_channel",
+    "slots":     "casino_slots_channel",
+    "crash":     "casino_crash_channel",
+    "coinflip":  "casino_coinflip_channel",
+}
 
 # ── DB Helpers ────────────────────────────────────────────────────────────────
 
@@ -262,6 +274,17 @@ async def _provision_channels(guild: discord.Guild) -> dict:
             except Exception as e:
                 results["failed"].append((config_key, str(e)))
                 print(f"[SETUP]   FAILED: {config_key} — {e}")
+
+    # ── Bridge casino per-game channel IDs to casino_db ─────────────────
+    try:
+        from casino.casino_db import set_setting as _casino_set
+        for cfg_key, casino_setting in _CASINO_BRIDGE.items():
+            ch_id = get_channel_id(cfg_key, guild.id)
+            if ch_id:
+                await _casino_set(casino_setting, str(ch_id))
+                print(f"[SETUP]   Synced {cfg_key} → casino_db ({casino_setting}={ch_id})")
+    except Exception as e:
+        print(f"[SETUP]   Casino bridge failed: {e}")
 
     print(f"[SETUP] Provisioning complete: {len(results['found'])} found, {len(results['created'])} created, {len(results['failed'])} failed")
     return results

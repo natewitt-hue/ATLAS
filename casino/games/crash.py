@@ -172,11 +172,12 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
     await resolve_crash_round(round_obj.round_id)
 
     # Log losses for players who didn't cash out
+    from casino.casino import post_to_ledger
     now = datetime.now(timezone.utc).isoformat()
     for player in round_obj.players.values():
         if not player.cashed_out:
             # Wager already deducted; just log the session
-            await process_wager(
+            result = await process_wager(
                 discord_id = player.discord_id,
                 wager      = player.wager,
                 game_type  = GAME_TYPE,
@@ -184,6 +185,14 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 payout     = 0,
                 multiplier = round_obj.crash_point,
                 channel_id = round_obj.channel_id,
+            )
+            # Post to #casino-ledger
+            await post_to_ledger(
+                bot=bot, guild_id=channel.guild.id,
+                discord_id=player.discord_id, game_type=GAME_TYPE,
+                wager=player.wager, outcome="loss", payout=0,
+                multiplier=round_obj.crash_point,
+                new_balance=result["new_balance"],
             )
 
     # Store crash point in recent history
@@ -251,7 +260,7 @@ class CrashView(discord.ui.View):
         player.cashout_mult = mult
 
         # Log win session
-        await process_wager(
+        result = await process_wager(
             discord_id = uid,
             wager      = player.wager,
             game_type  = GAME_TYPE,
@@ -259,6 +268,15 @@ class CrashView(discord.ui.View):
             payout     = payout,
             multiplier = mult,
             channel_id = self.round_obj.channel_id,
+        )
+
+        # Post to #casino-ledger
+        from casino.casino import post_to_ledger
+        await post_to_ledger(
+            bot=interaction.client, guild_id=interaction.guild_id,
+            discord_id=uid, game_type=GAME_TYPE,
+            wager=player.wager, outcome="win", payout=payout,
+            multiplier=mult, new_balance=result["new_balance"],
         )
 
         profit = payout - player.wager

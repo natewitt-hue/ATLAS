@@ -1,12 +1,13 @@
 """
 commish_cog.py — ATLAS Commissioner Admin Group
 =================================================
-Consolidates ~42 admin commands from 7 cogs into the hidden /commish group.
+Consolidates admin commands from multiple cogs into the hidden /commish group.
 Uses delegation pattern — calls _impl methods on existing cogs.
 
 Structure:
   /commish sb <cmd>       — Sportsbook admin (15 commands)
-  /commish casino <cmd>   — Casino admin (11 commands)
+  /commish casino <cmd>   — Casino admin (9 commands)
+  /commish eco <cmd>      — Economy admin (10 commands)
   /commish markets <cmd>  — Prediction markets admin (3 commands)
   /commish <cmd>          — Flat admin commands (11 commands)
 
@@ -29,6 +30,7 @@ commish = app_commands.Group(
 
 sb = app_commands.Group(name="sb", description="Sportsbook admin.", parent=commish)
 casino_admin = app_commands.Group(name="casino", description="Casino admin.", parent=commish)
+eco_admin = app_commands.Group(name="eco", description="Economy admin.", parent=commish)
 markets_admin = app_commands.Group(name="markets", description="Markets admin.", parent=commish)
 
 
@@ -185,7 +187,7 @@ class CommishCog(commands.Cog):
         await cog._sb_settleprop_impl(interaction, prop_id, result)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # /commish casino — Casino Admin (11 commands)
+    # /commish casino — Casino Admin (9 commands)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     CASINO_GAMES = typing.Literal["blackjack", "crash", "slots", "coinflip"]
@@ -229,24 +231,6 @@ class CommishCog(commands.Cog):
             return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
         await cog._casino_close_game_impl(interaction, game)
 
-    @casino_admin.command(name="setchannel", description="Register a game's designated channel.")
-    @app_commands.describe(game="Which game", channel="The channel to assign")
-    async def casino_setchannel(self, interaction: discord.Interaction,
-                                game: typing.Literal["blackjack", "crash", "slots", "coinflip"],
-                                channel: discord.TextChannel):
-        cog = self._get("CasinoCog")
-        if not cog:
-            return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
-        await cog._casino_set_channel_impl(interaction, game, channel)
-
-    @casino_admin.command(name="sethub", description="Set the casino hub channel.")
-    @app_commands.describe(channel="The hub channel")
-    async def casino_sethub(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        cog = self._get("CasinoCog")
-        if not cog:
-            return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
-        await cog._casino_set_hub_impl(interaction, channel)
-
     @casino_admin.command(name="setlimits", description="Adjust casino bet limits.")
     @app_commands.describe(
         max_bet="Maximum bet per game (default 100)",
@@ -284,6 +268,110 @@ class CommishCog(commands.Cog):
         if not cog:
             return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
         await cog._casino_give_scratch_impl(interaction, user)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # /commish eco — Economy Admin (10 commands)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @eco_admin.command(name="give", description="Give TSL Bucks to a member.")
+    @app_commands.describe(member="Member to give money to", amount="Amount to give",
+                           reason="Reason for grant")
+    async def eco_give(self, interaction: discord.Interaction, member: discord.Member,
+                       amount: int, reason: str = "Commissioner grant"):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_give_impl(interaction, member, amount, reason)
+
+    @eco_admin.command(name="take", description="Take TSL Bucks from a member.")
+    @app_commands.describe(member="Member to take money from", amount="Amount to take",
+                           reason="Reason for deduction")
+    async def eco_take(self, interaction: discord.Interaction, member: discord.Member,
+                       amount: int, reason: str = "Commissioner deduction"):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_take_impl(interaction, member, amount, reason)
+
+    @eco_admin.command(name="set", description="Set a member's exact balance.")
+    @app_commands.describe(member="Member", amount="New balance", reason="Reason")
+    async def eco_set(self, interaction: discord.Interaction, member: discord.Member,
+                      amount: int, reason: str = "Commissioner set"):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_set_impl(interaction, member, amount, reason)
+
+    @eco_admin.command(name="check", description="Check a member's balance.")
+    @app_commands.describe(member="Member to check")
+    async def eco_check(self, interaction: discord.Interaction, member: discord.Member):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_check_impl(interaction, member)
+
+    @eco_admin.command(name="giverole", description="Give TSL Bucks to all members with a role.")
+    @app_commands.describe(role="Role to pay", amount="Amount per member",
+                           reason="Reason for grant")
+    async def eco_giverole(self, interaction: discord.Interaction, role: discord.Role,
+                           amount: int, reason: str = "Role grant"):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_give_role_impl(interaction, role, amount, reason)
+
+    @eco_admin.command(name="takerole", description="Take TSL Bucks from all members with a role.")
+    @app_commands.describe(role="Role to deduct from", amount="Amount per member",
+                           reason="Reason for deduction")
+    async def eco_takerole(self, interaction: discord.Interaction, role: discord.Role,
+                           amount: int, reason: str = "Role deduction"):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_take_role_impl(interaction, role, amount, reason)
+
+    @eco_admin.command(name="stipendadd", description="Set up a recurring payment for a role.")
+    @app_commands.describe(
+        role="Role to pay",
+        amount="Amount per interval (positive=income, negative=deduction)",
+        interval="Payment frequency",
+        reason="Description of the stipend",
+    )
+    @app_commands.choices(interval=[
+        app_commands.Choice(name="Daily", value="daily"),
+        app_commands.Choice(name="Weekly", value="weekly"),
+        app_commands.Choice(name="Biweekly", value="biweekly"),
+        app_commands.Choice(name="Monthly", value="monthly"),
+    ])
+    async def eco_stipendadd(self, interaction: discord.Interaction, role: discord.Role,
+                             amount: int, interval: app_commands.Choice[str],
+                             reason: str = "Recurring stipend"):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_stipend_add_impl(interaction, role, amount, interval.value, reason)
+
+    @eco_admin.command(name="stipendremove", description="Remove a recurring stipend for a role.")
+    @app_commands.describe(role="Role whose stipend to remove")
+    async def eco_stipendremove(self, interaction: discord.Interaction, role: discord.Role):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_stipend_remove_impl(interaction, role)
+
+    @eco_admin.command(name="stipendlist", description="View all active stipends.")
+    async def eco_stipendlist(self, interaction: discord.Interaction):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_stipend_list_impl(interaction)
+
+    @eco_admin.command(name="stipendpaynow", description="Manually trigger all due stipend payments.")
+    async def eco_stipendpaynow(self, interaction: discord.Interaction):
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
+        await cog._eco_stipend_paynow_impl(interaction)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # /commish markets — Prediction Markets Admin (3 commands)

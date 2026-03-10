@@ -633,21 +633,43 @@ class AnalyticsNav(discord.ui.View):
 _ANALYSIS_OK = an is not None
 _INTEL_OK = ig is not None
 
-# ── Optional history_cog pipeline (SQL + Gemini NL queries) ──────────────────
+# ── Optional codex pipeline (SQL + Gemini NL queries) ────────────────────────
+# NOTE: Was history_cog — renamed to codex_cog in v1.4. Fallback to history_cog
+# for backwards compat if codex_cog doesn't exist yet.
 try:
-    from history_cog import (
+    from codex_cog import (
         gemini_sql,
         gemini_answer,
         run_sql,
         extract_sql,
         fuzzy_resolve_user,
         resolve_names_in_question,
+        _build_conversation_block,
+        _add_conversation_turn,
         DB_SCHEMA,
         KNOWN_USERS,
     )
     _HISTORY_OK = True
 except ImportError:
-    _HISTORY_OK = False
+    try:
+        from history_cog import (
+            gemini_sql, gemini_answer, run_sql, extract_sql,
+            fuzzy_resolve_user, resolve_names_in_question,
+            DB_SCHEMA, KNOWN_USERS,
+        )
+        _build_conversation_block = None
+        _add_conversation_turn = None
+        _HISTORY_OK = True
+    except ImportError:
+        _HISTORY_OK = False
+        _build_conversation_block = None
+        _add_conversation_turn = None
+
+# Optional affinity module
+try:
+    import affinity as _affinity_mod
+except ImportError:
+    _affinity_mod = None
 
 
 # ── ATLAS branding constants ──────────────────────────────────────────────────
@@ -2872,15 +2894,18 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
 #  ASK ATLAS — MODE SELECTOR + TWO MODALS
 # ─────────────────────────────────────────────────────────────────────────────
 
-class AskModeView(discord.ui.View):
+class OracleHubView(discord.ui.View):
     """
-    Step 1: shown when user clicks 🔬 Ask ATLAS.
-    📊 TSL League  → SQL pipeline against tsl_history.db (Codex mode)
-    🌐 Open Intel  → Straight Gemini + web search, no DB (general AI mode)
+    Oracle Hub — 5 Ask ATLAS modes.
+    📊 TSL League   → SQL pipeline against tsl_history.db
+    🌐 Open Intel   → General AI + web search
+    🏈 Sports Intel → NFL / real-world sports + web search
+    🎯 Player Scout → Player ratings, dev traits, abilities from roster data
+    🧠 Strategy     → Trade advice, roster tips, game strategy
     """
 
     def __init__(self):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
 
     @discord.ui.button(label="📊 TSL League", style=discord.ButtonStyle.primary, row=0)
     async def btn_tsl(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -2889,6 +2914,18 @@ class AskModeView(discord.ui.View):
     @discord.ui.button(label="🌐 Open Intel", style=discord.ButtonStyle.secondary, row=0)
     async def btn_open(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(AskOpenModal())
+
+    @discord.ui.button(label="🏈 Sports Intel", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_sports(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(SportsIntelModal())
+
+    @discord.ui.button(label="🎯 Player Scout", style=discord.ButtonStyle.primary, row=1)
+    async def btn_scout(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(PlayerScoutModal())
+
+    @discord.ui.button(label="🧠 Strategy", style=discord.ButtonStyle.success, row=1)
+    async def btn_strategy(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.send_modal(StrategyRoomModal())
 
 
 class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
@@ -2919,7 +2956,21 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                 await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
                 return
 
-            sql = await gemini_sql(annotated, client, alias_map)
+            # ── Conversation memory ─────────────────────────────
+            conv_block = ""
+            if _build_conversation_block:
+                conv_block = _build_conversation_block(interaction.user.id)
+
+            # ── Affinity tone (answer only) ─────────────────────
+            affinity_block = ""
+            if _affinity_mod:
+                try:
+                    score = await _affinity_mod.get_affinity(interaction.user.id)
+                    affinity_block = _affinity_mod.get_affinity_instruction(score)
+                except Exception:
+                    pass
+
+            sql = await gemini_sql(annotated, client, alias_map, conv_context=conv_block)
             if not sql:
                 await interaction.followup.send(
                     "📊 Couldn't generate a query for that. Try rephrasing — "
@@ -2931,8 +2982,12 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
             rows, error = run_sql(sql)
             if error:
                 fix_prompt = (
-                    f"This SQLite query failed:\n{sql}\n\nError: {error}\n\n"
-                    f"Fix it. Return only valid SQLite SQL.\n\nSchema:\n{DB_SCHEMA}"
+                    f"This SQLite query for a Madden database failed:\n{sql}\n\n"
+                    f"Error: {error}\n\n"
+                    f"REMINDER: ALL columns are stored as TEXT. Always use "
+                    f"CAST(col AS INTEGER) for numeric comparisons.\n"
+                    f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
+                    f"Schema:\n{DB_SCHEMA}"
                 )
                 loop = asyncio.get_running_loop()
                 fix_response = await loop.run_in_executor(
@@ -2949,7 +3004,12 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                     )
                     return
 
-            answer = await gemini_answer(q, sql, rows, client)
+            answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
+            answer = await gemini_answer(q, sql, rows, client, conv_context=answer_context)
+
+            # ── Store conversation turn ─────────────────────────
+            if _add_conversation_turn:
+                _add_conversation_turn(interaction.user.id, q, sql or "", answer)
 
             embed = discord.Embed(
                 title="🔬 ATLAS Intelligence — TSL League",
@@ -2962,8 +3022,10 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                 footer_parts.append(
                     f"🔎 Resolved: {', '.join(f'{k}→{v}' for k, v in alias_map.items())}"
                 )
+            if conv_block:
+                footer_parts.append("💬 Conversational")
             embed.set_footer(
-                text=" | ".join(footer_parts) + " · ATLAS™ Codex",
+                text=" | ".join(footer_parts) + " · ATLAS™ Oracle",
                 icon_url=ATLAS_ICON_URL,
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -3032,6 +3094,298 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
             )
             embed.set_footer(
                 text="Open Intel mode · Web search enabled · ATLAS™ Oracle",
+                icon_url=ATLAS_ICON_URL,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+
+
+class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"):
+    """Sports Intel mode: real-world NFL/sports questions via Gemini + web search."""
+
+    question = discord.ui.TextInput(
+        label="Your Sports Question",
+        placeholder="e.g. Who leads the NFL in passing yards? Latest trade rumors?",
+        required=True,
+        max_length=300,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        q = self.question.value.strip()
+        client = _get_gemini_client()
+        if not client:
+            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
+            return
+
+        try:
+            from google.genai import types
+
+            system_instruction = (
+                "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
+                "You are in Sports Intel mode — answering real-world NFL and sports questions. "
+                "Use web search to find current stats, news, standings, scores, and trade rumors. "
+                "Be authoritative on sports analysis. Give sharp, opinionated takes with conviction. "
+                "Use bold (**text**) for key stats and names (Discord markdown). "
+                "Keep responses concise (3-5 sentences) unless the user asks for detail. "
+                "Always refer to yourself as ATLAS."
+            )
+
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.5,
+                        tools=[{"google_search": {}}],
+                    ),
+                    contents=q,
+                ),
+            )
+
+            answer = (
+                response.text.strip()
+                if response.text
+                else "ATLAS couldn't pull intel on that one."
+            )
+
+            embed = discord.Embed(
+                title="🏈 ATLAS Intelligence — Sports Intel",
+                description=answer,
+                color=ATLAS_GOLD,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            embed.set_footer(
+                text="Sports Intel mode · Web search enabled · ATLAS™ Oracle",
+                icon_url=ATLAS_ICON_URL,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+
+
+class PlayerScoutModal(discord.ui.Modal, title="🎯 Ask ATLAS — Player Scout"):
+    """Player Scout mode: query Madden player ratings, abilities, dev traits from the roster."""
+
+    question = discord.ui.TextInput(
+        label="Your Scouting Question",
+        placeholder="e.g. Who is the fastest WR? Best X-Factor QBs? Compare two players?",
+        required=True,
+        max_length=300,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        if not _HISTORY_OK:
+            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
+            return
+
+        q = self.question.value.strip()
+        client = _get_gemini_client()
+        if not client:
+            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
+            return
+
+        try:
+            # Scout-specific SQL prompt focusing on players + player_abilities tables
+            scout_schema = f"""DATABASE: tsl_history.db — Madden Player Scouting Data
+
+TABLE: players (current roster snapshot — {dm.CURRENT_SEASON})
+  Columns: rosterId, firstName, lastName, age, height, weight, pos, jerseyNum,
+           college, yearsPro, dev, teamId, teamName, isFA, isOnIR,
+           playerBestOvr, capHit, contractSalary, contractYearsLeft,
+           speedRating, strengthRating, agilityRating, awareRating, catchRating,
+           routeRunShortRating, routeRunMedRating, routeRunDeepRating,
+           throwPowerRating, throwAccShortRating, throwAccMedRating, throwAccDeepRating,
+           carryRating, jukeMoveRating, spinMoveRating, truckRating, breakTackleRating,
+           tackleRating, hitPowerRating, pursuitRating, playRecRating, manCoverRating,
+           zoneCoverRating, pressRating, blockSheddingRating, runBlockRating,
+           passBlockRating, impactBlockRating, kickPowerRating, kickAccuracyRating
+  Notes: dev values: 'Normal', 'Star', 'Superstar', 'XFactor'. isFA='1' = free agent.
+
+TABLE: player_abilities (X-Factor/Superstar abilities)
+  Columns: rosterId, firstName, lastName, teamName, title, description,
+           startSeasonIndex, endSeasonIndex
+  Notes: Active abilities have no endSeasonIndex or endSeasonIndex >= current season.
+
+RULES:
+- ALL columns are TEXT. Use CAST(col AS INTEGER) for math/comparisons.
+- To find a player by name: WHERE firstName || ' ' || lastName LIKE '%name%'
+- For position groups: QB, HB, WR, TE, LT/LG/C/RG/RT (OL), LE/RE/DT (DL), LOLB/MLB/ROLB (LB), CB/FS/SS (DB)
+- Return ONLY the SQL query, no explanation, no markdown fences.
+"""
+
+            scout_prompt = f"""{scout_schema}
+
+Generate a SQLite SELECT query to answer this scouting question:
+"{q}"
+"""
+
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model="gemini-2.0-flash", contents=scout_prompt
+                ),
+            )
+            sql = extract_sql(response.text)
+            if not sql:
+                await interaction.followup.send(
+                    "🎯 Couldn't generate a scouting query. Try being specific about "
+                    "position, team, or rating (e.g. 'fastest WR on the Ravens').",
+                    ephemeral=True,
+                )
+                return
+
+            rows, error = run_sql(sql)
+            if error:
+                await interaction.followup.send(
+                    "⚠️ Scout query failed. Try rephrasing your question!", ephemeral=True
+                )
+                return
+
+            # Generate scouting report from results
+            results_str = json.dumps(rows[:20], indent=2)
+            if len(results_str) > 2500:
+                results_str = results_str[:2500] + "\n... (truncated)"
+
+            answer_prompt = f"""You are ATLAS in Scout mode — analyzing Madden player ratings and abilities.
+
+A user asked: "{q}"
+
+Scouting data ({len(rows)} players):
+{results_str}
+
+RESPONSE GUIDELINES:
+- Lead with the direct answer to the question.
+- Use **bold** for player names, ratings, and dev traits (Discord markdown).
+- Compare players when relevant — highlight standout ratings.
+- Mention dev trait (Normal/Star/Superstar/XFactor) as it heavily impacts value.
+- Keep it under 300 words. Make it feel like a real scouting report.
+"""
+
+            answer_response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model="gemini-2.0-flash", contents=answer_prompt
+                ),
+            )
+            answer = answer_response.text.strip() if answer_response.text else "No scouting data found."
+
+            embed = discord.Embed(
+                title="🎯 ATLAS Intelligence — Player Scout",
+                description=answer,
+                color=discord.Color.from_rgb(30, 144, 255),
+                timestamp=datetime.datetime.utcnow(),
+            )
+            embed.set_footer(
+                text=f"🔍 {len(rows)} players analyzed · ATLAS™ Oracle · Scout Mode",
+                icon_url=ATLAS_ICON_URL,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+
+
+class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Room"):
+    """Strategy mode: trade advice, roster tips, and game strategy using TSL context."""
+
+    question = discord.ui.TextInput(
+        label="Your Strategy Question",
+        placeholder="e.g. Should I trade my WR1 for picks? How to beat a 3-4 defense?",
+        required=True,
+        max_length=300,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        q = self.question.value.strip()
+        client = _get_gemini_client()
+        if not client:
+            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
+            return
+
+        try:
+            from google.genai import types
+
+            # Build TSL context from live data
+            context_parts = []
+
+            # Standings snapshot
+            if not dm.df_standings.empty:
+                top_teams = dm.df_standings.head(10)
+                standings_lines = []
+                for _, row in top_teams.iterrows():
+                    name = row.get("teamName", "?")
+                    wins = row.get("totalWins", "0")
+                    losses = row.get("totalLosses", "0")
+                    standings_lines.append(f"  {name}: {wins}-{losses}")
+                context_parts.append("CURRENT STANDINGS (Top 10):\n" + "\n".join(standings_lines))
+
+            # Team ratings
+            if not dm.df_teams.empty:
+                team_lines = []
+                for _, row in dm.df_teams.iterrows():
+                    name = row.get("nickName", "?")
+                    ovr = row.get("ovrRating", "?")
+                    owner = row.get("userName", "?")
+                    team_lines.append(f"  {name} (OVR {ovr}) — {owner}")
+                context_parts.append("TEAM RATINGS:\n" + "\n".join(team_lines[:16]))
+
+            tsl_context = "\n\n".join(context_parts) if context_parts else ""
+
+            system_instruction = (
+                "You are ATLAS in Strategy Room mode — the TSL's top strategic advisor. "
+                "Provide trade advice, roster management tips, game strategy, and competitive analysis. "
+                "Use the TSL context data provided to give SPECIFIC, ACTIONABLE recommendations. "
+                "Reference actual team names, standings, and ratings when relevant. "
+                "Be opinionated and decisive — don't hedge. Give a clear recommendation. "
+                "Use **bold** for key points (Discord markdown). "
+                "Keep responses under 400 words. Always refer to yourself as ATLAS."
+            )
+
+            contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
+
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.5,
+                        tools=[{"google_search": {}}],
+                    ),
+                    contents=contents,
+                ),
+            )
+
+            answer = (
+                response.text.strip()
+                if response.text
+                else "ATLAS couldn't formulate a strategy for that one."
+            )
+
+            embed = discord.Embed(
+                title="🧠 ATLAS Intelligence — Strategy Room",
+                description=answer,
+                color=discord.Color.from_rgb(34, 197, 94),
+                timestamp=datetime.datetime.utcnow(),
+            )
+            embed.set_footer(
+                text="Strategy Room · TSL context + web search · ATLAS™ Oracle",
                 icon_url=ATLAS_ICON_URL,
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -3441,16 +3795,26 @@ class HubView(discord.ui.View):
         await interaction.response.send_modal(SeasonRecapModal())
 
     @discord.ui.button(
-        label="🔬 Ask ATLAS", style=discord.ButtonStyle.success,
+        label="🔮 Oracle Hub", style=discord.ButtonStyle.success,
         row=3, custom_id="hub:ask",
     )
     async def btn_ask(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        # Show mode selector — user picks TSL League or Open Intel before typing question
+        embed = discord.Embed(
+            title="🔮 ATLAS Oracle Hub",
+            description=(
+                "**Choose your intelligence mode:**\n\n"
+                "📊 **TSL League** — Query the TSL history database\n"
+                "🌐 **Open Intel** — General knowledge + web search\n"
+                "🏈 **Sports Intel** — Real-world NFL stats & news\n"
+                "🎯 **Player Scout** — Madden ratings, dev traits, abilities\n"
+                "🧠 **Strategy** — Trade advice, roster tips, game strategy"
+            ),
+            color=0xC9962A,
+        )
+        embed.set_footer(text="ATLAS™ Oracle Module")
         await interaction.response.send_message(
-            "**🔬 Ask ATLAS — Choose your mode:**\n"
-            "`📊 TSL League` — Query the TSL history database\n"
-            "`🌐 Open Intel` — General knowledge, sports, anything",
-            view=AskModeView(),
+            embed=embed,
+            view=OracleHubView(),
             ephemeral=True,
         )
 
@@ -3601,6 +3965,33 @@ class StatsHubCog(commands.Cog):
             return
         embed = _build_hotcold_single(data)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── /oracle ────────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="oracle", description="🔮 ATLAS Oracle Hub — Ask questions across 5 intelligence modes.")
+    async def oracle(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🔮 ATLAS Oracle Hub",
+            description=(
+                "**Choose your intelligence mode:**\n\n"
+                "📊 **TSL League** — Query the TSL history database\n"
+                "🌐 **Open Intel** — General knowledge + web search\n"
+                "🏈 **Sports Intel** — Real-world NFL stats & news\n"
+                "🎯 **Player Scout** — Madden ratings, dev traits, abilities\n"
+                "🧠 **Strategy** — Trade advice, roster tips, game strategy"
+            ),
+            color=0xC9962A,
+        )
+        embed.set_author(
+            name="ATLAS · Autonomous TSL League Administration System",
+            icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
+        )
+        embed.set_footer(text="ATLAS™ Oracle Module · Pick a mode to begin")
+        await interaction.response.send_message(
+            embed=embed,
+            view=OracleHubView(),
+            ephemeral=True,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

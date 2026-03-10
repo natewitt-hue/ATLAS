@@ -37,11 +37,24 @@ import sqlite3
 import json
 import os
 import re
+import time
 from collections import Counter
+from dataclasses import dataclass, field
 from google import genai
 from difflib import get_close_matches
 
 import data_manager as dm
+
+# Optional modules
+try:
+    import affinity as _affinity_mod
+except ImportError:
+    _affinity_mod = None
+
+try:
+    from build_member_db import get_db_username_for_discord_id as _get_db_username
+except ImportError:
+    _get_db_username = None
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DB_PATH   = os.path.join(os.path.dirname(__file__), "tsl_history.db")
@@ -64,6 +77,128 @@ try:
 except ImportError:
     def _answer_persona() -> str:
         return ATLAS_PERSONA
+
+# ── Conversation Memory ──────────────────────────────────────────────────────
+CONV_MAX_TURNS   = 5        # Max Q&A pairs to inject as context
+CONV_TTL_SECONDS = 1800     # 30 minutes — stale conversations are dropped
+
+
+@dataclass
+class ConversationTurn:
+    question: str
+    sql: str
+    answer: str
+    timestamp: float = field(default_factory=time.time)
+
+
+# In-memory cache: discord_id → list of recent turns
+_conv_cache: dict[int, list[ConversationTurn]] = {}
+
+
+def _init_conversation_db() -> None:
+    """Create conversation_history table if it doesn't exist."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_history (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_id INTEGER NOT NULL,
+                    question   TEXT    NOT NULL,
+                    sql_query  TEXT,
+                    answer     TEXT    NOT NULL,
+                    created_at REAL   NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conv_user_time
+                ON conversation_history(discord_id, created_at DESC)
+            """)
+    except Exception as e:
+        print(f"[CodexCog] Conversation DB init error: {e}")
+
+
+def _get_conversation_context(discord_id: int) -> list[ConversationTurn]:
+    """Return recent non-stale conversation turns from the in-memory cache."""
+    turns = _conv_cache.get(discord_id, [])
+    cutoff = time.time() - CONV_TTL_SECONDS
+    fresh = [t for t in turns if t.timestamp >= cutoff]
+    if len(fresh) != len(turns):
+        _conv_cache[discord_id] = fresh
+    return fresh[-CONV_MAX_TURNS:]
+
+
+def _load_conversations_from_db(discord_id: int) -> list[ConversationTurn]:
+    """Cold-start recovery: load recent turns from SQLite."""
+    cutoff = time.time() - CONV_TTL_SECONDS
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT question, sql_query, answer, created_at "
+                "FROM conversation_history "
+                "WHERE discord_id = ? AND created_at >= ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (discord_id, cutoff, CONV_MAX_TURNS),
+            ).fetchall()
+        return [
+            ConversationTurn(
+                question=r["question"], sql=r["sql_query"] or "",
+                answer=r["answer"], timestamp=r["created_at"],
+            )
+            for r in reversed(rows)
+        ]
+    except Exception:
+        return []
+
+
+def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str) -> None:
+    """Store a turn in memory and persist to DB."""
+    turn = ConversationTurn(question=question, sql=sql, answer=answer)
+    turns = _conv_cache.setdefault(discord_id, [])
+    turns.append(turn)
+
+    # Keep only the last CONV_MAX_TURNS * 2 in memory
+    if len(turns) > CONV_MAX_TURNS * 2:
+        _conv_cache[discord_id] = turns[-CONV_MAX_TURNS:]
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                "INSERT INTO conversation_history "
+                "(discord_id, question, sql_query, answer, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (discord_id, turn.question, turn.sql, turn.answer, turn.timestamp),
+            )
+    except Exception as e:
+        print(f"[CodexCog] Conversation persist error: {e}")
+
+
+def _build_conversation_block(discord_id: int) -> str:
+    """Build a conversation history string for prompt injection."""
+    turns = _get_conversation_context(discord_id)
+    if not turns:
+        turns = _load_conversations_from_db(discord_id)
+        if turns:
+            _conv_cache[discord_id] = turns
+
+    if not turns:
+        return ""
+
+    lines = ["RECENT CONVERSATION HISTORY (use for context and follow-up references):"]
+    for i, t in enumerate(turns, 1):
+        lines.append(f"  Q{i}: {t.question}")
+        if t.sql:
+            lines.append(f"  SQL{i}: {t.sql}")
+        lines.append(f"  A{i}: {t.answer[:200]}")
+    lines.append(
+        "If the current question references 'that', 'those', 'them', 'the same', "
+        "'it', 'he', 'she', 'they', etc., use the above history to resolve what is "
+        "being referenced. You may reuse or modify previous SQL patterns if relevant."
+    )
+    return "\n".join(lines)
+
 
 # ── Schema fed to Gemini for SQL generation ──────────────────────────────────
 def _build_schema() -> str:
@@ -323,7 +458,10 @@ def extract_sql(text: str) -> str | None:
     return None
 
 
-async def gemini_sql(question: str, client, alias_map: dict | None = None) -> str | None:
+async def gemini_sql(
+    question: str, client, alias_map: dict | None = None,
+    conv_context: str = "",
+) -> str | None:
     """Ask Gemini to generate SQL. Non-blocking via run_in_executor."""
     alias_block = ""
     if alias_map:
@@ -336,20 +474,53 @@ async def gemini_sql(question: str, client, alias_map: dict | None = None) -> st
         + "\nOnly use these exact strings in WHERE clauses involving homeUser or awayUser.\n"
     )
 
-    prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden database.
+    conv_block = f"\n{conv_context}\n" if conv_context else ""
+
+    prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden franchise database.
+Your job: convert natural-language questions into a single correct SQLite SELECT query.
 
 {DB_SCHEMA}
-{known_users_block}{alias_block}
-Generate a single valid SQLite SELECT query to answer this question:
-"{question}"
+{known_users_block}{alias_block}{conv_block}
 
-Rules:
-- Return ONLY the SQL query, no explanation, no markdown fences.
-- Cast numeric columns when doing comparisons: CAST(col AS INTEGER)
-- Limit results to 30 rows unless the user specifically needs more.
-- For user/owner questions, query homeUser/awayUser using EXACT usernames from the valid values list above.
-- Default to stageIndex='1' (regular season) unless the user asks about playoffs.
-- Never use DROP, INSERT, UPDATE, DELETE, or any DDL.
+RULES:
+1. Return ONLY the raw SQL query — no markdown, no explanation, no code fences.
+2. ALL columns are stored as TEXT. Use CAST(col AS INTEGER) or CAST(col AS REAL) for math/comparisons.
+3. Completed games: ALWAYS filter status IN ('2','3'). Never include unplayed games.
+4. Default to stageIndex='1' (regular season) unless the user asks about playoffs.
+5. For owner queries: use EXACT usernames from the VALID VALUES list above. Never use LIKE or wildcards.
+6. For "record" questions: count wins AND losses separately, not just total games.
+7. When a user could appear as home OR away, handle both: (homeUser='X' OR awayUser='X').
+8. For owner-specific history across seasons, ALWAYS JOIN owner_tenure to track team changes.
+9. For draft queries, use player_draft_map — NEVER players.teamName.
+10. Limit results to 30 rows unless the user needs more.
+11. Never use DROP, INSERT, UPDATE, DELETE, or any DDL.
+
+COMMON MISTAKES TO AVOID:
+- Forgetting status IN ('2','3') → includes unplayed/scheduled games → wrong counts.
+- Using players.teamName for draft history → wrong (players move teams). Use player_draft_map.
+- Counting only homeUser wins → misses away wins. Always handle both home and away.
+- Hardcoding seasonIndex → misses multi-season data. Default to all seasons unless asked.
+- Using GROUP BY without handling the home/away split → double-counting.
+- Forgetting CAST() on TEXT columns → string comparison instead of numeric → wrong ordering.
+
+FEW-SHOT EXAMPLES:
+Q: "Who has the most wins all time?"
+SQL: SELECT owner, SUM(wins) AS total_wins FROM (SELECT winner_user AS owner, COUNT(*) AS wins FROM games WHERE status IN ('2','3') AND winner_user != '' GROUP BY winner_user) GROUP BY owner ORDER BY total_wins DESC LIMIT 10
+
+Q: "What is TheWitt's record this season?"
+SQL: SELECT SUM(CASE WHEN winner_user='TheWitt' THEN 1 ELSE 0 END) AS wins, SUM(CASE WHEN loser_user='TheWitt' THEN 1 ELSE 0 END) AS losses FROM games WHERE status IN ('2','3') AND seasonIndex='{dm.CURRENT_SEASON}' AND (homeUser='TheWitt' OR awayUser='TheWitt')
+
+Q: "Who leads the league in passing yards this season?"
+SQL: SELECT fullName, teamName, SUM(CAST(passYds AS INTEGER)) AS total_pass_yds FROM offensive_stats WHERE seasonIndex='{dm.CURRENT_SEASON}' AND stageIndex='1' AND pos='QB' GROUP BY fullName ORDER BY total_pass_yds DESC LIMIT 10
+
+Q: "Head to head record between TheWitt and KillaE94?"
+SQL: SELECT winner_user, COUNT(*) AS wins FROM games WHERE status IN ('2','3') AND ((homeUser='TheWitt' AND awayUser='KillaE94') OR (homeUser='KillaE94' AND awayUser='TheWitt')) GROUP BY winner_user
+
+Q: "Best defensive players on the Ravens?"
+SQL: SELECT fullName, pos, SUM(CAST(defTotalTackles AS INTEGER)) AS tackles, SUM(CAST(defSacks AS REAL)) AS sacks, SUM(CAST(defInts AS INTEGER)) AS ints FROM defensive_stats WHERE teamName LIKE '%Ravens%' AND seasonIndex='{dm.CURRENT_SEASON}' AND stageIndex='1' GROUP BY fullName ORDER BY tackles DESC LIMIT 15
+
+Now generate a query for this question:
+"{question}"
 """
 
     def _call():
@@ -360,7 +531,10 @@ Rules:
     return extract_sql(response.text)
 
 
-async def gemini_answer(question: str, sql: str, rows: list[dict], client) -> str:
+async def gemini_answer(
+    question: str, sql: str, rows: list[dict], client,
+    conv_context: str = "",
+) -> str:
     """Format SQL results into natural language. Non-blocking via run_in_executor."""
     results_str = json.dumps(rows, indent=2)
     if len(results_str) > MAX_CHARS:
@@ -373,19 +547,25 @@ async def gemini_answer(question: str, sql: str, rows: list[dict], client) -> st
             "for this question. Do NOT invent stats or outcomes.\n"
         )
 
-    prompt = f"""{_answer_persona()}
+    conv_block = f"\n{conv_context}\n" if conv_context else ""
 
+    prompt = f"""{_answer_persona()}
+{conv_block}
 A TSL member asked: "{question}"
 
-I ran this SQL query:
-{sql}
-
-Results:
+Query results ({len(rows)} rows):
 {results_str}
 {no_data_instruction}
-Using these exact results, answer the question.
-Be accurate to the data — do not invent stats or outcomes not in the results.
-Don't repeat the SQL or mention databases — just give the answer.
+RESPONSE GUIDELINES:
+- Lead with the DIRECT answer — the specific stat, name, or fact the user asked about.
+- Use **bold** for key numbers and names (Discord markdown).
+- Include supporting context: season, team, comparison to others when relevant.
+- If multiple rows returned, highlight the top 3-5 and briefly summarize the rest.
+- Keep it under 300 words unless the user asked for a full breakdown.
+- If data seems incomplete or unexpected, acknowledge it but still give the best answer.
+- NEVER repeat the SQL query or mention databases/tables — just deliver the answer.
+- NEVER invent stats or outcomes that are not in the results above.
+- Use sports language and dramatic flair — make numbers tell a story.
 """
 
     def _call():
@@ -405,6 +585,7 @@ class CodexCog(commands.Cog):
         if not api_key:
             print("[CodexCog] ⚠️  GEMINI_API_KEY not set — /ask, /h2h, /season_recap will fail.")
         self.gemini = genai.Client(api_key=api_key) if api_key else None
+        _init_conversation_db()
 
     # ── /ask ─────────────────────────────────────────────────────────────────
     @app_commands.command(
@@ -421,13 +602,8 @@ class CodexCog(commands.Cog):
             return
 
         try:
-            # Resolve caller via Discord ID — immune to username changes.
-            # Falls back to fuzzy username match if not in registry yet.
-            try:
-                from build_member_db import get_db_username_for_discord_id
-                caller_db = get_db_username_for_discord_id(interaction.user.id)
-            except Exception:
-                caller_db = None
+            # Resolve caller via Discord ID; fall back to fuzzy username match
+            caller_db = _get_db_username(interaction.user.id) if _get_db_username else None
             if not caller_db:
                 caller_db = fuzzy_resolve_user(interaction.user.name) or interaction.user.name
 
@@ -438,7 +614,21 @@ class CodexCog(commands.Cog):
             question_with_context = f"{caller_context} {question}"
             annotated_question, alias_map = resolve_names_in_question(question_with_context)
 
-            sql = await gemini_sql(annotated_question, self.gemini, alias_map)
+            conv_block = _build_conversation_block(interaction.user.id)
+
+            # Affinity tone (answer only, not SQL)
+            affinity_block = ""
+            if _affinity_mod:
+                try:
+                    score = await _affinity_mod.get_affinity(interaction.user.id)
+                    affinity_block = _affinity_mod.get_affinity_instruction(score)
+                except Exception:
+                    pass
+
+            sql = await gemini_sql(
+                annotated_question, self.gemini, alias_map,
+                conv_context=conv_block,
+            )
             if not sql:
                 await interaction.followup.send(
                     "📊 Couldn't generate a query for that one. Try rephrasing — "
@@ -461,8 +651,7 @@ class CodexCog(commands.Cog):
                     return self.gemini.models.generate_content(
                         model="gemini-2.0-flash", contents=fix_prompt
                     )
-                loop = asyncio.get_running_loop()
-                fix_response = await loop.run_in_executor(None, _fix)
+                fix_response = await asyncio.get_running_loop().run_in_executor(None, _fix)
                 sql = extract_sql(fix_response.text) or sql
                 rows, error = run_sql(sql)
                 if error:
@@ -472,8 +661,14 @@ class CodexCog(commands.Cog):
                     )
                     return
 
-            # Use original question (no context prefix) for the natural-language answer
-            answer = await gemini_answer(question, sql, rows, self.gemini)
+            answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
+            answer = await gemini_answer(
+                question, sql, rows, self.gemini,
+                conv_context=answer_context,
+            )
+
+            # ── Store conversation turn ─────────────────────────
+            _add_conversation_turn(interaction.user.id, question, sql or "", answer)
 
             embed = discord.Embed(
                 title="📊 TSL Historical Intelligence",
@@ -488,8 +683,10 @@ class CodexCog(commands.Cog):
             if alias_map:
                 resolved_str = ", ".join(f"{k}→{v}" for k, v in alias_map.items())
                 footer_parts.append(f"🔎 Resolved: {resolved_str}")
+            if conv_block:
+                footer_parts.append("💬 Conversational")
             embed.set_footer(
-                text=" | ".join(footer_parts) + " · ATLAS™ Codex Module",
+                text=" | ".join(footer_parts) + " · 💡 Try /oracle for more modes · ATLAS™ Codex Module",
                 icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
             )
             await interaction.followup.send(embed=embed)
