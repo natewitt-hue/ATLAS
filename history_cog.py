@@ -1,32 +1,22 @@
 """
-codex_cog.py v1.4  ─  ATLAS Historical Intelligence (Codex Module)
+history_cog.py v1.2  ─  ATLAS Historical Intelligence
 Uses Gemini to convert natural language questions → SQL → natural language answers
 against the TSL SQLite database.
 
 Commands:
-  /ask          <question>        Ask ATLAS anything about TSL history
-  /ask_debug    <question>        [Admin] Show generated SQL + raw rows — diagnostics
-  /h2h          <user1> <user2>  Head-to-head record
-  /season_recap <season>         Full season recap
+  /ask   <question>          Ask ATLAS anything about TSL history
+  /h2h   <user1> <user2>    Head-to-head record
+  /season_recap <season>    Full season recap
 
-v1.3 fixes:
-  - FIX: Docstring corrected — file is codex_cog.py (was still saying history_cog.py).
-  - FIX: Gemini client uses os.getenv (was os.environ — crashed on missing key).
-  - FIX: /season_recap uses dm.CURRENT_SEASON instead of hardcoded 6.
-
-v1.4 fixes:
-  - ADD:  /ask_debug admin command — referenced in /ask error messages since v1.3
-          but never implemented in this file. Migrated from history_cog.py.
-  - FIX:  Class renamed HistoryCog → CodexCog. setup() was instantiating
-          HistoryCog(bot) which still worked only because the name matched the
-          class in this file — confusing and fragile.
-  - FIX:  ATLAS_PERSONA replaced with get_persona("analytical") from echo_loader
-          for all three Gemini answer calls. Falls back to inline stub if echo_loader
-          unavailable. DB_SCHEMA SQL-generation prompt intentionally unchanged.
-  - FIX:  All three embed footers corrected "Oracle Module" → "Codex Module".
-  - FIX:  /h2h footer season range now dynamic via dm.CURRENT_SEASON.
-  - FIX:  DB_SCHEMA season comment now dynamic so Gemini always sees correct
-          current season number instead of hardcoded '6'.
+v1.2 fixes:
+  - BUG FIX: gemini_sql() and gemini_answer() now use run_in_executor — no longer
+    block the Discord event loop during Gemini API calls.
+  - BUG FIX: KNOWN_USERS corrected to match actual DB usernames (historical values
+    from games.csv, not current Discord display names).
+  - BUG FIX: _is_zero_result() simplified — was producing false positives for
+    valid queries that returned 0 as a real stat value.
+  - ADDED:   DB health check on setup() — warns loudly if tsl_history.db is empty.
+  - ADDED:   /ask_debug admin command — shows generated SQL for diagnostics.
 """
 
 import asyncio
@@ -37,24 +27,9 @@ import sqlite3
 import json
 import os
 import re
-import time
 from collections import Counter
-from dataclasses import dataclass, field
 from google import genai
 from difflib import get_close_matches
-
-import data_manager as dm
-
-# Optional modules
-try:
-    import affinity as _affinity_mod
-except ImportError:
-    _affinity_mod = None
-
-try:
-    from build_member_db import get_db_username_for_discord_id as _get_db_username
-except ImportError:
-    _get_db_username = None
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DB_PATH   = os.path.join(os.path.dirname(__file__), "tsl_history.db")
@@ -68,145 +43,13 @@ Use football slang, stat callouts, and dramatic flair. Never be boring.
 Keep responses under 400 words unless asked for full breakdowns.
 """
 
-# ── Echo persona loader — analytical register for answer generation ───────────
-# Defined after ATLAS_PERSONA so the fallback can reference it safely.
-try:
-    from echo_loader import get_persona as _get_persona
-    def _answer_persona() -> str:
-        return _get_persona("analytical")
-except ImportError:
-    def _answer_persona() -> str:
-        return ATLAS_PERSONA
-
-# ── Conversation Memory ──────────────────────────────────────────────────────
-CONV_MAX_TURNS   = 5        # Max Q&A pairs to inject as context
-CONV_TTL_SECONDS = 1800     # 30 minutes — stale conversations are dropped
-
-
-@dataclass
-class ConversationTurn:
-    question: str
-    sql: str
-    answer: str
-    timestamp: float = field(default_factory=time.time)
-
-
-# In-memory cache: discord_id → list of recent turns
-_conv_cache: dict[int, list[ConversationTurn]] = {}
-
-
-def _init_conversation_db() -> None:
-    """Create conversation_history table if it doesn't exist."""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS conversation_history (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    discord_id INTEGER NOT NULL,
-                    question   TEXT    NOT NULL,
-                    sql_query  TEXT,
-                    answer     TEXT    NOT NULL,
-                    created_at REAL   NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_conv_user_time
-                ON conversation_history(discord_id, created_at DESC)
-            """)
-    except Exception as e:
-        print(f"[CodexCog] Conversation DB init error: {e}")
-
-
-def _get_conversation_context(discord_id: int) -> list[ConversationTurn]:
-    """Return recent non-stale conversation turns from the in-memory cache."""
-    turns = _conv_cache.get(discord_id, [])
-    cutoff = time.time() - CONV_TTL_SECONDS
-    fresh = [t for t in turns if t.timestamp >= cutoff]
-    if len(fresh) != len(turns):
-        _conv_cache[discord_id] = fresh
-    return fresh[-CONV_MAX_TURNS:]
-
-
-def _load_conversations_from_db(discord_id: int) -> list[ConversationTurn]:
-    """Cold-start recovery: load recent turns from SQLite."""
-    cutoff = time.time() - CONV_TTL_SECONDS
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT question, sql_query, answer, created_at "
-                "FROM conversation_history "
-                "WHERE discord_id = ? AND created_at >= ? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (discord_id, cutoff, CONV_MAX_TURNS),
-            ).fetchall()
-        return [
-            ConversationTurn(
-                question=r["question"], sql=r["sql_query"] or "",
-                answer=r["answer"], timestamp=r["created_at"],
-            )
-            for r in reversed(rows)
-        ]
-    except Exception:
-        return []
-
-
-def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str) -> None:
-    """Store a turn in memory and persist to DB."""
-    turn = ConversationTurn(question=question, sql=sql, answer=answer)
-    turns = _conv_cache.setdefault(discord_id, [])
-    turns.append(turn)
-
-    # Keep only the last CONV_MAX_TURNS * 2 in memory
-    if len(turns) > CONV_MAX_TURNS * 2:
-        _conv_cache[discord_id] = turns[-CONV_MAX_TURNS:]
-
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(
-                "INSERT INTO conversation_history "
-                "(discord_id, question, sql_query, answer, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (discord_id, turn.question, turn.sql, turn.answer, turn.timestamp),
-            )
-    except Exception as e:
-        print(f"[CodexCog] Conversation persist error: {e}")
-
-
-def _build_conversation_block(discord_id: int) -> str:
-    """Build a conversation history string for prompt injection."""
-    turns = _get_conversation_context(discord_id)
-    if not turns:
-        turns = _load_conversations_from_db(discord_id)
-        if turns:
-            _conv_cache[discord_id] = turns
-
-    if not turns:
-        return ""
-
-    lines = ["RECENT CONVERSATION HISTORY (use for context and follow-up references):"]
-    for i, t in enumerate(turns, 1):
-        lines.append(f"  Q{i}: {t.question}")
-        if t.sql:
-            lines.append(f"  SQL{i}: {t.sql}")
-        lines.append(f"  A{i}: {t.answer[:200]}")
-    lines.append(
-        "If the current question references 'that', 'those', 'them', 'the same', "
-        "'it', 'he', 'she', 'they', etc., use the above history to resolve what is "
-        "being referenced. You may reuse or modify previous SQL patterns if relevant."
-    )
-    return "\n".join(lines)
-
-
 # ── Schema fed to Gemini for SQL generation ──────────────────────────────────
-def _build_schema() -> str:
-    return f"""DATABASE: tsl_history.db  ─  The Simulation League (TSL) Madden franchise history
+DB_SCHEMA = """
+DATABASE: tsl_history.db  ─  The Simulation League (TSL) Madden franchise history
 
 IMPORTANT RULES:
 - All column values are stored as TEXT even if they look like numbers. Cast with CAST(col AS INTEGER) or CAST(col AS REAL) when doing math/comparisons.
-- seasonIndex: '1'=Season 1 (2025), '2'=Season 2 (2026)... '{dm.CURRENT_SEASON}'=Season {dm.CURRENT_SEASON} (current)
+- seasonIndex: '1'=Season 1 (2025), '2'=Season 2 (2026)... '6'=Season 6 (2030, current)
 - stageIndex: '0'=Preseason, '1'=Regular Season, '2'=Playoffs
 - weekIndex is 0-based
 
@@ -324,9 +167,6 @@ OWNER-FILTERED QUERY PATTERN:
     AND g.seasonIndex=ot.seasonIndex
   WHERE ot.userName='[owner]' AND (g.homeUser='[owner]' OR g.awayUser='[owner]')
 """
-
-# Called at prompt-build time so the season number is always current
-DB_SCHEMA = _build_schema()
 
 # ── Known users — EXACT strings as stored in games.csv/tsl_history.db ────────
 # These are the historical usernames. Do NOT change to current Discord display names.
@@ -458,10 +298,7 @@ def extract_sql(text: str) -> str | None:
     return None
 
 
-async def gemini_sql(
-    question: str, client, alias_map: dict | None = None,
-    conv_context: str = "",
-) -> str | None:
+async def gemini_sql(question: str, client, alias_map: dict | None = None) -> str | None:
     """Ask Gemini to generate SQL. Non-blocking via run_in_executor."""
     alias_block = ""
     if alias_map:
@@ -474,53 +311,20 @@ async def gemini_sql(
         + "\nOnly use these exact strings in WHERE clauses involving homeUser or awayUser.\n"
     )
 
-    conv_block = f"\n{conv_context}\n" if conv_context else ""
-
-    prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden franchise database.
-Your job: convert natural-language questions into a single correct SQLite SELECT query.
+    prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden database.
 
 {DB_SCHEMA}
-{known_users_block}{alias_block}{conv_block}
-
-RULES:
-1. Return ONLY the raw SQL query — no markdown, no explanation, no code fences.
-2. ALL columns are stored as TEXT. Use CAST(col AS INTEGER) or CAST(col AS REAL) for math/comparisons.
-3. Completed games: ALWAYS filter status IN ('2','3'). Never include unplayed games.
-4. Default to stageIndex='1' (regular season) unless the user asks about playoffs.
-5. For owner queries: use EXACT usernames from the VALID VALUES list above. Never use LIKE or wildcards.
-6. For "record" questions: count wins AND losses separately, not just total games.
-7. When a user could appear as home OR away, handle both: (homeUser='X' OR awayUser='X').
-8. For owner-specific history across seasons, ALWAYS JOIN owner_tenure to track team changes.
-9. For draft queries, use player_draft_map — NEVER players.teamName.
-10. Limit results to 30 rows unless the user needs more.
-11. Never use DROP, INSERT, UPDATE, DELETE, or any DDL.
-
-COMMON MISTAKES TO AVOID:
-- Forgetting status IN ('2','3') → includes unplayed/scheduled games → wrong counts.
-- Using players.teamName for draft history → wrong (players move teams). Use player_draft_map.
-- Counting only homeUser wins → misses away wins. Always handle both home and away.
-- Hardcoding seasonIndex → misses multi-season data. Default to all seasons unless asked.
-- Using GROUP BY without handling the home/away split → double-counting.
-- Forgetting CAST() on TEXT columns → string comparison instead of numeric → wrong ordering.
-
-FEW-SHOT EXAMPLES:
-Q: "Who has the most wins all time?"
-SQL: SELECT owner, SUM(wins) AS total_wins FROM (SELECT winner_user AS owner, COUNT(*) AS wins FROM games WHERE status IN ('2','3') AND winner_user != '' GROUP BY winner_user) GROUP BY owner ORDER BY total_wins DESC LIMIT 10
-
-Q: "What is TheWitt's record this season?"
-SQL: SELECT SUM(CASE WHEN winner_user='TheWitt' THEN 1 ELSE 0 END) AS wins, SUM(CASE WHEN loser_user='TheWitt' THEN 1 ELSE 0 END) AS losses FROM games WHERE status IN ('2','3') AND seasonIndex='{dm.CURRENT_SEASON}' AND (homeUser='TheWitt' OR awayUser='TheWitt')
-
-Q: "Who leads the league in passing yards this season?"
-SQL: SELECT fullName, teamName, SUM(CAST(passYds AS INTEGER)) AS total_pass_yds FROM offensive_stats WHERE seasonIndex='{dm.CURRENT_SEASON}' AND stageIndex='1' AND pos='QB' GROUP BY fullName ORDER BY total_pass_yds DESC LIMIT 10
-
-Q: "Head to head record between TheWitt and KillaE94?"
-SQL: SELECT winner_user, COUNT(*) AS wins FROM games WHERE status IN ('2','3') AND ((homeUser='TheWitt' AND awayUser='KillaE94') OR (homeUser='KillaE94' AND awayUser='TheWitt')) GROUP BY winner_user
-
-Q: "Best defensive players on the Ravens?"
-SQL: SELECT fullName, pos, SUM(CAST(defTotalTackles AS INTEGER)) AS tackles, SUM(CAST(defSacks AS REAL)) AS sacks, SUM(CAST(defInts AS INTEGER)) AS ints FROM defensive_stats WHERE teamName LIKE '%Ravens%' AND seasonIndex='{dm.CURRENT_SEASON}' AND stageIndex='1' GROUP BY fullName ORDER BY tackles DESC LIMIT 15
-
-Now generate a query for this question:
+{known_users_block}{alias_block}
+Generate a single valid SQLite SELECT query to answer this question:
 "{question}"
+
+Rules:
+- Return ONLY the SQL query, no explanation, no markdown fences.
+- Cast numeric columns when doing comparisons: CAST(col AS INTEGER)
+- Limit results to 30 rows unless the user specifically needs more.
+- For user/owner questions, query homeUser/awayUser using EXACT usernames from the valid values list above.
+- Default to stageIndex='1' (regular season) unless the user asks about playoffs.
+- Never use DROP, INSERT, UPDATE, DELETE, or any DDL.
 """
 
     def _call():
@@ -531,10 +335,7 @@ Now generate a query for this question:
     return extract_sql(response.text)
 
 
-async def gemini_answer(
-    question: str, sql: str, rows: list[dict], client,
-    conv_context: str = "",
-) -> str:
+async def gemini_answer(question: str, sql: str, rows: list[dict], client) -> str:
     """Format SQL results into natural language. Non-blocking via run_in_executor."""
     results_str = json.dumps(rows, indent=2)
     if len(results_str) > MAX_CHARS:
@@ -547,25 +348,19 @@ async def gemini_answer(
             "for this question. Do NOT invent stats or outcomes.\n"
         )
 
-    conv_block = f"\n{conv_context}\n" if conv_context else ""
+    prompt = f"""{ATLAS_PERSONA}
 
-    prompt = f"""{_answer_persona()}
-{conv_block}
 A TSL member asked: "{question}"
 
-Query results ({len(rows)} rows):
+I ran this SQL query:
+{sql}
+
+Results:
 {results_str}
 {no_data_instruction}
-RESPONSE GUIDELINES:
-- Lead with the DIRECT answer — the specific stat, name, or fact the user asked about.
-- Use **bold** for key numbers and names (Discord markdown).
-- Include supporting context: season, team, comparison to others when relevant.
-- If multiple rows returned, highlight the top 3-5 and briefly summarize the rest.
-- Keep it under 300 words unless the user asked for a full breakdown.
-- If data seems incomplete or unexpected, acknowledge it but still give the best answer.
-- NEVER repeat the SQL query or mention databases/tables — just deliver the answer.
-- NEVER invent stats or outcomes that are not in the results above.
-- Use sports language and dramatic flair — make numbers tell a story.
+Using these exact results, answer the question.
+Be accurate to the data — do not invent stats or outcomes not in the results.
+Don't repeat the SQL or mention databases — just give the answer.
 """
 
     def _call():
@@ -578,14 +373,10 @@ RESPONSE GUIDELINES:
 
 # ── Cog ──────────────────────────────────────────────────────────────────────
 
-class CodexCog(commands.Cog):
+class HistoryCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot  = bot
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("[CodexCog] ⚠️  GEMINI_API_KEY not set — /ask, /h2h, /season_recap will fail.")
-        self.gemini = genai.Client(api_key=api_key) if api_key else None
-        _init_conversation_db()
+        self.gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     # ── /ask ─────────────────────────────────────────────────────────────────
     @app_commands.command(
@@ -597,13 +388,14 @@ class CodexCog(commands.Cog):
     async def ask(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(thinking=True)
 
-        if not self.gemini:
-            await interaction.followup.send("❌ ATLAS AI is offline — GEMINI_API_KEY not configured.")
-            return
-
         try:
-            # Resolve caller via Discord ID; fall back to fuzzy username match
-            caller_db = _get_db_username(interaction.user.id) if _get_db_username else None
+            # Resolve caller via Discord ID — immune to username changes.
+            # Falls back to fuzzy username match if not in registry yet.
+            try:
+                from build_member_db import get_db_username_for_discord_id
+                caller_db = get_db_username_for_discord_id(interaction.user.id)
+            except Exception:
+                caller_db = None
             if not caller_db:
                 caller_db = fuzzy_resolve_user(interaction.user.name) or interaction.user.name
 
@@ -614,21 +406,7 @@ class CodexCog(commands.Cog):
             question_with_context = f"{caller_context} {question}"
             annotated_question, alias_map = resolve_names_in_question(question_with_context)
 
-            conv_block = _build_conversation_block(interaction.user.id)
-
-            # Affinity tone (answer only, not SQL)
-            affinity_block = ""
-            if _affinity_mod:
-                try:
-                    score = await _affinity_mod.get_affinity(interaction.user.id)
-                    affinity_block = _affinity_mod.get_affinity_instruction(score)
-                except Exception:
-                    pass
-
-            sql = await gemini_sql(
-                annotated_question, self.gemini, alias_map,
-                conv_context=conv_block,
-            )
+            sql = await gemini_sql(annotated_question, self.gemini, alias_map)
             if not sql:
                 await interaction.followup.send(
                     "📊 Couldn't generate a query for that one. Try rephrasing — "
@@ -651,7 +429,8 @@ class CodexCog(commands.Cog):
                     return self.gemini.models.generate_content(
                         model="gemini-2.0-flash", contents=fix_prompt
                     )
-                fix_response = await asyncio.get_running_loop().run_in_executor(None, _fix)
+                loop = asyncio.get_running_loop()
+                fix_response = await loop.run_in_executor(None, _fix)
                 sql = extract_sql(fix_response.text) or sql
                 rows, error = run_sql(sql)
                 if error:
@@ -661,14 +440,8 @@ class CodexCog(commands.Cog):
                     )
                     return
 
-            answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
-            answer = await gemini_answer(
-                question, sql, rows, self.gemini,
-                conv_context=answer_context,
-            )
-
-            # ── Store conversation turn ─────────────────────────
-            _add_conversation_turn(interaction.user.id, question, sql or "", answer)
+            # Use original question (no context prefix) for the natural-language answer
+            answer = await gemini_answer(question, sql, rows, self.gemini)
 
             embed = discord.Embed(
                 title="📊 TSL Historical Intelligence",
@@ -683,10 +456,8 @@ class CodexCog(commands.Cog):
             if alias_map:
                 resolved_str = ", ".join(f"{k}→{v}" for k, v in alias_map.items())
                 footer_parts.append(f"🔎 Resolved: {resolved_str}")
-            if conv_block:
-                footer_parts.append("💬 Conversational")
             embed.set_footer(
-                text=" | ".join(footer_parts) + " · 💡 Try /oracle for more modes · ATLAS™ Codex Module",
+                text=" | ".join(footer_parts) + " · ATLAS™ Oracle Module",
                 icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
             )
             await interaction.followup.send(embed=embed)
@@ -702,14 +473,19 @@ class CodexCog(commands.Cog):
             )
 
     # ── /ask_debug (admin only) ───────────────────────────────────────────────
-
-    async def _ask_debug_impl(self, interaction: discord.Interaction, question: str):
-        """Core ask_debug logic — shared by /commish askdebug and deprecated /ask_debug."""
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        if not self.gemini:
-            await interaction.followup.send("❌ ATLAS AI is offline — GEMINI_API_KEY not configured.")
+    @app_commands.command(
+        name="ask_debug",
+        description="Admin: /ask with SQL output for diagnostics"
+    )
+    @app_commands.describe(question="Your question about TSL history")
+    async def ask_debug(self, interaction: discord.Interaction, question: str):
+        # Admin check — reuse ADMIN_USER_IDS from bot.py environment
+        admin_ids = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+        if interaction.user.id not in admin_ids:
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         try:
             try:
@@ -732,16 +508,12 @@ class CodexCog(commands.Cog):
 
             rows, error = run_sql(sql)
 
-            embed = discord.Embed(title="🔧 ATLAS Codex — Debug", color=0xC9962A)
-            embed.set_author(
-                name="ATLAS · Autonomous TSL League Administration System",
-                icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
-            )
+            embed = discord.Embed(title="🔧 ATLAS Debug", color=0xC9962A)
             embed.add_field(name="Question", value=question, inline=False)
             sql_display = sql if len(sql) < 1000 else sql[:997] + "..."
             embed.add_field(name="Generated SQL", value=f"```sql\n{sql_display}\n```", inline=False)
             if error:
-                embed.add_field(name="❌ SQL Error", value=f"```{error}```", inline=False)
+                embed.add_field(name="SQL Error", value=f"```{error}```", inline=False)
             else:
                 embed.add_field(name="Rows Returned", value=str(len(rows)), inline=True)
                 if rows:
@@ -755,43 +527,28 @@ class CodexCog(commands.Cog):
                     value="\n".join(f"{k} → {v}" for k, v in alias_map.items()),
                     inline=False
                 )
-            embed.set_footer(text="ATLAS™ Codex Module · Debug · Admin only")
+
             await interaction.followup.send(embed=embed)
-
         except Exception as e:
-            await interaction.followup.send(f"Debug error: `{e}`")
+            await interaction.followup.send(f"❌ Debug error: `{e}`")
 
-    # ── Deprecated wrapper (remove in Phase 5) ──────────────────────────────
+    # ── /h2h ─────────────────────────────────────────────────────────────────
     @app_commands.command(
-        name="ask_debug",
-        description="[Deprecated] Use /commish askdebug instead."
+        name="h2h",
+        description="Head-to-head record between two TSL owners across all seasons"
     )
-    @app_commands.describe(question="Your question about TSL history")
-    async def ask_debug(self, interaction: discord.Interaction, question: str):
-        admin_ids = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
-        if interaction.user.id not in admin_ids:
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        await self._ask_debug_impl(interaction, question)
-
-    # ── H2H and Season Recap _impl methods (called by oracle HubView buttons) ──
-
-    async def _h2h_impl(self, interaction: discord.Interaction, owner1: str, owner2: str):
-        """Head-to-head record — used by oracle HubView H2H modal."""
+    @app_commands.describe(owner1="First owner username", owner2="Second owner username")
+    async def h2h(self, interaction: discord.Interaction, owner1: str, owner2: str):
         await interaction.response.defer(thinking=True)
-
-        if not self.gemini:
-            await interaction.followup.send("ATLAS AI is offline — GEMINI_API_KEY not configured.")
-            return
 
         u1 = fuzzy_resolve_user(owner1)
         u2 = fuzzy_resolve_user(owner2)
 
         if not u1:
-            await interaction.followup.send(f"Couldn't find an owner matching `{owner1}`.")
+            await interaction.followup.send(f"❓ Couldn't find an owner matching `{owner1}`.")
             return
         if not u2:
-            await interaction.followup.send(f"Couldn't find an owner matching `{owner2}`.")
+            await interaction.followup.send(f"❓ Couldn't find an owner matching `{owner2}`.")
             return
 
         sql = f"""
@@ -816,7 +573,7 @@ class CodexCog(commands.Cog):
         rows, error = run_sql(sql)
         if error or not rows:
             await interaction.followup.send(
-                f"No completed regular season games found between **{u1}** and **{u2}**."
+                f"📋 No completed regular season games found between **{u1}** and **{u2}**."
             )
             return
 
@@ -824,7 +581,7 @@ class CodexCog(commands.Cog):
         total_u2    = sum(int(r['u2_wins'] or 0) for r in rows)
         total_games = sum(int(r['games_played'] or 0) for r in rows)
 
-        summary_prompt = f"""{_answer_persona()}
+        summary_prompt = f"""{ATLAS_PERSONA}
 
 Head-to-head data for {u1} vs {u2} in TSL (regular season only):
 - {u1} all-time wins: {total_u1}
@@ -841,7 +598,7 @@ note any sweep seasons, and make it entertaining.
         response = await loop.run_in_executor(None, _call)
         summary = response.text.strip()
 
-        embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=0xC9962A)
+        embed = discord.Embed(title=f"⚔️ Rivalry Report: {u1} vs {u2}", color=0xC9962A)
         embed.set_author(
             name="ATLAS · Autonomous TSL League Administration System",
             icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
@@ -855,22 +612,27 @@ note any sweep seasons, and make it entertaining.
         for r in rows:
             w1 = int(r['u1_wins'] or 0)
             w2 = int(r['u2_wins'] or 0)
-            marker = "W" if w1 > w2 else ("L" if w2 > w1 else "T")
+            marker = "🏆" if w1 > w2 else ("💀" if w2 > w1 else "🤝")
             breakdown += f"Season {r['seasonIndex']}: {u1} {w1}-{w2} {u2} {marker}\n"
         embed.add_field(name="Season-by-Season", value=breakdown or "No data", inline=False)
-        embed.add_field(name="ATLAS Says", value=summary, inline=False)
+        embed.add_field(name="🎙️ ATLAS Says", value=summary, inline=False)
         embed.set_footer(
-            text=f"ATLAS Codex Module · Regular season only · All seasons 1-{dm.CURRENT_SEASON}",
+            text="ATLAS™ · Oracle Module · Regular season only · All seasons 1-6",
             icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
         )
         await interaction.followup.send(embed=embed)
 
-    async def _season_recap_impl(self, interaction: discord.Interaction, season: int):
-        """Season recap — used by oracle HubView Season Recap modal."""
+    # ── /season_recap ─────────────────────────────────────────────────────────
+    @app_commands.command(
+        name="season_recap",
+        description="ATLAS's recap of any TSL season"
+    )
+    @app_commands.describe(season="Season number (1-6)")
+    async def season_recap(self, interaction: discord.Interaction, season: int):
         await interaction.response.defer(thinking=True)
 
-        if season < 1 or season > dm.CURRENT_SEASON:
-            await interaction.followup.send(f"Valid seasons are 1 through {dm.CURRENT_SEASON}.")
+        if season < 1 or season > 6:
+            await interaction.followup.send("❌ Valid seasons are 1 through 6.")
             return
 
         sql = f"""
@@ -891,7 +653,7 @@ note any sweep seasons, and make it entertaining.
         leaderboard = sorted(wins.keys(), key=lambda u: wins[u], reverse=True)[:5]
         top_str = "\n".join([f"{u}: {wins[u]}W-{losses[u]}L" for u in leaderboard])
 
-        prompt = f"""{_answer_persona()}
+        prompt = f"""{ATLAS_PERSONA}
 
 Season {season} TSL regular season data:
 - Total games played: {len(rows)}
@@ -909,7 +671,7 @@ Keep it under 350 words.
         response = await loop.run_in_executor(None, _call)
 
         embed = discord.Embed(
-            title=f"TSL Season {season} Recap",
+            title=f"📅 TSL Season {season} Recap",
             description=response.text.strip(),
             color=0xC9962A
         )
@@ -918,7 +680,7 @@ Keep it under 350 words.
             icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
         )
         embed.set_footer(
-            text=f"ATLAS Codex Module · Season {season} · {len(rows)} regular season games",
+            text=f"ATLAS™ · Oracle Module · Season {season} · {len(rows)} regular season games",
             icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
         )
         await interaction.followup.send(embed=embed)
@@ -930,9 +692,8 @@ async def setup(bot: commands.Bot):
         conn = sqlite3.connect(DB_PATH)
         count = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
         conn.close()
-        print(f"[CodexCog] tsl_history.db OK — {count} games in DB ✅")
+        print(f"[HistoryCog] tsl_history.db OK — {count} games in DB ✅")
     except Exception as e:
-        print(f"[CodexCog] ⚠️  WARNING: tsl_history.db check failed: {e}")
-        print(f"[CodexCog] ⚠️  Run build_tsl_db.py to populate the database!")
-    await bot.add_cog(CodexCog(bot))
-    print("ATLAS: Codex · Historical Intelligence loaded. 📜")
+        print(f"[HistoryCog] ⚠️  WARNING: tsl_history.db check failed: {e}")
+        print(f"[HistoryCog] ⚠️  Run build_tsl_db.py to populate the database!")
+    await bot.add_cog(HistoryCog(bot))

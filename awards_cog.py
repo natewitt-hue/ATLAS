@@ -65,39 +65,49 @@ class VoteView(discord.ui.View):
 class AwardsCog(commands.Cog):
     def __init__(self, bot): self.bot = bot
 
-    @app_commands.command(name="createpoll", description="Create an anonymous award poll.")
-    async def createpoll(self, interaction: discord.Interaction, title: str, nominees: str):
-        if interaction.user.id not in _admin_ids(): 
-            return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            
+    # ── Implementation methods (used by /commish and deprecated wrappers) ──
+
+    async def _createpoll_impl(self, interaction: discord.Interaction, title: str, nominees: str):
         poll_id = str(uuid.uuid4())[:8]
         options = [n.strip() for n in nominees.split(",")]
         _polls[poll_id] = {"title": title, "options": options, "votes": {}, "open": True}
-        _save_polls()  # persist new poll
-        
+        _save_polls()
+
         embed = discord.Embed(title=f"🗳️ {title}", description="Select your choice from the dropdown below. Votes are blind.", color=discord.Color.gold())
         view = VoteView(poll_id, options)
-        
-        await interaction.response.send_message(f"✅ Poll created: {title}", ephemeral=True)
+
+        await interaction.response.send_message(f"Poll created: {title}", ephemeral=True)
         await interaction.channel.send(embed=embed, view=view)
-        
-    @app_commands.command(name="closepoll", description="Close a poll and reveal results.")
-    async def closepoll(self, interaction: discord.Interaction, poll_id: str):
-        if interaction.user.id not in _admin_ids(): 
-            return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            
+
+    async def _closepoll_impl(self, interaction: discord.Interaction, poll_id: str):
         if poll_id not in _polls:
-            return await interaction.response.send_message("❌ Poll not found.", ephemeral=True)
-            
+            return await interaction.response.send_message("Poll not found.", ephemeral=True)
+
         _polls[poll_id]["open"] = False
-        _save_polls()  # persist closed state
+        _save_polls()
         tally = {}
         for vote in _polls[poll_id]["votes"].values():
             tally[vote] = tally.get(vote, 0) + 1
-            
+
         results = "\n".join([f"**{opt}**: {tally.get(opt, 0)} votes" for opt in _polls[poll_id]["options"]])
-        
-        embed = discord.Embed(title=f"🏆 Final Results: {_polls[poll_id]['title']}", description=results, color=discord.Color.green())
+
+        embed = discord.Embed(title=f"Final Results: {_polls[poll_id]['title']}", description=results, color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
 
-async def setup(bot): await bot.add_cog(AwardsCog(bot))
+    # ── Deprecated flat commands (remove in Phase 5) ─────────────────────────
+
+    @app_commands.command(name="createpoll", description="[Deprecated] Use /commish createpoll instead.")
+    async def createpoll(self, interaction: discord.Interaction, title: str, nominees: str):
+        if interaction.user.id not in _admin_ids():
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        await self._createpoll_impl(interaction, title, nominees)
+
+    @app_commands.command(name="closepoll", description="[Deprecated] Use /commish closepoll instead.")
+    async def closepoll(self, interaction: discord.Interaction, poll_id: str):
+        if interaction.user.id not in _admin_ids():
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        await self._closepoll_impl(interaction, poll_id)
+
+async def setup(bot):
+    await bot.add_cog(AwardsCog(bot))
+    print("ATLAS: Awards Engine loaded.")

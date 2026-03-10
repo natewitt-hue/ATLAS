@@ -69,20 +69,15 @@ def _dev_icon_uri(dev: str) -> str:
 
 _browser = None
 _playwright_instance = None
-_browser_lock = None  # Lazily created asyncio.Lock
 
 async def _get_browser():
-    global _browser, _playwright_instance, _browser_lock
-    import asyncio
-    if _browser_lock is None:
-        _browser_lock = asyncio.Lock()
-    async with _browser_lock:
-        if _browser is None or not _browser.is_connected():
-            from playwright.async_api import async_playwright
-            _playwright_instance = async_playwright()
-            pw = await _playwright_instance.__aenter__()
-            _browser = await pw.chromium.launch(headless=True)
-        return _browser
+    global _browser, _playwright_instance
+    if _browser is None or not _browser.is_connected():
+        from playwright.async_api import async_playwright
+        _playwright_instance = async_playwright()
+        pw = await _playwright_instance.__aenter__()
+        _browser = await pw.chromium.launch(headless=True)
+    return _browser
 
 
 async def close_browser():
@@ -263,7 +258,7 @@ def _build_html(data: dict) -> str:
         ai_clean = ai.strip().strip("*_")
         ai_html = f"""
         <div class="section-block ai-block">
-          <div class="section-title">🤖 WITTGPT VERDICT</div>
+          <div class="section-title">🤖 ATLAS VERDICT</div>
           <div class="ai-quote">"{ai_clean}"</div>
         </div>"""
 

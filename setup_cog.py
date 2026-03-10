@@ -22,6 +22,7 @@ import traceback
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -32,28 +33,47 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsl_history.
 # Keys become the config_key stored in server_config.
 # Structure: (config_key, display_name, category_name, read_only_for_members, admin_only)
 REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
-    # WITTGPT category
-    ("admin_chat",      "admin-chat",      "WITTGPT", False, True),   # admin-only R/W
-    ("bot_logs",        "bot-logs",        "WITTGPT", True,  True),   # admin-only, bot posts only
-    ("askwittgpt",      "askwittgpt",      "WITTGPT", False, False),  # everyone R/W
-    ("compliance",      "compliance",      "WITTGPT", True,  False),  # everyone reads, bot posts
-    ("power_rankings",  "power-rankings",  "WITTGPT", True,  False),  # everyone reads, bot posts
-    ("sportsbook",      "sportsbook",      "WITTGPT", False, False),  # everyone R/W
-    ("casino",          "casino",          "WITTGPT", False, False),  # everyone R/W
-    # TSL LEAGUE UPDATES category (existing — bot just needs the IDs)
-    ("announcements",   "announcements",   "TSL LEAGUE UPDATES", False, False),
-    ("game_results",    "game-results",    "TSL LEAGUE UPDATES", False, False),
-    ("roster_moves",    "roster-moves",    "TSL LEAGUE UPDATES", False, False),
-    ("dev_upgrades",    "dev-upgrades",    "TSL LEAGUE UPDATES", False, False),
-    # TSL TRADE CENTER category (existing)
-    ("trades",          "trades",          "TSL TRADE CENTER", False, False),
-    # TSL MADDEN category (existing — for force-request routing)
-    ("force_request",   "force-request",   "TSL MADDEN", False, False),
+    # ── ATLAS — Command Center (admin + AI) ──
+    ("admin_chat",      "admin-chat",      "ATLAS — Command Center", False, True),
+    ("bot_logs",        "bot-logs",        "ATLAS — Command Center", True,  True),
+    ("ask_atlas",       "ask-atlas",       "ATLAS — Command Center", False, False),
+    # ── ATLAS — Oracle (stats, rankings, results) ──
+    ("power_rankings",  "power-rankings",  "ATLAS — Oracle", True,  False),
+    ("announcements",   "announcements",   "ATLAS — Oracle", False, False),
+    ("game_results",    "game-results",    "ATLAS — Oracle", False, False),
+    # ── ATLAS — Genesis (roster, trades, development) ──
+    ("roster_moves",    "roster-moves",    "ATLAS — Genesis", False, False),
+    ("trades",          "trades",          "ATLAS — Genesis", False, False),
+    ("dev_upgrades",    "dev-upgrades",    "ATLAS — Genesis", False, False),
+    # ── ATLAS — Sentinel (enforcement, compliance) ──
+    ("compliance",      "compliance",      "ATLAS — Sentinel", True,  False),
+    ("force_request",   "force-request",   "ATLAS — Sentinel", False, False),
+    # ── ATLAS — Casino (economy, games, markets) ──
+    ("casino_ledger",      "casino-ledger",      "ATLAS — Casino", True,  False),
+    ("blackjack",          "blackjack",           "ATLAS — Casino", False, False),
+    ("slots",              "slots",               "ATLAS — Casino", False, False),
+    ("crash",              "crash",               "ATLAS — Casino", False, False),
+    ("coinflip",           "coinflip",            "ATLAS — Casino", False, False),
+    ("sportsbook",         "sportsbook",          "ATLAS — Casino", False, False),
+    ("prediction_markets", "prediction-markets",  "ATLAS — Casino", False, False),
 ]
+
+# Legacy channel name aliases for remap (old name → config_key)
+_CHANNEL_ALIASES: dict[str, str] = {
+    "askwittgpt": "ask_atlas",
+}
 
 # Channels where /complaint and /forcerequest are silently routed to DM → admin-chat.
 # These command names are enforced in their respective cogs using get_channel_id().
 PRIVATE_ROUTING_COMMANDS = {"complaint", "forcerequest"}
+
+# Maps setup_cog config keys to casino_db setting names for channel sync.
+_CASINO_BRIDGE = {
+    "blackjack": "casino_blackjack_channel",
+    "slots":     "casino_slots_channel",
+    "crash":     "casino_crash_channel",
+    "coinflip":  "casino_coinflip_channel",
+}
 
 # ── DB Helpers ────────────────────────────────────────────────────────────────
 
@@ -106,6 +126,14 @@ def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
                                                    guild_id=excluded.guild_id
         """, (key, channel_id, guild_id))
         con.commit()
+
+
+def _clear_guild_config(guild_id: int) -> int:
+    """Delete all server_config rows for a guild. Returns count deleted."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.execute("DELETE FROM server_config WHERE guild_id=?", (guild_id,))
+        con.commit()
+        return cur.rowcount
 
 
 # ── Permission Builders ───────────────────────────────────────────────────────
@@ -181,6 +209,7 @@ async def _provision_channels(guild: discord.Guild) -> dict:
     Main provisioning function. Returns a results dict for the receipt embed.
     """
     _ensure_table()
+    print(f"[SETUP] Provisioning started for guild '{guild.name}' ({guild.id})")
 
     results = {
         "found":   [],   # (key, channel)  — already existed
@@ -214,6 +243,7 @@ async def _provision_channels(guild: discord.Guild) -> dict:
             # Channel exists — just store the ID
             _save_channel_id(config_key, existing_ch.id, guild.id)
             results["found"].append((config_key, existing_ch))
+            print(f"[SETUP]   Found existing: {config_key} -> #{existing_ch.name} ({existing_ch.id})")
         else:
             # Need to create it
             try:
@@ -221,15 +251,18 @@ async def _provision_channels(guild: discord.Guild) -> dict:
 
                 # If the target category doesn't exist, create it
                 if category is None:
+                    print(f"[SETUP]   Creating category: {category_name}")
                     category = await guild.create_category(category_name)
+                    categories[category_name.upper()] = category  # cache for reuse
 
                 overwrites = _build_overwrites(guild, admin_role, read_only, admin_only)
 
+                print(f"[SETUP]   Creating channel: #{channel_name} under '{category_name}'")
                 new_ch = await guild.create_text_channel(
                     name=channel_name,
                     category=category,
                     overwrites=overwrites,
-                    reason="ATLAS auto-setup on join"
+                    reason="ATLAS setup"
                 )
 
                 _save_channel_id(config_key, new_ch.id, guild.id)
@@ -237,9 +270,23 @@ async def _provision_channels(guild: discord.Guild) -> dict:
 
             except discord.Forbidden:
                 results["failed"].append((config_key, "Missing Manage Channels permission"))
+                print(f"[SETUP]   FAILED: {config_key} — Missing Manage Channels permission")
             except Exception as e:
                 results["failed"].append((config_key, str(e)))
+                print(f"[SETUP]   FAILED: {config_key} — {e}")
 
+    # ── Bridge casino per-game channel IDs to casino_db ─────────────────
+    try:
+        from casino.casino_db import set_setting as _casino_set
+        for cfg_key, casino_setting in _CASINO_BRIDGE.items():
+            ch_id = get_channel_id(cfg_key, guild.id)
+            if ch_id:
+                await _casino_set(casino_setting, str(ch_id))
+                print(f"[SETUP]   Synced {cfg_key} → casino_db ({casino_setting}={ch_id})")
+    except Exception as e:
+        print(f"[SETUP]   Casino bridge failed: {e}")
+
+    print(f"[SETUP] Provisioning complete: {len(results['found'])} found, {len(results['created'])} created, {len(results['failed'])} failed")
     return results
 
 
@@ -306,39 +353,175 @@ async def _post_receipt(guild: discord.Guild, results: dict) -> None:
     await channel.send(embed=embed)
 
 
+# ── Setup UI Views ───────────────────────────────────────────────────────────
+
+class SetupChoiceView(discord.ui.View):
+    """Interactive setup: Remap existing channels or create new ATLAS categories."""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=120)
+        self.bot = bot
+
+    @discord.ui.button(label="Remap Existing Channels", style=discord.ButtonStyle.primary, row=0)
+    async def remap_existing(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Scan for existing channels by name and store their IDs."""
+        await interaction.response.defer(thinking=True)
+        guild = interaction.guild
+        print(f"[SETUP] Remap button clicked by {interaction.user} in '{guild.name}'")
+        results = {"found": [], "missing": []}
+
+        existing: dict[str, discord.TextChannel] = {
+            ch.name.lower().replace(" ", "-"): ch for ch in guild.text_channels
+        }
+
+        for config_key, channel_name, _cat, _ro, _ao in REQUIRED_CHANNELS:
+            match = existing.get(channel_name.lower())
+            if not match:
+                # Check legacy aliases (e.g. "askwittgpt" → ask_atlas)
+                for alias, target_key in _CHANNEL_ALIASES.items():
+                    if target_key == config_key:
+                        match = existing.get(alias)
+                        break
+            if match:
+                _save_channel_id(config_key, match.id, guild.id)
+                results["found"].append((config_key, match))
+            else:
+                results["missing"].append(config_key)
+
+        embed = discord.Embed(
+            title="ATLAS Setup — Channel Remap Complete",
+            color=0x00C851
+        )
+
+        if results["found"]:
+            found_text = "\n".join(f"`{k}` → <#{ch.id}>" for k, ch in results["found"])
+            embed.add_field(name=f"Mapped ({len(results['found'])})", value=found_text, inline=False)
+
+        if results["missing"]:
+            missing_text = "\n".join(f"`{k}` — not found" for k in results["missing"])
+            embed.add_field(
+                name=f"Not Found ({len(results['missing'])})",
+                value=missing_text + "\n\nThese channels will be created if you run setup again with **Create New**.",
+                inline=False
+            )
+
+        embed.set_footer(text="Channel IDs are stored by ID — renaming channels won't break routing.")
+        self.stop()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Create New ATLAS Categories", style=discord.ButtonStyle.secondary, row=0)
+    async def create_new(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Create new category structure and provision all channels."""
+        await interaction.response.defer(thinking=True)
+        guild = interaction.guild
+        print(f"[SETUP] Create New button clicked by {interaction.user} in '{guild.name}'")
+
+        try:
+            results = await _provision_channels(guild)
+
+            embed = discord.Embed(
+                title="ATLAS Setup — Full Provisioning Complete",
+                color=0x00C851
+            )
+
+            if results["found"]:
+                found_text = "\n".join(f"`{k}` → <#{ch.id}>" for k, ch in results["found"])
+                embed.add_field(name=f"Already Existed ({len(results['found'])})", value=found_text, inline=False)
+
+            if results["created"]:
+                created_text = "\n".join(f"`{k}` → <#{ch.id}>" for k, ch in results["created"])
+                embed.add_field(name=f"Created ({len(results['created'])})", value=created_text, inline=False)
+
+            if results["failed"]:
+                failed_text = "\n".join(f"`{k}` — {reason}" for k, reason in results["failed"])
+                embed.add_field(name=f"Failed ({len(results['failed'])})", value=failed_text, inline=False)
+
+            embed.set_footer(text="Channel IDs are stored by ID — renaming channels won't break routing.")
+            self.stop()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            self.stop()
+            await interaction.followup.send(f"ATLAS Setup failed: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Delete ATLAS Channels", style=discord.ButtonStyle.danger, row=1)
+    async def nuke_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Delete all WITTGPT and ATLAS categories + their channels."""
+        await interaction.response.defer(thinking=True)
+        guild = interaction.guild
+        print(f"[SETUP] Delete button clicked by {interaction.user} in '{guild.name}'")
+
+        deleted = 0
+        for cat in list(guild.categories):
+            name_upper = cat.name.upper()
+            if "WITTGPT" in name_upper or "ATLAS " in name_upper:
+                print(f"[SETUP]   Deleting category: '{cat.name}' ({len(cat.channels)} channels)")
+                for ch in cat.channels:
+                    try:
+                        await ch.delete(reason="ATLAS cleanup")
+                        deleted += 1
+                    except Exception as e:
+                        print(f"[SETUP]   Failed to delete #{ch.name}: {e}")
+                try:
+                    await cat.delete(reason="ATLAS cleanup")
+                    deleted += 1
+                except Exception as e:
+                    print(f"[SETUP]   Failed to delete category '{cat.name}': {e}")
+
+        cleared = _clear_guild_config(guild.id)
+        print(f"[SETUP] Cleanup complete: {deleted} Discord objects deleted, {cleared} config rows cleared")
+
+        embed = discord.Embed(
+            title="ATLAS Cleanup Complete",
+            description=f"Deleted **{deleted}** channels/categories.\nCleared **{cleared}** config entries.\n\nRun `/setup` again to create fresh ATLAS channels.",
+            color=0xFF4444
+        )
+        self.stop()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class SetupCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _ensure_table()
-        print("ATLAS: Setup · Channel Router loaded. 🏗️")
+        print("ATLAS: Setup · Channel Router loaded.")
+
+    # ── /setup (admin only) ──────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="setup",
+        description="[Admin] Configure ATLAS channel routing for this server."
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def setup_command(self, interaction: discord.Interaction):
+        """Admin only. Presents a choice between remapping existing channels
+        or creating new ATLAS category structure."""
+        await interaction.response.defer(ephemeral=True)
+
+        embed = discord.Embed(
+            title="ATLAS Server Setup",
+            description=(
+                "Choose how to configure ATLAS channels:\n\n"
+                "**Remap Existing** — Scans your server for channels matching "
+                "the required names and stores their IDs. No channels are created.\n\n"
+                "**Create New** — Creates any missing channels under ATLAS categories "
+                "with proper permissions. Existing channels are kept."
+            ),
+            color=0xC9962A
+        )
+        embed.set_footer(text="Channel IDs are stored statically — renaming channels won't break routing.")
+
+        view = SetupChoiceView(self.bot)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── on_guild_join listener ───────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
-        print(f"ATLAS: Joined guild '{guild.name}' ({guild.id}) — provisioning channels...")
-        try:
-            results = await _provision_channels(guild)
-            await _post_receipt(guild, results)
-            print(
-                f"ATLAS: Setup complete — "
-                f"{len(results['found'])} found, "
-                f"{len(results['created'])} created, "
-                f"{len(results['failed'])} failed."
-            )
-        except Exception:
-            traceback.print_exc()
-            # Attempt to DM the server owner if something goes wrong
-            try:
-                owner = guild.owner
-                if owner:
-                    await owner.send(
-                        f"⚠️ **ATLAS Setup Failed** on `{guild.name}`.\n"
-                        f"Please re-invite the bot with **Manage Channels** and **Manage Roles** permissions, "
-                        f"then run `/setup` to complete initialization."
-                    )
-            except Exception:
-                pass
+        print(f"ATLAS: Joined guild '{guild.name}' ({guild.id})")
+        print(f"ATLAS: [on_guild_join] No auto-provisioning. Run /setup to configure channels.")
 
 
 async def setup(bot: commands.Bot):

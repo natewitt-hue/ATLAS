@@ -12,13 +12,12 @@ Slash commands:
   /rosterhub               — Open the ATLAS Genesis Roster Hub
   /trade                   — Open the TSL Trade Center (autocomplete team select)
   /tradelist               — [Commissioner] List pending trades
-  /tradelookup             — Look up a trade by ID
-  /devaudit                — Audit dev traits for a team or league-wide
-  /cornerstonedesignate    — Designate a player as a Cornerstone
-  /lotterystandings        — View current lottery standings
   /runlottery              — [Admin] Run the draft lottery
-  /contractcheck           — Check a player's contract situation
   /orphanfranchise         — [Admin] Flag/unflag a team as orphaned
+
+Hub-only tools (via /rosterhub buttons):
+  Trade Lookup, Dev Traits, Ability Audit, Ability Check,
+  Cornerstone Designation, Contract Check, Lottery Standings
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -51,7 +50,7 @@ except ImportError:
     cr = None
     _IMAGE_RENDER = False
 
-# Ability engine — required for /abilityaudit and RosterHub ability button
+# Ability engine — required for RosterHub ability audit/check buttons
 try:
     import ability_engine as ae
     _AE_AVAILABLE = True
@@ -808,95 +807,166 @@ async def _evaluate_and_post(
 
 # ── Team Select Views (Steps 1 & 2) ──────────────────────────────────────────
 
-def _build_team_options(exclude_id: int | None = None) -> list[discord.SelectOption]:
-    teams = _get_all_teams()
+def _build_conference_team_options(
+    conference: str, exclude_id: int | None = None,
+) -> list[discord.SelectOption]:
+    """Return team select options filtered by conference (AFC or NFC).
+
+    Uses divName field from dm.df_teams (e.g. 'AFC North', 'NFC West').
+    Each conference has 16 teams -- well under Discord's 25-item limit.
+    """
+    conf_upper = conference.upper()
     options = []
-    for t in teams:
-        tid  = int(t.get("id", 0))
+    for t in _get_all_teams():
+        tid = int(t.get("id", 0))
         if exclude_id and tid == exclude_id:
+            continue
+        div_name = str(t.get("divName", ""))
+        if not div_name.upper().startswith(conf_upper):
             continue
         nick  = t.get("nickName", t.get("displayName", "Unknown"))
         owner = t.get("userName", "")
         label = f"{nick} — {owner}" if owner else nick
         options.append(discord.SelectOption(label=label[:100], value=str(tid)))
-    return options[:25]  # Discord per-page max (used for autocomplete fallback)
+    return options
 
 
-class TeamASelect(discord.ui.Select):
-    def __init__(self, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
+def _step_info(step: str) -> tuple[str, str]:
+    """Return (step_number, step_label) for the given step letter."""
+    if step == "A":
+        return "1", "Team A (sending)"
+    return "2", "Team B (receiving)"
+
+
+def _conference_select_embed(step: str, description: str, team_a: dict | None = None) -> discord.Embed:
+    """Build the standard conference-selection embed for a given trade step."""
+    step_num, _ = _step_info(step)
+    if team_a and step == "B":
+        description = f"**Team A:** {_team_label(team_a)}\n\n{description}"
+    return discord.Embed(
+        title=f"💱 Trade Center — Step {step_num}",
+        description=description,
+        color=discord.Color.blurple(),
+    )
+
+
+class ConferenceSelectView(discord.ui.View):
+    """AFC / NFC buttons -- used for both Team A and Team B selection steps."""
+
+    def __init__(
+        self, bot: commands.Bot, proposer_id: int,
+        step: str = "A",
+        team_a: dict | None = None,
+    ):
+        super().__init__(timeout=180)
         self.bot_ref     = bot
         self.proposer_id = proposer_id
-        self.use_picker  = use_picker
-        super().__init__(
-            placeholder="Select Team A (the team sending)...",
-            min_values=1, max_values=1,
-            options=_build_team_options() or [discord.SelectOption(label="Loading...", value="0")],
-        )
+        self.step        = step
+        self.team_a      = team_a
 
-    async def callback(self, interaction: discord.Interaction):
-        team_a_id = int(self.values[0])
-        team_a    = next((t for t in _get_all_teams() if int(t.get("id", 0)) == team_a_id), None)
-        if not team_a:
-            return await interaction.response.send_message("❌ Team not found.", ephemeral=True)
+    @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈")
+    async def afc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_teams(interaction, "AFC")
 
-        embed = discord.Embed(
-            title="💱 Trade Center — Step 2",
-            description=f"**Team A:** {_team_label(team_a)}\n\nNow select **Team B** (the team receiving).",
-            color=discord.Color.blurple(),
+    @discord.ui.button(label="NFC", style=discord.ButtonStyle.secondary, emoji="🏈")
+    async def nfc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_teams(interaction, "NFC")
+
+    async def _show_teams(self, interaction: discord.Interaction, conference: str):
+        exclude_id = int(self.team_a.get("id", 0)) if self.team_a else None
+        options = _build_conference_team_options(conference, exclude_id=exclude_id)
+        if not options:
+            return await interaction.response.send_message(
+                f"❌ No {conference} teams found.", ephemeral=True,
+            )
+        _, step_label = _step_info(self.step)
+        embed = _conference_select_embed(
+            self.step,
+            f"Select **{step_label}** from the **{conference}**.",
+            team_a=self.team_a,
         )
-        view = TeamBView(team_a=team_a, bot=self.bot_ref, proposer_id=self.proposer_id, use_picker=self.use_picker)
+        view = ConferenceTeamSelectView(
+            bot=self.bot_ref, proposer_id=self.proposer_id,
+            step=self.step, team_a=self.team_a, options=options,
+        )
         await interaction.response.edit_message(embed=embed, view=view)
 
 
-class TeamAView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
-        super().__init__(timeout=180)
-        self.add_item(TeamASelect(bot, proposer_id, use_picker=use_picker))
+class ConferenceTeamSelect(discord.ui.Select):
+    """Select menu showing only teams from one conference."""
 
-
-class TeamBSelect(discord.ui.Select):
-    def __init__(self, team_a: dict, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
-        self.team_a      = team_a
+    def __init__(
+        self, bot: commands.Bot, proposer_id: int,
+        step: str, team_a: dict | None,
+        options: list[discord.SelectOption],
+    ):
         self.bot_ref     = bot
         self.proposer_id = proposer_id
-        self.use_picker  = use_picker
-        exclude = int(team_a.get("id", 0))
+        self.step        = step
+        self.team_a      = team_a
+        placeholder = "Select Team A..." if step == "A" else "Select Team B..."
         super().__init__(
-            placeholder="Select Team B (the other team)...",
-            min_values=1, max_values=1,
-            options=_build_team_options(exclude_id=exclude) or [
-                discord.SelectOption(label="Loading...", value="0")
-            ],
+            placeholder=placeholder, min_values=1, max_values=1, options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        team_b_id = int(self.values[0])
-        team_b    = next((t for t in _get_all_teams() if int(t.get("id", 0)) == team_b_id), None)
-        if not team_b:
+        team_id = int(self.values[0])
+        team = next(
+            (t for t in _get_all_teams() if int(t.get("id", 0)) == team_id), None,
+        )
+        if not team:
             return await interaction.response.send_message("❌ Team not found.", ephemeral=True)
 
-        if self.use_picker:
+        if self.step == "A":
+            embed = _conference_select_embed(
+                "B",
+                "Pick a conference to select **Team B** (the team receiving).",
+                team_a=team,
+            )
+            view = ConferenceSelectView(
+                bot=self.bot_ref, proposer_id=self.proposer_id,
+                step="B", team_a=team,
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
             view = PickerTradeView(
-                team_a=self.team_a,
-                team_b=team_b,
-                proposer_id=self.proposer_id,
-                bot=self.bot_ref,
+                team_a=self.team_a, team_b=team,
+                proposer_id=self.proposer_id, bot=self.bot_ref,
             )
             await interaction.response.edit_message(embed=view.step_embed(), view=view)
-        else:
-            modal = TradeDetailModal(
-                team_a=self.team_a,
-                team_b=team_b,
-                proposer_id=self.proposer_id,
-                bot=self.bot_ref,
-            )
-            await interaction.response.send_modal(modal)
 
 
-class TeamBView(discord.ui.View):
-    def __init__(self, team_a: dict, bot: commands.Bot, proposer_id: int, use_picker: bool = False):
+class ConferenceTeamSelectView(discord.ui.View):
+    """Wraps the conference-filtered team select + a Back button."""
+
+    def __init__(
+        self, bot: commands.Bot, proposer_id: int,
+        step: str, team_a: dict | None,
+        options: list[discord.SelectOption],
+    ):
         super().__init__(timeout=180)
-        self.add_item(TeamBSelect(team_a=team_a, bot=bot, proposer_id=proposer_id, use_picker=use_picker))
+        self.bot_ref     = bot
+        self.proposer_id = proposer_id
+        self.step        = step
+        self.team_a      = team_a
+        self.add_item(ConferenceTeamSelect(
+            bot=bot, proposer_id=proposer_id,
+            step=step, team_a=team_a, options=options,
+        ))
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _, step_label = _step_info(self.step)
+        embed = _conference_select_embed(
+            self.step,
+            f"Pick a conference to select **{step_label}**.",
+            team_a=self.team_a,
+        )
+        view = ConferenceSelectView(
+            bot=self.bot_ref, proposer_id=self.proposer_id,
+            step=self.step, team_a=self.team_a,
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 # ── Picker-based Trade Flow ───────────────────────────────────────────────────
@@ -1476,144 +1546,26 @@ class TradeCenterCog(commands.Cog):
 
     @app_commands.command(
         name="trade",
-        description="Open the TSL Trade Center — browse and click to select players.",
+        description="Open the TSL Trade Center — pick a conference, then select teams.",
     )
-    @app_commands.describe(
-        team_a="Team sending assets (type to search)",
-        team_b="Team receiving assets (type to search)",
-    )
-    async def trade(
-        self,
-        interaction: discord.Interaction,
-        team_a: str,
-        team_b: str,
-    ):
-        """
-        Picker-first trade flow with autocomplete team selection.
-        Autocomplete bypasses the 25-option Discord dropdown limit for 32 teams.
-        """
+    async def trade(self, interaction: discord.Interaction):
+        """Conference-button trade flow.  AFC/NFC → 16-team dropdown → picker."""
         if dm.df_teams.empty or not dm.get_players():
             return await interaction.response.send_message(
-                "⚠️ Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True
+                "⚠️ Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True,
             )
-
-        # Resolve team_a and team_b from autocomplete value (team ID string) or name
-        def _resolve_team(val: str) -> dict | None:
-            # Autocomplete passes the team ID as a string
-            if val.isdigit():
-                return next((t for t in _get_all_teams() if str(t.get("id", "")) == val), None)
-            # Fallback: fuzzy name match
-            return _find_team(val)
-
-        ta = _resolve_team(team_a)
-        tb = _resolve_team(team_b)
-
-        if not ta:
-            return await interaction.response.send_message(
-                f"❌ Team not found: `{team_a}`. Start typing to see suggestions.", ephemeral=True
-            )
-        if not tb:
-            return await interaction.response.send_message(
-                f"❌ Team not found: `{team_b}`. Start typing to see suggestions.", ephemeral=True
-            )
-        if ta.get("id") == tb.get("id"):
-            return await interaction.response.send_message(
-                "❌ Team A and Team B must be different teams.", ephemeral=True
-            )
-
-        view = PickerTradeView(
-            team_a=ta,
-            team_b=tb,
-            proposer_id=interaction.user.id,
-            bot=self.bot,
-        )
         embed = discord.Embed(
-            title="💱 TSL Trade Center — Picker Mode",
-            description=(
-                f"**Team A:** {_team_label(ta)}\n"
-                f"**Team B:** {_team_label(tb)}\n\n"
-                "Use the buttons below to select players for each side.\n"
-                "Click **Add Picks** to include draft picks."
-            ),
+            title="💱 Trade Center — Step 1",
+            description="Pick a conference to select **Team A** (the team sending).",
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
-        await interaction.response.send_message(embed=view.step_embed(), view=view, ephemeral=True)
-
-    @trade.autocomplete("team_a")
-    async def _team_a_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        teams = _get_all_teams()
-        current_lower = current.lower()
-        matches = [
-            t for t in teams
-            if current_lower in _team_label(t).lower() or current_lower in str(t.get("nickName","")).lower()
-        ]
-        return [
-            app_commands.Choice(name=_team_label(t)[:100], value=str(t.get("id", 0)))
-            for t in matches[:25]
-        ]
-
-    @trade.autocomplete("team_b")
-    async def _team_b_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        teams = _get_all_teams()
-        current_lower = current.lower()
-        matches = [
-            t for t in teams
-            if current_lower in _team_label(t).lower() or current_lower in str(t.get("nickName","")).lower()
-        ]
-        return [
-            app_commands.Choice(name=_team_label(t)[:100], value=str(t.get("id", 0)))
-            for t in matches[:25]
-        ]
-
-    @app_commands.command(
-        name="tradelookup",
-        description="Look up a trade by ID."
-    )
-    @app_commands.describe(trade_id="Trade ID (e.g. A1B2C3D4)")
-    async def tradelookup(self, interaction: discord.Interaction, trade_id: str):
-        trade = _trades.get(trade_id.upper())
-        if not trade:
-            return await interaction.response.send_message(
-                f"❌ No trade found with ID `{trade_id.upper()}`.", ephemeral=True
-            )
-        status_map = {
-            "pending":   "⏳ Pending",
-            "approved":  "✅ Approved",
-            "rejected":  "❌ Rejected",
-            "countered": "🔄 Countered",
-        }
-        embed = discord.Embed(
-            title=f"💱 Trade `{trade['id']}`",
-            color=discord.Color.blurple(),
+        view = ConferenceSelectView(
+            bot=self.bot, proposer_id=interaction.user.id, step="A",
         )
-        embed.add_field(name="Status",  value=status_map.get(trade["status"], trade["status"]), inline=True)
-        embed.add_field(name="Band",    value=trade.get("band", "?"),                           inline=True)
-        embed.add_field(name="Delta",   value=f"{trade.get('delta_pct', 0):.1f}%",              inline=True)
-        embed.add_field(name="Team A",  value=trade.get("team_a_name", "?"),                    inline=True)
-        embed.add_field(name="Team B",  value=trade.get("team_b_name", "?"),                    inline=True)
-        embed.add_field(name="Proposer",value=f"<@{trade['proposer_id']}>",                    inline=True)
-        embed.add_field(name="📤 A sends", value=f"Players: `{trade.get('players_a_raw','—')}`\nPicks: `{trade.get('picks_a_raw','—')}`", inline=False)
-        embed.add_field(name="📥 B sends", value=f"Players: `{trade.get('players_b_raw','—')}`\nPicks: `{trade.get('picks_b_raw','—')}`", inline=False)
-        embed.set_footer(text=f"Submitted: {trade.get('submitted_at','?')[:10]}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(
-        name="tradelist",
-        description="[Commissioner] List recent pending trades."
-    )
-    async def tradelist(self, interaction: discord.Interaction):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
-            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
-
+    async def _tradelist_impl(self, interaction: discord.Interaction):
         pending = [t for t in _trades.values() if t.get("status") == "pending"]
         if not pending:
             return await interaction.response.send_message("✅ No pending trades.", ephemeral=True)
@@ -1634,8 +1586,21 @@ class TradeCenterCog(commands.Cog):
                 ),
                 inline=False,
             )
-        embed.set_footer(text="Use /tradelookup <id> for full details.")
+        embed.set_footer(text="Use 🔍 Trade Lookup in /rosterhub for full details.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="tradelist",
+        description="[Deprecated] Use /commish tradelist instead."
+    )
+    async def tradelist(self, interaction: discord.Interaction):
+        is_admin = (
+            interaction.user.id in ADMIN_USER_IDS or
+            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
+        )
+        if not is_admin:
+            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+        await self._tradelist_impl(interaction)
 
 
 
@@ -1878,250 +1843,8 @@ class ParityCog(commands.Cog):
         self.bot = bot
         _load_state()
 
-    # ── /devaudit ─────────────────────────────────────────────────────────────
-    @app_commands.command(
-        name="devaudit",
-        description="List SS/XF and Star dev traits for a team or league-wide."
-    )
-    @app_commands.describe(team="Team name (partial match). Leave blank for all teams.")
-    async def devaudit(self, interaction: discord.Interaction, team: str = ""):
-        await interaction.response.defer(thinking=True)
-
-        players = dm.get_players()
-        if not players:
-            await interaction.followup.send("❌ No roster data. Run `/wittsync` first.")
-            return
-
-        team_filter = team.strip()
-        if team_filter:
-            players = [p for p in players if team_filter.lower() in str(p.get("teamName", "")).lower()]
-            if not players:
-                await interaction.followup.send(f"❌ No players found matching `{team_filter}`.")
-                return
-
-        dev_order = {"Superstar X-Factor": 0, "Superstar": 1, "Star": 2, "Normal": 3}
-
-        by_dev: dict[str, list] = {}
-        for p in players:
-            dev = ae._normalize_dev(p) if _AE_AVAILABLE else (p.get("dev", "Normal") or "Normal")
-            if dev == "Normal" and not team_filter:
-                continue
-            by_dev.setdefault(dev, []).append(p)
-
-        if not any(v for v in by_dev.values()):
-            await interaction.followup.send(
-                f"ℹ️ No Star+ players found for `{team_filter or 'league'}`."
-            )
-            return
-
-        embed = discord.Embed(
-            title=f"📊 Dev Traits — {'League-Wide' if not team_filter else team_filter}",
-            color=discord.Color.gold(),
-            description=f"Season {dm.CURRENT_SEASON}",
-        )
-        for dev in sorted(by_dev.keys(), key=lambda d: dev_order.get(d, 9)):
-            emoji = DEV_EMOJI.get(dev, "")
-            lines = [
-                f"{emoji} **{p.get('firstName','')} {p.get('lastName','')}** "
-                f"({p.get('pos','?')}, {p.get('teamName','?')}) OVR {p.get('playerBestOvr','?')}"
-                for p in sorted(by_dev[dev], key=lambda x: int(x.get("playerBestOvr", 0) or 0), reverse=True)
-            ]
-            chunk = "\n".join(lines[:20])
-            if chunk:
-                embed.add_field(
-                    name=f"{emoji} {dev} ({len(by_dev[dev])})",
-                    value=chunk[:1024],
-                    inline=False,
-                )
-        await interaction.followup.send(embed=embed)
-
-    # ── /abilityaudit ─────────────────────────────────────────────────────────
-    @app_commands.command(
-        name="abilityaudit",
-        description="Audit player ability compliance (Lock & Key system). Omit team for league summary."
-    )
-    @app_commands.describe(team="Team name to audit (partial match OK). Leave blank for league-wide.")
-    async def abilityaudit(self, interaction: discord.Interaction, team: str = ""):
-        await interaction.response.defer(thinking=True)
-
-        if not _AE_AVAILABLE:
-            await interaction.followup.send("❌ ability_engine.py not found. Place it alongside bot.py.")
-            return
-
-        players   = dm.get_players()
-        abilities = dm.get_player_abilities()
-
-        if not players:
-            await interaction.followup.send("❌ No player data loaded. Run `/wittsync` first.")
-            return
-
-        team_filter = team.strip() if team.strip() else None
-        results     = ae.audit_roster(players, abilities, team_filter=team_filter)
-
-        if team_filter:
-            if not results:
-                await interaction.followup.send(
-                    f"❌ No Star+ players found for team matching `{team_filter}`. Check the team name."
-                )
-                return
-            actual_team = results[0].team
-            embeds = _build_team_ability_embeds(results, actual_team)
-            for i in range(0, len(embeds), 10):
-                await interaction.followup.send(embeds=embeds[i:i+10])
-            return
-
-        summary    = ae.summarize_audit(results)
-        violations = [r for r in results if not r.is_clean]
-        embed      = _build_league_ability_embed(summary, violations)
-        await interaction.followup.send(embed=embed)
-
-    # ── /abilitycheck ─────────────────────────────────────────────────────────
-    @app_commands.command(
-        name="abilitycheck",
-        description="Deep-dive ability check for a single player (partial name match)."
-    )
-    @app_commands.describe(player="Player name (first or last, partial OK).")
-    async def abilitycheck(self, interaction: discord.Interaction, player: str):
-        await interaction.response.defer(thinking=True)
-
-        if not _AE_AVAILABLE:
-            await interaction.followup.send("❌ ability_engine.py not found. Place it alongside bot.py.")
-            return
-
-        players   = dm.get_players()
-        abilities = dm.get_player_abilities()
-
-        query   = player.strip().lower()
-        matches = [
-            p for p in players
-            if query in (p.get("firstName", "") + " " + p.get("lastName", "")).lower()
-            and ae._normalize_dev(p) != "Normal"
-        ]
-
-        if not matches:
-            await interaction.followup.send(
-                f"❌ No Star+ player found matching `{player}`. "
-                f"Check spelling or use `/abilityaudit team:` for a full roster."
-            )
-            return
-
-        if len(matches) > 1:
-            names = ", ".join(
-                f"{m['firstName']} {m['lastName']} ({m['pos']}, {m.get('teamName','?')})"
-                for m in matches[:8]
-            )
-            await interaction.followup.send(
-                f"⚠️ Multiple matches for `{player}`: {names}\nBe more specific."
-            )
-            return
-
-        results = ae.audit_roster([matches[0]], abilities)
-
-        if not results:
-            p = matches[0]
-            await interaction.followup.send(
-                f"ℹ️ **{p['firstName']} {p['lastName']}** has no abilities equipped."
-            )
-            return
-
-        await interaction.followup.send(embed=_build_player_ability_embed(results[0]))
-
-    # ── /cornerstonedesignate ─────────────────────────────────────────────────
-    @app_commands.command(
-        name="cornerstonedesignate",
-        description="Designate a player as a Cornerstone (1-tier dev bump, trade-locked for season)."
-    )
-    @app_commands.describe(player="Player name (partial match OK)")
-    async def cornerstonedesignate(self, interaction: discord.Interaction, player: str):
-        await interaction.response.defer(thinking=True)
-
-        players = dm.get_players()
-        query   = player.strip().lower()
-        matches = [
-            p for p in players
-            if query in f"{p.get('firstName','')} {p.get('lastName','')}".lower()
-        ]
-
-        if not matches:
-            await interaction.followup.send(f"❌ No player found matching `{player}`.")
-            return
-        if len(matches) > 1:
-            names = ", ".join(f"{m['firstName']} {m['lastName']} ({m['pos']})" for m in matches[:5])
-            await interaction.followup.send(f"⚠️ Multiple matches: {names}\nBe more specific.")
-            return
-
-        p = matches[0]
-        rid  = p.get("rosterId")
-        name = f"{p.get('firstName','')} {p.get('lastName','')}".strip()
-
-        if rid in _state["cornerstones"]:
-            await interaction.followup.send(f"⚠️ **{name}** is already designated as a Cornerstone this season.")
-            return
-
-        _state["cornerstones"][rid] = {
-            "name":             name,
-            "team":             p.get("teamName", "?"),
-            "pos":              p.get("pos", "?"),
-            "designated_week":  dm.CURRENT_WEEK,
-            "designated_by":    str(interaction.user),
-        }
-        _save_state()
-
-        embed = discord.Embed(
-            title=f"🔒 Cornerstone Designation — {name}",
-            color=discord.Color.gold(),
-            description=(
-                f"**{name}** ({p.get('pos')}, {p.get('teamName','?')}) has been designated as a Cornerstone.\n\n"
-                f"• One-tier dev trait bump applied (commissioner must execute in Madden)\n"
-                f"• Player is **trade-locked** for the remainder of Season {dm.CURRENT_SEASON}\n"
-                f"• Designation recorded at Week {dm.CURRENT_WEEK}"
-            )
-        )
-        embed.set_footer(text="Cornerstone lock enforced by bot in /tradepropose.")
-        await interaction.followup.send(embed=embed)
-
-    # ── /lotterystandings ─────────────────────────────────────────────────────
-    @app_commands.command(
-        name="lotterystandings",
-        description="View the current anti-tanking lottery standings for eliminated teams."
-    )
-    async def lotterystandings(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
-
-        pool = _build_lottery_pool()
-
-        if not pool:
-            await interaction.followup.send(
-                "ℹ️ No eliminated teams found. Lottery standings are only available "
-                "after teams are mathematically eliminated from playoffs."
-            )
-            return
-
-        total_balls = sum(b for _, b in pool)
-        lines = []
-        for team, balls in pool:
-            pct = balls / total_balls * 100
-            lines.append(f"**{team}**: {balls} balls ({pct:.1f}%)")
-
-        embed = discord.Embed(
-            title=f"🎱 Lottery Standings — Season {dm.CURRENT_SEASON}",
-            color=discord.Color.blurple(),
-            description="\n".join(lines)
-        )
-        embed.set_footer(
-            text=f"Baseline: {LOTTERY_BASELINE} balls | +{LOTTERY_PER_WIN}/post-elim win | Total balls: {total_balls}"
-        )
-        await interaction.followup.send(embed=embed)
-
     # ── /runlottery ───────────────────────────────────────────────────────────
-    @app_commands.command(
-        name="runlottery",
-        description="[Admin] Run the weighted draft lottery draw."
-    )
-    async def runlottery(self, interaction: discord.Interaction):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
+    async def _runlottery_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
 
         pool = _build_lottery_pool()
@@ -2161,52 +1884,18 @@ class ParityCog(commands.Cog):
         embed.set_footer(text=f"Drawn by {interaction.user} | Results logged.")
         await interaction.followup.send(embed=embed)
 
-    # ── /contractcheck ────────────────────────────────────────────────────────
     @app_commands.command(
-        name="contractcheck",
-        description="Validate a proposed contract extension against the Green Bar Rule."
+        name="runlottery",
+        description="[Deprecated] Use /commish runlottery instead."
     )
-    @app_commands.describe(
-        player="Player name",
-        years="Proposed contract years",
-        aav="Proposed AAV (cap % as decimal, e.g. 4.5 for 4.5%)",
-    )
-    async def contractcheck(
-        self,
-        interaction: discord.Interaction,
-        player: str,
-        years: int,
-        aav: float,
-    ):
-        await interaction.response.defer(thinking=True)
-
-        # TODO: Implement Green Bar Rule validation against system-neutral offer
-        # Requires dm.get_contract_details() (Phase 1)
-        embed = discord.Embed(
-            title=f"📋 Contract Check — {player}",
-            color=discord.Color.blurple(),
-            description=(
-                f"Proposed: **{years} years** at **{aav:.1f}%** cap per year\n\n"
-                f"⚠️ Full Green Bar Rule validation requires `dm.get_contract_details()` (Phase 1).\n"
-                f"Manual commissioner review required until then."
-            )
-        )
-        await interaction.followup.send(embed=embed)
-
-    # ── /orphanfranchise ──────────────────────────────────────────────────────
-    @app_commands.command(
-        name="orphanfranchise",
-        description="[Admin] Set or clear orphan franchise flag for a team."
-    )
-    @app_commands.describe(
-        team="Team name",
-        flag="True to set orphan, False to clear"
-    )
-    async def orphanfranchise(self, interaction: discord.Interaction, team: str, flag: bool):
+    async def runlottery(self, interaction: discord.Interaction):
         if interaction.user.id not in ADMIN_USER_IDS:
             await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
+        await self._runlottery_impl(interaction)
 
+    # ── /orphanfranchise ──────────────────────────────────────────────────────
+    async def _orphanfranchise_impl(self, interaction: discord.Interaction, team: str, flag: bool):
         if flag:
             _state["orphan_teams"].add(team.strip())
             msg = f"✅ **{team}** marked as an Orphan Franchise. Cap-clear is now permitted by bot."
@@ -2216,6 +1905,20 @@ class ParityCog(commands.Cog):
 
         _save_state()
         await interaction.response.send_message(msg)
+
+    @app_commands.command(
+        name="orphanfranchise",
+        description="[Deprecated] Use /commish orphanfranchise instead."
+    )
+    @app_commands.describe(
+        team="Team name",
+        flag="True to set orphan, False to clear"
+    )
+    async def orphanfranchise(self, interaction: discord.Interaction, team: str, flag: bool):
+        if interaction.user.id not in ADMIN_USER_IDS:
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+            return
+        await self._orphanfranchise_impl(interaction, team, flag)
 
     # ── Cap integrity gate (called by trade_cog / admin commands) ─────────────
 
@@ -2338,7 +2041,7 @@ class GenesisHubView(discord.ui.View):
                 ),
                 inline=False,
             )
-        embed.set_footer(text="Use /tradelookup <id> for full details.")
+        embed.set_footer(text="Use 🔍 Trade Lookup in /rosterhub for full details.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(
@@ -2376,18 +2079,7 @@ class GenesisHubView(discord.ui.View):
         row=2, custom_id="genesis:cornerstone",
     )
     async def btn_cornerstone(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        embed = discord.Embed(
-            title="🔒 Cornerstone Designation",
-            description=(
-                "Use `/cornerstonedesignate <player>` to designate a player as your Cornerstone.\n\n"
-                "**Rules:**\n"
-                "• One Cornerstone per team per season\n"
-                "• Cornerstone players cannot be traded or have their position changed\n"
-                "• Designation must be set before Week 1 of the regular season"
-            ),
-            color=discord.Color.gold(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_modal(_CornerstoneModal())
 
     @discord.ui.button(
         label="📋 Contract Check", style=discord.ButtonStyle.secondary,
@@ -2684,6 +2376,74 @@ class _AbilityCheckModal(discord.ui.Modal, title="👤 Ability Check"):
             )
         except Exception as e:
             await interaction.followup.send(f"❌ Ability check error: `{e}`", ephemeral=True)
+
+
+class _CornerstoneModal(discord.ui.Modal, title="🔒 Cornerstone Designation"):
+    player_name = discord.ui.TextInput(
+        label="Player Name",
+        placeholder="Partial name match OK (e.g. Mahomes)",
+        min_length=2,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            players = dm.get_players()
+            if not players:
+                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
+
+            query = self.player_name.value.strip().lower()
+            matches = [
+                p for p in players
+                if query in f"{p.get('firstName', '')} {p.get('lastName', '')}".lower()
+            ]
+
+            if not matches:
+                return await interaction.followup.send(
+                    f"❌ No player found matching `{self.player_name.value}`.", ephemeral=True
+                )
+            if len(matches) > 1:
+                names = ", ".join(
+                    f"{m['firstName']} {m['lastName']} ({m['pos']})" for m in matches[:5]
+                )
+                return await interaction.followup.send(
+                    f"⚠️ Multiple matches: {names}\nBe more specific.", ephemeral=True
+                )
+
+            p = matches[0]
+            rid = p.get("rosterId")
+            name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+
+            if rid in _state["cornerstones"]:
+                return await interaction.followup.send(
+                    f"⚠️ **{name}** is already designated as a Cornerstone this season.",
+                    ephemeral=True,
+                )
+
+            _state["cornerstones"][rid] = {
+                "name":            name,
+                "team":            p.get("teamName", "?"),
+                "pos":             p.get("pos", "?"),
+                "designated_week": dm.CURRENT_WEEK,
+                "designated_by":   str(interaction.user),
+            }
+            _save_state()
+
+            embed = discord.Embed(
+                title=f"🔒 Cornerstone Designation — {name}",
+                color=discord.Color.gold(),
+                description=(
+                    f"**{name}** ({p.get('pos')}, {p.get('teamName', '?')}) has been designated as a Cornerstone.\n\n"
+                    f"• One-tier dev trait bump applied (commissioner must execute in Madden)\n"
+                    f"• Player is **trade-locked** for the remainder of Season {dm.CURRENT_SEASON}\n"
+                    f"• Designation recorded at Week {dm.CURRENT_WEEK}"
+                ),
+            )
+            embed.set_footer(text="Cornerstone lock enforced by bot in /tradepropose.")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Cornerstone error: `{e}`", ephemeral=True)
 
 
 # ── Genesis Hub Cog ────────────────────────────────────────────────────────────

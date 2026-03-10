@@ -200,9 +200,16 @@ def infer_context(command_name: str = None, channel_name: str = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Convenience aliases (backwards compat — prefer get_persona() directly)
+# Convenience module-level accessors (for backwards compatibility with cogs
+# that had ATLAS_PERSONA = "..." hardcoded — use get_persona() directly in
+# new code, but these provide a quick drop-in replacement).
 # ---------------------------------------------------------------------------
 
-def PERSONA_CASUAL()     -> str: return get_persona("casual")
-def PERSONA_OFFICIAL()   -> str: return get_persona("official")
-def PERSONA_ANALYTICAL() -> str: return get_persona("analytical")
+def PERSONA_CASUAL() -> str:
+    return get_persona("casual")
+
+def PERSONA_OFFICIAL() -> str:
+    return get_persona("official")
+
+def PERSONA_ANALYTICAL() -> str:
+    return get_persona("analytical")

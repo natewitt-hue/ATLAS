@@ -10,20 +10,24 @@ Register in bot.py setup_hook():
     await bot.load_extension("sentinel_cog")
 
 Slash commands:
-  /rulehub                — Open the ATLAS Sentinel Rules Hub
-  /complaint              — File a complaint against another owner
+  /rulehub                — Open the ATLAS Sentinel Rules Hub (interactive button view)
   /caselist               — [Commissioner] List pending complaints
   /caseview               — View a specific case
   /forcerequest           — Submit a force win request with screenshot evidence
   /forcehistory           — [Admin] Force request session stats
-  /blowoutcheck           — Check blowout protocol compliance
-  /disconnectlookup       — Look up disconnect protocol by quarter
-  /statcheck              — Flag potential stat-padding concern
   /fourthdown             — Get an official TSL 4th down ruling
-  /positionchange         — Request a position change for a player
-  /positionchangelog      — View position change history
   /positionchangeapprove  — [Admin] Approve a pending position change
   /positionchangedeny     — [Admin] Deny a pending position change
+
+Hub buttons (via /rulehub):
+  File Complaint          — Opens complaint filing flow (was /complaint)
+  Force Request           — Directs to /forcerequest (requires file attachment)
+  4th Down                — Directs to /fourthdown (requires file attachment)
+  DC Protocol             — Modal: quarter + margin lookup (was /disconnectlookup)
+  Blowout Check           — Modal: team scores check (was /blowoutcheck)
+  Stat Check              — Modal: stat-padding flag (was /statcheck)
+  Position Change         — Modal: player position change (was /positionchange)
+  Position Log            — Shows position change history (was /positionchangelog)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -558,52 +562,7 @@ class ComplaintCog(commands.Cog):
         self.bot = bot
         _load_state()
 
-    @app_commands.command(
-        name="complaint",
-        description="File an official complaint against another TSL owner."
-    )
-    async def complaint(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="📋 TSL Complaint System",
-            description=(
-                "Use this system to report a legitimate rule violation or conduct issue.\n\n"
-                "**Step 1:** Select a category below.\n"
-                "**Step 2:** Fill in the accused owner, your explanation, and any external links.\n"
-                "**Step 3:** Upload screenshots or video clips directly in your case thread.\n\n"
-                "⚠️ *False or frivolous complaints may result in penalties against the filer.*"
-            ),
-            color=discord.Color.orange()
-        )
-        embed.add_field(
-            name="📂 Categories",
-            value="\n".join(f"{e} **{l}** — {d}" for _, (e, l, d) in CATEGORIES.items()),
-            inline=False
-        )
-        embed.add_field(
-            name="📎 Evidence",
-            value=(
-                "After submitting, a private case thread will be created where you can upload "
-                "**screenshots, clips, and videos** directly — no links required."
-            ),
-            inline=False
-        )
-        embed.set_footer(text="TSL Commissioner Office — All complaints are reviewed.")
-        await interaction.response.send_message(
-            embed=embed, view=CategoryView(self.bot), ephemeral=True
-        )
-
-    @app_commands.command(
-        name="caseview",
-        description="[Commissioner] View a complaint case by ID."
-    )
-    @app_commands.describe(case_id="The complaint case ID (e.g. A1B2C3D4)")
-    async def caseview(self, interaction: discord.Interaction, case_id: str):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
-            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+    async def caseview_impl(self, interaction: discord.Interaction, case_id: str):
         c = _complaints.get(case_id.upper())
         if not c:
             return await interaction.response.send_message(
@@ -614,17 +573,20 @@ class ComplaintCog(commands.Cog):
         )
 
     @app_commands.command(
-        name="caselist",
-        description="[Commissioner] List all open/pending complaints."
+        name="caseview",
+        description="[Deprecated] Use /commish caseview instead."
     )
-    async def caselist(self, interaction: discord.Interaction):
+    @app_commands.describe(case_id="The complaint case ID (e.g. A1B2C3D4)")
+    async def caseview(self, interaction: discord.Interaction, case_id: str):
         is_admin = (
             interaction.user.id in ADMIN_USER_IDS or
             (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
         )
         if not is_admin:
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+        await self.caseview_impl(interaction, case_id)
 
+    async def caselist_impl(self, interaction: discord.Interaction):
         pending = [c for c in _complaints.values() if c["verdict"] == "pending"]
         if not pending:
             return await interaction.response.send_message(
@@ -648,6 +610,19 @@ class ComplaintCog(commands.Cog):
             )
         embed.set_footer(text="Use /caseview <id> to inspect a specific case.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="caselist",
+        description="[Deprecated] Use /commish caselist instead."
+    )
+    async def caselist(self, interaction: discord.Interaction):
+        is_admin = (
+            interaction.user.id in ADMIN_USER_IDS or
+            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
+        )
+        if not is_admin:
+            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+        await self.caselist_impl(interaction)
 
 
 
@@ -1221,13 +1196,7 @@ class ForceRequestCog(commands.Cog):
         )
 
     # ── /forcehistory (admin only) ────────────────────────────────────────────
-    @app_commands.command(
-        name="forcehistory",
-        description="[Admin] View force request stats for this session."
-    )
-    async def forcehistory(self, interaction: discord.Interaction):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            return await interaction.response.send_message("🚫 Admin only.", ephemeral=True)
+    async def forcehistory_impl(self, interaction: discord.Interaction):
         ch = self.bot.get_channel(_review_channel_id())
         ch_ref = ch.mention if ch else "*(not configured)*"
         await interaction.response.send_message(
@@ -1236,6 +1205,15 @@ class ForceRequestCog(commands.Cog):
             f"Requests this session: **{self._request_counter}**",
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="forcehistory",
+        description="[Deprecated] Use /commish forcehistory instead."
+    )
+    async def forcehistory(self, interaction: discord.Interaction):
+        if interaction.user.id not in ADMIN_USER_IDS:
+            return await interaction.response.send_message("🚫 Admin only.", ephemeral=True)
+        await self.forcehistory_impl(interaction)
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -1252,39 +1230,51 @@ DC_PROTOCOL = {
     4: "📋 Q4 DC → If margin ≤ 7, Commish review. If > 7, no replay; result stands."
 }
 
+# ── Gameplay helper functions (used by hub modals) ────────────────────────────
+
+def _dc_protocol_embed(quarter: int, score_margin: int) -> discord.Embed | str:
+    """Build a DC protocol embed. Returns error string if invalid quarter."""
+    if quarter not in DC_PROTOCOL:
+        return "❌ Invalid Quarter (1-4)."
+    return discord.Embed(
+        title=f"📡 Disconnect Protocol — Q{quarter}",
+        description=DC_PROTOCOL[quarter],
+        color=discord.Color.blurple(),
+    )
+
+
+def _blowout_check_embed(home_team: str, home_score: int, away_team: str, away_score: int) -> discord.Embed:
+    """Build a blowout check embed."""
+    margin = abs(home_score - away_score)
+    violations = []
+    if margin >= 35:
+        violations.append("⚠️ 35-pt protocol: Verify starters were subbed out.")
+    elif margin >= 28:
+        violations.append("⚠️ 28-pt protocol: Verify no non-3rd down passes occurred in Q4.")
+    embed = discord.Embed(
+        title=f"Blowout Check: {home_team} vs {away_team}",
+        color=discord.Color.red() if violations else discord.Color.green(),
+    )
+    embed.description = "\n".join(violations) if violations else "✅ No automatic blowout flags."
+    return embed
+
+
+def _stat_check_embed(player: str, stat_type: str, yards: int) -> discord.Embed:
+    """Build a stat check embed."""
+    threshold = 450 if stat_type.lower() == "passing" else 225
+    flagged = yards > threshold
+    return discord.Embed(
+        title=f"{'🚨' if flagged else '✅'} Stat Check — {player}",
+        description=(
+            f"**{yards} {stat_type} yards**\nThreshold: {threshold}\n\n"
+            f"{'⚠️ Commissioner review required.' if flagged else '✅ Within range.'}"
+        ),
+        color=discord.Color.red() if flagged else discord.Color.green(),
+    )
+
+
 class GameplayCog(commands.Cog):
     def __init__(self, bot): self.bot = bot
-
-    @app_commands.command(name="disconnectlookup", description="Look up the DC protocol ruling.")
-    async def disconnectlookup(self, interaction: discord.Interaction, quarter: int, score_margin: int):
-        if quarter not in DC_PROTOCOL:
-            return await interaction.response.send_message("❌ Invalid Quarter (1-4).", ephemeral=True)
-            
-        embed = discord.Embed(title=f"📡 Disconnect Protocol — Q{quarter}", description=DC_PROTOCOL[quarter], color=discord.Color.blurple())
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="blowoutcheck", description="Check blowout protocol compliance.")
-    async def blowoutcheck(self, interaction: discord.Interaction, home_team: str, home_score: int, away_team: str, away_score: int):
-        margin = abs(home_score - away_score)
-        violations = []
-        if margin >= 35: violations.append("⚠️ 35-pt protocol: Verify starters were subbed out.")
-        elif margin >= 28: violations.append("⚠️ 28-pt protocol: Verify no non-3rd down passes occurred in Q4.")
-        
-        embed = discord.Embed(title=f"Blowout Check: {home_team} vs {away_team}", color=discord.Color.red() if violations else discord.Color.green())
-        embed.description = "\n".join(violations) if violations else "✅ No automatic blowout flags."
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="statcheck", description="Flag a potential stat-padding concern.")
-    async def statcheck(self, interaction: discord.Interaction, player: str, stat_type: str, yards: int):
-        threshold = 450 if stat_type.lower() == "passing" else 225
-        flagged = yards > threshold
-        
-        embed = discord.Embed(
-            title=f"{'🚨' if flagged else '✅'} Stat Check — {player}",
-            description=f"**{yards} {stat_type} yards**\nThreshold: {threshold}\n\n{'⚠️ Commissioner review required.' if flagged else '✅ Within range.'}",
-            color=discord.Color.red() if flagged else discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1772,6 +1762,206 @@ def _announcement_embed(record: dict) -> discord.Embed:
     return embed
 
 
+def _build_positionchangelog_embed(team: str = "") -> discord.Embed:
+    """Build the position change log embed. Extracted for hub modal use."""
+    records = [
+        r for r in _state.get("position_changes", [])
+        if r.get("season") == dm.CURRENT_SEASON
+    ]
+    if team.strip():
+        records = [
+            r for r in records
+            if team.strip().lower() in r.get("team", "").lower()
+        ]
+    if not records:
+        label = f" for **{team}**" if team.strip() else ""
+        return discord.Embed(
+            title="📋 Position Change Log",
+            description=f"No position changes recorded{label} in Season {dm.CURRENT_SEASON}.",
+            color=discord.Color.greyple(),
+        )
+    STATUS_EMOJI = {"approved": "✅", "pending": "⏳", "denied": "❌"}
+    lines = []
+    for r in sorted(records, key=lambda x: x.get("timestamp", "")):
+        emoji = STATUS_EMOJI.get(r["status"], "❓")
+        lines.append(
+            f"{emoji} `{r['log_id']}` **{r['player_name']}** ({r['team']}) "
+            f"{r['from_pos']} → {r['to_pos']} — Wk {r['week']} — {r['status'].upper()}"
+        )
+    chunks, chunk = [], []
+    for line in lines:
+        if sum(len(l) for l in chunk) + len(line) > 900:
+            chunks.append(chunk)
+            chunk = []
+        chunk.append(line)
+    if chunk:
+        chunks.append(chunk)
+    title = (
+        f"🔄 Position Changes — S{dm.CURRENT_SEASON}"
+        + (f" | {team.strip()}" if team.strip() else "")
+    )
+    embed = discord.Embed(title=title, color=discord.Color.blurple())
+    for i, ch in enumerate(chunks):
+        embed.add_field(
+            name="\u200b" if i > 0 else f"{len(records)} change(s)",
+            value="\n".join(ch),
+            inline=False,
+        )
+    return embed
+
+
+async def _run_position_change(
+    interaction: discord.Interaction,
+    bot: commands.Bot,
+    player_name: str,
+    new_position: str,
+    team: str,
+) -> None:
+    """Core logic for the /positionchange command, extracted for hub modal use.
+
+    Expects the interaction to already be deferred (thinking=True).
+    """
+    to_pos = new_position.strip().upper()
+
+    # 1. Look up player in roster cache
+    players = dm.get_players()
+    if not players:
+        await interaction.followup.send("❌ No roster data available. Try `/wittsync` first.", ephemeral=True)
+        return
+
+    query = player_name.strip().lower()
+    matches = [
+        p for p in players
+        if query in f"{p.get('firstName','')} {p.get('lastName','')}".lower()
+    ]
+
+    if not matches:
+        await interaction.followup.send(f"❌ No player found matching `{player_name}`.", ephemeral=True)
+        return
+    if len(matches) > 3:
+        names = ", ".join(
+            f"{m['firstName']} {m['lastName']} ({m.get('pos','?')}, {m.get('teamName','?')})"
+            for m in matches[:5]
+        )
+        await interaction.followup.send(
+            f"⚠️ Too many matches for `{player_name}`: {names}\nBe more specific.", ephemeral=True
+        )
+        return
+    if len(matches) > 1:
+        team_matches = [
+            m for m in matches
+            if team.strip().lower() in (m.get("teamName") or "").lower()
+        ]
+        if len(team_matches) == 1:
+            matches = team_matches
+        else:
+            names = ", ".join(
+                f"{m['firstName']} {m['lastName']} ({m.get('pos','?')}, {m.get('teamName','?')})"
+                for m in matches[:5]
+            )
+            await interaction.followup.send(
+                f"⚠️ Multiple matches for `{player_name}`: {names}\nBe more specific.", ephemeral=True
+            )
+            return
+
+    p = matches[0]
+    from_pos = (p.get("pos") or "").upper()
+    p_name = f"{p.get('firstName','')} {p.get('lastName','')}".strip()
+    p_team = (p.get("teamName") or team).strip()
+
+    # 2. Prevent same-position change
+    if from_pos == to_pos:
+        await interaction.followup.send(
+            f"⚠️ **{p_name}** is already listed as **{from_pos}**.", ephemeral=True
+        )
+        return
+
+    # 3. Check if this player already has a change this season
+    season_changes = [
+        r for r in _state.get("position_changes", [])
+        if r.get("roster_id") == p.get("rosterId")
+        and r.get("season") == dm.CURRENT_SEASON
+        and r.get("status") in ("approved", "pending")
+    ]
+    if season_changes:
+        prev = season_changes[-1]
+        await interaction.followup.send(
+            f"⚠️ **{p_name}** already has a position change this season "
+            f"(`{prev['from_pos']} → {prev['to_pos']}`, "
+            f"Status: {prev['status'].upper()}, Log ID: `{prev['log_id']}`).\n"
+            "Only one position change per player per season is allowed.",
+            ephemeral=True,
+        )
+        return
+
+    # 4. Check Cornerstone lock
+    cornerstones = _state.get("cornerstones", {})
+    if str(p.get("rosterId")) in cornerstones or p.get("rosterId") in cornerstones:
+        await interaction.followup.send(
+            f"🔒 **{p_name}** is designated as a **Cornerstone** and cannot have "
+            "their position changed this season.",
+            ephemeral=True,
+        )
+        return
+
+    # 5. Validate against rulebook
+    validation = validate_position_change(p, from_pos, to_pos)
+    log_id = str(uuid.uuid4())[:8].upper()
+    season = dm.CURRENT_SEASON
+    week = dm.CURRENT_WEEK
+
+    result_embed_msg = _result_embed(p, from_pos, to_pos, validation, p_team, log_id, season, week)
+    await interaction.followup.send(embed=result_embed_msg, ephemeral=True)
+
+    # 6. If banned or failed, stop here
+    if validation["banned"] or validation["no_rule"] or not validation["legal"]:
+        return
+
+    # 7. Persist the record
+    status = "pending" if validation["requires_approval"] else "approved"
+    record = _make_record(
+        player=p,
+        from_pos=from_pos,
+        to_pos=to_pos,
+        requested_by=str(interaction.user),
+        team=p_team,
+        status=status,
+        log_id=log_id,
+        season=season,
+        week=week,
+    )
+    _state.setdefault("position_changes", []).append(record)
+    _save_state()
+
+    # 8. Route to announcement channel
+    channel = bot.get_channel(_roster_moves_channel_id()) if _roster_moves_channel_id() else None
+    if channel is None:
+        return
+
+    if status == "approved":
+        await channel.send(embed=_announcement_embed(record))
+    elif status == "pending":
+        pending_embed = discord.Embed(
+            title=f"⏳ Pending Approval — {p_name}: {from_pos} → {to_pos}",
+            color=discord.Color.gold(),
+            description=(
+                f"**{p_name}** ({p_team}) has requested a position change "
+                f"that requires Commissioner approval.\n\n"
+                f"Log ID: `{log_id}`\n"
+                f"Submitted by: {interaction.user.mention}"
+            ),
+        )
+        pending_embed.add_field(
+            name="Admin Actions",
+            value=(
+                f"`/positionchangeapprove {log_id}` — approve the move\n"
+                f"`/positionchangedeny {log_id} [reason]` — deny the move"
+            ),
+            inline=False,
+        )
+        await channel.send(embed=pending_embed)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  COG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1780,245 +1970,12 @@ class PositionChangeCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ── /positionchange ────────────────────────────────────────────────────────
-    @app_commands.command(
-        name="positionchange",
-        description="Request a position change for a player on your team.",
-    )
-    @app_commands.describe(
-        player      = "Player name (partial match OK)",
-        new_position= "New position (e.g. TE, WR, S, CB, LB, FB)",
-        team        = "Your team name (partial match OK)",
-    )
-    async def positionchange(
-        self,
-        interaction: discord.Interaction,
-        player:       str,
-        new_position: str,
-        team:         str,
-    ):
-        await interaction.response.defer(thinking=True)
-
-        to_pos = new_position.strip().upper()
-
-        # ── 1. Look up player in roster cache ─────────────────────────────────
-        players = dm.get_players()
-        if not players:
-            await interaction.followup.send("❌ No roster data available. Try `/wittsync` first.")
-            return
-
-        query   = player.strip().lower()
-        matches = [
-            p for p in players
-            if query in f"{p.get('firstName','')} {p.get('lastName','')}".lower()
-        ]
-
-        if not matches:
-            await interaction.followup.send(f"❌ No player found matching `{player}`.")
-            return
-        if len(matches) > 3:
-            names = ", ".join(
-                f"{m['firstName']} {m['lastName']} ({m.get('pos','?')}, {m.get('teamName','?')})"
-                for m in matches[:5]
-            )
-            await interaction.followup.send(
-                f"⚠️ Too many matches for `{player}`: {names}\nBe more specific."
-            )
-            return
-        if len(matches) > 1:
-            # Try to narrow by team
-            team_matches = [
-                m for m in matches
-                if team.strip().lower() in (m.get("teamName") or "").lower()
-            ]
-            if len(team_matches) == 1:
-                matches = team_matches
-            else:
-                names = ", ".join(
-                    f"{m['firstName']} {m['lastName']} ({m.get('pos','?')}, {m.get('teamName','?')})"
-                    for m in matches[:5]
-                )
-                await interaction.followup.send(
-                    f"⚠️ Multiple matches for `{player}`: {names}\nBe more specific."
-                )
-                return
-
-        p        = matches[0]
-        from_pos = (p.get("pos") or "").upper()
-        p_name   = f"{p.get('firstName','')} {p.get('lastName','')}".strip()
-        p_team   = (p.get("teamName") or team).strip()
-
-        # ── 2. Prevent same-position change ───────────────────────────────────
-        if from_pos == to_pos:
-            await interaction.followup.send(
-                f"⚠️ **{p_name}** is already listed as **{from_pos}**."
-            )
-            return
-
-        # ── 3. Check if this player already has a change this season ──────────
-        season_changes = [
-            r for r in _state.get("position_changes", [])
-            if r.get("roster_id") == p.get("rosterId")
-            and r.get("season") == dm.CURRENT_SEASON
-            and r.get("status") in ("approved", "pending")
-        ]
-        if season_changes:
-            prev = season_changes[-1]
-            await interaction.followup.send(
-                f"⚠️ **{p_name}** already has a position change this season "
-                f"(`{prev['from_pos']} → {prev['to_pos']}`, "
-                f"Status: {prev['status'].upper()}, Log ID: `{prev['log_id']}`).\n"
-                "Only one position change per player per season is allowed."
-            )
-            return
-
-        # ── 4. Check Cornerstone lock ─────────────────────────────────────────
-        cornerstones = _state.get("cornerstones", {})
-        if str(p.get("rosterId")) in cornerstones or p.get("rosterId") in cornerstones:
-            await interaction.followup.send(
-                f"🔒 **{p_name}** is designated as a **Cornerstone** and cannot have "
-                "their position changed this season."
-            )
-            return
-
-        # ── 5. Validate against rulebook ──────────────────────────────────────
-        validation = validate_position_change(p, from_pos, to_pos)
-        log_id     = str(uuid.uuid4())[:8].upper()
-        season     = dm.CURRENT_SEASON
-        week       = dm.CURRENT_WEEK
-
-        result_embed = _result_embed(p, from_pos, to_pos, validation, p_team, log_id, season, week)
-        await interaction.followup.send(embed=result_embed)
-
-        # ── 6. If banned or failed — stop here ────────────────────────────────
-        if validation["banned"] or validation["no_rule"] or not validation["legal"]:
-            return
-
-        # ── 7. Persist the record ─────────────────────────────────────────────
-        status = "pending" if validation["requires_approval"] else "approved"
-        record = _make_record(
-            player       = p,
-            from_pos     = from_pos,
-            to_pos       = to_pos,
-            requested_by = str(interaction.user),
-            team         = p_team,
-            status       = status,
-            log_id       = log_id,
-            season       = season,
-            week         = week,
-        )
-        _state.setdefault("position_changes", []).append(record)
-        _save_state()
-
-        # ── 8. Route to announcement channel ──────────────────────────────────
-        channel = self.bot.get_channel(_roster_moves_channel_id()) if _roster_moves_channel_id() else None
-        if channel is None:
-            return  # no channel configured — still saved to state
-
-        if status == "approved":
-            await channel.send(embed=_announcement_embed(record))
-
-        elif status == "pending":
-            pending_embed = discord.Embed(
-                title=f"⏳ Pending Approval — {p_name}: {from_pos} → {to_pos}",
-                color=discord.Color.gold(),
-                description=(
-                    f"**{p_name}** ({p_team}) has requested a position change "
-                    f"that requires Commissioner approval.\n\n"
-                    f"Log ID: `{log_id}`\n"
-                    f"Submitted by: {interaction.user.mention}"
-                ),
-            )
-            pending_embed.add_field(
-                name="Admin Actions",
-                value=(
-                    f"`/positionchangeapprove {log_id}` — approve the move\n"
-                    f"`/positionchangedeny {log_id} [reason]` — deny the move"
-                ),
-                inline=False,
-            )
-            await channel.send(embed=pending_embed)
-
-    # ── /positionchangelog ─────────────────────────────────────────────────────
-    @app_commands.command(
-        name="positionchangelog",
-        description="View position change history for this season.",
-    )
-    @app_commands.describe(team="Filter by team name (optional).")
-    async def positionchangelog(
-        self,
-        interaction: discord.Interaction,
-        team: str = "",
-    ):
-        await interaction.response.defer(thinking=True)
-
-        records = [
-            r for r in _state.get("position_changes", [])
-            if r.get("season") == dm.CURRENT_SEASON
-        ]
-
-        if team.strip():
-            records = [
-                r for r in records
-                if team.strip().lower() in r.get("team", "").lower()
-            ]
-
-        if not records:
-            label = f" for **{team}**" if team.strip() else ""
-            await interaction.followup.send(
-                f"📋 No position changes recorded{label} in Season {dm.CURRENT_SEASON}."
-            )
-            return
-
-        # Status emoji map
-        STATUS_EMOJI = {"approved": "✅", "pending": "⏳", "denied": "❌"}
-
-        lines = []
-        for r in sorted(records, key=lambda x: x.get("timestamp", "")):
-            emoji = STATUS_EMOJI.get(r["status"], "❓")
-            lines.append(
-                f"{emoji} `{r['log_id']}` **{r['player_name']}** ({r['team']}) "
-                f"{r['from_pos']} → {r['to_pos']} — Wk {r['week']} — {r['status'].upper()}"
-            )
-
-        # Discord embed field cap = 1024 chars; chunk if needed
-        chunks, chunk = [], []
-        for line in lines:
-            if sum(len(l) for l in chunk) + len(line) > 900:
-                chunks.append(chunk)
-                chunk = []
-            chunk.append(line)
-        if chunk:
-            chunks.append(chunk)
-
-        title = (
-            f"🔄 Position Changes — S{dm.CURRENT_SEASON}"
-            + (f" | {team.strip()}" if team.strip() else "")
-        )
-        embed = discord.Embed(title=title, color=discord.Color.blurple())
-        for i, ch in enumerate(chunks):
-            embed.add_field(
-                name="\u200b" if i > 0 else f"{len(records)} change(s)",
-                value="\n".join(ch),
-                inline=False,
-            )
-        await interaction.followup.send(embed=embed)
-
     # ── /positionchangeapprove ────────────────────────────────────────────────
-    @app_commands.command(
-        name="positionchangeapprove",
-        description="[Admin] Approve a pending position change.",
-    )
-    @app_commands.describe(log_id="Log ID from the pending request (e.g. A1B2C3D4)")
-    async def positionchangeapprove(
+    async def positionchangeapprove_impl(
         self,
         interaction: discord.Interaction,
         log_id: str,
     ):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-
         record = _find_pending(log_id)
         if record is None:
             await interaction.response.send_message(
@@ -2042,25 +1999,28 @@ class PositionChangeCog(commands.Cog):
         if channel:
             await channel.send(embed=_announcement_embed(record))
 
-    # ── /positionchangedeny ───────────────────────────────────────────────────
     @app_commands.command(
-        name="positionchangedeny",
-        description="[Admin] Deny a pending position change.",
+        name="positionchangeapprove",
+        description="[Deprecated] Use /commish positionchangeapprove instead.",
     )
-    @app_commands.describe(
-        log_id = "Log ID from the pending request",
-        reason = "Reason for denial (shown to requester)",
-    )
-    async def positionchangedeny(
+    @app_commands.describe(log_id="Log ID from the pending request (e.g. A1B2C3D4)")
+    async def positionchangeapprove(
+        self,
+        interaction: discord.Interaction,
+        log_id: str,
+    ):
+        if interaction.user.id not in ADMIN_USER_IDS:
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+            return
+        await self.positionchangeapprove_impl(interaction, log_id)
+
+    # ── /positionchangedeny ───────────────────────────────────────────────────
+    async def positionchangedeny_impl(
         self,
         interaction: discord.Interaction,
         log_id: str,
         reason: str = "No reason provided.",
     ):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-
         record = _find_pending(log_id)
         if record is None:
             await interaction.response.send_message(
@@ -2096,6 +2056,25 @@ class PositionChangeCog(commands.Cog):
             )
             deny_embed.set_footer(text=f"Log ID: {record['log_id']}")
             await channel.send(embed=deny_embed)
+
+    @app_commands.command(
+        name="positionchangedeny",
+        description="[Deprecated] Use /commish positionchangedeny instead.",
+    )
+    @app_commands.describe(
+        log_id = "Log ID from the pending request",
+        reason = "Reason for denial (shown to requester)",
+    )
+    async def positionchangedeny(
+        self,
+        interaction: discord.Interaction,
+        log_id: str,
+        reason: str = "No reason provided.",
+    ):
+        if interaction.user.id not in ADMIN_USER_IDS:
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+            return
+        await self.positionchangedeny_impl(interaction, log_id, reason)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2307,17 +2286,15 @@ Basis: [Rules-based / Strategic Override / Both]
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _fetch_image_bytes(url: str) -> bytes:
-    """Download an image from a Discord CDN URL (sync — call via run_in_executor)."""
+    """Download an image from a Discord CDN URL."""
     resp = requests.get(url, timeout=15)
     resp.raise_for_status()
     return resp.content
 
 
 async def _analyze_screenshot(image_bytes: bytes, filename: str) -> str:
-    """Send screenshot to Gemini Vision and get a TSL ruling (async-safe)."""
-    import asyncio
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _analyze_screenshot_sync, image_bytes, filename)
+    """Send screenshot to Gemini Vision and get a TSL ruling (async wrapper)."""
+    return _analyze_screenshot_sync(image_bytes, filename)
 
 
 def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
@@ -2462,6 +2439,351 @@ class FourthDown(commands.Cog):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  SENTINEL HUB — Modals
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DisconnectModal(discord.ui.Modal, title="📡 DC Protocol Lookup"):
+    """Collects quarter and margin, then shows the DC protocol ruling."""
+
+    quarter_input = discord.ui.TextInput(
+        label="Quarter (1-4)",
+        placeholder="e.g. 3",
+        max_length=1,
+    )
+    margin_input = discord.ui.TextInput(
+        label="Score Margin",
+        placeholder="e.g. 14",
+        max_length=4,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            quarter = int(self.quarter_input.value.strip())
+            margin = int(self.margin_input.value.strip())
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Quarter and margin must be numbers.", ephemeral=True
+            )
+        result = _dc_protocol_embed(quarter, margin)
+        if isinstance(result, str):
+            return await interaction.response.send_message(result, ephemeral=True)
+        await interaction.response.send_message(embed=result, ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ Something went wrong with the DC lookup.", ephemeral=True
+            )
+
+
+class BlowoutModal(discord.ui.Modal, title="💥 Blowout Check"):
+    """Collects team names and scores to check blowout protocol."""
+
+    home_team_input = discord.ui.TextInput(
+        label="Home Team",
+        placeholder="e.g. Cowboys",
+        max_length=40,
+    )
+    home_score_input = discord.ui.TextInput(
+        label="Home Score",
+        placeholder="e.g. 42",
+        max_length=4,
+    )
+    away_team_input = discord.ui.TextInput(
+        label="Away Team",
+        placeholder="e.g. Eagles",
+        max_length=40,
+    )
+    away_score_input = discord.ui.TextInput(
+        label="Away Score",
+        placeholder="e.g. 7",
+        max_length=4,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            home_score = int(self.home_score_input.value.strip())
+            away_score = int(self.away_score_input.value.strip())
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Scores must be numbers.", ephemeral=True
+            )
+        embed = _blowout_check_embed(
+            self.home_team_input.value.strip(),
+            home_score,
+            self.away_team_input.value.strip(),
+            away_score,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ Something went wrong with the blowout check.", ephemeral=True
+            )
+
+
+class StatCheckModal(discord.ui.Modal, title="📊 Stat Check"):
+    """Collects player, stat type, and yards to flag stat-padding."""
+
+    player_input = discord.ui.TextInput(
+        label="Player Name",
+        placeholder="e.g. Patrick Mahomes",
+        max_length=60,
+    )
+    stat_type_input = discord.ui.TextInput(
+        label="Stat Type (passing / rushing / receiving)",
+        placeholder="e.g. passing",
+        max_length=20,
+    )
+    yards_input = discord.ui.TextInput(
+        label="Yards",
+        placeholder="e.g. 475",
+        max_length=6,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            yards = int(self.yards_input.value.strip())
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Yards must be a number.", ephemeral=True
+            )
+        embed = _stat_check_embed(
+            self.player_input.value.strip(),
+            self.stat_type_input.value.strip(),
+            yards,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ Something went wrong with the stat check.", ephemeral=True
+            )
+
+
+class PositionChangeModal(discord.ui.Modal, title="🔄 Position Change Request"):
+    """Collects player name, new position, and team for a position change."""
+
+    player_input = discord.ui.TextInput(
+        label="Player Name (partial match OK)",
+        placeholder="e.g. Travis Kelce",
+        max_length=80,
+    )
+    new_pos_input = discord.ui.TextInput(
+        label="New Position (e.g. TE, WR, S, CB, LB, FB)",
+        placeholder="e.g. WR",
+        max_length=10,
+    )
+    team_input = discord.ui.TextInput(
+        label="Your Team Name (partial match OK)",
+        placeholder="e.g. Chiefs",
+        max_length=40,
+    )
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__()
+        self.bot_ref = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            await _run_position_change(
+                interaction,
+                self.bot_ref,
+                self.player_input.value.strip(),
+                self.new_pos_input.value.strip(),
+                self.team_input.value.strip(),
+            )
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            await interaction.followup.send(
+                f"❌ Position change error: `{e}`", ephemeral=True
+            )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ Something went wrong with the position change.", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ Something went wrong with the position change.", ephemeral=True
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SENTINEL HUB — Persistent Button View
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SentinelHubView(discord.ui.View):
+    """
+    Persistent button hub for Sentinel enforcement tools.
+    - timeout=None              buttons never expire on their own
+    - custom_id on each button  bot can re-register on restart
+    - All drill-downs ephemeral no channel flood
+    """
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    # ── Row 0: Core Enforcement ──────────────────────────────────────────────
+
+    @discord.ui.button(
+        label="File Complaint", style=discord.ButtonStyle.primary,
+        row=0, custom_id="sentinel:complaint", emoji="📋",
+    )
+    async def btn_complaint(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            embed = discord.Embed(
+                title="📋 TSL Complaint System",
+                description=(
+                    "Use this system to report a legitimate rule violation or conduct issue.\n\n"
+                    "**Step 1:** Select a category below.\n"
+                    "**Step 2:** Fill in the accused owner, your explanation, and any external links.\n"
+                    "**Step 3:** Upload screenshots or video clips directly in your case thread.\n\n"
+                    "⚠️ *False or frivolous complaints may result in penalties against the filer.*"
+                ),
+                color=discord.Color.orange(),
+            )
+            embed.add_field(
+                name="📂 Categories",
+                value="\n".join(f"{e} **{l}** — {d}" for _, (e, l, d) in CATEGORIES.items()),
+                inline=False,
+            )
+            embed.add_field(
+                name="📎 Evidence",
+                value=(
+                    "After submitting, a private case thread will be created where you can upload "
+                    "**screenshots, clips, and videos** directly — no links required."
+                ),
+                inline=False,
+            )
+            embed.set_footer(text="TSL Commissioner Office — All complaints are reviewed.")
+            await interaction.response.send_message(
+                embed=embed, view=CategoryView(self.bot), ephemeral=True
+            )
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Something went wrong opening the complaint flow.", ephemeral=True
+                )
+
+    @discord.ui.button(
+        label="Force Request", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="sentinel:forcerequest", emoji="🏳️",
+    )
+    async def btn_forcerequest(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.send_message(
+                "Use `/forcerequest` to submit a force win request (requires screenshot attachment).",
+                ephemeral=True,
+            )
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+
+    @discord.ui.button(
+        label="4th Down", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="sentinel:fourthdown", emoji="🏈",
+    )
+    async def btn_fourthdown(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.send_message(
+                "Use `/fourthdown` to submit a 4th down ruling request (requires screenshot attachment).",
+                ephemeral=True,
+            )
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+
+    # ── Row 1: Quick Lookups (modals) ────────────────────────────────────────
+
+    @discord.ui.button(
+        label="DC Protocol", style=discord.ButtonStyle.success,
+        row=1, custom_id="sentinel:dcprotocol", emoji="📡",
+    )
+    async def btn_dcprotocol(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(DisconnectModal())
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Could not open the DC Protocol modal.", ephemeral=True
+                )
+
+    @discord.ui.button(
+        label="Blowout Check", style=discord.ButtonStyle.success,
+        row=1, custom_id="sentinel:blowout", emoji="💥",
+    )
+    async def btn_blowout(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(BlowoutModal())
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Could not open the Blowout Check modal.", ephemeral=True
+                )
+
+    @discord.ui.button(
+        label="Stat Check", style=discord.ButtonStyle.success,
+        row=1, custom_id="sentinel:statcheck", emoji="📊",
+    )
+    async def btn_statcheck(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(StatCheckModal())
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Could not open the Stat Check modal.", ephemeral=True
+                )
+
+    # ── Row 2: Position Changes ──────────────────────────────────────────────
+
+    @discord.ui.button(
+        label="Position Change", style=discord.ButtonStyle.primary,
+        row=2, custom_id="sentinel:poschange", emoji="🔄",
+    )
+    async def btn_poschange(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(PositionChangeModal(self.bot))
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Could not open the Position Change modal.", ephemeral=True
+                )
+
+    @discord.ui.button(
+        label="Position Log", style=discord.ButtonStyle.secondary,
+        row=2, custom_id="sentinel:poslog", emoji="📜",
+    )
+    async def btn_poslog(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            embed = _build_positionchangelog_embed()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Could not load the position change log.", ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ Could not load the position change log.", ephemeral=True
+                )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  SENTINEL HUB — /rulehub
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2479,46 +2801,43 @@ class SentinelHubCog(commands.Cog):
         embed = discord.Embed(
             title="⚔️ ATLAS Sentinel — Rules Hub",
             description=(
-                "Your one-stop panel for TSL rule enforcement, compliance, and dispute resolution."
+                "Your one-stop panel for TSL rule enforcement, compliance, and dispute resolution.\n"
+                "Use the buttons below to access enforcement tools."
             ),
             color=discord.Color.from_rgb(201, 150, 42),
         )
         embed.set_thumbnail(url=ATLAS_ICON_URL)
 
         embed.add_field(
-            name="⚖️ Disputes",
+            name="⚖️ Core Enforcement",
             value=(
-                "`/complaint` — File a complaint against an owner\n"
-                "`/caselist` — View open complaint cases\n"
-                "`/caseview` — Inspect a case by ID\n"
-                "`/forcerequest` — Submit a force win request\n"
-                "`/forcehistory` — [Admin] Session force request stats"
+                "**File Complaint** — Report a rule violation or conduct issue\n"
+                "**Force Request** — Submit a force win request (screenshot required)\n"
+                "**4th Down** — Request an official 4th down ruling (screenshot required)"
             ),
             inline=False,
         )
         embed.add_field(
-            name="🏈 Gameplay Rules",
+            name="🏈 Quick Lookups",
             value=(
-                "`/fourthdown` — Get official 4th down ruling\n"
-                "`/blowoutcheck` — Check blowout protocol\n"
-                "`/disconnectlookup` — DC protocol by quarter\n"
-                "`/statcheck` — Flag stat-padding concern"
+                "**DC Protocol** — Look up disconnect protocol by quarter & margin\n"
+                "**Blowout Check** — Check blowout protocol compliance\n"
+                "**Stat Check** — Flag a potential stat-padding concern"
             ),
             inline=False,
         )
         embed.add_field(
             name="📋 Roster Compliance",
             value=(
-                "`/positionchange` — Request a position change\n"
-                "`/positionchangelog` — View position change history\n"
-                "`/positionchangeapprove` — [Admin] Approve a position change\n"
-                "`/positionchangedeny` — [Admin] Deny a position change\n"
-                "`/abilityaudit` & `/abilitycheck` — via `/rosterhub` (Genesis Module)"
+                "**Position Change** — Request a position change for a player\n"
+                "**Position Log** — View position change history this season"
             ),
             inline=False,
         )
         embed.set_footer(text="ATLAS™ Sentinel Module · TSL Enforcement & Compliance")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(
+            embed=embed, view=SentinelHubView(self.bot), ephemeral=True
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2526,6 +2845,7 @@ class SentinelHubCog(commands.Cog):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def setup(bot: commands.Bot):
+    bot.add_view(SentinelHubView(bot))
     await bot.add_cog(ComplaintCog(bot))
     await bot.add_cog(ForceRequestCog(bot))
     await bot.add_cog(GameplayCog(bot))

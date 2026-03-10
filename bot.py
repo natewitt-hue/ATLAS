@@ -32,8 +32,8 @@ v1.4.0 changes:
 v1.4.1 changes:
   - ADD:  kalshi_cog — ATLAS Flow Casino: Prediction Market module.
           Syncs real-world Kalshi markets every 5 min; users bet TSL Bucks
-          on Economics, Politics, and Entertainment events (/markets, /bet,
-          /portfolio, /resolve_market).
+          on Economics, Politics, and Entertainment events (/markets,
+          /resolve_market). Betting and portfolio are in the /markets browser.
   - FIX:  All 8 cog-loader except blocks now include the exception message
           inline (e) so a quick read of the terminal log shows the failure
           without needing to parse the full traceback below it.
@@ -74,6 +74,38 @@ v1.5.0 changes:
           else defaults to casual.
   - FIX:  awards_cog comment corrected — was mislabeled "ATLAS Echo".
 ─────────────────────────────────────────────────────────────────────────────
+v2.0.0 changes:
+  - OVERHAUL: Command Architecture, Permissions & Channel Routing.
+          Reduces ~92 flat slash commands to ~10 for non-admin users.
+  - ADD:  /atlas group (hidden) — sync, rebuilddb, clearsync, status,
+          echorebuild, echostatus. Admin-only via default_permissions.
+  - ADD:  /commish group (hidden) — 42 commissioner admin commands
+          organized into subgroups: sb (15), casino (11), markets (3),
+          plus 11 flat admin commands.
+  - ADD:  commish_cog.py — new cog that delegates to existing _impl methods.
+  - ADD:  permissions.py — centralized permission checks and channel routing.
+  - ADD:  /setup command — interactive channel configuration for server admins.
+  - ADD:  SentinelHubView — persistent button hub replacing flat sentinel commands.
+  - ADD:  Sportsbook board buttons — My Bets, History, Leaderboard, Props.
+  - ADD:  Casino hub "My Stats" button.
+  - ADD:  Oracle HubView "Season Recap" button and modal.
+  - ADD:  Polymarket browser "My Portfolio" button.
+  - ADD:  Genesis "Cornerstone Designate" modal in hub.
+  - CHG:  All admin commands retain deprecated flat wrappers during transition.
+  - RMV:  /lockgame, /setline (legacy aliases).
+  - RMV:  /blackjack, /slots, /crash, /coinflip, /challenge, /scratch,
+          /casino_stats (absorbed into /casino hub).
+  - RMV:  /mybets, /bethistory, /leaderboard, /props (absorbed into
+          /sportsbook board buttons).
+  - RMV:  /bet, /portfolio (absorbed into /markets browser).
+  - RMV:  /complaint, /disconnectlookup, /blowoutcheck, /statcheck,
+          /positionchange, /positionchangelog (absorbed into /rulehub).
+  - RMV:  /h2h, /season_recap (absorbed into oracle HubView buttons).
+  - RMV:  /tradelookup, /devaudit, /abilityaudit, /abilitycheck,
+          /cornerstonedesignate, /lotterystandings, /contractcheck
+          (absorbed into /rosterhub buttons).
+  - RMV:  /statshub (redundant with /stats hub).
+─────────────────────────────────────────────────────────────────────────────
 """
 
 import asyncio
@@ -108,6 +140,13 @@ try: import lore_rag
 except ImportError: lore_rag = None
 
 try:
+    import affinity as affinity_mod
+    _affinity_available = True
+except ImportError:
+    affinity_mod = None
+    _affinity_available = False
+
+try:
     from echo_loader import load_all_personas, get_persona, infer_context
     _echo_available = True
 except ImportError:
@@ -127,7 +166,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "1.5.0"  # Increment with every deployment
+ATLAS_VERSION = "2.0.0"  # Increment with every deployment
 ATLAS_ICON_URL  = "https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
 ATLAS_GOLD      = discord.Color.from_rgb(201, 150, 42)
 ATLAS_DARK      = discord.Color.from_rgb(10,  10,  10)
@@ -137,8 +176,6 @@ DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 ADMIN_USER_IDS   = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
-# Required by kalshi_cog — set PREDICTION_MARKET_CHANNEL_ID in .env
-PREDICTION_MARKET_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 intents       = discord.Intents.all()
@@ -151,86 +188,41 @@ _startup_done = False
 
 @bot.event
 async def setup_hook():
-    # ── ATLAS Echo — load FIRST so personas are in memory before any cog
-    #    attempts a Gemini call. Fallback stubs activate automatically if
-    #    echo/ files haven't been generated yet — bot will not crash.
-    try:
-        await bot.load_extension("echo_cog")
-        # echo_cog prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading echo_cog: {e}")
-        traceback.print_exc()
+    # Ordered cog list — load order matters:
+    #   1. echo_cog FIRST: personas must be in memory before any cog calls Gemini.
+    #      Fallback stubs activate if echo/ files haven't been generated yet.
+    #   2. setup_cog SECOND: provisions channels and populates server_config
+    #      table that all other cogs depend on for routing.
+    #   3. Everything else: order does not matter; all print their own load messages.
+    _EXTENSIONS = [
+        "echo_cog",           # ATLAS Echo — voice personas (MUST be first)
+        "setup_cog",          # ATLAS Setup — server config (MUST be second)
+        "flow_sportsbook",    # ATLAS Flow — TSL sportsbook
+        "casino.casino",      # ATLAS Casino — games & economy
+        "oracle_cog",         # ATLAS Oracle — stats, profiles, analytics
+        "genesis_cog",        # ATLAS Genesis — trade center, parity, dev traits
+        "sentinel_cog",       # ATLAS Sentinel — enforcement, compliance, disputes
+        "awards_cog",         # ATLAS Core — awards & voting
+        "codex_cog",          # ATLAS Codex — historical AI (/ask, /h2h)
+        "polymarket_cog",     # ATLAS Flow — Polymarket prediction markets
+        "economy_cog",        # ATLAS Economy — money management & stipends
+        "commish_cog",        # ATLAS Commissioner — unified admin commands
+    ]
 
-    # ── Setup Cog MUST load second — provisions channels and populates
-    #    server_config table that all other cogs depend on for routing.
-    try:
-        await bot.load_extension("setup_cog")
-        # setup_cog prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading setup_cog: {e}")
-        traceback.print_exc()
+    for ext in _EXTENSIONS:
+        try:
+            await bot.load_extension(ext)
+        except Exception as e:
+            print(f"ATLAS Error loading {ext}: {e}")
+            traceback.print_exc()
 
-    try:
-        await bot.load_extension("flow_sportsbook")
-        # prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading flow_sportsbook: {e}")
-        traceback.print_exc()
-
-    try:
-        await bot.load_extension("casino.casino")
-        # casino prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading casino: {e}")
-        traceback.print_exc()
-
-    # ATLAS Oracle — stats, profiles, analytics (/stats family + /statshub)
-    try:
-        await bot.load_extension("oracle_cog")
-        # oracle_cog prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading oracle_cog: {e}")
-        traceback.print_exc()
-
-    # ATLAS Genesis — trade center, parity, dev traits (/trade, /devaudit, etc.)
-    try:
-        await bot.load_extension("genesis_cog")
-        # genesis_cog prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading genesis_cog: {e}")
-        traceback.print_exc()
-
-    # ATLAS Sentinel — enforcement, compliance, disputes (/complaint, /fourthdown, etc.)
-    try:
-        await bot.load_extension("sentinel_cog")
-        # sentinel_cog prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading sentinel_cog: {e}")
-        traceback.print_exc()
-
-    # ATLAS Core — awards & voting (/vote, /mvp, etc.)
-    try:
-        await bot.load_extension("awards_cog")
-        print("ATLAS: Echo · Awards Engine loaded. 🏆")
-    except Exception as e:
-        print(f"ATLAS Error loading awards_cog: {e}")
-        traceback.print_exc()
-
-    # ATLAS Codex — historical AI (/ask, /h2h, /season_recap)
-    try:
-        await bot.load_extension("codex_cog")
-        # codex_cog prints its own load message
-    except Exception as e:
-        print(f"ATLAS Error loading codex_cog: {e}")
-        traceback.print_exc()
-
-    # ATLAS Flow — Kalshi prediction markets (/markets, /bet, /portfolio)
-    try:
-        await bot.load_extension("kalshi_cog")
-        print("ATLAS: Flow · Kalshi Prediction Markets loaded. 📊")
-    except Exception as e:
-        print(f"ATLAS Error loading kalshi_cog: {e}")
-        traceback.print_exc()
+    # Affinity DB table setup (safe to call every startup)
+    if _affinity_available:
+        try:
+            await affinity_mod.setup_affinity_db()
+            print("ATLAS: User affinity system initialized.")
+        except Exception as e:
+            print(f"ATLAS: Affinity DB setup failed: {e}")
 
     # FIX #9: Only sync command tree on initial boot (setup_hook runs once).
     # This avoids burning Discord's 200 syncs/day rate limit during debugging.
@@ -367,14 +359,22 @@ async def blowout_monitor():
 
 @bot.event
 async def on_ready():
-    global _startup_done
+    global _startup_done, _bot_start_time
 
-    # FIX #8: Only run load_all() on first boot, not on every Discord reconnect.
-    # Discord fires on_ready after every resume/reconnect — without this guard,
-    # each reconnect would re-run the full MaddenStats API sweep.
     if _startup_done:
         print(f"--- ATLAS v{ATLAS_VERSION} RECONNECTED | {dm.get_league_status()} (skipping reload) ---")
         return
+
+    import time
+    _bot_start_time = time.time()
+
+    # Set presence immediately so the bot shows online during data load
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="TSL · INTELLIGENCE · OVERSIGHT · AUTHORITY"
+        )
+    )
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _startup_load)
@@ -382,14 +382,6 @@ async def on_ready():
 
     print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
     print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
-
-    # Set ATLAS presence / status line
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name="TSL · INTELLIGENCE · OVERSIGHT · AUTHORITY"
-        )
-    )
 
     # Guard prevents spawning a duplicate task on every Discord reconnect
     if not blowout_monitor.is_running():
@@ -400,72 +392,174 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    # If ATLAS is mentioned, trigger the AI reasoning engine
     if bot.user.mentioned_in(message):
         user_input = re.sub(r'<@!?\d+>', '', message.content).strip()
         async with message.channel.typing():
             try:
-                # Get intent mapping (get_intent takes only the query string)
-                intent = reasoning.get_intent(user_input) if hasattr(reasoning, 'get_intent') else "GENERAL"
-
-                # Infer Echo persona from channel name
                 persona_type = infer_context(channel_name=message.channel.name)
 
-                # Build context if RAG is available (async to avoid CPU blocking)
+                # ── Affinity lookup ────────────────────────────────
+                affinity_instruction = ""
+                if _affinity_available:
+                    try:
+                        score = await affinity_mod.get_affinity(message.author.id)
+                        affinity_instruction = affinity_mod.get_affinity_instruction(score)
+                    except Exception:
+                        pass
+
+                # ── Lore RAG context (async to avoid CPU blocking) ─
                 if lore_rag and hasattr(lore_rag, 'build_lore_context_async'):
                     context = await lore_rag.build_lore_context_async(user_input)
                 elif lore_rag:
-                    loop = asyncio.get_running_loop()
-                    context = await loop.run_in_executor(None, lore_rag.build_lore_context, user_input)
+                    context = await asyncio.get_running_loop().run_in_executor(
+                        None, lore_rag.build_lore_context, user_input,
+                    )
                 else:
                     context = ""
 
-                # Fetch persona response (now non-blocking via run_in_executor)
+                if affinity_instruction:
+                    context = f"{affinity_instruction}\n\n{context}"
+
                 wit = await call_atlas(user_input, context, persona_type=persona_type)
                 await message.reply(wit)
+
+                # ── Post-interaction affinity update ───────────────
+                if _affinity_available:
+                    try:
+                        sentiment = affinity_mod.analyze_sentiment(user_input)
+                        await affinity_mod.update_affinity(message.author.id, sentiment)
+                    except Exception:
+                        pass
+
             except Exception as e:
                 print(f"Message Processing Error: {e}")
                 await message.reply("ATLAS is currently undergoing maintenance. Try again later.")
 
     await bot.process_commands(message)
 
-# ── Slash Commands ────────────────────────────────────────────────────────────
+# ── /atlas Admin Group ────────────────────────────────────────────────────────
 
-@bot.tree.command(name="wittsync", description="[Admin] Reload league data from MaddenStats.")
-async def wittsync(interaction: discord.Interaction):
-    """Admin only: Manually reload all league data from the MaddenStats API."""
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+atlas_group = app_commands.Group(
+    name="atlas",
+    description="ATLAS core system administration.",
+    default_permissions=discord.Permissions(administrator=True),
+)
+
+_bot_start_time: float = 0.0  # Set on_ready for /atlas status uptime
+
+
+@atlas_group.command(name="sync", description="Reload league data from MaddenStats API.")
+async def atlas_sync(interaction: discord.Interaction):
+    await _sync_impl(interaction)
+
+
+@atlas_group.command(name="rebuilddb", description="Force rebuild tsl_history.db from MaddenStats API.")
+async def atlas_rebuilddb(interaction: discord.Interaction):
+    await _rebuilddb_impl(interaction)
+
+
+@atlas_group.command(name="clearsync", description="Force re-sync command tree to this server.")
+async def atlas_clearsync(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    bot.tree.clear_commands(guild=interaction.guild)
+    bot.tree.copy_global_to(guild=interaction.guild)
+    await bot.tree.sync(guild=interaction.guild)
+    await interaction.followup.send("Commands synced. Restart Discord to see updates.")
+
+
+@atlas_group.command(name="status", description="Show ATLAS system status, uptime, and data freshness.")
+async def atlas_status(interaction: discord.Interaction):
+    import time
+
+    uptime_sec = int(time.time() - _bot_start_time) if _bot_start_time else 0
+    hours, remainder = divmod(uptime_sec, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+    status = dm.get_league_status() if hasattr(dm, 'get_league_status') else "Unknown"
+
+    cog_names = [name for name, _ in bot.cogs.items()]
+    cog_list = ", ".join(cog_names) if cog_names else "None loaded"
+
+    embed = discord.Embed(
+        title="ATLAS System Status",
+        color=ATLAS_GOLD,
+    )
+    embed.add_field(name="Version", value=f"v{ATLAS_VERSION}", inline=True)
+    embed.add_field(name="Uptime", value=uptime_str, inline=True)
+    embed.add_field(name="League", value=status, inline=True)
+    embed.add_field(name="Cogs Loaded", value=cog_list, inline=False)
+    embed.add_field(name="Guilds", value=str(len(bot.guilds)), inline=True)
+
+    if _echo_available:
+        try:
+            from echo_loader import get_persona_status
+            ps = get_persona_status()
+            echo_lines = []
+            for reg, info in ps.items():
+                state = "LIVE" if info.get("loaded") else ("FALLBACK" if info.get("using_fallback") else "OFF")
+                echo_lines.append(f"**{reg}**: {state}")
+            embed.add_field(name="Echo Personas", value="\n".join(echo_lines), inline=False)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@atlas_group.command(name="affinity", description="View or reset a user's ATLAS affinity score.")
+@app_commands.describe(user="The user to check", reset="Reset their score to 0?")
+async def atlas_affinity(interaction: discord.Interaction, user: discord.Member, reset: bool = False):
+    if not _affinity_available:
+        return await interaction.response.send_message(
+            "❌ Affinity system not loaded.", ephemeral=True,
+        )
+    if reset:
+        await affinity_mod.reset_affinity(user.id)
+        await interaction.response.send_message(
+            f"🔄 Reset affinity for **{user.display_name}** to 0.", ephemeral=True,
+        )
+    else:
+        score = await affinity_mod.get_affinity(user.id)
+        tier = affinity_mod.get_tier_label(score)
+        embed = discord.Embed(
+            title=f"User Affinity — {user.display_name}",
+            color=ATLAS_GOLD,
+        )
+        embed.add_field(name="Score", value=f"`{score:.1f}`", inline=True)
+        embed.add_field(name="Tier", value=tier, inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(atlas_group)
+
+
+# ── Shared Implementations (used by /atlas and deprecated wrappers) ──────────
+
+async def _sync_impl(interaction: discord.Interaction):
+    """Core sync logic — shared by /atlas sync and deprecated /wittsync."""
     await interaction.response.defer(thinking=True)
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, dm.load_all)
 
-    # Rebuild owner map with fresh team data
     if intel:
         try:
             intel.build_owner_map()
         except Exception as e:
-            # FIX #3: log instead of bare except: pass
             print(f"ATLAS: build_owner_map() failed during sync: {e}")
 
-    # Invalidate schema cache so reasoning engine sees new column names
     try:
         reasoning._SCHEMA_CACHE     = ""
         reasoning._SCHEMA_TIMESTAMP = 0.0
     except AttributeError:
         pass
 
-    # Auto-grade any bets whose games now have scores
     try:
         if dm._autograde_callback is not None:
             await dm._autograde_callback()
     except Exception as e:
         print(f"ATLAS: auto_grade error: {e}")
 
-    # Rebuild tsl_history.db with fresh data from the API
-    # Pass pre-loaded player/ability data from dm to avoid duplicate API hits
     try:
         db_result = await loop.run_in_executor(
             None,
@@ -475,26 +569,22 @@ async def wittsync(interaction: discord.Interaction):
             )
         )
         if db_result["success"]:
-            db_line = f"\n📁 History DB: **{db_result['games']}** games | **{db_result['players']}** players ({db_result['elapsed']}s)"
+            db_line = f"\nHistory DB: **{db_result['games']}** games | **{db_result['players']}** players ({db_result['elapsed']}s)"
         else:
-            db_line = f"\n⚠️ History DB sync had issues: {', '.join(db_result['errors'][:2])}"
+            db_line = f"\nHistory DB sync had issues: {', '.join(db_result['errors'][:2])}"
     except Exception as e:
-        db_line = f"\n⚠️ History DB sync failed: `{e}`"
+        db_line = f"\nHistory DB sync failed: `{e}`"
 
     status = dm.get_league_status()
     await interaction.followup.send(
-        f"✅ Data reloaded. League status: **{status}**{db_line}"
+        f"Data reloaded. League status: **{status}**{db_line}"
     )
 
-@bot.tree.command(name="rebuilddb", description="Admin: Force rebuild tsl_history.db from MaddenStats API")
-async def rebuilddb(interaction: discord.Interaction):
-    """Admin only: Manually trigger a full tsl_history.db rebuild."""
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+
+async def _rebuilddb_impl(interaction: discord.Interaction):
+    """Core DB rebuild logic — shared by /atlas rebuilddb and deprecated /rebuilddb."""
     await interaction.response.defer(thinking=True)
     loop = asyncio.get_running_loop()
-    # Use cached dm data if available to avoid duplicate API hits (matches /wittsync behavior)
     players = dm.get_players() if hasattr(dm, 'get_players') else None
     abilities = dm.get_player_abilities() if hasattr(dm, 'get_player_abilities') else None
     if players and abilities:
@@ -506,25 +596,35 @@ async def rebuilddb(interaction: discord.Interaction):
         db_result = await loop.run_in_executor(None, db_builder.sync_tsl_db)
     if db_result["success"]:
         lines = [
-            f"✅ **tsl_history.db rebuilt** in {db_result['elapsed']}s",
-            f"📊 Games: **{db_result['games']}**",
-            f"👤 Players: **{db_result['players']}**",
+            f"**tsl_history.db rebuilt** in {db_result['elapsed']}s",
+            f"Games: **{db_result['games']}**",
+            f"Players: **{db_result['players']}**",
         ]
         if db_result["errors"]:
-            lines.append(f"⚠️ Warnings: {', '.join(db_result['errors'][:3])}")
+            lines.append(f"Warnings: {', '.join(db_result['errors'][:3])}")
     else:
-        lines = [f"❌ DB rebuild failed: {', '.join(db_result['errors'][:3])}"]
+        lines = [f"DB rebuild failed: {', '.join(db_result['errors'][:3])}"]
     await interaction.followup.send("\n".join(lines))
 
 
-@bot.command()
-async def clearsync(ctx):
-    """Admin only: Forces commands to appear in this server."""
-    if ctx.author.id not in ADMIN_USER_IDS: return
-    bot.tree.clear_commands(guild=ctx.guild)
-    bot.tree.copy_global_to(guild=ctx.guild)
-    await bot.tree.sync(guild=ctx.guild)
-    await ctx.send("✅ Commands synced. Restart Discord.")
+# ── Deprecated Wrappers (remove in Phase 5) ─────────────────────────────────
+
+@bot.tree.command(name="wittsync", description="[Deprecated] Use /atlas sync instead.")
+async def wittsync(interaction: discord.Interaction):
+    if interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("Admin only.", ephemeral=True)
+        return
+    await _sync_impl(interaction)
+    await interaction.followup.send("_Tip: Use `/atlas sync` instead — this command will be removed soon._")
+
+
+@bot.tree.command(name="rebuilddb", description="[Deprecated] Use /atlas rebuilddb instead.")
+async def rebuilddb(interaction: discord.Interaction):
+    if interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("Admin only.", ephemeral=True)
+        return
+    await _rebuilddb_impl(interaction)
+    await interaction.followup.send("_Tip: Use `/atlas rebuilddb` instead — this command will be removed soon._")
 
 # ── Code Snapshot Export ──────────────────────────────────────────────────────
 

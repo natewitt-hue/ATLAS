@@ -89,6 +89,16 @@ async def play_coinflip(
         channel_id = interaction.channel_id,
     )
 
+    # Post to #casino-ledger
+    from casino.casino import post_to_ledger
+    await post_to_ledger(
+        bot=interaction.client, guild_id=interaction.guild_id,
+        discord_id=uid, game_type=GAME_TYPE,
+        wager=wager, outcome=outcome, payout=payout,
+        multiplier=2.0 if won else 0.0,
+        new_balance=db_result["new_balance"],
+    )
+
     profit     = payout - wager
     profit_str = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
     coin_emoji = "🌕" if result == "heads" else "🌑"
@@ -184,6 +194,24 @@ class ChallengeView(discord.ui.View):
 
         self.clear_items()
         await interaction.response.edit_message(embed=embed, view=self)
+
+        # Post to #casino-ledger (winner + loser)
+        from casino.casino import post_to_ledger
+        from casino.casino_db import get_balance
+        winner_bal = await get_balance(winner_id)
+        loser_bal  = await get_balance(loser_id)
+        await post_to_ledger(
+            bot=interaction.client, guild_id=interaction.guild_id,
+            discord_id=winner_id, game_type="coinflip_pvp",
+            wager=self.wager, outcome="win", payout=payout,
+            multiplier=1.9, new_balance=winner_bal,
+        )
+        await post_to_ledger(
+            bot=interaction.client, guild_id=interaction.guild_id,
+            discord_id=loser_id, game_type="coinflip_pvp",
+            wager=self.wager, outcome="loss", payout=0,
+            multiplier=0.0, new_balance=loser_bal,
+        )
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="❌")
     async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):

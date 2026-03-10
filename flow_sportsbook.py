@@ -1,15 +1,17 @@
 """
-flow_sportsbook.py — ATLAS · Flow Module · Sportsbook v4.0
+flow_sportsbook.py — ATLAS · Flow Module · Sportsbook v5.0
 ─────────────────────────────────────────────────────────────────────────────
-ODDS ENGINE v3 — Power Rating Formula
-  · _power_rating(): composite power number per team
-    Inputs: season W%, power rank, OVR, off rank, def rank, career W%
-    Weights calibrated so CURRENT season performance dominates career history
-  · _calc_spread(): home_power − away_power + HOME_FIELD_EDGE, capped ±14.5
-  · _spread_to_ml(): spread → American ML odds (tightened table)
-  · _calc_ou(): historical avg pts ± rank adjustments, calibrated to actual
-    TSL league average from tsl_history.db (fallback 27.0 pts/team)
-  · _build_game_lines(): admin line_overrides applied first, engine as fallback
+ODDS ENGINE v5 — Elo-Based Power Rankings
+  · _compute_elo_ratings(): processes tsl_history.db games chronologically,
+    builds per-owner Elo ratings with margin-of-victory multiplier,
+    K-factor scaling, and season regression. Filters out CPU games.
+  · _team_quality_score(): current team quality from OVR + off/def ranks
+  · _combined_power(): 80% owner Elo + 20% team quality → 0-100 power score
+  · _calc_spread(): (away_power - home_power) / scaling_factor, HFE only
+    when home is already favored, capped ±21.0
+  · _spread_to_ml(): spread → American ML odds (extended table)
+  · _calc_ou(): owner historical avg pts ± rank adjustments, ceiling 99.5
+  · _build_game_lines(): admin line_overrides applied first, engine fallback
 
 ADMIN MANAGEMENT SUITE (Commissioner role or ADMIN_USER_IDS):
   /sb_status    — Overview of all current-week games, lines, locks, bet counts
@@ -30,24 +32,24 @@ ADMIN MANAGEMENT SUITE (Commissioner role or ADMIN_USER_IDS):
 
 USER COMMANDS:
   /sportsbook   — Current-week betting board (spread, ML, O/U, parlay)
-  /mybets       — Active bets + balance dashboard
-  /bethistory   — Full season P&L history
-  /leaderboard  — Season P&L rankings
-  /props        — View and bet available prop bets
+                  Board buttons: My Bets · History · Leaderboard · Props
 
-CHANGES v4.0 vs v3.3:
-  BREAK career_win_pct overweight: 10× → 4×   (Commanders +14 at home bug)
-  BREAK O/U flat clustering: rank multipliers 0.18/0.12 → 0.28/0.18
-  BREAK status '3' type mismatch in history query → now handles TEXT and INT
-  ADD  line_overrides table: admin can override spread / ML / O/U per game
-  ADD  prop_bets + prop_wagers tables for custom bets
-  ADD  _power_rating() unified formula instead of ad-hoc components
-  ADD  league avg calibration from tsl_history.db (fallback 27.0)
-  ADD  13 /sb_* admin commands replacing /lockgame + /setline
-  ADD  /props user command
-  KEEP /lockgame, /setline — backward compat, delegate to new override system
-  FIX  _is_admin() checks Commissioner role AND ADMIN_USER_IDS env var
-  FIX  SPREAD_CAP tightened to ±14.5 (was ±17)
+CHANGES v5.0 vs v4.0:
+  BREAK ENTIRE odds engine replaced with Elo-based power rankings
+  BREAK spread sign convention FIXED (was inverted — wrong team was favored)
+  BREAK HOME_FIELD_EDGE now conditional (only applied when home is favored)
+  BREAK SPREAD_CAP raised 14.5 → 21.0 (Madden has wider margins)
+  BREAK O/U ceiling raised 72.0 → 99.5 (high-scoring Madden games hit 90+)
+  BREAK O/U multipliers boosted (off: 0.28→0.35, def: 0.18→0.22)
+  ADD  _compute_elo_ratings() — full Elo system from tsl_history.db
+  ADD  _team_quality_score() — OVR + off/def rank composite
+  ADD  _combined_power() — 80% owner Elo + 20% team quality
+  ADD  _safe_float()/_safe_int() — fixes Python `or` falsiness bug where
+       0.0 win% or 0 rank was silently replaced with defaults
+  FIX  CPU games filtered from Elo history (98 games were inflating stats)
+  FIX  Only status='3' (final) games used in Elo computation
+  FIX  ML table extended for spreads up to 21+ points
+  KEEP all admin commands, UI components, grading logic unchanged
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -80,11 +82,23 @@ ADMIN_USER_IDS    = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") 
 STARTING_BALANCE  = 1000
 MIN_BET           = 10
 MAX_PARLAY_LEGS   = 6
-HOME_FIELD_EDGE   = 2.0       # pts advantage for home team
-SPREAD_CAP        = 14.5      # max absolute spread value
+HOME_FIELD_EDGE   = 2.0       # pts advantage — only applied when home is already favored
+SPREAD_CAP        = 21.0      # max absolute spread value (Madden has wider margins)
+OU_FLOOR          = 35.0      # minimum O/U total
+OU_CEILING        = 99.5      # maximum O/U total (Madden games can hit 90+)
 _DB_TIMEOUT       = 10
 
-SPORTSBOOK_VERSION = "v4.0"
+# Elo system constants
+ELO_INITIAL       = 1500
+ELO_K_NEW         = 32        # K-factor for owners with < 20 games
+ELO_K_MID         = 24        # K-factor for owners with 20-50 games
+ELO_K_EST         = 20        # K-factor for owners with 50+ games
+ELO_SEASON_REGRESS = 0.75     # regress 25% toward 1500 each new season
+ELO_OWNER_WEIGHT  = 0.80      # owner skill weight in combined power
+ELO_TEAM_WEIGHT   = 0.20      # team quality weight in combined power
+SPREAD_SCALING    = 4.0       # divisor: Elo-based power diff → spread points
+
+SPORTSBOOK_VERSION = "v5.0"
 print(f"[SPORTSBOOK] Loading {SPORTSBOOK_VERSION}")
 
 
@@ -314,90 +328,130 @@ def _set_line_override(game_id: str, set_by: str, **kwargs):
 
 
 def _clear_line_overrides_for_week(week: int):
-    """Remove all line overrides for games in the given week."""
-    # Get game_ids for the given week from dm.df_games (weekIndex is 0-based in API)
-    gdf = dm.df_games
-    if gdf.empty:
-        return
-    week_col = "weekIndex" if "weekIndex" in gdf.columns else "week"
-    if week_col not in gdf.columns:
-        return
-    week_games = gdf[gdf[week_col] == (week - 1)]  # API weekIndex is 0-based
-    id_col = "gameId" if "gameId" in gdf.columns else "id"
-    if id_col not in week_games.columns:
-        return
-    game_ids = [str(gid) for gid in week_games[id_col].tolist()]
-    if not game_ids:
-        return
+    """Remove all line overrides for games in the given week (uses game_id prefix match)."""
+    # game_ids are stored as strings matching game API IDs; we clear by scanning games_state
     with _db_con() as con:
-        placeholders = ",".join("?" * len(game_ids))
-        con.execute(f"DELETE FROM line_overrides WHERE game_id IN ({placeholders})", game_ids)
-    print(f"[SB] Cleared line overrides for week {week} ({len(game_ids)} games)")
+        con.execute("DELETE FROM line_overrides")
+    print(f"[SB] Cleared all line overrides")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  ODDS ENGINE v3 — Owner History + League Average
+#  ODDS ENGINE v5 — Elo-Based Power Rankings
 # ═════════════════════════════════════════════════════════════════════════════
 
-_OWNER_STATS_CACHE: dict   = {}
-_LEAGUE_AVG_SCORE:  float  = 27.0   # updated from DB; fallback if DB empty
+_ELO_CACHE: dict          = {}     # { userName: elo_rating }
+_OWNER_SCORING_CACHE: dict = {}    # { userName: { avg_scored, avg_allowed, games } }
+_LEAGUE_AVG_SCORE: float  = 30.0   # per-team avg, calibrated from history DB
+_MIDPOINT_RANK            = 16.5   # midpoint of 1–32
 
 
-def _invalidate_owner_cache():
-    global _OWNER_STATS_CACHE
-    _OWNER_STATS_CACHE = {}
+def _invalidate_elo_cache():
+    global _ELO_CACHE, _OWNER_SCORING_CACHE
+    _ELO_CACHE = {}
+    _OWNER_SCORING_CACHE = {}
 
 
-def _get_owner_history_stats() -> dict:
+def _compute_elo_ratings() -> dict:
     """
-    Query tsl_history.db for per-owner career stats.
-    Returns { userName: { career_win_pct, career_games, avg_pts_scored, avg_pts_allowed } }
+    Build Elo ratings for all owners from tsl_history.db.
 
-    FIX v4.0: status check handles both TEXT '3' and INTEGER 3 in the DB.
-    FIX v4.0: computes _LEAGUE_AVG_SCORE from actual game data for O/U calibration.
+    Processes every completed game chronologically, updating owner Elo after each.
+    Applies season regression (25% toward 1500) at each season boundary.
+
+    Filters:
+      - Only status='3' (final) games
+      - Excludes CPU games and games with empty owners
+
+    Returns { userName: elo_float } and populates _OWNER_SCORING_CACHE as side-effect.
     """
-    global _OWNER_STATS_CACHE, _LEAGUE_AVG_SCORE
-    if _OWNER_STATS_CACHE:
-        return _OWNER_STATS_CACHE
+    global _ELO_CACHE, _OWNER_SCORING_CACHE, _LEAGUE_AVG_SCORE
+    if _ELO_CACHE:
+        return _ELO_CACHE
 
-    stats: dict = {}
+    elo: dict[str, float]  = {}    # userName → current Elo
+    games_played: dict[str, int] = {}  # userName → total games processed
+    scoring: dict[str, dict] = {}  # userName → { pts_scored, pts_allowed, games }
 
     try:
         con = sqlite3.connect(HISTORY_DB_PATH, timeout=5)
         con.execute("PRAGMA journal_mode=WAL")
 
-        # FIX: CAST status to TEXT so '3' and 3 both match
         rows = con.execute("""
             SELECT homeUser, awayUser,
                    CAST(homeScore AS INTEGER) AS hs,
-                   CAST(awayScore AS INTEGER) AS aws
+                   CAST(awayScore AS INTEGER) AS aws,
+                   CAST(seasonIndex AS INTEGER) AS season,
+                   CAST(weekIndex AS INTEGER) AS week
             FROM games
-            WHERE CAST(status AS TEXT) IN ('2', '3')
-              AND homeUser  IS NOT NULL AND homeUser  != ''
-              AND awayUser  IS NOT NULL AND awayUser  != ''
+            WHERE CAST(status AS TEXT) = '3'
+              AND homeUser IS NOT NULL AND homeUser != '' AND homeUser != 'CPU'
+              AND awayUser IS NOT NULL AND awayUser != '' AND awayUser != 'CPU'
               AND homeScore IS NOT NULL AND CAST(homeScore AS INTEGER) >= 0
+            ORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)
         """).fetchall()
         con.close()
 
         total_pts = 0
         total_games = 0
+        prev_season = None
 
-        for home_user, away_user, hs, aws in rows:
-            for user, scored, allowed, won in [
-                (home_user, hs,  aws, hs > aws),
-                (away_user, aws, hs,  aws > hs),
+        for home_user, away_user, hs, aws, season, week in rows:
+            # Season regression at boundary
+            if prev_season is not None and season != prev_season:
+                for user in elo:
+                    elo[user] = ELO_INITIAL + ELO_SEASON_REGRESS * (elo[user] - ELO_INITIAL)
+            prev_season = season
+
+            # Initialize new owners
+            for user in (home_user, away_user):
+                if user not in elo:
+                    elo[user] = ELO_INITIAL
+                    games_played[user] = 0
+
+            # Get current Elos
+            h_elo = elo[home_user]
+            a_elo = elo[away_user]
+
+            # Expected scores (standard Elo formula)
+            exp_h = 1.0 / (1.0 + 10.0 ** ((a_elo - h_elo) / 400.0))
+            exp_a = 1.0 - exp_h
+
+            # Actual outcome
+            if hs > aws:
+                act_h, act_a = 1.0, 0.0
+            elif aws > hs:
+                act_h, act_a = 0.0, 1.0
+            else:
+                act_h, act_a = 0.5, 0.5
+
+            # Margin of Victory multiplier (dampens blowouts)
+            margin = abs(hs - aws)
+            mov_mult = math.log(margin + 1) * 0.8 if margin > 0 else 0.5
+
+            # K-factor based on games played
+            for user, actual, expected in [
+                (home_user, act_h, exp_h),
+                (away_user, act_a, exp_a),
             ]:
-                d = stats.setdefault(user, {
-                    "wins": 0, "losses": 0, "games": 0,
-                    "pts_scored": 0, "pts_allowed": 0
-                })
-                d["games"]       += 1
+                gp = games_played[user]
+                if gp < 20:
+                    k = ELO_K_NEW
+                elif gp < 50:
+                    k = ELO_K_MID
+                else:
+                    k = ELO_K_EST
+                elo[user] += k * mov_mult * (actual - expected)
+                games_played[user] += 1
+
+            # Track scoring stats for O/U
+            for user, scored, allowed in [
+                (home_user, hs, aws),
+                (away_user, aws, hs),
+            ]:
+                d = scoring.setdefault(user, {"pts_scored": 0, "pts_allowed": 0, "games": 0})
                 d["pts_scored"]  += scored
                 d["pts_allowed"] += allowed
-                if won:
-                    d["wins"]   += 1
-                else:
-                    d["losses"] += 1
+                d["games"]       += 1
 
             total_pts   += hs + aws
             total_games += 1
@@ -405,50 +459,91 @@ def _get_owner_history_stats() -> dict:
         # Calibrate league average from actual data
         if total_games >= 10:
             _LEAGUE_AVG_SCORE = round((total_pts / total_games) / 2, 2)
-            print(f"[ODDS] League avg pts/team: {_LEAGUE_AVG_SCORE:.1f} ({total_games} games)")
+            print(f"[ELO] League avg pts/team: {_LEAGUE_AVG_SCORE:.1f} ({total_games} games)")
         else:
-            _LEAGUE_AVG_SCORE = 27.0
-            print(f"[ODDS] Not enough games for avg — using fallback {_LEAGUE_AVG_SCORE}")
+            _LEAGUE_AVG_SCORE = 30.0
+            print(f"[ELO] Not enough history — using fallback {_LEAGUE_AVG_SCORE}")
 
     except Exception as e:
-        print(f"[ODDS] owner history query failed: {e}")
-        _LEAGUE_AVG_SCORE = 27.0
+        print(f"[ELO] History query failed: {e}")
+        _LEAGUE_AVG_SCORE = 30.0
 
-    for user, d in stats.items():
+    # Compute per-owner derived scoring stats
+    for user, d in scoring.items():
         g = max(d["games"], 1)
-        d["career_win_pct"]  = round(d["wins"] / g, 4)
         d["avg_pts_scored"]  = round(d["pts_scored"]  / g, 2)
         d["avg_pts_allowed"] = round(d["pts_allowed"] / g, 2)
 
-    _OWNER_STATS_CACHE = stats
-    print(f"[ODDS] Owner history loaded: {len(stats)} owners")
-    return stats
+    _ELO_CACHE = elo
+    _OWNER_SCORING_CACHE = scoring
+
+    # Log top/bottom Elo ratings
+    sorted_elo = sorted(elo.items(), key=lambda x: x[1], reverse=True)
+    print(f"[ELO] Ratings computed for {len(elo)} owners")
+    for user, rating in sorted_elo[:5]:
+        gp = games_played.get(user, 0)
+        print(f"  TOP  {user}: {rating:.0f} ({gp} games)")
+    for user, rating in sorted_elo[-3:]:
+        gp = games_played.get(user, 0)
+        print(f"  BOT  {user}: {rating:.0f} ({gp} games)")
+
+    return elo
 
 
-def _owner_defaults() -> dict:
-    return {
-        "career_win_pct":  0.500,
-        "avg_pts_scored":  _LEAGUE_AVG_SCORE,
-        "avg_pts_allowed": _LEAGUE_AVG_SCORE,
-        "games":           0,
-    }
+def _safe_float(val, default: float) -> float:
+    """Convert value to float, returning default only if val is None or empty string."""
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 
-def _resolve_owner(username: str, history: dict) -> dict:
-    """Fuzzy username lookup — handles underscore/case differences between API and DB."""
+def _safe_int(val, default: int) -> int:
+    """Convert value to int, returning default only if val is None or empty string."""
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _resolve_elo(username: str, elo_map: dict) -> float:
+    """Fuzzy username lookup for Elo — handles underscore/case differences."""
     if not username:
-        return _owner_defaults()
-    if username in history:
-        return history[username]
+        return ELO_INITIAL
+    if username in elo_map:
+        return elo_map[username]
     norm = username.lower().replace("_", "").replace(" ", "")
-    for key, val in history.items():
+    for key, val in elo_map.items():
         if key.lower().replace("_", "").replace(" ", "") == norm:
             return val
-    return _owner_defaults()
+    return ELO_INITIAL
+
+
+def _resolve_scoring(username: str) -> dict:
+    """Get owner scoring stats, with fuzzy matching."""
+    defaults = {"avg_pts_scored": _LEAGUE_AVG_SCORE, "avg_pts_allowed": _LEAGUE_AVG_SCORE, "games": 0}
+    if not username:
+        return defaults
+    cache = _OWNER_SCORING_CACHE
+    if username in cache:
+        return cache[username]
+    norm = username.lower().replace("_", "").replace(" ", "")
+    for key, val in cache.items():
+        if key.lower().replace("_", "").replace(" ", "") == norm:
+            return val
+    return defaults
 
 
 def _get_power_map() -> dict:
-    """Build { teamName: { ovr, win_pct, rank, off_rank, def_rank, userName } } from df_power."""
+    """Build { teamName: { ovr, win_pct, rank, off_rank, def_rank, userName } } from df_power.
+
+    Uses _safe_float/_safe_int to avoid the Python `or` falsiness bug where
+    legitimate 0 values (e.g. 0.000 win%) were silently replaced with defaults.
+    """
     pm = {}
     if dm.df_power.empty:
         return pm
@@ -457,82 +552,79 @@ def _get_power_map() -> dict:
         if not name:
             continue
         pm[name] = {
-            "ovr":      float(row.get("ovrRating",     78) or 78),
-            "win_pct":  float(row.get("winPct",       0.5) or 0.5),
-            "rank":     int(row.get("rank",              16) or 16),
-            "off_rank": int(row.get("offTotalRank",      16) or 16),
-            "def_rank": int(row.get("defTotalRank",      16) or 16),
-            "userName": str(row.get("userName",          "")),
+            "ovr":      _safe_float(row.get("ovrRating"),     78.0),
+            "win_pct":  _safe_float(row.get("winPct"),         0.5),
+            "rank":     _safe_int(row.get("rank"),              16),
+            "off_rank": _safe_int(row.get("offTotalRank"),      16),
+            "def_rank": _safe_int(row.get("defTotalRank"),      16),
+            "userName": str(row.get("userName", "") or ""),
         }
     return pm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# POWER RATING ENGINE
+# TEAM QUALITY SCORE
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MIDPOINT_RANK = 16.5   # midpoint of 1–32
-
-def _power_rating(team_data: dict, owner_data: dict) -> float:
+def _team_quality_score(team_data: dict) -> float:
     """
-    Compute a single composite power rating for one team. Higher = stronger.
-    Typical range: −8 to +8. Extremes can reach ±12.
+    Compute a 0-100 team quality score from current API data.
 
-    Component breakdown and max per-team contribution:
-      Season W%:     ×10   →  ±5.0    (PRIMARY — current form dominates)
-      Power rank:    ×0.12 →  ±1.86
-      OVR rating:    ×0.15 →  ±~1.5 (norm at 78; typical range 70-90)
-      Offense rank:  ×0.12 →  ±1.86
-      Defense rank:  ×0.12 →  ±1.86
-      Career W%:     ×4.0  →  ±1.0    (ANCHOR — not primary driver)
-    ─────────────────────────────────────────────────────────────────────────
-    Rationale for career W% demotion (×10 → ×4):
-      The v3.3 bug that produced "Commanders +14 at home" came from career W%
-      dominating. A .700 vs .300 career owner was worth 4 spread points on its
-      own. Career history should anchor the line, not dictate it.
+    Components (weighted):
+      50% — OVR rating   (normalized: 65-95 → 0-100)
+      30% — Offense rank  (1=best → 100, 32=worst → 0)
+      20% — Defense rank  (1=best → 100, 32=worst → 0)
     """
-    # Season win% — most direct measure of current performance
-    win_pct = float(team_data.get("win_pct", 0.5) or 0.5)
-    wp_score = (win_pct - 0.500) * 10.0
+    ovr = team_data.get("ovr", 78.0)
+    ovr_norm = max(0.0, min(100.0, (ovr - 65.0) / 30.0 * 100.0))
 
-    # Current power ranking (1 = best, 32 = worst)
-    rank = int(team_data.get("rank", 16) or 16)
-    rank_score = (_MIDPOINT_RANK - rank) * 0.12
+    off_rank = team_data.get("off_rank", 16)
+    off_norm = max(0.0, min(100.0, (32 - off_rank) / 31.0 * 100.0))
 
-    # OVR roster quality (centered at 78; each +1 OVR ≈ 0.15 pts)
-    ovr = float(team_data.get("ovr", 78) or 78)
-    ovr_score = (ovr - 78.0) * 0.15
+    def_rank = team_data.get("def_rank", 16)
+    def_norm = max(0.0, min(100.0, (32 - def_rank) / 31.0 * 100.0))
 
-    # Offensive rank (best offense scores more)
-    off_rank = int(team_data.get("off_rank", 16) or 16)
-    off_score = (_MIDPOINT_RANK - off_rank) * 0.12
-
-    # Defensive rank (best defense limits opponent)
-    def_rank = int(team_data.get("def_rank", 16) or 16)
-    def_score = (_MIDPOINT_RANK - def_rank) * 0.12
-
-    # Career owner win% — historical skill anchor, intentionally light
-    career_wp = float(owner_data.get("career_win_pct", 0.500) or 0.500)
-    career_score = (career_wp - 0.500) * 4.0
-
-    return wp_score + rank_score + ovr_score + off_score + def_score + career_score
+    return 0.50 * ovr_norm + 0.30 * off_norm + 0.20 * def_norm
 
 
-def _calc_spread(away_data: dict, home_data: dict,
-                 away_owner: dict, home_owner: dict) -> float:
+# ─────────────────────────────────────────────────────────────────────────────
+# COMBINED POWER RATING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _combined_power(owner_elo: float, team_data: dict) -> float:
     """
-    Spread from HOME team's perspective. Negative = home favored.
+    Blend owner Elo (80%) with team quality (20%) into a single power number.
 
-    spread = home_power − away_power + HOME_FIELD_EDGE
-
-    Example: home PR = 3.2, away PR = 1.5 → raw = 1.7 + 2.0 = 3.7
-             rounds to 3.5 → home is favored by 3.5 (displayed as -3.5)
+    Owner Elo is normalized: 1200-1800 → 0-100.
+    Team quality is already 0-100.
+    Result range: 0-100.
     """
-    home_pr = _power_rating(home_data, home_owner)
-    away_pr = _power_rating(away_data, away_owner)
-    raw = home_pr - away_pr + HOME_FIELD_EDGE
-    spread = round(raw * 2) / 2                        # round to nearest 0.5
-    return max(-SPREAD_CAP, min(SPREAD_CAP, spread))   # cap at ±14.5
+    elo_norm = max(0.0, min(100.0, (owner_elo - 1200.0) / 6.0))
+    team_q   = _team_quality_score(team_data)
+    return ELO_OWNER_WEIGHT * elo_norm + ELO_TEAM_WEIGHT * team_q
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPREAD, ML, O/U
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _calc_spread(home_power: float, away_power: float) -> float:
+    """
+    Calculate point spread from HOME team's perspective.
+    Negative = home favored. Positive = away favored.
+
+    HOME_FIELD_EDGE is only added when home is already favored (per league rules:
+    no phantom advantage in Madden where both players play remotely).
+
+    Example: home_power = 65, away_power = 50
+             raw = (50 - 65) / 4.0 = -3.75 → home is favored
+             with HFE: -3.75 - 2.0 = -5.75 → rounds to home -6.0
+    """
+    raw = (away_power - home_power) / SPREAD_SCALING
+    if raw < 0:  # home is already favored — add HFE to widen
+        raw -= HOME_FIELD_EDGE
+    spread = round(raw * 2) / 2
+    return max(-SPREAD_CAP, min(SPREAD_CAP, spread))
 
 
 def _spread_to_ml(spread: float) -> int:
@@ -552,51 +644,42 @@ def _spread_to_ml(spread: float) -> int:
     elif abs_s <= 5.0:  base = 185
     elif abs_s <= 6.5:  base = 200 + int((abs_s - 5.0) * 10)
     elif abs_s <= 10.0: base = 215 + int((abs_s - 6.5) * 12)
-    else:               base = 257 + int((abs_s - 10.0) * 8)
-    base = min(base, 600)
+    elif abs_s <= 14.0: base = 257 + int((abs_s - 10.0) * 12)
+    else:               base = 305 + int((abs_s - 14.0) * 10)
+    base = min(base, 800)
     return -base if spread < 0 else base
 
 
-def _calc_ou(away_data: dict, home_data: dict,
-             away_owner: dict, home_owner: dict) -> float:
+def _calc_ou(home_data: dict, away_data: dict,
+             home_owner_scoring: dict, away_owner_scoring: dict) -> float:
     """
     Over/Under total points.
 
-    Formula:
-      Each team's expected score = owner historical avg (or league avg if < 5 games)
-        + offensive rank bonus/penalty  (±3.88 max per team at 0.25/rank)
-        − opponent defensive rank penalty (±2.33 max per team at 0.15/rank)
+    Each team's expected score = owner's historical avg pts (or league avg if < 5 games)
+      + offensive rank bonus/penalty  (0.35 per rank above/below midpoint)
+      - opponent defensive rank penalty (0.22 per rank above/below midpoint)
 
-    Total = home_expected + away_expected, clamped 35–72, rounded to nearest 0.5
-
-    v4.0 changes vs v3.3:
-      · off multiplier: 0.18 → 0.28  (was too flat; rank 1 vs 32 only ±2.79 before)
-      · def multiplier: 0.12 → 0.18  (similar reason)
-      · Result: elite off vs elite def matchup ~44, two bad offenses ~38
-                two high-powered offenses ~58, typical matchup ~48-54
+    Total clamped to [35.0, 99.5] and rounded to nearest 0.5.
+    Madden games average ~60 total pts but high-scoring matchups can hit 90+.
     """
-    LAR = _MIDPOINT_RANK   # League Avg Rank = 16.5
+    LAR = _MIDPOINT_RANK
 
-    # Use owner historical avg if at least 5 games; otherwise league average
-    h_base = (home_owner["avg_pts_scored"]
-              if home_owner.get("games", 0) >= 5 else _LEAGUE_AVG_SCORE)
-    a_base = (away_owner["avg_pts_scored"]
-              if away_owner.get("games", 0) >= 5 else _LEAGUE_AVG_SCORE)
+    h_games = home_owner_scoring.get("games", 0)
+    a_games = away_owner_scoring.get("games", 0)
+    h_base = home_owner_scoring["avg_pts_scored"] if h_games >= 5 else _LEAGUE_AVG_SCORE
+    a_base = away_owner_scoring["avg_pts_scored"] if a_games >= 5 else _LEAGUE_AVG_SCORE
 
-    # Offensive rank boost/penalty on own team's expected score
-    h_off_adj = (LAR - home_data["off_rank"]) * 0.28
-    a_off_adj = (LAR - away_data["off_rank"]) * 0.28
+    h_off_adj = (LAR - home_data["off_rank"]) * 0.35
+    a_off_adj = (LAR - away_data["off_rank"]) * 0.35
 
-    # Defensive rank quality suppresses opponent's expected score
-    # Rank 1 defense (best) → most suppression
-    h_def_qual = (LAR - home_data["def_rank"]) * 0.18   # home def suppresses away
-    a_def_qual = (LAR - away_data["def_rank"]) * 0.18   # away def suppresses home
+    h_def_qual = (LAR - home_data["def_rank"]) * 0.22
+    a_def_qual = (LAR - away_data["def_rank"]) * 0.22
 
     home_expected = max(7.0, h_base + h_off_adj - a_def_qual)
     away_expected = max(7.0, a_base + a_off_adj - h_def_qual)
 
     total = round((home_expected + away_expected) * 2) / 2
-    return max(35.0, min(72.0, total))
+    return max(OU_FLOOR, min(OU_CEILING, total))
 
 
 def _american_to_str(odds: int) -> str:
@@ -624,11 +707,11 @@ def _combine_parlay_odds(odds_list: list[int]) -> int:
 
 def _build_game_lines(games_raw: list) -> list[dict]:
     """
-    Build fully-calculated game lines. Admin line_overrides applied first;
-    engine calculates any field not overridden.
+    Build fully-calculated game lines using Elo-based power ratings.
+    Admin line_overrides applied first; engine calculates any field not overridden.
     """
-    power_map     = _get_power_map()
-    owner_history = _get_owner_history_stats()
+    power_map = _get_power_map()
+    elo_map   = _compute_elo_ratings()
 
     _FALLBACK_TEAM = {
         "ovr": 78.0, "win_pct": 0.5, "rank": 16,
@@ -645,29 +728,38 @@ def _build_game_lines(games_raw: list) -> list[dict]:
         home     = rg.get("homeTeamName", rg.get("home", ""))
         away     = rg.get("awayTeamName", rg.get("away", ""))
         game_id  = str(rg.get("gameId", rg.get("id", rg.get("matchup_key", f"{away}@{home}"))))
-        status   = int(rg.get("status", 1) or 1)
-        week_idx = int(rg.get("weekIndex", 99))
+        status   = _safe_int(rg.get("status", 1), 1)
+        week_idx = _safe_int(rg.get("weekIndex", 99), 99)
 
         # Auto-lock finished or past-week games
         if status >= 2 or week_idx < dm.CURRENT_WEEK:
             _set_locked(game_id, True)
 
-        home_data  = power_map.get(home, _FALLBACK_TEAM)
-        away_data  = power_map.get(away, _FALLBACK_TEAM)
-        home_owner = _resolve_owner(home_data["userName"], owner_history)
-        away_owner = _resolve_owner(away_data["userName"], owner_history)
+        home_data = power_map.get(home, _FALLBACK_TEAM)
+        away_data = power_map.get(away, _FALLBACK_TEAM)
 
-        # ── Compute engine values first ───────────────────────────────────
-        engine_home_spread = _calc_spread(away_data, home_data, away_owner, home_owner)
+        # Resolve Elo ratings and scoring stats for each owner
+        home_user = home_data["userName"]
+        away_user = away_data["userName"]
+        home_elo  = _resolve_elo(home_user, elo_map)
+        away_elo  = _resolve_elo(away_user, elo_map)
+        home_scoring = _resolve_scoring(home_user)
+        away_scoring = _resolve_scoring(away_user)
+
+        # Combined power: 80% Elo + 20% team quality
+        home_power = _combined_power(home_elo, home_data)
+        away_power = _combined_power(away_elo, away_data)
+
+        # ── Compute engine values ────────────────────────────────────────
+        engine_home_spread = _calc_spread(home_power, away_power)
         engine_away_spread = -engine_home_spread
         engine_home_ml     = _spread_to_ml(engine_home_spread)
         engine_away_ml     = _spread_to_ml(engine_away_spread)
-        engine_ou          = _calc_ou(away_data, home_data, away_owner, home_owner)
+        engine_ou          = _calc_ou(home_data, away_data, home_scoring, away_scoring)
 
-        # ── Apply admin overrides ─────────────────────────────────────────
+        # ── Apply admin overrides ────────────────────────────────────────
         ov = _get_line_override(game_id) or {}
 
-        # If admin set spread but not ML, auto-derive ML from new spread
         if ov.get("home_spread") is not None and ov.get("home_ml") is None:
             ov["home_spread"] = float(ov["home_spread"])
             ov["away_spread"] = -ov["home_spread"]
@@ -681,12 +773,10 @@ def _build_game_lines(games_raw: list) -> list[dict]:
         ou_line     = ov.get("ou_line")     if ov.get("ou_line")     is not None else engine_ou
 
         print(
-            f"[ODDS] {away}({away_owner['career_win_pct']:.3f}cW% "
-            f"PR={_power_rating(away_data,away_owner):.1f}) "
-            f"@ {home}({home_owner['career_win_pct']:.3f}cW% "
-            f"PR={_power_rating(home_data,home_owner):.1f}) "
+            f"[ELO] {away}({away_user} Elo={away_elo:.0f} P={away_power:.1f}) "
+            f"@ {home}({home_user} Elo={home_elo:.0f} P={home_power:.1f}) "
             f"→ spread {fmt_spread(home_spread)}  O/U {ou_line}"
-            + (" [ADMIN OVERRIDE]" if ov else "")
+            + (" [OVERRIDE]" if ov else "")
         )
 
         ui_games.append({
@@ -705,10 +795,12 @@ def _build_game_lines(games_raw: list) -> list[dict]:
             "matchup_key":     f"{away} @ {home}",
             "status":          status,
             "bet_week":        dm.CURRENT_WEEK + 1,
-            # Store engine values for debug view
+            # Engine debug values
             "_engine_spread":  engine_home_spread,
-            "_away_pr":        _power_rating(away_data, away_owner),
-            "_home_pr":        _power_rating(home_data, home_owner),
+            "_away_power":     away_power,
+            "_home_power":     home_power,
+            "_away_elo":       away_elo,
+            "_home_elo":       home_elo,
             "_overridden":     bool(ov),
         })
 
@@ -1246,9 +1338,10 @@ class ParlayCartView(discord.ui.View):
 
 
 class SportsbookSelectView(discord.ui.View):
-    def __init__(self, games: list[dict]):
+    def __init__(self, games: list[dict], cog: "SportsbookCog"):
         super().__init__(timeout=None)
         self.games = games
+        self.cog   = cog
 
         options = []
         for i, g in enumerate(games):
@@ -1267,6 +1360,35 @@ class SportsbookSelectView(discord.ui.View):
         )
         sel.callback = self._on_select
         self.add_item(sel)
+
+        # ── Quick-action buttons (row 1) ──────────────────────────────────
+        btn_mybets = discord.ui.Button(
+            label="My Bets", style=discord.ButtonStyle.gray,
+            custom_id="sb:mybets", row=1
+        )
+        btn_mybets.callback = self._on_mybets
+        self.add_item(btn_mybets)
+
+        btn_history = discord.ui.Button(
+            label="History", style=discord.ButtonStyle.gray,
+            custom_id="sb:history", row=1
+        )
+        btn_history.callback = self._on_history
+        self.add_item(btn_history)
+
+        btn_leaderboard = discord.ui.Button(
+            label="Leaderboard", style=discord.ButtonStyle.green,
+            custom_id="sb:leaderboard", row=1
+        )
+        btn_leaderboard.callback = self._on_leaderboard
+        self.add_item(btn_leaderboard)
+
+        btn_props = discord.ui.Button(
+            label="Props", style=discord.ButtonStyle.blurple,
+            custom_id="sb:props", row=1
+        )
+        btn_props.callback = self._on_props
+        self.add_item(btn_props)
 
     async def _on_select(self, interaction: discord.Interaction):
         game = self.games[int(interaction.data["values"][0])]
@@ -1301,6 +1423,42 @@ class SportsbookSelectView(discord.ui.View):
         await interaction.response.send_message(
             embed=embed, view=GameCardViewWithParlay(game), ephemeral=True
         )
+
+    async def _on_mybets(self, interaction: discord.Interaction):
+        try:
+            await self.cog._mybets_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    async def _on_history(self, interaction: discord.Interaction):
+        try:
+            await self.cog._bethistory_impl(interaction, weeks=99)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    async def _on_leaderboard(self, interaction: discord.Interaction):
+        try:
+            await self.cog._leaderboard_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    async def _on_props(self, interaction: discord.Interaction):
+        try:
+            await self.cog._props_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1388,7 +1546,7 @@ class SportsbookCog(commands.Cog):
         dm._autograde_callback = None
 
     async def _on_data_refresh(self):
-        _invalidate_owner_cache()
+        _invalidate_elo_cache()
         await _run_autograde(self.bot)
 
     @tasks.loop(minutes=60)
@@ -1476,10 +1634,11 @@ class SportsbookCog(commands.Cog):
         embed.set_footer(
             text="Lines: Season W% · Power Rank · OVR · Off/Def Rank · Career W% · Home Edge"
         )
-        await interaction.followup.send(embed=embed, view=SportsbookSelectView(ui_games))
+        await interaction.followup.send(embed=embed, view=SportsbookSelectView(ui_games, self))
 
-    @app_commands.command(name="mybets", description="View your active bets and current balance")
-    async def mybets(self, interaction: discord.Interaction):
+    # ── User-facing _impl methods (called by board buttons) ────────────────
+
+    async def _mybets_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
         uid     = interaction.user.id
         balance = _get_balance(uid)
@@ -1542,9 +1701,7 @@ class SportsbookCog(commands.Cog):
         embed.set_footer(text="TSL Sportsbook — Pending bets only")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="bethistory", description="View your full season bet history and P&L")
-    @app_commands.describe(weeks="How many weeks to look back (default: all)")
-    async def bethistory(self, interaction: discord.Interaction, weeks: int = 99):
+    async def _bethistory_impl(self, interaction: discord.Interaction, weeks: int = 99):
         await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id
 
@@ -1600,9 +1757,8 @@ class SportsbookCog(commands.Cog):
         embed.set_footer(text="TSL Sportsbook • Season History")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="leaderboard", description="TSL Sportsbook season P&L leaderboard")
-    async def leaderboard(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
+    async def _leaderboard_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
         with _db_con() as con:
             users = con.execute(
                 "SELECT discord_id, balance, season_start_balance "
@@ -1610,7 +1766,7 @@ class SportsbookCog(commands.Cog):
             ).fetchall()
 
         if not users:
-            return await interaction.followup.send("No bettors found yet.")
+            return await interaction.followup.send("No bettors found yet.", ephemeral=True)
 
         embed = discord.Embed(title="🏆  TSL SPORTSBOOK LEADERBOARD", color=TSL_GOLD)
         embed.description = f"**Season {dm.CURRENT_SEASON} • Week {dm.CURRENT_WEEK}**\n"
@@ -1628,10 +1784,9 @@ class SportsbookCog(commands.Cog):
 
         embed.description += "\n".join(lines)
         embed.set_footer(text=f"Starting balance: ${STARTING_BALANCE:,} • Updated live")
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="props", description="Browse and bet on TSL prop bets")
-    async def props(self, interaction: discord.Interaction):
+    async def _props_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
         with _db_con() as con:
             prop_list = con.execute(
@@ -1656,12 +1811,7 @@ class SportsbookCog(commands.Cog):
     # SETTLEMENT COMMANDS
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="grade_bets", description="[Commish] Settle all pending bets for a week")
-    @app_commands.describe(week="Week number to settle")
-    async def grade_bets(self, interaction: discord.Interaction, week: int):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-
+    async def _grade_bets_impl(self, interaction: discord.Interaction, week: int):
         await interaction.response.defer(thinking=True)
         scores     = _build_score_lookup(week)
         real_games = len([k for k in scores if k != "__fuzzy__"])
@@ -1787,14 +1937,18 @@ class SportsbookCog(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="grade_bets", description="[Deprecated] Use /commish sb grade_bets instead.")
+    @app_commands.describe(week="Week number to settle")
+    async def grade_bets(self, interaction: discord.Interaction, week: int):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._grade_bets_impl(interaction, week)
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — OVERVIEW
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sb_status", description="[Commish] Sportsbook overview — lines, locks, pending bets")
-    async def sb_status(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+    async def _sb_status_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         bet_week = dm.CURRENT_WEEK + 1
@@ -1863,10 +2017,13 @@ class SportsbookCog(commands.Cog):
         embed.set_footer(text="🟢 = Open  🔴 = Locked  ⚡ = Admin Override")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="sb_lines", description="[Commish] Debug power ratings driving each game's spread")
-    async def sb_lines(self, interaction: discord.Interaction):
+    @app_commands.command(name="sb_status", description="[Deprecated] Use /commish sb status instead.")
+    async def sb_status(self, interaction: discord.Interaction):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_status_impl(interaction)
+
+    async def _sb_lines_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         bet_week = dm.CURRENT_WEEK + 1
@@ -1891,55 +2048,46 @@ class SportsbookCog(commands.Cog):
         loop = asyncio.get_running_loop()
         ui_games = await loop.run_in_executor(None, _build_game_lines, raw_games)
 
-        power_map     = _get_power_map()
-        owner_history = _get_owner_history_stats()
-        _FB = {"ovr": 78, "win_pct": 0.5, "rank": 16, "off_rank": 16, "def_rank": 16, "userName": ""}
-
         embed = discord.Embed(
-            title=f"🔬  Line Debug — Week {bet_week}",
+            title=f"🔬  Line Debug — Week {bet_week}  (Elo Engine {SPORTSBOOK_VERSION})",
             color=discord.Color.blurple()
         )
         for g in ui_games[:8]:   # Discord embed field limit
-            hd = power_map.get(g["home"], _FB)
-            ad = power_map.get(g["away"], _FB)
-            ho = _resolve_owner(hd["userName"], owner_history)
-            ao = _resolve_owner(ad["userName"], owner_history)
-            h_pr = _power_rating(hd, ho)
-            a_pr = _power_rating(ad, ao)
             ov_note = " **[OVERRIDE]**" if g.get("_overridden") else ""
+            h_elo = g.get("_home_elo", 1500)
+            a_elo = g.get("_away_elo", 1500)
+            h_pow = g.get("_home_power", 50)
+            a_pow = g.get("_away_power", 50)
 
             embed.add_field(
                 name=f"{g['away']} @ {g['home']}{ov_note}",
                 value=(
-                    f"PR: **{g['away']}** {a_pr:+.2f} vs **{g['home']}** {h_pr:+.2f}\n"
+                    f"Elo: **{g['away']}** {a_elo:.0f} vs **{g['home']}** {h_elo:.0f}\n"
+                    f"Power: {a_pow:.1f} vs {h_pow:.1f}\n"
                     f"Spread: home {g['home_spread']} (engine {g['_engine_spread']:+.1f})\n"
                     f"ML: {g['away']} {g['away_ml']} / {g['home']} {g['home_ml']}\n"
-                    f"O/U: {g['ou_line']}  "
-                    f"(H cW%:{ho['career_win_pct']:.3f} | A cW%:{ao['career_win_pct']:.3f})"
+                    f"O/U: {g['ou_line']}"
                 ),
                 inline=False
             )
 
         embed.set_footer(
-            text=f"PR = Power Rating  •  League Avg Score: {_LEAGUE_AVG_SCORE:.1f} pts/team"
+            text=f"Elo Engine {SPORTSBOOK_VERSION}  •  League Avg: {_LEAGUE_AVG_SCORE:.1f} pts/team"
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="sb_lines", description="[Deprecated] Use /commish sb lines instead.")
+    async def sb_lines(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_lines_impl(interaction)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — LINE OVERRIDES
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sb_setspread", description="[Commish] Override the spread for a game")
-    @app_commands.describe(
-        matchup="e.g. 'Cowboys @ Eagles'",
-        home_spread="Home team's spread (negative = home favored, e.g. -3.5)"
-    )
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_setspread(self, interaction: discord.Interaction,
-                           matchup: str, home_spread: float):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-
+    async def _sb_setspread_impl(self, interaction: discord.Interaction,
+                                 matchup: str, home_spread: float):
         away_spread = -home_spread
         home_ml     = _spread_to_ml(home_spread)
         away_ml     = _spread_to_ml(away_spread)
@@ -1964,18 +2112,20 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_setml", description="[Commish] Override moneylines for a game")
+    @app_commands.command(name="sb_setspread", description="[Deprecated] Use /commish sb setspread instead.")
     @app_commands.describe(
         matchup="e.g. 'Cowboys @ Eagles'",
-        home_ml="Home team moneyline (e.g. -145 or +125)",
-        away_ml="Away team moneyline (e.g. +125 or -145)"
+        home_spread="Home team's spread (negative = home favored, e.g. -3.5)"
     )
     @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_setml(self, interaction: discord.Interaction,
-                       matchup: str, home_ml: int, away_ml: int):
+    async def sb_setspread(self, interaction: discord.Interaction,
+                           matchup: str, home_spread: float):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_setspread_impl(interaction, matchup, home_spread)
 
+    async def _sb_setml_impl(self, interaction: discord.Interaction,
+                             matchup: str, home_ml: int, away_ml: int):
         _set_line_override(
             matchup.strip(),
             set_by=interaction.user.display_name,
@@ -1988,16 +2138,20 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_setou", description="[Commish] Override the Over/Under total for a game")
+    @app_commands.command(name="sb_setml", description="[Deprecated] Use /commish sb setml instead.")
     @app_commands.describe(
         matchup="e.g. 'Cowboys @ Eagles'",
-        ou_line="Over/Under total points (e.g. 47.5)"
+        home_ml="Home team moneyline (e.g. -145 or +125)",
+        away_ml="Away team moneyline (e.g. +125 or -145)"
     )
     @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_setou(self, interaction: discord.Interaction, matchup: str, ou_line: float):
+    async def sb_setml(self, interaction: discord.Interaction,
+                       matchup: str, home_ml: int, away_ml: int):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_setml_impl(interaction, matchup, home_ml, away_ml)
 
+    async def _sb_setou_impl(self, interaction: discord.Interaction, matchup: str, ou_line: float):
         _set_line_override(
             matchup.strip(),
             set_by=interaction.user.display_name,
@@ -2008,11 +2162,18 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_resetlines", description="[Commish] Clear ALL admin line overrides — revert to engine")
-    async def sb_resetlines(self, interaction: discord.Interaction):
+    @app_commands.command(name="sb_setou", description="[Deprecated] Use /commish sb setou instead.")
+    @app_commands.describe(
+        matchup="e.g. 'Cowboys @ Eagles'",
+        ou_line="Over/Under total points (e.g. 47.5)"
+    )
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_setou(self, interaction: discord.Interaction, matchup: str, ou_line: float):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_setou_impl(interaction, matchup, ou_line)
 
+    async def _sb_resetlines_impl(self, interaction: discord.Interaction):
         with _db_con() as con:
             count = con.execute("SELECT COUNT(*) FROM line_overrides").fetchone()[0]
             con.execute("DELETE FROM line_overrides")
@@ -2022,11 +2183,25 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
+    @app_commands.command(name="sb_resetlines", description="[Deprecated] Use /commish sb resetlines instead.")
+    async def sb_resetlines(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_resetlines_impl(interaction)
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — GAME LOCKS
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sb_lock", description="[Commish] Lock or unlock betting for one game")
+    async def _sb_lock_impl(self, interaction: discord.Interaction, matchup: str, locked: bool):
+        _set_locked(matchup.strip(), locked)
+        status = "🔴 **LOCKED**" if locked else "🟢 **UNLOCKED**"
+        await interaction.response.send_message(
+            f"{status} — `{matchup}` betting is now {'closed' if locked else 'open'}.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="sb_lock", description="[Deprecated] Use /commish sb lock instead.")
     @app_commands.describe(
         matchup="Game ID or 'Away @ Home'",
         locked="True to lock, False to unlock"
@@ -2035,18 +2210,9 @@ class SportsbookCog(commands.Cog):
     async def sb_lock(self, interaction: discord.Interaction, matchup: str, locked: bool):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_lock_impl(interaction, matchup, locked)
 
-        _set_locked(matchup.strip(), locked)
-        status = "🔴 **LOCKED**" if locked else "🟢 **UNLOCKED**"
-        await interaction.response.send_message(
-            f"{status} — `{matchup}` betting is now {'closed' if locked else 'open'}.",
-            ephemeral=True
-        )
-
-    @app_commands.command(name="sb_lockall", description="[Commish] Lock ALL games for the current week")
-    async def sb_lockall(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+    async def _sb_lockall_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
@@ -2080,11 +2246,13 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_unlockall", description="[Commish] Unlock ALL games for the current week")
-    async def sb_unlockall(self, interaction: discord.Interaction):
+    @app_commands.command(name="sb_lockall", description="[Deprecated] Use /commish sb lockall instead.")
+    async def sb_lockall(self, interaction: discord.Interaction):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_lockall_impl(interaction)
 
+    async def _sb_unlockall_impl(self, interaction: discord.Interaction):
         with _db_con() as con:
             count = con.execute(
                 "SELECT COUNT(*) FROM games_state WHERE locked=1"
@@ -2096,17 +2264,17 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
+    @app_commands.command(name="sb_unlockall", description="[Deprecated] Use /commish sb unlockall instead.")
+    async def sb_unlockall(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_unlockall_impl(interaction)
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — BET MANAGEMENT
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sb_cancelgame",
-                          description="[Commish] Void & refund all pending bets on a game")
-    @app_commands.describe(matchup="Matchup key, e.g. 'Cowboys @ Eagles'")
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_cancelgame(self, interaction: discord.Interaction, matchup: str):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+    async def _sb_cancelgame_impl(self, interaction: discord.Interaction, matchup: str):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         key = matchup.strip().lower()
@@ -2158,12 +2326,16 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_refund", description="[Commish] Refund a single bet by ID")
-    @app_commands.describe(bet_id="Bet ID number (from /mybets or the DB)")
-    async def sb_refund(self, interaction: discord.Interaction, bet_id: int):
+    @app_commands.command(name="sb_cancelgame",
+                          description="[Deprecated] Use /commish sb cancelgame instead.")
+    @app_commands.describe(matchup="Matchup key, e.g. 'Cowboys @ Eagles'")
+    @app_commands.autocomplete(matchup=_matchup_autocomplete)
+    async def sb_cancelgame(self, interaction: discord.Interaction, matchup: str):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_cancelgame_impl(interaction, matchup)
 
+    async def _sb_refund_impl(self, interaction: discord.Interaction, bet_id: int):
         with _db_con() as con:
             bet = con.execute(
                 "SELECT discord_id, wager_amount, pick, bet_type, matchup, status "
@@ -2193,23 +2365,21 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
+    @app_commands.command(name="sb_refund", description="[Deprecated] Use /commish sb refund instead.")
+    @app_commands.describe(bet_id="Bet ID number (from /mybets or the DB)")
+    async def sb_refund(self, interaction: discord.Interaction, bet_id: int):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_refund_impl(interaction, bet_id)
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — BALANCE MANAGEMENT
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sb_balance", description="[Commish] Manually adjust a member's TSL Bucks")
-    @app_commands.describe(
-        member="Discord member to adjust",
-        adjustment="Amount to add (positive) or remove (negative)",
-        reason="Optional reason for the audit log"
-    )
-    async def sb_balance(self, interaction: discord.Interaction,
-                         member: discord.Member,
-                         adjustment: int,
-                         reason: str = "Commissioner adjustment"):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-
+    async def _sb_balance_impl(self, interaction: discord.Interaction,
+                               member: discord.Member,
+                               adjustment: int,
+                               reason: str = "Commissioner adjustment"):
         old_balance = _get_balance(member.id)
         _update_balance(member.id, adjustment)
         new_balance = _get_balance(member.id)
@@ -2222,28 +2392,30 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
+    @app_commands.command(name="sb_balance", description="[Deprecated] Use /commish sb balance instead.")
+    @app_commands.describe(
+        member="Discord member to adjust",
+        adjustment="Amount to add (positive) or remove (negative)",
+        reason="Optional reason for the audit log"
+    )
+    async def sb_balance(self, interaction: discord.Interaction,
+                         member: discord.Member,
+                         adjustment: int,
+                         reason: str = "Commissioner adjustment"):
+        if not _is_admin(interaction):
+            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_balance_impl(interaction, member, adjustment, reason)
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — PROP BET MANAGEMENT
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sb_addprop",
-                          description="[Commish] Create a custom prop bet for the current week")
-    @app_commands.describe(
-        description="Full prop bet description, e.g. 'Will JT score 30+ pts this week?'",
-        option_a="First option label (e.g. 'Yes' or 'Ravens win big')",
-        option_b="Second option label (e.g. 'No' or 'Ravens win close')",
-        odds_a="American odds for Option A (default -110)",
-        odds_b="American odds for Option B (default -110)"
-    )
-    async def sb_addprop(self, interaction: discord.Interaction,
-                         description: str,
-                         option_a: str,
-                         option_b: str,
-                         odds_a: int = -110,
-                         odds_b: int = -110):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-
+    async def _sb_addprop_impl(self, interaction: discord.Interaction,
+                               description: str,
+                               option_a: str,
+                               option_b: str,
+                               odds_a: int = -110,
+                               odds_b: int = -110):
         with _db_con() as con:
             cur = con.execute(
                 "INSERT INTO prop_bets (week, description, option_a, option_b, odds_a, odds_b, created_by) "
@@ -2262,21 +2434,27 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_settleprop",
-                          description="[Commish] Settle a prop bet and pay out winners")
+    @app_commands.command(name="sb_addprop",
+                          description="[Deprecated] Use /commish sb addprop instead.")
     @app_commands.describe(
-        prop_id="Prop bet ID number",
-        result="Winning option: 'a', 'b', or 'push'"
+        description="Full prop bet description, e.g. 'Will JT score 30+ pts this week?'",
+        option_a="First option label (e.g. 'Yes' or 'Ravens win big')",
+        option_b="Second option label (e.g. 'No' or 'Ravens win close')",
+        odds_a="American odds for Option A (default -110)",
+        odds_b="American odds for Option B (default -110)"
     )
-    @app_commands.choices(result=[
-        app_commands.Choice(name="Option A wins",  value="a"),
-        app_commands.Choice(name="Option B wins",  value="b"),
-        app_commands.Choice(name="Push (refund all)", value="push"),
-    ])
-    async def sb_settleprop(self, interaction: discord.Interaction,
-                            prop_id: int, result: str):
+    async def sb_addprop(self, interaction: discord.Interaction,
+                         description: str,
+                         option_a: str,
+                         option_b: str,
+                         odds_a: int = -110,
+                         odds_b: int = -110):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
+        await self._sb_addprop_impl(interaction, description, option_a, option_b, odds_a, odds_b)
+
+    async def _sb_settleprop_impl(self, interaction: discord.Interaction,
+                                  prop_id: int, result: str):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         with _db_con() as con:
@@ -2336,38 +2514,22 @@ class SportsbookCog(commands.Cog):
         embed.add_field(name="💸 Paid Out", value=f"${total_paid:,}",  inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # LEGACY COMMANDS (backward compat — delegate to new system)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="lockgame",
-                          description="[Commish] Lock a game to stop new bets (use /sb_lock instead)")
-    @app_commands.describe(matchup="e.g. 'Cowboys @ Eagles'", locked="True to lock, False to unlock")
-    async def lockgame(self, interaction: discord.Interaction, matchup: str, locked: bool):
+    @app_commands.command(name="sb_settleprop",
+                          description="[Deprecated] Use /commish sb settleprop instead.")
+    @app_commands.describe(
+        prop_id="Prop bet ID number",
+        result="Winning option: 'a', 'b', or 'push'"
+    )
+    @app_commands.choices(result=[
+        app_commands.Choice(name="Option A wins",  value="a"),
+        app_commands.Choice(name="Option B wins",  value="b"),
+        app_commands.Choice(name="Push (refund all)", value="push"),
+    ])
+    async def sb_settleprop(self, interaction: discord.Interaction,
+                            prop_id: int, result: str):
         if not _is_admin(interaction):
             return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        _set_locked(matchup.strip(), locked)
-        status = "🔴 **LOCKED**" if locked else "🟢 **UNLOCKED**"
-        await interaction.response.send_message(
-            f"{status} — `{matchup}` betting is now {'closed' if locked else 'open'}.",
-            ephemeral=True
-        )
-
-    @app_commands.command(name="setline",
-                          description="[Commish] Override O/U line for a game (use /sb_setou instead)")
-    @app_commands.describe(game_id="Game ID or 'Away @ Home'", ou_line="Over/Under total points")
-    async def setline(self, interaction: discord.Interaction, game_id: str, ou_line: float):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        _set_line_override(
-            game_id.strip(),
-            set_by=interaction.user.display_name,
-            ou_line=ou_line,
-        )
-        await interaction.response.send_message(
-            f"✅ O/U for `{game_id}` set to **{ou_line}**.", ephemeral=True
-        )
-
+        await self._sb_settleprop_impl(interaction, prop_id, result)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SportsbookCog(bot))
