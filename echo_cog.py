@@ -30,12 +30,7 @@ class EchoCog(commands.Cog):
         raw = os.getenv("ADMIN_USER_IDS", "")
         self._admin_ids = [int(x) for x in raw.split(",") if x.strip()]
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Load personas when bot is ready."""
-        pass  # Startup loading handled by _startup_load in bot.py
-
-    # ── Implementation methods (called by /atlas commands and deprecated wrappers)
+    # ── Implementation methods (called by /atlas commands)
 
     async def _echorebuild_impl(self, interaction: discord.Interaction):
         """Core echo rebuild logic."""
@@ -116,32 +111,6 @@ class EchoCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── Deprecated flat commands (remove in Phase 5) ─────────────────────────
-
-    @app_commands.command(
-        name="echorebuild",
-        description="[Deprecated] Use /atlas echorebuild instead."
-    )
-    async def echorebuild(self, interaction: discord.Interaction):
-        if interaction.user.id not in self._admin_ids:
-            await interaction.response.send_message(
-                "ATLAS: Echo rebuild is restricted to admins.", ephemeral=True
-            )
-            return
-        await self._echorebuild_impl(interaction)
-        await interaction.followup.send("_Tip: Use `/atlas echorebuild` instead — this command will be removed soon._")
-
-    @app_commands.command(
-        name="echostatus",
-        description="[Deprecated] Use /atlas echostatus instead."
-    )
-    async def echostatus(self, interaction: discord.Interaction):
-        if interaction.user.id not in self._admin_ids:
-            await interaction.response.send_message(
-                "ATLAS: Admin only.", ephemeral=True
-            )
-            return
-        await self._echostatus_impl(interaction)
 
 
 async def setup(bot: commands.Bot):

@@ -92,6 +92,7 @@ class BlackjackSession:
     wager:         int
     channel_id:    int
     message_id:    int = 0
+    original_wager: int = 0  # set after __init__ to track pre-double wager
 
     shoe:          list = field(default_factory=lambda: _build_shoe())
     dealer_hand:   list = field(default_factory=list)
@@ -306,7 +307,7 @@ class DoubleButton(discord.ui.Button):
                 "❌ Insufficient funds to double down.", ephemeral=True
             )
 
-        session.wager   *= 2
+        session.wager   += session.original_wager  # double by adding original (not *= 2)
         session.doubled  = True
         session.hit()
         await _finish_hand(interaction, session, view)
@@ -517,7 +518,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     Begin a new blackjack hand for the interacting user.
     Called from the casino hub or directly in #casino-blackjack.
     """
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
 
     uid = interaction.user.id
 
@@ -555,6 +556,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         wager      = wager,
         channel_id = interaction.channel_id,
     )
+    session.original_wager = wager
     session.deal()
     active_sessions[uid] = session
 

@@ -94,19 +94,6 @@ class AwardsCog(commands.Cog):
         embed = discord.Embed(title=f"Final Results: {_polls[poll_id]['title']}", description=results, color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
 
-    # ── Deprecated flat commands (remove in Phase 5) ─────────────────────────
-
-    @app_commands.command(name="createpoll", description="[Deprecated] Use /commish createpoll instead.")
-    async def createpoll(self, interaction: discord.Interaction, title: str, nominees: str):
-        if interaction.user.id not in _admin_ids():
-            return await interaction.response.send_message("Admin only.", ephemeral=True)
-        await self._createpoll_impl(interaction, title, nominees)
-
-    @app_commands.command(name="closepoll", description="[Deprecated] Use /commish closepoll instead.")
-    async def closepoll(self, interaction: discord.Interaction, poll_id: str):
-        if interaction.user.id not in _admin_ids():
-            return await interaction.response.send_message("Admin only.", ephemeral=True)
-        await self._closepoll_impl(interaction, poll_id)
 
 async def setup(bot):
     await bot.add_cog(AwardsCog(bot))

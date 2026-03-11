@@ -589,30 +589,3 @@ def build_context_string(data: dict) -> str:
         return "\n".join(lines)
 
     return "(No data found)"
-
-def generate_bar_chart(df, x_col, y_col, title="TSL Stat Comparison"):
-    """Generates a bar chart and returns an io.BytesIO buffer."""
-    import io
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    plt.figure(figsize=(10, 6))
-    sns.set_theme(style="darkgrid")
-    
-    # Sort data for better visualization
-    df_sorted = df.sort_values(by=y_col, ascending=False).head(15)
-    
-    chart = sns.barplot(data=df_sorted, x=x_col, y=y_col, palette="viridis")
-    plt.title(title, fontsize=16, color='white')
-    plt.xticks(rotation=45, color='white')
-    plt.yticks(color='white')
-    
-    # Transparent background for Discord Dark Mode
-    plt.gcf().set_facecolor('#2f3136')
-    chart.set_facecolor('#2f3136')
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', facecolor='#2f3136')
-    buf.seek(0)
-    plt.close()
-    return buf

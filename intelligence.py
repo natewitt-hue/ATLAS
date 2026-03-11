@@ -455,10 +455,10 @@ def get_clutch_records(margin: int = 7) -> dict:
     games[home_score_col] = pd.to_numeric(games[home_score_col], errors="coerce").fillna(0)
     games[away_score_col] = pd.to_numeric(games[away_score_col], errors="coerce").fillna(0)
 
-    # Final games only — status==3 if available, otherwise score>0 fallback
+    # Completed games — status IN (2,3) if available, otherwise score>0 fallback
     if status_col:
         games[status_col] = pd.to_numeric(games[status_col], errors="coerce").fillna(0).astype(int)
-        played = games[games[status_col] == 3].copy()
+        played = games[games[status_col].isin([2, 3])].copy()
     else:
         played = games[
             (games[home_score_col] > 0) | (games[away_score_col] > 0)
@@ -722,46 +722,3 @@ def build_leaderboard_data() -> dict:
         "season":         dm.CURRENT_SEASON,
         "status":         dm.get_league_status(),
     }
-
-
-# ── Reaction pagination helper ────────────────────────────────────────────────
-
-class PaginatedResult:
-    def __init__(self, pages: list, title: str = ""):
-        self.pages   = pages
-        self.title   = title
-        self.current = 0
-        self.total   = len(pages)
-
-    def current_page(self):
-        return self.pages[self.current] if self.pages else None
-
-    def next(self):
-        if self.current < self.total - 1:
-            self.current += 1
-        return self.current_page()
-
-    def prev(self):
-        if self.current > 0:
-            self.current -= 1
-        return self.current_page()
-
-    def page_label(self):
-        return f"Page {self.current + 1} / {self.total}"
-
-
-_paginated_messages: dict[int, PaginatedResult] = {}
-
-
-def register_pagination(message_id: int, pages: list, title: str = "") -> PaginatedResult:
-    pr = PaginatedResult(pages, title)
-    _paginated_messages[message_id] = pr
-    return pr
-
-
-def get_pagination(message_id: int) -> PaginatedResult | None:
-    return _paginated_messages.get(message_id)
-
-
-def cleanup_pagination(message_id: int):
-    _paginated_messages.pop(message_id, None)

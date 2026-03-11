@@ -758,7 +758,7 @@ async def _analyze_screenshots(
         )
 
     response = await loop.run_in_executor(None, _call)
-    raw = response.text.strip()
+    raw = (response.text or "").strip()
 
     # Defaults
     result = {
@@ -1306,7 +1306,7 @@ except ImportError:
             except Exception as e:
                 print(f"[positionchange_cog] State load error: {e}")
 
-    def _save_parity_state():
+    def _save_state():
         try:
             to_save = dict(_state)
             to_save["orphan_teams"] = list(_state.get("orphan_teams", set()))
@@ -1898,8 +1898,15 @@ async def _run_position_change(
         )
         return
 
-    # 4. Check Cornerstone lock
-    cornerstones = _state.get("cornerstones", {})
+    # 4. Check Cornerstone lock (read from disk to pick up genesis_cog changes)
+    _cs_data = {}
+    if os.path.isfile(_STATE_PATH):
+        try:
+            with open(_STATE_PATH, "r") as _csf:
+                _cs_data = json.load(_csf)
+        except Exception:
+            pass
+    cornerstones = _cs_data.get("cornerstones", {})
     if str(p.get("rosterId")) in cornerstones or p.get("rosterId") in cornerstones:
         await interaction.followup.send(
             f"🔒 **{p_name}** is designated as a **Cornerstone** and cannot have "
@@ -2303,7 +2310,7 @@ async def _analyze_screenshot(image_bytes: bytes, filename: str) -> str:
 
 def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
     """Send screenshot to Gemini Vision and get a TSL ruling (sync, safe for run_in_executor)."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     # Detect MIME type from filename
     ext = filename.lower().split(".")[-1]
@@ -2317,7 +2324,7 @@ def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
             types.Part.from_text(text=SYSTEM_PROMPT),
         ],
     )
-    return response.text
+    return response.text or "INCONCLUSIVE — Gemini returned no response."
 
 
 def _is_madden_screenshot(attachment: discord.Attachment) -> bool:

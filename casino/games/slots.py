@@ -94,7 +94,7 @@ def _calculate_payout(reels: list[str], wager: int) -> tuple[int, str, float]:
 
 async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     """Play one spin of the slot machine with animated reveal."""
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
 
     if not await is_casino_open("slots"):
         return await interaction.followup.send(
@@ -262,7 +262,7 @@ def _build_scratch_embed(
 
 async def daily_scratch(interaction: discord.Interaction) -> None:
     """Claim and play the daily scratch card."""
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
 
     uid = interaction.user.id
 

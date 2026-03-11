@@ -193,23 +193,29 @@ async def get_max_bet() -> int:
 
 async def get_balance(discord_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
-            await db.execute(
-                "INSERT OR IGNORE INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
-                (discord_id, STARTING_BALANCE, STARTING_BALANCE)
-            )
-            await db.commit()
-            # Re-read in case a concurrent insert won the race
+        await db.execute("BEGIN IMMEDIATE")
+        try:
             async with db.execute(
                 "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
             ) as cur:
                 row = await cur.fetchone()
-            return row[0] if row else STARTING_BALANCE
-        return row[0]
+            if row is None:
+                await db.execute(
+                    "INSERT OR IGNORE INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
+                    (discord_id, STARTING_BALANCE, STARTING_BALANCE)
+                )
+                # Re-read in case a concurrent insert won the race
+                async with db.execute(
+                    "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
+                ) as cur:
+                    row = await cur.fetchone()
+                await db.commit()
+                return row[0] if row else STARTING_BALANCE
+            await db.commit()
+            return row[0]
+        except Exception:
+            await db.rollback()
+            raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -429,9 +435,6 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> int | Non
     reward is not provided (backwards compat).
     Returns the amount won, or None if already claimed today.
     """
-    if not await can_claim_scratch(discord_id):
-        return None
-
     today = date.today().isoformat()
 
     # Fallback: roll if caller didn't pass a pre-computed reward
@@ -450,6 +453,15 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> int | Non
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            # Check eligibility inside the transaction to prevent TOCTOU race
+            async with db.execute(
+                "SELECT last_claim FROM daily_scratches WHERE discord_id=?", (discord_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if row and row[0] == today:
+                await db.rollback()
+                return None
+
             # Mark claimed
             await db.execute("""
                 INSERT INTO daily_scratches (discord_id, last_claim) VALUES (?,?)
@@ -562,23 +574,29 @@ async def cashout_crash_bet(bet_id: int, discord_id: int, multiplier: float) -> 
     Returns payout amount.  Balance credit is handled by process_wager().
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT wager, status FROM crash_bets WHERE id=? AND discord_id=?",
-            (bet_id, discord_id)
-        ) as cur:
-            row = await cur.fetchone()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute(
+                "SELECT wager, status FROM crash_bets WHERE id=? AND discord_id=?",
+                (bet_id, discord_id)
+            ) as cur:
+                row = await cur.fetchone()
 
-        if not row or row[1] != "active":
-            return 0
+            if not row or row[1] != "active":
+                await db.rollback()
+                return 0
 
-        wager  = row[0]
-        payout = int(wager * multiplier)
+            wager  = row[0]
+            payout = int(wager * multiplier)
 
-        await db.execute(
-            "UPDATE crash_bets SET cashout_mult=?, payout=?, status='cashed' WHERE id=?",
-            (multiplier, payout, bet_id)
-        )
-        await db.commit()
+            await db.execute(
+                "UPDATE crash_bets SET cashout_mult=?, payout=?, status='cashed' WHERE id=?",
+                (multiplier, payout, bet_id)
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     return payout
 

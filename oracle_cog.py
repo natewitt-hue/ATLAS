@@ -634,8 +634,6 @@ _ANALYSIS_OK = an is not None
 _INTEL_OK = ig is not None
 
 # ── Optional codex pipeline (SQL + Gemini NL queries) ────────────────────────
-# NOTE: Was history_cog — renamed to codex_cog in v1.4. Fallback to history_cog
-# for backwards compat if codex_cog doesn't exist yet.
 try:
     from codex_cog import (
         gemini_sql,
@@ -646,24 +644,14 @@ try:
         resolve_names_in_question,
         _build_conversation_block,
         _add_conversation_turn,
-        DB_SCHEMA,
+        get_db_schema,
         KNOWN_USERS,
     )
     _HISTORY_OK = True
 except ImportError:
-    try:
-        from history_cog import (
-            gemini_sql, gemini_answer, run_sql, extract_sql,
-            fuzzy_resolve_user, resolve_names_in_question,
-            DB_SCHEMA, KNOWN_USERS,
-        )
-        _build_conversation_block = None
-        _add_conversation_turn = None
-        _HISTORY_OK = True
-    except ImportError:
-        _HISTORY_OK = False
-        _build_conversation_block = None
-        _add_conversation_turn = None
+    _HISTORY_OK = False
+    _build_conversation_block = None
+    _add_conversation_turn = None
 
 # Optional affinity module
 try:
@@ -2994,7 +2982,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                     f"REMINDER: ALL columns are stored as TEXT. Always use "
                     f"CAST(col AS INTEGER) for numeric comparisons.\n"
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{DB_SCHEMA}"
+                    f"Schema:\n{get_db_schema()}"
                 )
                 loop = asyncio.get_running_loop()
                 fix_response = await loop.run_in_executor(
@@ -3514,10 +3502,12 @@ class DraftSeasonView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=120)
-        options = [discord.SelectOption(label="All Seasons Overview", value="0")] + [
+        season_opts = [
             discord.SelectOption(label=f"Season {s}", value=str(s))
             for s in range(1, dm.CURRENT_SEASON + 1)
         ]
+        # Discord caps select menus at 25 options — keep overview + last 24 seasons
+        options = [discord.SelectOption(label="All Seasons Overview", value="0")] + season_opts[-24:]
         self.season_select.options = options
 
     @discord.ui.select(placeholder="Select season...")

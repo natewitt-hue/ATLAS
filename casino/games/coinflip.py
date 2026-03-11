@@ -43,7 +43,8 @@ async def play_coinflip(
     wager:       int,
 ) -> None:
     """Instant solo coin flip. Even money (1x profit)."""
-    await interaction.response.defer()
+    if not interaction.response.is_done():
+        await interaction.response.defer()
 
     uid = interaction.user.id
 
@@ -145,16 +146,16 @@ class ChallengeView(discord.ui.View):
             return await interaction.response.send_message(
                 "❌ This challenge has already been resolved.", ephemeral=True
             )
+        self.resolved = True  # Set immediately to prevent double-accept race
 
         # Deduct opponent's wager
         try:
             await deduct_wager(self.opponent_id, self.wager)
         except Exception as e:
+            self.resolved = False  # Roll back if deduction failed
             return await interaction.response.send_message(
                 f"❌ Insufficient funds: {e}", ephemeral=True
             )
-
-        self.resolved = True
         self.stop()
         active_challenges.pop(self.challenge_id, None)
 

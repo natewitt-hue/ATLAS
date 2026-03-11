@@ -146,11 +146,17 @@ class CoinPickView(discord.ui.View):
 
     @discord.ui.button(label="Heads 🌕", style=discord.ButtonStyle.primary)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
         self.stop()
         await play_coinflip(interaction, "heads", self.wager)
 
     @discord.ui.button(label="Tails 🌑", style=discord.ButtonStyle.secondary)
     async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
         self.stop()
         await play_coinflip(interaction, "tails", self.wager)
 
@@ -160,6 +166,16 @@ class CasinoHubView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=120)
+        self.message: discord.Message | None = None
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="🃏 Blackjack", style=discord.ButtonStyle.success, row=0)
     async def blackjack(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -223,7 +239,7 @@ class CasinoHubView(discord.ui.View):
                     f"{hands} hands | {wins}W-{losses}L\n"
                     f"Wagered: {wagered:,} | ROI: {roi:+.1f}%"
                 ),
-                inline = True,
+                inline = False,
             )
 
         if total_wagered > 0:
@@ -289,7 +305,9 @@ class CasinoCog(commands.Cog):
         embed.add_field(name="Max Bet",      value=f"{max_bet:,} Bucks",          inline=True)
         embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
 
-        await interaction.followup.send(embed=embed, view=CasinoHubView(), ephemeral=True)
+        view = CasinoHubView()
+        msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
+        view.message = msg
 
     # ═══════════════════════════════════════════════════════════════════════
     #  COMMISSIONER COMMANDS

@@ -281,7 +281,7 @@ async def call_atlas(user_input: str, context: str, persona_type: str = "casual"
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, _generate)
-        return response.text.strip()
+        return (response.text or "").strip() or "ATLAS has no response."
     except Exception as e:
         return f"ATLAS Brain Error: {str(e)}"
 
@@ -632,25 +632,6 @@ async def _rebuilddb_impl(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(lines))
 
 
-# ── Deprecated Wrappers (remove in Phase 5) ─────────────────────────────────
-
-@bot.tree.command(name="wittsync", description="[Deprecated] Use /atlas sync instead.")
-async def wittsync(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("Admin only.", ephemeral=True)
-        return
-    await _sync_impl(interaction)
-    await interaction.followup.send("_Tip: Use `/atlas sync` instead — this command will be removed soon._")
-
-
-@bot.tree.command(name="rebuilddb", description="[Deprecated] Use /atlas rebuilddb instead.")
-async def rebuilddb(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("Admin only.", ephemeral=True)
-        return
-    await _rebuilddb_impl(interaction)
-    await interaction.followup.send("_Tip: Use `/atlas rebuilddb` instead — this command will be removed soon._")
-
 # ── Code Snapshot Export ──────────────────────────────────────────────────────
 
 def export_code_snapshot():
@@ -680,6 +661,7 @@ if __name__ == "__main__":
     if not GEMINI_API_KEY:
         print("⚠️  WARNING: GEMINI_API_KEY is not set — /ask and ATLAS AI responses will fail.")
 
-    export_code_snapshot()
+    if os.getenv("EXPORT_SNAPSHOT"):
+        export_code_snapshot()
     bot.run(DISCORD_TOKEN)
 
