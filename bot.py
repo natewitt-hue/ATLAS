@@ -200,6 +200,7 @@ async def setup_hook():
         "codex_cog",          # ATLAS Codex — historical AI (/ask, /h2h)
         "polymarket_cog",     # ATLAS Flow — Polymarket prediction markets
         "economy_cog",        # ATLAS Economy — money management & stipends
+        "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
         "commish_cog",        # ATLAS Commissioner — unified admin commands
     ]
 
@@ -209,6 +210,14 @@ async def setup_hook():
         except Exception as e:
             print(f"ATLAS Error loading {ext}: {e}")
             traceback.print_exc()
+
+    # Flow wallet DB setup (creates transactions table if needed)
+    try:
+        import flow_wallet
+        await flow_wallet.setup_wallet_db()
+        print("ATLAS: Flow wallet system initialized.")
+    except Exception as e:
+        print(f"ATLAS: Flow wallet setup failed: {e}")
 
     # Affinity DB table setup (safe to call every startup)
     if _affinity_available:

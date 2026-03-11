@@ -65,10 +65,11 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import data_manager as dm
+import flow_wallet
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 _DIR              = os.path.dirname(os.path.abspath(__file__))
-DB_PATH           = os.path.join(_DIR, "sportsbook.db")
+DB_PATH           = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
 HISTORY_DB_PATH   = os.path.join(_DIR, "tsl_history.db")
 
 TSL_GOLD          = 0xD4AF37
@@ -244,31 +245,11 @@ def setup_db():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _get_balance(uid: int) -> int:
-    with _db_con() as con:
-        res = con.execute("SELECT balance FROM users_table WHERE discord_id=?", (uid,)).fetchone()
-        if not res:
-            con.execute(
-                "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?, ?, ?)",
-                (uid, STARTING_BALANCE, STARTING_BALANCE)
-            )
-            return STARTING_BALANCE
-        return res[0]
+    return flow_wallet.get_balance_sync(uid)
 
 
 def _update_balance(uid: int, delta: int, con=None):
-    def _run(c):
-        if not c.execute("SELECT 1 FROM users_table WHERE discord_id=?", (uid,)).fetchone():
-            c.execute(
-                "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?, ?, ?)",
-                (uid, STARTING_BALANCE + delta, STARTING_BALANCE)
-            )
-        else:
-            c.execute("UPDATE users_table SET balance = balance + ? WHERE discord_id=?", (delta, uid))
-    if con:
-        _run(con)
-    else:
-        with _db_con() as c:
-            _run(c)
+    flow_wallet.update_balance_sync(uid, delta, source="TSL_BET", con=con)
 
 
 def _is_locked(game_id: str) -> bool:

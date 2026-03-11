@@ -27,11 +27,12 @@ import re
 
 from google import genai
 
-from casino.casino_db import (
+import flow_wallet
+from flow_wallet import (
     DB_PATH,
-    get_balance as _casino_get_balance,
     InsufficientFundsError,
 )
+from casino.renderer.prediction_card_renderer import render_market_page
 
 log = logging.getLogger("polymarket_cog")
 
@@ -144,6 +145,12 @@ MARKETS_PER_PAGE = 3         # Market cards shown per browse page (fits YES/NO b
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
 HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
 
+# Sports categories blocked from prediction markets (use /realsports instead)
+BLOCKED_CATEGORIES = {
+    "⚽ Sports", "🏈 NFL", "🏀 NBA", "⚾ MLB", "🏒 NHL",
+    "⚽ Soccer", "🥊 MMA", "♟️ Chess", "🎮 Gaming",
+}
+
 # ─────────────────────────────────────────────
 # DATABASE SETUP
 # ─────────────────────────────────────────────
@@ -207,40 +214,26 @@ async def init_prediction_db(db_path: str = DB_PATH):
 
 
 # ─────────────────────────────────────────────
-# TSL BUCKS HELPERS (delegates to casino_db)
+# TSL BUCKS HELPERS (delegates to flow_wallet)
 # ─────────────────────────────────────────────
 
-async def get_balance(user_id: str) -> int:
+async def get_balance(user_id) -> int:
     """Return the current TSL Bucks balance for a user."""
-    return await _casino_get_balance(int(user_id))
+    return await flow_wallet.get_balance(int(user_id))
 
 
-async def update_balance(user_id: str, delta: int):
+async def update_balance(user_id, delta: int):
     """
     Add `delta` (positive = credit, negative = debit) to a user's balance.
     Raises ValueError if the resulting balance would go negative.
     """
     uid = int(user_id)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (uid,)
-            ) as cur:
-                row = await cur.fetchone()
-            if not row:
-                raise ValueError("No casino account found. Use the casino first to create one.")
-            new_balance = row[0] + delta
-            if new_balance < 0:
-                raise ValueError("Insufficient TSL Bucks")
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, uid)
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+    if delta >= 0:
+        await flow_wallet.credit(uid, delta, "PREDICTION",
+                                 description="prediction market")
+    else:
+        await flow_wallet.debit(uid, abs(delta), "PREDICTION",
+                                description="prediction market")
 
 
 # ─────────────────────────────────────────────
@@ -580,7 +573,7 @@ class WagerModal(discord.ui.Modal):
         quantity    = int(raw)
         cost_bucks  = price_to_bucks(self.price) * quantity
         payout      = PAYOUT_SCALE * quantity
-        user_id     = str(interaction.user.id)
+        user_id     = interaction.user.id
 
         # Balance check
         try:
@@ -860,46 +853,52 @@ class MarketBrowserView(discord.ui.View):
         self.filter = cat
         self.page = 0
         self._rebuild_buttons()
-        await interaction.response.edit_message(embed=self._embed(), view=self)
+        embed, card_file = self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
 
     async def _prev(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
         self._rebuild_buttons()
-        await interaction.response.edit_message(embed=self._embed(), view=self)
+        embed, card_file = self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
 
     async def _next(self, interaction: discord.Interaction):
         self.page = min(self._max_page(), self.page + 1)
         self._rebuild_buttons()
-        await interaction.response.edit_message(embed=self._embed(), view=self)
+        embed, card_file = self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
 
-    # ── Embed builder ──
+    # ── Embed + Image builder ──
 
-    def _embed(self) -> discord.Embed:
+    def _build_page(self) -> tuple[discord.Embed, discord.File | None]:
+        """Build embed + rendered card image for the current page."""
         markets = self._filtered()
         total = len(markets)
         start = self.page * MARKETS_PER_PAGE
         chunk = markets[start : start + MARKETS_PER_PAGE]
 
         if self.filter == "hot":
-            cat_label = "🔥 Hot / Trending"
+            cat_label = "Hot / Trending"
         elif self.filter == "all":
             cat_label = "All Categories"
         else:
             cat_label = self.filter
 
         embed = discord.Embed(
-            title="📊 ATLAS Flow — Prediction Markets",
+            title="ATLAS Flow -- Prediction Markets",
             color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
         )
 
-        header_title = "🔥 TRENDING" if self.filter == "hot" else cat_label.upper()
-        embed.description = (
-            f"```\n"
-            f"{header_title}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 {total} markets  •  Page {self.page+1}/{self._max_page()+1}\n"
-            f"```"
-        )
+        embed.description = f"**{total}** markets | Page {self.page+1}/{self._max_page()+1}"
 
         # Hot markets banner — only on page 0 of "all" filter
         if self.page == 0 and self.filter == "all" and self.hot_markets:
@@ -909,55 +908,56 @@ class MarketBrowserView(discord.ui.View):
                 yes_p = hm.get("yes_price", 0.5)
                 heat = hot_label(vol_24h)
                 hot_lines.append(
-                    f"{heat} **{hm['title'][:50]}** — "
-                    f"YES {yes_p:.0%} · 24h: {fmt_volume(vol_24h)}"
+                    f"{heat} **{hm['title'][:50]}** -- "
+                    f"YES {yes_p:.0%} | 24h: {fmt_volume(vol_24h)}"
                 )
             if hot_lines:
                 embed.add_field(
-                    name="🔥 Trending Now",
+                    name="Trending Now",
                     value="\n".join(hot_lines),
                     inline=False,
                 )
 
-        # Market cards (one per row, matching the YES/NO buttons below)
-        for i, m in enumerate(chunk):
-            yes_p = m.get("yes_price", 0.5)
-            no_p = m.get("no_price", 0.5)
-            vol_24h = m.get("volume_24hr", 0)
-            cat = m.get("category", "🌐 Other")
-
-            # End date
-            end = m.get("end_date", "")
+        # Render Pillow card image
+        card_file = None
+        if chunk:
             try:
-                end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-                end_str = f"<t:{int(end_dt.timestamp())}:R>"
+                card_data = [
+                    {
+                        "title": m.get("title", ""),
+                        "category": m.get("category", "Other"),
+                        "yes_price": m.get("yes_price", 0.5),
+                        "no_price": m.get("no_price", 0.5),
+                        "volume": m.get("volume", 0),
+                        "end_date": m.get("end_date", ""),
+                    }
+                    for m in chunk
+                ]
+                buf = render_market_page(card_data, self.page + 1, self._max_page() + 1)
+                card_file = discord.File(buf, filename="markets.png")
+                embed.set_image(url="attachment://markets.png")
             except Exception:
-                end_str = "No end date"
-
-            heat = hot_label(vol_24h)
-            heat_prefix = f"{heat} " if heat else ""
-            vol_str = fmt_volume(m.get("volume", 0))
-
-            # Compact market card
-            embed.add_field(
-                name=f"{cat}  {heat_prefix}{m['title'][:55]}",
-                value=(
-                    f"**YES {yes_p:.0%}**  ·  **NO {no_p:.0%}**  ·  "
-                    f"Vol: {vol_str}  ·  {end_str}"
-                ),
-                inline=False,
-            )
-
-        if not chunk:
+                # Fallback: text-based cards if rendering fails
+                for m in chunk:
+                    yes_p = m.get("yes_price", 0.5)
+                    no_p = m.get("no_price", 0.5)
+                    cat = m.get("category", "Other")
+                    vol_str = fmt_volume(m.get("volume", 0))
+                    embed.add_field(
+                        name=f"{cat}  {m['title'][:55]}",
+                        value=f"**YES {yes_p:.0%}**  |  **NO {no_p:.0%}**  |  Vol: {vol_str}",
+                        inline=False,
+                    )
+        else:
             embed.add_field(
                 name="No markets found",
                 value="Try a different category or check back later.",
                 inline=False,
             )
 
-        embed.set_footer(text="Click YES or NO below to bet · Odds fetched live · ATLAS Flow Casino")
+        embed.set_footer(text="Click YES or NO below to bet | ATLAS Flow Casino")
         embed.timestamp = datetime.now(timezone.utc)
-        return embed
+        return embed, card_file
 
 
 # ─────────────────────────────────────────────
@@ -1028,6 +1028,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     # if the market's own slug reveals a more specific category
                     mkt_category = extract_category_from_event(event, market_slug=slug)
                     category = mkt_category if mkt_category != "🌐 Other" else event_category
+
+                    # Skip sports markets — use /realsports instead
+                    if category in BLOCKED_CATEGORIES:
+                        continue
+
                     status = market_status(mkt)
                     end_date = mkt.get("endDate", "") or mkt.get("end_date_iso", "")
                     volume = mkt.get("volumeNum") or mkt.get("volume") or 0
@@ -1143,11 +1148,20 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         async with aiosqlite.connect(DB_PATH) as db:
             updated = 0
+            blocked = 0
             for item in classifications:
                 idx = item.get("index", 0) - 1
                 cat = item.get("category", "")
                 if 0 <= idx < len(unknowns) and cat:
                     market_id = unknowns[idx][0]
+                    # If Gemini classified it as a sports category, remove it
+                    if cat in BLOCKED_CATEGORIES:
+                        await db.execute(
+                            "DELETE FROM prediction_markets WHERE market_id = ?",
+                            (market_id,),
+                        )
+                        blocked += 1
+                        continue
                     await db.execute(
                         "UPDATE prediction_markets SET category = ? WHERE market_id = ?",
                         (cat, market_id),
@@ -1155,7 +1169,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     updated += 1
             await db.commit()
 
-        log.info(f"Gemini classified {updated}/{len(unknowns)} markets.")
+        log.info(f"Gemini classified {updated}/{len(unknowns)} markets ({blocked} sports blocked).")
 
     async def _auto_resolve_pass(self):
         """
@@ -1408,7 +1422,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             cog=self,
         )
 
-        await interaction.followup.send(embed=view._embed(), view=view, ephemeral=True)
+        embed, card_file = view._build_page()
+        kwargs = {"embed": embed, "view": view, "ephemeral": True}
+        if card_file:
+            kwargs["file"] = card_file
+        await interaction.followup.send(**kwargs)
 
     # ── Slash: /bet <slug> ──────────────────
 
@@ -1538,7 +1556,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     async def portfolio_cmd(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await self._ensure_db()
-        user_id = str(interaction.user.id)
+        user_id = interaction.user.id
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("""
@@ -1757,6 +1775,53 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         )
         embed.set_footer(text="Polymarket Gamma API — No API key required")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Impl: refund_sports (called by commish_cog) ────
+
+    async def refund_sports_impl(self, interaction: discord.Interaction):
+        """Void all open contracts on sports-category markets and refund users."""
+        await self._ensure_db()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Find sports markets with open contracts
+            placeholders = ",".join("?" for _ in BLOCKED_CATEGORIES)
+            async with db.execute(
+                f"SELECT m.market_id, m.title, m.category "
+                f"FROM prediction_markets m "
+                f"INNER JOIN prediction_contracts c "
+                f"  ON c.market_id = m.market_id AND c.status = 'open' "
+                f"WHERE m.category IN ({placeholders}) "
+                f"GROUP BY m.market_id",
+                tuple(BLOCKED_CATEGORIES),
+            ) as cursor:
+                sports_markets = await cursor.fetchall()
+
+        if not sports_markets:
+            await interaction.followup.send(
+                "No open contracts on sports markets found.", ephemeral=True
+            )
+            return
+
+        total_voided = 0
+        total_refunded = 0
+        for market_id, title, category in sports_markets:
+            counts = await self._resolve(market_id, "VOID", resolved_by="sports_filter")
+            total_voided += counts["voided"]
+            total_refunded += counts["voided"]  # each voided contract = 1 refund
+
+            # Also remove the market from the DB so it won't reappear
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM prediction_markets WHERE market_id = ?",
+                    (market_id,),
+                )
+                await db.commit()
+
+        await interaction.followup.send(
+            f"Voided **{total_voided}** contracts across **{len(sports_markets)}** "
+            f"sports markets. All users refunded.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):

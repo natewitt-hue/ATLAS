@@ -19,7 +19,7 @@ import time
 
 import aiosqlite
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sportsbook.db")
+DB_PATH = os.getenv("FLOW_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "flow_economy.db"))
 
 # ── Score adjustment constants ────────────────────────────────────────────────
 POSITIVE_DELTA =  2     # Friendly / grateful message

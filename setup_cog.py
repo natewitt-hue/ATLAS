@@ -55,6 +55,7 @@ REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
     ("crash",              "crash",               "ATLAS — Casino", False, False),
     ("coinflip",           "coinflip",            "ATLAS — Casino", False, False),
     ("sportsbook",         "sportsbook",          "ATLAS — Casino", False, False),
+    ("real_sportsbook",    "real-sportsbook",     "ATLAS — Casino", False, False),
     ("prediction_markets", "prediction-markets",  "ATLAS — Casino", False, False),
 ]
 
