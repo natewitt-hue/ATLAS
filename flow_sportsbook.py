@@ -13,26 +13,12 @@ ODDS ENGINE v5 — Elo-Based Power Rankings
   · _calc_ou(): owner historical avg pts ± rank adjustments, ceiling 99.5
   · _build_game_lines(): admin line_overrides applied first, engine fallback
 
-ADMIN MANAGEMENT SUITE (Commissioner role or ADMIN_USER_IDS):
-  /sb_status    — Overview of all current-week games, lines, locks, bet counts
-  /sb_lines     — Debug view: per-game power ratings + component breakdown
-  /sb_setspread — Override spread (auto-recalculates ML from new spread)
-  /sb_setml     — Override moneylines manually
-  /sb_setou     — Override O/U total
-  /sb_lock      — Lock / unlock a single game
-  /sb_lockall   — Lock all current-week games at once
-  /sb_unlockall — Unlock all current-week games at once
-  /sb_cancelgame — Void & refund all pending bets on one game
-  /sb_refund    — Refund a single bet by ID
-  /sb_balance   — Manually adjust a member's TSL Bucks
-  /sb_resetlines — Wipe all admin line overrides for the current week
-  /sb_addprop   — Create a custom prop bet with two options
-  /sb_settleprop — Settle a prop bet and pay out winners
-  /grade_bets   — Manual commissioner bet settlement (unchanged)
+ADMIN MANAGEMENT (via /commish sb subcommands — _impl methods live here):
+  status, lines, setspread, setml, setou, lock, lockall, unlockall,
+  cancelgame, refund, balance, resetlines, addprop, settleprop, grade_bets
 
 USER COMMANDS:
-  /sportsbook   — Current-week betting board (spread, ML, O/U, parlay)
-                  Board buttons: My Bets · History · Leaderboard · Props
+  /sportsbook   — Unified hub: TSL + NFL/NBA/MLB/NHL + My Bets/History/Leaderboard/Props
 
 CHANGES v5.0 vs v4.0:
   BREAK ENTIRE odds engine replaced with Elo-based power rankings
@@ -59,13 +45,17 @@ import math
 import os
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 
+import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 import data_manager as dm
 import flow_wallet
+from odds_api_client import SUPPORTED_SPORTS as REAL_SPORTS
+from real_sportsbook_cog import EventListView, SPORT_EMOJI
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 _DIR              = os.path.dirname(os.path.abspath(__file__))
@@ -1318,6 +1308,200 @@ class ParlayCartView(discord.ui.View):
         await interaction.response.send_message("🗑️ Parlay cart cleared.", ephemeral=True)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  HELPER — Load TSL week games for the hub
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _load_tsl_week_games() -> list[dict]:
+    """Load current-week TSL game lines for the sportsbook UI."""
+    bet_week = dm.CURRENT_WEEK + 1
+    src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+    if src.empty:
+        raise ValueError("No game data loaded. Try again shortly.")
+
+    df = src.copy()
+    for col in ["weekIndex", "seasonIndex", "stageIndex"]:
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: int(float(x)) if x not in (None, "", "nan") else -1
+            )
+
+    if "weekIndex" in df.columns:
+        mask = df["weekIndex"] == (bet_week - 1)
+        if "seasonIndex" in df.columns:
+            mask = mask & (df["seasonIndex"] == dm.CURRENT_SEASON)
+        games_df = df[mask]
+    elif "week" in df.columns:
+        games_df = df[df["week"].apply(
+            lambda x: int(float(x)) if x not in (None, "") else -1
+        ) == bet_week]
+    else:
+        games_df = df
+
+    raw_games = games_df.to_dict("records")
+    if not raw_games:
+        raise ValueError(f"No games found for Week {bet_week}. Schedule may not be posted yet.")
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _build_game_lines, raw_games)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  UNIFIED SPORTSBOOK HUB VIEW — TSL + Real Sports
+# ═════════════════════════════════════════════════════════════════════════════
+
+class SportsbookHubView(discord.ui.View):
+    """Unified sportsbook hub — TSL simulation + real sports."""
+
+    def __init__(self, cog: "SportsbookCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    # ── Row 0: Sport buttons ───────────────────────────────────────────────
+
+    @discord.ui.button(label="TSL", emoji="\U0001f3c8",
+                       style=discord.ButtonStyle.primary,
+                       custom_id="atlas:sportsbook:tsl", row=0)
+    async def tsl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            ui_games = await _load_tsl_week_games()
+        except ValueError as e:
+            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+        except Exception as e:
+            return await interaction.followup.send(
+                f"❌ Error loading TSL games: `{e}`", ephemeral=True
+            )
+
+        bet_week = dm.CURRENT_WEEK + 1
+        balance = _get_balance(interaction.user.id)
+        embed = discord.Embed(title="\U0001f3c8  TSL SPORTSBOOK", color=TSL_GOLD)
+        embed.description = (
+            f"```\n"
+            f"WEEK {bet_week} BOARD  •  SEASON {dm.CURRENT_SEASON}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"\U0001f4b0 Your Balance:  ${balance:,}\n"
+            f"\U0001f3ae Games:         {len(ui_games)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELECT A GAME TO PLACE WAGER\n"
+            f"```"
+        )
+        embed.set_footer(text="Lines: Elo Rating \u00b7 Team Quality \u00b7 Home Edge")
+        await interaction.followup.send(
+            embed=embed, view=SportsbookSelectView(ui_games, self.cog), ephemeral=True
+        )
+
+    @discord.ui.button(label="NFL", emoji="\U0001f3c8",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:nfl", row=0)
+    async def nfl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "americanfootball_nfl")
+
+    @discord.ui.button(label="NBA", emoji="\U0001f3c0",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:nba", row=0)
+    async def nba_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "basketball_nba")
+
+    @discord.ui.button(label="MLB", emoji="\u26be",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:mlb", row=0)
+    async def mlb_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "baseball_mlb")
+
+    @discord.ui.button(label="NHL", emoji="\U0001f3d2",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:nhl", row=0)
+    async def nhl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "icehockey_nhl")
+
+    # ── Row 1: Utility buttons ─────────────────────────────────────────────
+
+    @discord.ui.button(label="My Bets", emoji="\U0001f4cb",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:my_bets", row=1)
+    async def my_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._mybets_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="History", emoji="\U0001f4ca",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:history", row=1)
+    async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._bethistory_impl(interaction, weeks=99)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Leaderboard", emoji="\U0001f3c6",
+                       style=discord.ButtonStyle.success,
+                       custom_id="atlas:sportsbook:leaderboard", row=1)
+    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._leaderboard_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Props", emoji="\U0001f3b2",
+                       style=discord.ButtonStyle.primary,
+                       custom_id="atlas:sportsbook:props", row=1)
+    async def props(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._props_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    # ── Internal: real sport drill-down ────────────────────────────────────
+
+    async def _show_real_sport(self, interaction: discord.Interaction, sport_key: str):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT event_id, sport_key, home_team, away_team, commence_time "
+                    "FROM real_events WHERE sport_key = ? AND commence_time > ? "
+                    "ORDER BY commence_time",
+                    (sport_key, now_str),
+                ) as cur:
+                    events = [dict(row) for row in await cur.fetchall()]
+        except Exception as e:
+            return await interaction.followup.send(
+                f"❌ Error loading events: `{e}`", ephemeral=True
+            )
+
+        if not events:
+            sport_name = REAL_SPORTS.get(sport_key, sport_key)
+            return await interaction.followup.send(
+                f"No **{sport_name}** games available right now.\n"
+                f"Odds sync on a schedule \u2014 check back later!",
+                ephemeral=True,
+            )
+
+        view = EventListView(None, events, sport_key)
+        embed = view.build_embed()
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  TSL GAME SELECTOR (drill-down from hub TSL button)
+# ═════════════════════════════════════════════════════════════════════════════
+
 class SportsbookSelectView(discord.ui.View):
     def __init__(self, games: list[dict], cog: "SportsbookCog"):
         super().__init__(timeout=None)
@@ -1341,35 +1525,6 @@ class SportsbookSelectView(discord.ui.View):
         )
         sel.callback = self._on_select
         self.add_item(sel)
-
-        # ── Quick-action buttons (row 1) ──────────────────────────────────
-        btn_mybets = discord.ui.Button(
-            label="My Bets", style=discord.ButtonStyle.gray,
-            custom_id="sb:mybets", row=1
-        )
-        btn_mybets.callback = self._on_mybets
-        self.add_item(btn_mybets)
-
-        btn_history = discord.ui.Button(
-            label="History", style=discord.ButtonStyle.gray,
-            custom_id="sb:history", row=1
-        )
-        btn_history.callback = self._on_history
-        self.add_item(btn_history)
-
-        btn_leaderboard = discord.ui.Button(
-            label="Leaderboard", style=discord.ButtonStyle.green,
-            custom_id="sb:leaderboard", row=1
-        )
-        btn_leaderboard.callback = self._on_leaderboard
-        self.add_item(btn_leaderboard)
-
-        btn_props = discord.ui.Button(
-            label="Props", style=discord.ButtonStyle.blurple,
-            custom_id="sb:props", row=1
-        )
-        btn_props.callback = self._on_props
-        self.add_item(btn_props)
 
     async def _on_select(self, interaction: discord.Interaction):
         game = self.games[int(interaction.data["values"][0])]
@@ -1405,41 +1560,6 @@ class SportsbookSelectView(discord.ui.View):
             embed=embed, view=GameCardViewWithParlay(game), ephemeral=True
         )
 
-    async def _on_mybets(self, interaction: discord.Interaction):
-        try:
-            await self.cog._mybets_impl(interaction)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
-    async def _on_history(self, interaction: discord.Interaction):
-        try:
-            await self.cog._bethistory_impl(interaction, weeks=99)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
-    async def _on_leaderboard(self, interaction: discord.Interaction):
-        try:
-            await self.cog._leaderboard_impl(interaction)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
-    async def _on_props(self, interaction: discord.Interaction):
-        try:
-            await self.cog._props_impl(interaction)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1558,64 +1678,28 @@ class SportsbookCog(commands.Cog):
     # USER COMMANDS
     # ─────────────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="sportsbook", description="Open the TSL Interactive Sportsbook")
+    @app_commands.command(name="sportsbook", description="Open the ATLAS Sportsbook \u2014 TSL + Real Sports")
     async def sportsbook(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        try:
-            bet_week = dm.CURRENT_WEEK + 1
-            src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
-            if src.empty:
-                return await interaction.followup.send("❌ No game data loaded. Try again shortly.")
-
-            df = src.copy()
-            for col in ["weekIndex", "seasonIndex", "stageIndex"]:
-                if col in df.columns:
-                    df[col] = df[col].apply(
-                        lambda x: int(float(x)) if x not in (None, "", "nan") else -1
-                    )
-
-            if "weekIndex" in df.columns:
-                mask = df["weekIndex"] == (bet_week - 1)
-                if "seasonIndex" in df.columns:
-                    mask = mask & (df["seasonIndex"] == dm.CURRENT_SEASON)
-                games_df = df[mask]
-            elif "week" in df.columns:
-                games_df = df[df["week"].apply(
-                    lambda x: int(float(x)) if x not in (None, "") else -1
-                ) == bet_week]
-            else:
-                games_df = df
-
-            raw_games = games_df.to_dict("records")
-            if not raw_games:
-                return await interaction.followup.send(
-                    f"❌ No games found for Week {bet_week}. Schedule may not be posted yet."
-                )
-
-            loop = asyncio.get_running_loop()
-            ui_games = await loop.run_in_executor(None, _build_game_lines, raw_games)
-
-        except Exception as e:
-            return await interaction.followup.send(f"❌ Error loading games: `{e}`")
-
         balance = _get_balance(interaction.user.id)
-        embed = discord.Embed(title="🏆  TSL GLOBAL SPORTSBOOK", color=TSL_GOLD)
+        bet_week = dm.CURRENT_WEEK + 1
+
+        embed = discord.Embed(title="\U0001f3c6  ATLAS GLOBAL SPORTSBOOK", color=TSL_GOLD)
         if interaction.guild and interaction.guild.icon:
             embed.set_thumbnail(url=interaction.guild.icon.url)
         embed.description = (
             f"```\n"
-            f"WEEK {bet_week} BOARD  •  SEASON {dm.CURRENT_SEASON}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 Your Balance:  ${balance:,}\n"
-            f"🎮 Games:         {len(ui_games)}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELECT A GAME TO PLACE WAGER\n"
-            f"```"
+            f"SEASON {dm.CURRENT_SEASON}  \u2022  WEEK {bet_week}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"\U0001f4b0 Your Balance:  ${balance:,}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"```\n"
+            f"\U0001f3c8 **TSL** \u2014 Elo-based sim lines on weekly matchups\n"
+            f"\U0001f3c8 **NFL** \u00b7 \U0001f3c0 **NBA** \u00b7 \u26be **MLB** \u00b7 \U0001f3d2 **NHL** \u2014 Live odds via FanDuel\n\n"
+            f"Select a sport below to browse games, or use the utility buttons."
         )
-        embed.set_footer(
-            text="Lines: Season W% · Power Rank · OVR · Off/Def Rank · Career W% · Home Edge"
-        )
-        await interaction.followup.send(embed=embed, view=SportsbookSelectView(ui_games, self))
+        embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
+        await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
 
     # ── User-facing _impl methods (called by board buttons) ────────────────
 
@@ -1918,13 +2002,6 @@ class SportsbookCog(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="grade_bets", description="[Deprecated] Use /commish sb grade_bets instead.")
-    @app_commands.describe(week="Week number to settle")
-    async def grade_bets(self, interaction: discord.Interaction, week: int):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._grade_bets_impl(interaction, week)
-
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — OVERVIEW
     # ─────────────────────────────────────────────────────────────────────────
@@ -1998,12 +2075,6 @@ class SportsbookCog(commands.Cog):
         embed.set_footer(text="🟢 = Open  🔴 = Locked  ⚡ = Admin Override")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="sb_status", description="[Deprecated] Use /commish sb status instead.")
-    async def sb_status(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_status_impl(interaction)
-
     async def _sb_lines_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
@@ -2057,12 +2128,6 @@ class SportsbookCog(commands.Cog):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="sb_lines", description="[Deprecated] Use /commish sb lines instead.")
-    async def sb_lines(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_lines_impl(interaction)
-
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — LINE OVERRIDES
     # ─────────────────────────────────────────────────────────────────────────
@@ -2093,18 +2158,6 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_setspread", description="[Deprecated] Use /commish sb setspread instead.")
-    @app_commands.describe(
-        matchup="e.g. 'Cowboys @ Eagles'",
-        home_spread="Home team's spread (negative = home favored, e.g. -3.5)"
-    )
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_setspread(self, interaction: discord.Interaction,
-                           matchup: str, home_spread: float):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_setspread_impl(interaction, matchup, home_spread)
-
     async def _sb_setml_impl(self, interaction: discord.Interaction,
                              matchup: str, home_ml: int, away_ml: int):
         _set_line_override(
@@ -2119,19 +2172,6 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_setml", description="[Deprecated] Use /commish sb setml instead.")
-    @app_commands.describe(
-        matchup="e.g. 'Cowboys @ Eagles'",
-        home_ml="Home team moneyline (e.g. -145 or +125)",
-        away_ml="Away team moneyline (e.g. +125 or -145)"
-    )
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_setml(self, interaction: discord.Interaction,
-                       matchup: str, home_ml: int, away_ml: int):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_setml_impl(interaction, matchup, home_ml, away_ml)
-
     async def _sb_setou_impl(self, interaction: discord.Interaction, matchup: str, ou_line: float):
         _set_line_override(
             matchup.strip(),
@@ -2143,17 +2183,6 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_setou", description="[Deprecated] Use /commish sb setou instead.")
-    @app_commands.describe(
-        matchup="e.g. 'Cowboys @ Eagles'",
-        ou_line="Over/Under total points (e.g. 47.5)"
-    )
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_setou(self, interaction: discord.Interaction, matchup: str, ou_line: float):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_setou_impl(interaction, matchup, ou_line)
-
     async def _sb_resetlines_impl(self, interaction: discord.Interaction):
         with _db_con() as con:
             count = con.execute("SELECT COUNT(*) FROM line_overrides").fetchone()[0]
@@ -2163,12 +2192,6 @@ class SportsbookCog(commands.Cog):
             f"✅ Cleared **{count}** line override(s). All games now use the ATLAS odds engine.",
             ephemeral=True
         )
-
-    @app_commands.command(name="sb_resetlines", description="[Deprecated] Use /commish sb resetlines instead.")
-    async def sb_resetlines(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_resetlines_impl(interaction)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — GAME LOCKS
@@ -2181,17 +2204,6 @@ class SportsbookCog(commands.Cog):
             f"{status} — `{matchup}` betting is now {'closed' if locked else 'open'}.",
             ephemeral=True
         )
-
-    @app_commands.command(name="sb_lock", description="[Deprecated] Use /commish sb lock instead.")
-    @app_commands.describe(
-        matchup="Game ID or 'Away @ Home'",
-        locked="True to lock, False to unlock"
-    )
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_lock(self, interaction: discord.Interaction, matchup: str, locked: bool):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_lock_impl(interaction, matchup, locked)
 
     async def _sb_lockall_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -2227,12 +2239,6 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_lockall", description="[Deprecated] Use /commish sb lockall instead.")
-    async def sb_lockall(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_lockall_impl(interaction)
-
     async def _sb_unlockall_impl(self, interaction: discord.Interaction):
         with _db_con() as con:
             count = con.execute(
@@ -2244,12 +2250,6 @@ class SportsbookCog(commands.Cog):
             f"🟢 **Unlocked {count} game(s)**. Betting is now open.",
             ephemeral=True
         )
-
-    @app_commands.command(name="sb_unlockall", description="[Deprecated] Use /commish sb unlockall instead.")
-    async def sb_unlockall(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_unlockall_impl(interaction)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — BET MANAGEMENT
@@ -2307,15 +2307,6 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_cancelgame",
-                          description="[Deprecated] Use /commish sb cancelgame instead.")
-    @app_commands.describe(matchup="Matchup key, e.g. 'Cowboys @ Eagles'")
-    @app_commands.autocomplete(matchup=_matchup_autocomplete)
-    async def sb_cancelgame(self, interaction: discord.Interaction, matchup: str):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_cancelgame_impl(interaction, matchup)
-
     async def _sb_refund_impl(self, interaction: discord.Interaction, bet_id: int):
         with _db_con() as con:
             bet = con.execute(
@@ -2346,13 +2337,6 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="sb_refund", description="[Deprecated] Use /commish sb refund instead.")
-    @app_commands.describe(bet_id="Bet ID number (from /mybets or the DB)")
-    async def sb_refund(self, interaction: discord.Interaction, bet_id: int):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_refund_impl(interaction, bet_id)
-
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — BALANCE MANAGEMENT
     # ─────────────────────────────────────────────────────────────────────────
@@ -2372,20 +2356,6 @@ class SportsbookCog(commands.Cog):
             f"Reason: *{reason}*",
             ephemeral=True
         )
-
-    @app_commands.command(name="sb_balance", description="[Deprecated] Use /commish sb balance instead.")
-    @app_commands.describe(
-        member="Discord member to adjust",
-        adjustment="Amount to add (positive) or remove (negative)",
-        reason="Optional reason for the audit log"
-    )
-    async def sb_balance(self, interaction: discord.Interaction,
-                         member: discord.Member,
-                         adjustment: int,
-                         reason: str = "Commissioner adjustment"):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_balance_impl(interaction, member, adjustment, reason)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — PROP BET MANAGEMENT
@@ -2414,25 +2384,6 @@ class SportsbookCog(commands.Cog):
             f"Members can bet via `/props`.",
             ephemeral=True
         )
-
-    @app_commands.command(name="sb_addprop",
-                          description="[Deprecated] Use /commish sb addprop instead.")
-    @app_commands.describe(
-        description="Full prop bet description, e.g. 'Will JT score 30+ pts this week?'",
-        option_a="First option label (e.g. 'Yes' or 'Ravens win big')",
-        option_b="Second option label (e.g. 'No' or 'Ravens win close')",
-        odds_a="American odds for Option A (default -110)",
-        odds_b="American odds for Option B (default -110)"
-    )
-    async def sb_addprop(self, interaction: discord.Interaction,
-                         description: str,
-                         option_a: str,
-                         option_b: str,
-                         odds_a: int = -110,
-                         odds_b: int = -110):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_addprop_impl(interaction, description, option_a, option_b, odds_a, odds_b)
 
     async def _sb_settleprop_impl(self, interaction: discord.Interaction,
                                   prop_id: int, result: str):
@@ -2494,23 +2445,6 @@ class SportsbookCog(commands.Cog):
         embed.add_field(name="🔁 Push",     value=str(pushes),         inline=True)
         embed.add_field(name="💸 Paid Out", value=f"${total_paid:,}",  inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="sb_settleprop",
-                          description="[Deprecated] Use /commish sb settleprop instead.")
-    @app_commands.describe(
-        prop_id="Prop bet ID number",
-        result="Winning option: 'a', 'b', or 'push'"
-    )
-    @app_commands.choices(result=[
-        app_commands.Choice(name="Option A wins",  value="a"),
-        app_commands.Choice(name="Option B wins",  value="b"),
-        app_commands.Choice(name="Push (refund all)", value="push"),
-    ])
-    async def sb_settleprop(self, interaction: discord.Interaction,
-                            prop_id: int, result: str):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._sb_settleprop_impl(interaction, prop_id, result)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SportsbookCog(bot))

@@ -708,7 +708,7 @@ class FlowHubView(discord.ui.View):
     @discord.ui.button(label="Real Sports", emoji="\U0001f3c6", style=discord.ButtonStyle.primary, row=0)
     async def real_sb(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "Use `/realsports` to bet on real NFL/NBA games.", ephemeral=True
+            "Use `/sportsbook` to bet on real NFL/NBA/MLB/NHL games.", ephemeral=True
         )
 
     @discord.ui.button(label="Predictions", emoji="\U0001f52e", style=discord.ButtonStyle.primary, row=0)

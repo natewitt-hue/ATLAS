@@ -1589,20 +1589,6 @@ class TradeCenterCog(commands.Cog):
         embed.set_footer(text="Use 🔍 Trade Lookup in /rosterhub for full details.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(
-        name="tradelist",
-        description="[Deprecated] Use /commish tradelist instead."
-    )
-    async def tradelist(self, interaction: discord.Interaction):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
-            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
-        await self._tradelist_impl(interaction)
-
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1884,16 +1870,6 @@ class ParityCog(commands.Cog):
         embed.set_footer(text=f"Drawn by {interaction.user} | Results logged.")
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(
-        name="runlottery",
-        description="[Deprecated] Use /commish runlottery instead."
-    )
-    async def runlottery(self, interaction: discord.Interaction):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-        await self._runlottery_impl(interaction)
-
     # ── /orphanfranchise ──────────────────────────────────────────────────────
     async def _orphanfranchise_impl(self, interaction: discord.Interaction, team: str, flag: bool):
         if flag:
@@ -1905,20 +1881,6 @@ class ParityCog(commands.Cog):
 
         _save_state()
         await interaction.response.send_message(msg)
-
-    @app_commands.command(
-        name="orphanfranchise",
-        description="[Deprecated] Use /commish orphanfranchise instead."
-    )
-    @app_commands.describe(
-        team="Team name",
-        flag="True to set orphan, False to clear"
-    )
-    async def orphanfranchise(self, interaction: discord.Interaction, team: str, flag: bool):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-        await self._orphanfranchise_impl(interaction, team, flag)
 
     # ── Cap integrity gate (called by trade_cog / admin commands) ─────────────
 

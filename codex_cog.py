@@ -761,19 +761,6 @@ class CodexCog(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"Debug error: `{e}`")
 
-    # ── Deprecated wrapper (remove in Phase 5) ──────────────────────────────
-    @app_commands.command(
-        name="ask_debug",
-        description="[Deprecated] Use /commish askdebug instead."
-    )
-    @app_commands.describe(question="Your question about TSL history")
-    async def ask_debug(self, interaction: discord.Interaction, question: str):
-        admin_ids = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
-        if interaction.user.id not in admin_ids:
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        await self._ask_debug_impl(interaction, question)
-
     # ── H2H and Season Recap _impl methods (called by oracle HubView buttons) ──
 
     async def _h2h_impl(self, interaction: discord.Interaction, owner1: str, owner2: str):

@@ -573,20 +573,6 @@ class ComplaintCog(commands.Cog):
             embeds=[_build_complaint_embed(c), _build_ruling_embed(c)], ephemeral=True
         )
 
-    @app_commands.command(
-        name="caseview",
-        description="[Deprecated] Use /commish caseview instead."
-    )
-    @app_commands.describe(case_id="The complaint case ID (e.g. A1B2C3D4)")
-    async def caseview(self, interaction: discord.Interaction, case_id: str):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
-            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
-        await self.caseview_impl(interaction, case_id)
-
     async def caselist_impl(self, interaction: discord.Interaction):
         pending = [c for c in _complaints.values() if c["verdict"] == "pending"]
         if not pending:
@@ -611,19 +597,6 @@ class ComplaintCog(commands.Cog):
             )
         embed.set_footer(text="Use /caseview <id> to inspect a specific case.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(
-        name="caselist",
-        description="[Deprecated] Use /commish caselist instead."
-    )
-    async def caselist(self, interaction: discord.Interaction):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
-            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
-        await self.caselist_impl(interaction)
 
 
 
@@ -1210,15 +1183,6 @@ class ForceRequestCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(
-        name="forcehistory",
-        description="[Deprecated] Use /commish forcehistory instead."
-    )
-    async def forcehistory(self, interaction: discord.Interaction):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            return await interaction.response.send_message("🚫 Admin only.", ephemeral=True)
-        await self.forcehistory_impl(interaction)
-
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -1288,7 +1252,7 @@ class GameplayCog(commands.Cog):
 # ── Try importing parity state helpers ────────────────────────────────────────
 # We share parity_state.json with parity_cog so we don't scatter state files.
 try:
-    from parity_cog import _state, _save_state, _STATE_PATH
+    from genesis_cog import _state, _save_state, _STATE_PATH
     _PARITY_STATE_AVAILABLE = True
 except ImportError:
     # Standalone fallback: manage our own state dict
@@ -1306,7 +1270,7 @@ except ImportError:
             except Exception as e:
                 print(f"[positionchange_cog] State load error: {e}")
 
-    def _save_parity_state():
+    def _save_state():
         try:
             to_save = dict(_state)
             to_save["orphan_teams"] = list(_state.get("orphan_teams", set()))
@@ -1935,7 +1899,7 @@ async def _run_position_change(
         week=week,
     )
     _state.setdefault("position_changes", []).append(record)
-    _save_parity_state()
+    _save_state()
 
     # 8. Route to announcement channel
     channel = bot.get_channel(_roster_moves_channel_id()) if _roster_moves_channel_id() else None
@@ -1991,7 +1955,7 @@ class PositionChangeCog(commands.Cog):
         record["status"]      = "approved"
         record["approved_by"] = str(interaction.user)
         record["approved_at"] = dt.utcnow().isoformat()
-        _save_parity_state()
+        _save_state()
 
         await interaction.response.send_message(
             f"✅ Position change `{log_id.upper()}` approved: "
@@ -2002,21 +1966,6 @@ class PositionChangeCog(commands.Cog):
         channel = self.bot.get_channel(_roster_moves_channel_id()) if _roster_moves_channel_id() else None
         if channel:
             await channel.send(embed=_announcement_embed(record))
-
-    @app_commands.command(
-        name="positionchangeapprove",
-        description="[Deprecated] Use /commish positionchangeapprove instead.",
-    )
-    @app_commands.describe(log_id="Log ID from the pending request (e.g. A1B2C3D4)")
-    async def positionchangeapprove(
-        self,
-        interaction: discord.Interaction,
-        log_id: str,
-    ):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-        await self.positionchangeapprove_impl(interaction, log_id)
 
     # ── /positionchangedeny ───────────────────────────────────────────────────
     async def positionchangedeny_impl(
@@ -2061,24 +2010,6 @@ class PositionChangeCog(commands.Cog):
             deny_embed.set_footer(text=f"Log ID: {record['log_id']}")
             await channel.send(embed=deny_embed)
 
-    @app_commands.command(
-        name="positionchangedeny",
-        description="[Deprecated] Use /commish positionchangedeny instead.",
-    )
-    @app_commands.describe(
-        log_id = "Log ID from the pending request",
-        reason = "Reason for denial (shown to requester)",
-    )
-    async def positionchangedeny(
-        self,
-        interaction: discord.Interaction,
-        log_id: str,
-        reason: str = "No reason provided.",
-    ):
-        if interaction.user.id not in ADMIN_USER_IDS:
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-        await self.positionchangedeny_impl(interaction, log_id, reason)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2303,7 +2234,7 @@ async def _analyze_screenshot(image_bytes: bytes, filename: str) -> str:
 
 def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
     """Send screenshot to Gemini Vision and get a TSL ruling (sync, safe for run_in_executor)."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     # Detect MIME type from filename
     ext = filename.lower().split(".")[-1]

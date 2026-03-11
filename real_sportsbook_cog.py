@@ -41,19 +41,21 @@ TSL_GOLD = 0xC8A951
 
 # Sport-specific emoji
 SPORT_EMOJI = {
-    "americanfootball_nfl": "\U0001f3c8",  # football
-    "basketball_nba": "\U0001f3c0",        # basketball
+    "americanfootball_nfl": "\U0001f3c8",  # 🏈
+    "basketball_nba":       "\U0001f3c0",  # 🏀
+    "baseball_mlb":         "\u26be",      # ⚾
+    "icehockey_nhl":        "\U0001f3d2",  # 🏒
 }
 
-# NFL season months (Sep–Feb)
-NFL_MONTHS = {9, 10, 11, 12, 1, 2}
-# NBA season months (Oct–Jun)
-NBA_MONTHS = {10, 11, 12, 1, 2, 3, 4, 5, 6}
-
-# NFL sync days (Tue=1, Sat=5)
-NFL_SYNC_DAYS = {1, 5}
-# NBA sync days (Mon=0, Wed=2, Fri=4)
-NBA_SYNC_DAYS = {0, 2, 4}
+# Season windows + sync schedule per sport
+# months: which months the sport is in-season
+# sync_days: weekday numbers (Mon=0 .. Sun=6) to fetch fresh odds
+SPORT_SEASONS = {
+    "americanfootball_nfl": {"months": {9, 10, 11, 12, 1, 2},          "sync_days": {1, 5}},
+    "basketball_nba":       {"months": {10, 11, 12, 1, 2, 3, 4, 5, 6}, "sync_days": {0, 2, 4}},
+    "baseball_mlb":         {"months": {3, 4, 5, 6, 7, 8, 9, 10},      "sync_days": {0, 2, 4}},
+    "icehockey_nhl":        {"months": {10, 11, 12, 1, 2, 3, 4, 5, 6}, "sync_days": {1, 3, 5}},
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -110,18 +112,72 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         self.client = OddsAPIClient()
         self._ready = False
 
+    async def _setup_tables(self):
+        """Create real sportsbook tables if they don't exist."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS real_events (
+                    event_id       TEXT PRIMARY KEY,
+                    sport_key      TEXT NOT NULL,
+                    sport_title    TEXT NOT NULL,
+                    home_team      TEXT NOT NULL,
+                    away_team      TEXT NOT NULL,
+                    commence_time  TEXT,
+                    home_score     INTEGER,
+                    away_score     INTEGER,
+                    locked         INTEGER DEFAULT 0,
+                    completed      INTEGER DEFAULT 0,
+                    last_odds_sync  TEXT,
+                    last_score_sync TEXT
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS real_odds (
+                    event_id      TEXT NOT NULL,
+                    bookmaker     TEXT NOT NULL,
+                    market        TEXT NOT NULL,
+                    outcome_name  TEXT NOT NULL,
+                    price         INTEGER,
+                    point         REAL,
+                    last_updated  TEXT,
+                    UNIQUE(event_id, bookmaker, market, outcome_name)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS real_bets (
+                    bet_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_id    INTEGER NOT NULL,
+                    event_id      TEXT NOT NULL,
+                    sport_key     TEXT,
+                    bet_type      TEXT NOT NULL,
+                    pick          TEXT NOT NULL,
+                    odds          INTEGER NOT NULL,
+                    line          REAL,
+                    wager_amount  INTEGER NOT NULL,
+                    status        TEXT DEFAULT 'Pending',
+                    created_at    TEXT
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS sportsbook_settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            await db.commit()
+        log.info("Real sportsbook tables ready.")
+
     async def cog_load(self):
+        await self._setup_tables()
         self.sync_scores_task.start()
         self.lock_started_games.start()
-        self.sync_nfl_odds_task.start()
-        self.sync_nba_odds_task.start()
+        self.sync_odds_task.start()
         self._ready = True
 
     async def cog_unload(self):
         self.sync_scores_task.cancel()
         self.lock_started_games.cancel()
-        self.sync_nfl_odds_task.cancel()
-        self.sync_nba_odds_task.cancel()
+        self.sync_odds_task.cancel()
         await self.client.close()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -158,29 +214,16 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         await self.bot.wait_until_ready()
 
     @tasks.loop(hours=12)
-    async def sync_nfl_odds_task(self):
-        """Sync NFL odds on Tue/Sat during season."""
+    async def sync_odds_task(self):
+        """Sync odds for all in-season sports on their scheduled days."""
         await asyncio.sleep(random.uniform(5, 15))
         now = datetime.now(timezone.utc)
-        if now.month not in NFL_MONTHS or now.weekday() not in NFL_SYNC_DAYS:
-            return
-        await self._sync_odds("americanfootball_nfl")
+        for sport_key, cfg in SPORT_SEASONS.items():
+            if now.month in cfg["months"] and now.weekday() in cfg["sync_days"]:
+                await self._sync_odds(sport_key)
 
-    @sync_nfl_odds_task.before_loop
-    async def _before_nfl(self):
-        await self.bot.wait_until_ready()
-
-    @tasks.loop(hours=12)
-    async def sync_nba_odds_task(self):
-        """Sync NBA odds 3x/week during season."""
-        await asyncio.sleep(random.uniform(5, 15))
-        now = datetime.now(timezone.utc)
-        if now.month not in NBA_MONTHS or now.weekday() not in NBA_SYNC_DAYS:
-            return
-        await self._sync_odds("basketball_nba")
-
-    @sync_nba_odds_task.before_loop
-    async def _before_nba(self):
+    @sync_odds_task.before_loop
+    async def _before_odds(self):
         await self.bot.wait_until_ready()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -413,27 +456,6 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         return "Lost"
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # SLASH COMMAND: /realsports
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    @app_commands.command(
-        name="realsports",
-        description="Bet on real NFL & NBA games with TSL Bucks.",
-    )
-    async def realsports_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        view = SportPickerView(self)
-        embed = discord.Embed(
-            title="\U0001f3c6 ATLAS Real Sportsbook",
-            description="Select a sport to view upcoming games and odds.",
-            color=TSL_GOLD,
-        )
-        balance = await flow_wallet.get_balance(interaction.user.id)
-        embed.set_footer(text=f"Balance: ${balance:,}")
-
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # IMPL METHODS (for commish_cog delegation)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -553,58 +575,10 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-class SportPickerView(discord.ui.View):
-    """Top-level: pick NFL or NBA."""
-
-    def __init__(self, cog: RealSportsbookCog):
-        super().__init__(timeout=120)
-        self.cog = cog
-
-    @discord.ui.button(label="NFL", emoji="\U0001f3c8", style=discord.ButtonStyle.primary)
-    async def nfl_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        await self._show_events(interaction, "americanfootball_nfl")
-
-    @discord.ui.button(label="NBA", emoji="\U0001f3c0", style=discord.ButtonStyle.primary)
-    async def nba_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        await self._show_events(interaction, "basketball_nba")
-
-    async def _show_events(self, interaction: discord.Interaction, sport_key: str):
-        """Load upcoming events for the sport and display them."""
-        now = datetime.now(timezone.utc).isoformat()
-        cutoff = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT event_id, sport_key, sport_title, home_team, away_team, "
-                "commence_time, locked, completed "
-                "FROM real_events "
-                "WHERE sport_key = ? AND completed = 0 AND locked = 0 "
-                "AND commence_time > ? "
-                "ORDER BY commence_time ASC LIMIT 25",
-                (sport_key, cutoff),
-            ) as cur:
-                events = [dict(row) for row in await cur.fetchall()]
-
-        if not events:
-            await interaction.followup.send(
-                f"No upcoming {SUPPORTED_SPORTS.get(sport_key, sport_key)} games. "
-                f"Odds sync may not have run yet.",
-                ephemeral=True,
-            )
-            return
-
-        view = EventListView(self.cog, events, sport_key)
-        embed = view.build_embed()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-
 class EventListView(discord.ui.View):
     """Shows a list of upcoming events with a select menu to pick one."""
 
-    def __init__(self, cog: RealSportsbookCog, events: list[dict], sport_key: str):
+    def __init__(self, cog, events: list[dict], sport_key: str):
         super().__init__(timeout=120)
         self.cog = cog
         self.events = events[:25]  # Select max 25 options
@@ -680,7 +654,7 @@ class EventListView(discord.ui.View):
 class BetTypeView(discord.ui.View):
     """Shows odds for a single event with buttons to place bets."""
 
-    def __init__(self, cog: RealSportsbookCog, event: dict, odds_rows: list[dict]):
+    def __init__(self, cog, event: dict, odds_rows: list[dict]):
         super().__init__(timeout=120)
         self.cog = cog
         self.event = event
@@ -767,7 +741,7 @@ class BetTypeView(discord.ui.View):
                 label = label[:97] + "..."
             options.append(discord.SelectOption(
                 label=label,
-                value=f"{o['outcome_name']}|{o['price']}|{o.get('point', '')}",
+                value=f"{o['outcome_name']}|{o['price']}|{o.get('point') or ''}",
             ))
 
         view = PickSelectView(self.cog, self.event, bet_type, options)
@@ -789,7 +763,7 @@ class BetTypeView(discord.ui.View):
                 label = label[:97] + "..."
             options.append(discord.SelectOption(
                 label=label,
-                value=f"{name}|{o['price']}|{o.get('point', '')}",
+                value=f"{name}|{o['price']}|{o.get('point') or ''}",
             ))
 
         view = PickSelectView(self.cog, self.event, "OU", options)
@@ -803,7 +777,7 @@ class BetTypeView(discord.ui.View):
 class PickSelectView(discord.ui.View):
     """Select menu for picking a specific outcome, then opens wager modal."""
 
-    def __init__(self, cog: RealSportsbookCog, event: dict,
+    def __init__(self, cog, event: dict,
                  bet_type: str, options: list[discord.SelectOption]):
         super().__init__(timeout=60)
         self.cog = cog
@@ -822,7 +796,7 @@ class PickSelectView(discord.ui.View):
         parts = raw.split("|")
         pick = parts[0]
         odds = int(parts[1])
-        line = float(parts[2]) if parts[2] else None
+        line = float(parts[2]) if parts[2] and parts[2] != 'None' else None
 
         # Map OU bet_type
         actual_bet_type = self.bet_type
@@ -838,7 +812,7 @@ class PickSelectView(discord.ui.View):
 class RealBetModal(discord.ui.Modal):
     """Modal to enter wager amount for a real sports bet."""
 
-    def __init__(self, cog: RealSportsbookCog, event: dict,
+    def __init__(self, cog, event: dict,
                  bet_type: str, pick: str, odds: int, line: Optional[float]):
         super().__init__(title=f"Bet Slip — {bet_type}")
         self.cog = cog

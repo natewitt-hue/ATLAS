@@ -125,6 +125,7 @@ import data_manager as dm
 import reasoning
 import build_tsl_db as db_builder
 import build_member_db as member_db
+from ui_state import UIStateManager
 
 # Optional modules
 try: import intelligence as intel
@@ -175,6 +176,9 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 intents       = discord.Intents.all()
 bot           = commands.Bot(command_prefix="!", intents=intents)
 
+# Hub Infrastructure — persistent UI state manager
+bot.ui_state  = UIStateManager(bot)
+
 # ── FIX #8: Startup guard — prevents re-running load_all() on reconnect ──────
 _startup_done = False
 
@@ -218,6 +222,13 @@ async def setup_hook():
         print("ATLAS: Flow wallet system initialized.")
     except Exception as e:
         print(f"ATLAS: Flow wallet setup failed: {e}")
+
+    # Hub Infrastructure — persistent UI state table
+    try:
+        await bot.ui_state.init_table()
+        print("ATLAS: UI State Manager initialized.")
+    except Exception as e:
+        print(f"ATLAS: UI State init failed: {e}")
 
     # Affinity DB table setup (safe to call every startup)
     if _affinity_available:
@@ -415,6 +426,9 @@ async def on_ready():
 
     print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
     print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
+
+    # Restore persistent hub views from ui_state table
+    await bot.ui_state.restore_all_views()
 
     # Guard prevents spawning a duplicate task on every Discord reconnect
     if not blowout_monitor.is_running():
@@ -640,25 +654,6 @@ async def _rebuilddb_impl(interaction: discord.Interaction):
         lines = [f"DB rebuild failed: {', '.join(db_result['errors'][:3])}"]
     await interaction.followup.send("\n".join(lines))
 
-
-# ── Deprecated Wrappers (remove in Phase 5) ─────────────────────────────────
-
-@bot.tree.command(name="wittsync", description="[Deprecated] Use /atlas sync instead.")
-async def wittsync(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("Admin only.", ephemeral=True)
-        return
-    await _sync_impl(interaction)
-    await interaction.followup.send("_Tip: Use `/atlas sync` instead — this command will be removed soon._")
-
-
-@bot.tree.command(name="rebuilddb", description="[Deprecated] Use /atlas rebuilddb instead.")
-async def rebuilddb(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("Admin only.", ephemeral=True)
-        return
-    await _rebuilddb_impl(interaction)
-    await interaction.followup.send("_Tip: Use `/atlas rebuilddb` instead — this command will be removed soon._")
 
 # ── Code Snapshot Export ──────────────────────────────────────────────────────
 

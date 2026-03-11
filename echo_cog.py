@@ -116,33 +116,6 @@ class EchoCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── Deprecated flat commands (remove in Phase 5) ─────────────────────────
-
-    @app_commands.command(
-        name="echorebuild",
-        description="[Deprecated] Use /atlas echorebuild instead."
-    )
-    async def echorebuild(self, interaction: discord.Interaction):
-        if interaction.user.id not in self._admin_ids:
-            await interaction.response.send_message(
-                "ATLAS: Echo rebuild is restricted to admins.", ephemeral=True
-            )
-            return
-        await self._echorebuild_impl(interaction)
-        await interaction.followup.send("_Tip: Use `/atlas echorebuild` instead — this command will be removed soon._")
-
-    @app_commands.command(
-        name="echostatus",
-        description="[Deprecated] Use /atlas echostatus instead."
-    )
-    async def echostatus(self, interaction: discord.Interaction):
-        if interaction.user.id not in self._admin_ids:
-            await interaction.response.send_message(
-                "ATLAS: Admin only.", ephemeral=True
-            )
-            return
-        await self._echostatus_impl(interaction)
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EchoCog(bot))

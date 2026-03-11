@@ -319,53 +319,21 @@ class CasinoCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="casino_status", description="[Deprecated] Use /commish casino status instead.")
-    async def casino_status(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_status_impl(interaction)
-
     async def _casino_open_impl(self, interaction: discord.Interaction):
         await db.set_setting("casino_open", "1")
         await interaction.response.send_message("✅ TSL Casino is now **OPEN**. 🎰")
-
-    @app_commands.command(name="casino_open", description="[Deprecated] Use /commish casino open instead.")
-    async def casino_open(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_open_impl(interaction)
 
     async def _casino_close_impl(self, interaction: discord.Interaction):
         await db.set_setting("casino_open", "0")
         await interaction.response.send_message("🔴 TSL Casino is now **CLOSED**.")
 
-    @app_commands.command(name="casino_close", description="[Deprecated] Use /commish casino close instead.")
-    async def casino_close(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_close_impl(interaction)
-
     async def _casino_open_game_impl(self, interaction: discord.Interaction, game: GAME_CHOICES):
         await db.set_setting(f"casino_{game}_open", "1")
         await interaction.response.send_message(f"✅ **{game.capitalize()}** is now open.")
 
-    @app_commands.command(name="casino_open_game", description="[Deprecated] Use /commish casino open_game instead.")
-    @app_commands.describe(game="Which game to open")
-    async def casino_open_game(self, interaction: discord.Interaction, game: GAME_CHOICES):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_open_game_impl(interaction, game)
-
     async def _casino_close_game_impl(self, interaction: discord.Interaction, game: GAME_CHOICES):
         await db.set_setting(f"casino_{game}_open", "0")
         await interaction.response.send_message(f"🔴 **{game.capitalize()}** is now closed.")
-
-    @app_commands.command(name="casino_close_game", description="[Deprecated] Use /commish casino close_game instead.")
-    @app_commands.describe(game="Which game to close")
-    async def casino_close_game(self, interaction: discord.Interaction, game: GAME_CHOICES):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_close_game_impl(interaction, game)
 
     async def _casino_set_limits_impl(
         self,
@@ -393,23 +361,6 @@ class CasinoCog(commands.Cog):
             "✅ Limits updated:\n" + "\n".join(changes), ephemeral=True
         )
 
-    @app_commands.command(name="casino_set_limits", description="[Deprecated] Use /commish casino set_limits instead.")
-    @app_commands.describe(
-        max_bet   = "Maximum bet per game (default 100)",
-        daily_min = "Minimum daily scratch reward",
-        daily_max = "Maximum daily scratch reward",
-    )
-    async def casino_set_limits(
-        self,
-        interaction: discord.Interaction,
-        max_bet:   typing.Optional[int] = None,
-        daily_min: typing.Optional[int] = None,
-        daily_max: typing.Optional[int] = None,
-    ):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_set_limits_impl(interaction, max_bet, daily_min, daily_max)
-
     async def _casino_house_report_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
@@ -433,12 +384,6 @@ class CasinoCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="casino_house_report", description="[Deprecated] Use /commish casino house_report instead.")
-    async def casino_house_report(self, interaction: discord.Interaction):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_house_report_impl(interaction)
-
     async def _casino_clear_session_impl(self, interaction: discord.Interaction, user: discord.Member):
         if user.id in bj_sessions:
             session = bj_sessions.pop(user.id)
@@ -455,13 +400,6 @@ class CasinoCog(commands.Cog):
                 ephemeral=True
             )
 
-    @app_commands.command(name="casino_clear_session", description="[Deprecated] Use /commish casino clear_session instead.")
-    @app_commands.describe(user="The user whose session to clear")
-    async def casino_clear_session(self, interaction: discord.Interaction, user: discord.Member):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_clear_session_impl(interaction, user)
-
     async def _casino_give_scratch_impl(self, interaction: discord.Interaction, user: discord.Member):
         # Reset their last_claim so they can claim immediately
         async with aiosqlite.connect(db.DB_PATH) as conn:
@@ -475,13 +413,6 @@ class CasinoCog(commands.Cog):
             f"They can claim it from the `/casino` hub.",
             ephemeral=True
         )
-
-    @app_commands.command(name="casino_give_scratch", description="[Deprecated] Use /commish casino give_scratch instead.")
-    @app_commands.describe(user="The user to gift a scratch card")
-    async def casino_give_scratch(self, interaction: discord.Interaction, user: discord.Member):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("❌ Commissioner only.", ephemeral=True)
-        await self._casino_give_scratch_impl(interaction, user)
 
 
 # ── Cog registration ──────────────────────────────────────────────────────────

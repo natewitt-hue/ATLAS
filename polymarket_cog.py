@@ -145,7 +145,7 @@ MARKETS_PER_PAGE = 3         # Market cards shown per browse page (fits YES/NO b
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
 HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
 
-# Sports categories blocked from prediction markets (use /realsports instead)
+# Sports categories blocked from prediction markets (use /sportsbook instead)
 BLOCKED_CATEGORIES = {
     "⚽ Sports", "🏈 NFL", "🏀 NBA", "⚾ MLB", "🏒 NHL",
     "⚽ Soccer", "🥊 MMA", "♟️ Chess", "🎮 Gaming",
@@ -547,7 +547,7 @@ class WagerModal(discord.ui.Modal):
     """Modal that asks the user how many contracts to buy."""
 
     amount_input = discord.ui.TextInput(
-        label="How many contracts? (1 contract = 1 TSL Buck unit)",
+        label="Contracts to buy (1 contract = 1 Buck)",
         placeholder="e.g. 10",
         min_length=1,
         max_length=6,
@@ -555,7 +555,7 @@ class WagerModal(discord.ui.Modal):
     )
 
     def __init__(self, market_id: str, slug: str, side: str, price: float, title: str):
-        super().__init__(title=f"Buy {side} — {title[:40]}")
+        super().__init__(title=f"Buy {side} — {title[:34]}")
         self.market_id    = market_id
         self.slug         = slug
         self.side         = side
@@ -1029,7 +1029,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     mkt_category = extract_category_from_event(event, market_slug=slug)
                     category = mkt_category if mkt_category != "🌐 Other" else event_category
 
-                    # Skip sports markets — use /realsports instead
+                    # Skip sports markets — use /sportsbook instead
                     if category in BLOCKED_CATEGORIES:
                         continue
 
@@ -1076,6 +1076,16 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     upserted += 1
 
             await db.commit()
+
+            # Purge any stale sports markets that pre-date the filter
+            blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
+            cursor = await db.execute(
+                f"DELETE FROM prediction_markets WHERE category IN ({blocked_ph}) AND status = 'active'",
+                tuple(BLOCKED_CATEGORIES),
+            )
+            if cursor.rowcount:
+                log.info(f"Purged {cursor.rowcount} stale sports markets from prediction DB.")
+                await db.commit()
 
         log.info(f"Polymarket sync complete — {upserted} active markets upserted.")
 
@@ -1360,11 +1370,15 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         description="Browse live Polymarket prediction markets."
     )
     async def markets_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return  # interaction expired before we could respond
         await self._ensure_db()
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("""
+            blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
+            async with db.execute(f"""
                 SELECT market_id, slug, title, category,
                        yes_price, no_price, volume, end_date,
                        COALESCE(volume_24hr, 0), COALESCE(featured, 0), liquidity
@@ -1372,9 +1386,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 WHERE status = 'active'
                   AND yes_price <= ?
                   AND no_price  <= ?
+                  AND category NOT IN ({blocked_ph})
                 ORDER BY volume DESC
                 LIMIT 200
-            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD)) as cursor:
+            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD, *BLOCKED_CATEGORIES)) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
@@ -1436,7 +1451,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     )
     @app_commands.describe(slug="The market slug/ID from /markets")
     async def bet_cmd(self, interaction: discord.Interaction, slug: str):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         await self._ensure_db()
         slug = slug.strip().lower()
 
@@ -1554,7 +1572,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         description="View your open prediction market contracts."
     )
     async def portfolio_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         await self._ensure_db()
         user_id = interaction.user.id
 
@@ -1620,7 +1641,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         slug: str,
         result: str,
     ):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         await self._ensure_db()
         slug   = slug.strip().lower()
         result = result.upper().strip()
@@ -1725,7 +1749,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def market_status_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         await self._ensure_db()
 
         # Test connectivity

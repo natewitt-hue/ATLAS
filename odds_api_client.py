@@ -25,7 +25,9 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 # Sports we actively track
 SUPPORTED_SPORTS = {
     "americanfootball_nfl": "NFL",
-    "basketball_nba": "NBA",
+    "basketball_nba":       "NBA",
+    "baseball_mlb":         "MLB",
+    "icehockey_nhl":        "NHL",
 }
 
 # Bookmakers to pull odds from (FanDuel is a good single source)
