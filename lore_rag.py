@@ -37,12 +37,6 @@ def _ensure_loaded():
             _metadata = pickle.load(f)
 
 
-def is_lore_query(text):
-    keywords = ["history", "beef", "drama", "said", "remember", "trade reaction", "lore"]
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in keywords)
-
-
 def build_lore_context(query: str, k=3) -> str:
     """
     Searches the FAISS index for lore relevant to the query.

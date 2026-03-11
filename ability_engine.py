@@ -7,10 +7,7 @@ through merit thresholds (The Lock & Key system).
 Data sources: players.json + playerAbilities.json from MaddenStats API
 Integration:  import ability_engine; results = ability_engine.run_audit(players, abilities)
 
-Discord commands (registered in bot.py):
-  /abilityaudit              — Full league audit, summary counts
-  /abilityaudit team:<name> — Single team detailed report
-  /abilitycheck player:<name> — Single player deep dive
+Discord access:  Genesis hub / /rosterhub buttons
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -959,7 +956,7 @@ def check_position_change(player: dict, from_pos: str, to_pos: str) -> tuple[boo
 def position_change_embed_lines(player: dict, from_pos: str, to_pos: str) -> list[str]:
     """
     Return formatted lines for a Discord embed showing position change eligibility.
-    Used by positionchange_cog.py and ability_cog.py.
+    Used by sentinel_cog.py and genesis_cog.py.
 
     Example output:
       **John Smith** (WR → TE): ✅ ELIGIBLE

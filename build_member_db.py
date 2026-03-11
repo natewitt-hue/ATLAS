@@ -1224,7 +1224,7 @@ def get_db_username_for_discord_id(discord_id: int | str, db_path: str = DB_PATH
 
 def get_known_users(db_path: str = DB_PATH) -> list[str]:
     """
-    Return list of all db_usernames for use as KNOWN_USERS in history_cog.
+    Return list of all db_usernames for use as KNOWN_USERS in codex_cog.
     Includes both current and historical members who have DB records.
     """
     conn = sqlite3.connect(db_path)
@@ -1265,7 +1265,7 @@ def get_alias_map(db_path: str = DB_PATH) -> dict[str, str]:
 
 def get_username_to_nick_map(db_path: str = DB_PATH) -> dict[str, str]:
     """
-    Return db_username → nickname map for stats_hub_cog's _USERNAME_TO_NICK.
+    Return db_username → nickname map for oracle_cog's _USERNAME_TO_NICK.
     Used for ring lookups and display name resolution.
     Only includes members with both a db_username and a nickname.
     """

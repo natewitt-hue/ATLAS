@@ -705,9 +705,9 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
         if "stageIndex" in df.columns:
             df = df[df["stageIndex"] == CURRENT_STAGE]
 
-        # Only final games (status == 3). Status 2 = in-progress, scores unreliable.
+        # Completed games: status 2 (live) or 3 (final) both have valid scores.
         if "status" in df.columns:
-            df = df[df["status"] == 3]
+            df = df[df["status"].isin([2, 3])]
 
         results = []
         for _, g in df.iterrows():
@@ -740,7 +740,7 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
     for g in scores:
         if pd.to_numeric(g.get("weekIndex", -1), errors="coerce") != week_index:
             continue
-        if int(g.get("status", 0)) != 3:  # final only
+        if int(g.get("status", 0)) not in (2, 3):  # completed games only
             continue
         hs  = int(g.get("homeScore", 0) or 0)
         aws = int(g.get("awayScore", 0) or 0)
@@ -776,7 +776,7 @@ def get_h2h_record(team_a: str, team_b: str) -> dict:
         hs  = int(pd.to_numeric(g.get("homeScore", 0), errors="coerce") or 0)
         aws = int(pd.to_numeric(g.get("awayScore", 0), errors="coerce") or 0)
         status = int(pd.to_numeric(g.get("status", 0), errors="coerce") or 0)
-        if status != 3:  # final only
+        if status not in (2, 3):  # completed games only
             continue
         if not ({h, aw} == {a_l, b_l}):
             continue

@@ -5,7 +5,7 @@ Single utility used by bot.py and all cogs to load the correct
 Echo persona based on context type.
 
 Import pattern (in any cog or bot.py):
-    from echo_loader import get_persona, load_all_personas, PERSONA_CASUAL
+    from echo_loader import get_persona, load_all_personas
 
 Context types:
     "casual"     - @mentions, banter, general chat
@@ -197,19 +197,3 @@ def infer_context(command_name: str = None, channel_name: str = None) -> str:
             return "official"
 
     return "casual"
-
-
-# ---------------------------------------------------------------------------
-# Convenience module-level accessors (for backwards compatibility with cogs
-# that had ATLAS_PERSONA = "..." hardcoded — use get_persona() directly in
-# new code, but these provide a quick drop-in replacement).
-# ---------------------------------------------------------------------------
-
-def PERSONA_CASUAL() -> str:
-    return get_persona("casual")
-
-def PERSONA_OFFICIAL() -> str:
-    return get_persona("official")
-
-def PERSONA_ANALYTICAL() -> str:
-    return get_persona("analytical")

@@ -383,7 +383,7 @@ def _compute_elo_ratings() -> dict:
                    CAST(seasonIndex AS INTEGER) AS season,
                    CAST(weekIndex AS INTEGER) AS week
             FROM games
-            WHERE CAST(status AS TEXT) = '3'
+            WHERE CAST(status AS TEXT) IN ('2','3')
               AND homeUser IS NOT NULL AND homeUser != '' AND homeUser != 'CPU'
               AND awayUser IS NOT NULL AND awayUser != '' AND awayUser != 'CPU'
               AND homeScore IS NOT NULL AND CAST(homeScore AS INTEGER) >= 0
@@ -1404,18 +1404,18 @@ class SportsbookSelectView(discord.ui.View):
             name="📊 Spread",
             value=(f"`{game['away']}` **{game['away_spread']}** (-110)\n"
                    f"`{game['home']}` **{game['home_spread']}** (-110)"),
-            inline=True
+            inline=False
         )
         embed.add_field(
             name="💰 Moneyline",
             value=(f"`{game['away']}` **{game['away_ml']}**\n"
                    f"`{game['home']}` **{game['home_ml']}**"),
-            inline=True
+            inline=False
         )
         embed.add_field(
             name="🎯 Over/Under",
             value=f"**{game['ou_line']}** pts\nOver / Under (-110 each)",
-            inline=True
+            inline=False
         )
         embed.add_field(name="Status", value=locked_str + admin_note, inline=False)
         embed.set_footer(text="Click a bet button below  •  🎰+ adds to your parlay cart")

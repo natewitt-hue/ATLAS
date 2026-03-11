@@ -127,14 +127,8 @@ import build_tsl_db as db_builder
 import build_member_db as member_db
 
 # Optional modules
-try: import analysis
-except ImportError: analysis = None
-
 try: import intelligence as intel
 except ImportError: intel = None
-
-try: import rules as rb
-except ImportError: rb = None
 
 try: import lore_rag
 except ImportError: lore_rag = None
@@ -229,6 +223,36 @@ async def setup_hook():
     # Use !clearsync for manual re-sync if needed.
     await bot.tree.sync()
 
+# ── Global App Command Error Handler ─────────────────────────────────────────
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Catch-all so no interaction ever goes unacknowledged (prevents 10062)."""
+    if isinstance(error, app_commands.CheckFailure):
+        # Permission check already sent a message — nothing more to do
+        if interaction.response.is_done():
+            return
+        await interaction.response.send_message(
+            "ATLAS: You don't have permission for this command.", ephemeral=True
+        )
+        return
+
+    cmd_name = interaction.command.name if interaction.command else "unknown"
+    print(f"[CommandError] /{cmd_name}: {error}")
+    traceback.print_exc()
+
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "ATLAS encountered an error processing this command.", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "ATLAS encountered an error processing this command.", ephemeral=True
+            )
+    except Exception:
+        pass  # interaction fully expired — nothing we can do
+
 # ── ATLAS Persona Call ──────────────────────────────────────────────────────
 
 async def call_atlas(user_input: str, context: str, persona_type: str = "casual") -> str:
@@ -257,7 +281,7 @@ async def call_atlas(user_input: str, context: str, persona_type: str = "casual"
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, _generate)
-        return response.text.strip()
+        return (response.text or "").strip() or "ATLAS has no response."
     except Exception as e:
         return f"ATLAS Brain Error: {str(e)}"
 
@@ -364,6 +388,7 @@ async def on_ready():
     if _startup_done:
         print(f"--- ATLAS v{ATLAS_VERSION} RECONNECTED | {dm.get_league_status()} (skipping reload) ---")
         return
+    _startup_done = True  # Set BEFORE async work to prevent concurrent on_ready races
 
     import time
     _bot_start_time = time.time()
@@ -378,7 +403,6 @@ async def on_ready():
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _startup_load)
-    _startup_done = True
 
     print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
     print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
@@ -433,6 +457,7 @@ async def on_message(message: discord.Message):
 
             except Exception as e:
                 print(f"Message Processing Error: {e}")
+                traceback.print_exc()
                 await message.reply("ATLAS is currently undergoing maintenance. Try again later.")
 
     await bot.process_commands(message)
@@ -607,25 +632,6 @@ async def _rebuilddb_impl(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(lines))
 
 
-# ── Deprecated Wrappers (remove in Phase 5) ─────────────────────────────────
-
-@bot.tree.command(name="wittsync", description="[Deprecated] Use /atlas sync instead.")
-async def wittsync(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("Admin only.", ephemeral=True)
-        return
-    await _sync_impl(interaction)
-    await interaction.followup.send("_Tip: Use `/atlas sync` instead — this command will be removed soon._")
-
-
-@bot.tree.command(name="rebuilddb", description="[Deprecated] Use /atlas rebuilddb instead.")
-async def rebuilddb(interaction: discord.Interaction):
-    if interaction.user.id not in ADMIN_USER_IDS:
-        await interaction.response.send_message("Admin only.", ephemeral=True)
-        return
-    await _rebuilddb_impl(interaction)
-    await interaction.followup.send("_Tip: Use `/atlas rebuilddb` instead — this command will be removed soon._")
-
 # ── Code Snapshot Export ──────────────────────────────────────────────────────
 
 def export_code_snapshot():
@@ -655,6 +661,7 @@ if __name__ == "__main__":
     if not GEMINI_API_KEY:
         print("⚠️  WARNING: GEMINI_API_KEY is not set — /ask and ATLAS AI responses will fail.")
 
-    export_code_snapshot()
+    if os.getenv("EXPORT_SNAPSHOT"):
+        export_code_snapshot()
     bot.run(DISCORD_TOKEN)
 

@@ -634,8 +634,6 @@ _ANALYSIS_OK = an is not None
 _INTEL_OK = ig is not None
 
 # ── Optional codex pipeline (SQL + Gemini NL queries) ────────────────────────
-# NOTE: Was history_cog — renamed to codex_cog in v1.4. Fallback to history_cog
-# for backwards compat if codex_cog doesn't exist yet.
 try:
     from codex_cog import (
         gemini_sql,
@@ -646,24 +644,14 @@ try:
         resolve_names_in_question,
         _build_conversation_block,
         _add_conversation_turn,
-        DB_SCHEMA,
+        get_db_schema,
         KNOWN_USERS,
     )
     _HISTORY_OK = True
 except ImportError:
-    try:
-        from history_cog import (
-            gemini_sql, gemini_answer, run_sql, extract_sql,
-            fuzzy_resolve_user, resolve_names_in_question,
-            DB_SCHEMA, KNOWN_USERS,
-        )
-        _build_conversation_block = None
-        _add_conversation_turn = None
-        _HISTORY_OK = True
-    except ImportError:
-        _HISTORY_OK = False
-        _build_conversation_block = None
-        _add_conversation_turn = None
+    _HISTORY_OK = False
+    _build_conversation_block = None
+    _add_conversation_turn = None
 
 # Optional affinity module
 try:
@@ -841,86 +829,90 @@ def _ring_info(username: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 #  HISTORICAL SQL HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-def _safe_sql(query: str) -> list[dict]:
+def _safe_sql(query: str, params: tuple = ()) -> list[dict]:
     """Execute a SQL query if history DB is available; return [] on any error."""
     if not _HISTORY_OK:
         return []
-    rows, err = run_sql(query)
+    rows, err = run_sql(query, params)
     return rows if not err else []
 
 def _franchise_alltime(tn: str) -> dict:
-    rows = _safe_sql(f"""
+    pat = f"%{tn}%"
+    rows = _safe_sql("""
         SELECT
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as wins,
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as losses
         FROM games
-        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
           AND status IN ('2','3') AND stageIndex='1'
-    """)
+    """, (pat, pat, pat, pat, pat, pat))
     r = rows[0] if rows else {}
     return {"wins": int(r.get("wins") or 0), "losses": int(r.get("losses") or 0)}
 
 def _franchise_by_season(tn: str) -> list[dict]:
-    return _safe_sql(f"""
+    pat = f"%{tn}%"
+    return _safe_sql("""
         SELECT seasonIndex,
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as wins,
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as losses
         FROM games
-        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
           AND status IN ('2','3') AND stageIndex='1'
         GROUP BY seasonIndex ORDER BY CAST(seasonIndex AS INT)
-    """)
+    """, (pat, pat, pat, pat, pat, pat))
 
 def _franchise_nemesis(tn: str) -> Optional[dict]:
     """Franchise's worst all-time opponent (min 4 games)."""
-    rows = _safe_sql(f"""
+    pat = f"%{tn}%"
+    rows = _safe_sql("""
         SELECT
-          CASE WHEN homeTeamName LIKE '%{tn}%' THEN awayTeamName ELSE homeTeamName END as opp,
+          CASE WHEN homeTeamName LIKE ? THEN awayTeamName ELSE homeTeamName END as opp,
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as wins,
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as losses,
           COUNT(*) as games
         FROM games
-        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
           AND status IN ('2','3') AND stageIndex='1'
         GROUP BY opp HAVING games >= 4
         ORDER BY CAST(wins AS FLOAT)/CAST(games AS FLOAT) ASC LIMIT 1
-    """)
+    """, (pat, pat, pat, pat, pat, pat, pat))
     return rows[0] if rows else None
 
 def _franchise_punching_bag(tn: str) -> Optional[dict]:
     """Franchise's best all-time record vs any opponent (min 4 games)."""
-    rows = _safe_sql(f"""
+    pat = f"%{tn}%"
+    rows = _safe_sql("""
         SELECT
-          CASE WHEN homeTeamName LIKE '%{tn}%' THEN awayTeamName ELSE homeTeamName END as opp,
+          CASE WHEN homeTeamName LIKE ? THEN awayTeamName ELSE homeTeamName END as opp,
           SUM(CASE WHEN
-            (homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
+            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
           THEN 1 ELSE 0 END) as wins,
           COUNT(*) as games
         FROM games
-        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
           AND status IN ('2','3') AND stageIndex='1'
         GROUP BY opp HAVING games >= 4
         ORDER BY CAST(wins AS FLOAT)/CAST(games AS FLOAT) DESC LIMIT 1
-    """)
+    """, (pat, pat, pat, pat, pat))
     return rows[0] if rows else None
 
 def _franchise_signature_moments(tn: str) -> tuple[Optional[dict], Optional[dict]]:
@@ -1691,7 +1683,10 @@ def _build_recap_embed(week: int | None = None) -> discord.Embed:
     if highlights.get("closest_game"):
         embed.add_field(name="⚡ Closest Game", value=highlights["closest_game"], inline=True)
 
-    embed.set_footer(text="⚡ = Close game (≤7pts, icon_url=ATLAS_ICON_URL)  💥 = Blowout (21+ pts) · ATLAS™ Oracle")
+    embed.set_footer(
+        text="⚡ = Close game (≤7pts)  💥 = Blowout (21+ pts) · ATLAS™ Oracle",
+        icon_url=ATLAS_ICON_URL
+    )
     return embed
 
 
@@ -2987,7 +2982,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                     f"REMINDER: ALL columns are stored as TEXT. Always use "
                     f"CAST(col AS INTEGER) for numeric comparisons.\n"
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{DB_SCHEMA}"
+                    f"Schema:\n{get_db_schema()}"
                 )
                 loop = asyncio.get_running_loop()
                 fix_response = await loop.run_in_executor(
@@ -3507,10 +3502,12 @@ class DraftSeasonView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=120)
-        options = [discord.SelectOption(label="All Seasons Overview", value="0")] + [
+        season_opts = [
             discord.SelectOption(label=f"Season {s}", value=str(s))
             for s in range(1, dm.CURRENT_SEASON + 1)
         ]
+        # Discord caps select menus at 25 options — keep overview + last 24 seasons
+        options = [discord.SelectOption(label="All Seasons Overview", value="0")] + season_opts[-24:]
         self.season_select.options = options
 
     @discord.ui.select(placeholder="Select season...")
@@ -3837,9 +3834,10 @@ class StatsHubCog(commands.Cog):
     # ── /stats hub ─────────────────────────────────────────────────────────────
     @stats.command(name="hub", description="Open the TSL Stats Hub (public).")
     async def hub(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         embed = _build_hub_embed()
         view  = HubView(self.bot)
-        await interaction.response.send_message(embed=embed, view=view)  # PUBLIC — no ephemeral
+        await interaction.followup.send(embed=embed, view=view)  # PUBLIC — no ephemeral
 
     # ── /stats team ────────────────────────────────────────────────────────────
     @stats.command(name="team", description="Look up any team's stat card.")
@@ -3891,7 +3889,7 @@ class StatsHubCog(commands.Cog):
             embed = _build_hotcold_single(data)
         else:
             await interaction.response.defer(ephemeral=True, thinking=True)
-            embed = _build_hotcold_league()
+            embed, player_names = _build_hotcold_league()
 
         view = AnalyticsNav(self.bot, interaction.user.id)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)

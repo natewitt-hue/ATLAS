@@ -43,28 +43,31 @@ async def play_coinflip(
     wager:       int,
 ) -> None:
     """Instant solo coin flip. Even money (1x profit)."""
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
     uid = interaction.user.id
 
     if not await is_casino_open("coinflip"):
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "🔴 Coin flip is currently closed.", ephemeral=True
         )
 
     cf_channel_id = await get_channel_id("coinflip")
     if cf_channel_id and interaction.channel_id != cf_channel_id:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"🪙 Coin flip is played in <#{cf_channel_id}>!", ephemeral=True
         )
 
     pick_clean = pick.strip().lower()
     if pick_clean not in ("heads", "tails"):
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "❌ Pick must be **heads** or **tails**.", ephemeral=True
         )
 
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
             ephemeral=True
         )
@@ -72,7 +75,7 @@ async def play_coinflip(
     try:
         await deduct_wager(uid, wager)
     except Exception as e:
-        return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     result  = random.choice(["heads", "tails"])
     won     = result == pick_clean
@@ -115,7 +118,7 @@ async def play_coinflip(
     embed.add_field(name="Payout",     value=f"{payout:,} Bucks",                       inline=True)
     embed.add_field(name="Balance",    value=f"{db_result['new_balance']:,} Bucks",      inline=True)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -143,16 +146,16 @@ class ChallengeView(discord.ui.View):
             return await interaction.response.send_message(
                 "❌ This challenge has already been resolved.", ephemeral=True
             )
+        self.resolved = True  # Set immediately to prevent double-accept race
 
         # Deduct opponent's wager
         try:
             await deduct_wager(self.opponent_id, self.wager)
         except Exception as e:
+            self.resolved = False  # Roll back if deduction failed
             return await interaction.response.send_message(
                 f"❌ Insufficient funds: {e}", ephemeral=True
             )
-
-        self.resolved = True
         self.stop()
         active_challenges.pop(self.challenge_id, None)
 

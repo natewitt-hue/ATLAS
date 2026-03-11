@@ -651,7 +651,9 @@ class BetButtonView(discord.ui.View):
         self.cog       = cog
 
     async def _fetch_live_price(self, side: str) -> float:
-        """Fetch live price from API with 2-second timeout; fallback to cached."""
+        """Fetch live price from API with 2-second timeout; fallback to cached.
+        NOTE: Not called from button handlers to avoid interaction timeout.
+        Kept for potential background refresh use."""
         if not self.cog:
             return self.yes_price if side == "YES" else self.no_price
         try:
@@ -677,19 +679,19 @@ class BetButtonView(discord.ui.View):
 
     @discord.ui.button(label="Buy YES ✅", style=discord.ButtonStyle.success)
     async def buy_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        price = await self._fetch_live_price("YES")
+        # Use cached price to avoid API timeout before modal response
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="YES",
-            price=price, title=self.title,
+            price=self.yes_price, title=self.title,
         )
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Buy NO ❌", style=discord.ButtonStyle.danger)
     async def buy_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        price = await self._fetch_live_price("NO")
+        # Use cached price to avoid API timeout before modal response
         modal = WagerModal(
             market_id=self.market_id, slug=self.slug, side="NO",
-            price=price, title=self.title,
+            price=self.no_price, title=self.title,
         )
         await interaction.response.send_modal(modal)
 
@@ -838,32 +840,10 @@ class MarketBrowserView(discord.ui.View):
         self.add_item(next_btn)
 
     def _make_bet_cb(self, market: dict, side: str):
-        """Closure-safe callback: fetch live odds → open wager modal."""
+        """Closure-safe callback: use cached odds → open wager modal instantly."""
         async def callback(interaction: discord.Interaction):
+            # Use cached price to avoid API timeout before modal response
             price = market["yes_price"] if side == "YES" else market["no_price"]
-            # Try to fetch live odds (2-second timeout)
-            if self.cog:
-                try:
-                    live = await asyncio.wait_for(
-                        self.cog.client.fetch_market_by_id(market["market_id"]),
-                        timeout=2.0,
-                    )
-                    if live:
-                        prices = extract_prices(live)
-                        price = prices["yes_price"] if side == "YES" else prices["no_price"]
-                        # Update DB cache
-                        now = datetime.now(timezone.utc).isoformat()
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute(
-                                "UPDATE prediction_markets SET yes_price=?, no_price=?, "
-                                "last_synced=? WHERE market_id=?",
-                                (prices["yes_price"], prices["no_price"],
-                                 now, market["market_id"]),
-                            )
-                            await db.commit()
-                except Exception:
-                    pass  # fall back to cached price
-
             modal = WagerModal(
                 market_id=market["market_id"],
                 slug=market["slug"],
@@ -1366,8 +1346,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         description="Browse live Polymarket prediction markets."
     )
     async def markets_cmd(self, interaction: discord.Interaction):
-        await self._ensure_db()
         await interaction.response.defer(ephemeral=True)
+        await self._ensure_db()
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("""
@@ -1438,6 +1418,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     )
     @app_commands.describe(slug="The market slug/ID from /markets")
     async def bet_cmd(self, interaction: discord.Interaction, slug: str):
+        await interaction.response.defer(ephemeral=True)
         await self._ensure_db()
         slug = slug.strip().lower()
 
@@ -1463,7 +1444,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     row = await cursor.fetchone()
 
         if not row:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Market `{slug}` not found. Use `/markets` to browse.",
                 ephemeral=True,
             )
@@ -1472,7 +1453,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         market_id, mkt_slug, title, category, yes_price, no_price, volume, end_date, status = row
 
         if status != "active":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⚠️ Market is **{status}** and not accepting new bets.",
                 ephemeral=True,
             )
@@ -1546,7 +1527,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             market_id=market_id, slug=mkt_slug, title=title,
             yes_price=yes_price, no_price=no_price, cog=self,
         )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ── Slash: /portfolio ─────────────────────
 
@@ -1555,6 +1536,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         description="View your open prediction market contracts."
     )
     async def portfolio_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         await self._ensure_db()
         user_id = str(interaction.user.id)
 
@@ -1572,7 +1554,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 rows = await cursor.fetchall()
 
         if not rows:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "You have no prediction market contracts. Use `/bet` to place one!",
                 ephemeral=True,
             )
@@ -1601,7 +1583,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 inline=False,
             )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── Slash: /resolve_market (admin) ────────
 
@@ -1620,12 +1602,13 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         slug: str,
         result: str,
     ):
+        await interaction.response.defer(ephemeral=True)
         await self._ensure_db()
         slug   = slug.strip().lower()
         result = result.upper().strip()
 
         if result not in ("YES", "NO", "VOID"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ `result` must be YES, NO, or VOID.", ephemeral=True
             )
             return
@@ -1639,14 +1622,12 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 row = await cursor.fetchone()
 
         if not row:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Market `{slug}` not found.", ephemeral=True
             )
             return
 
         market_id, title = row
-
-        await interaction.response.defer(ephemeral=True)
         resolved = await self._resolve(market_id, result, resolved_by="admin")
 
         await self._announce_resolutions([{
@@ -1726,8 +1707,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def market_status_cmd(self, interaction: discord.Interaction):
-        await self._ensure_db()
         await interaction.response.defer(ephemeral=True)
+        await self._ensure_db()
 
         # Test connectivity
         test = await self.client.fetch_active_markets(limit=1)

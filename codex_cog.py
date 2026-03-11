@@ -325,8 +325,9 @@ OWNER-FILTERED QUERY PATTERN:
   WHERE ot.userName='[owner]' AND (g.homeUser='[owner]' OR g.awayUser='[owner]')
 """
 
-# Called at prompt-build time so the season number is always current
-DB_SCHEMA = _build_schema()
+# Lazily computed so the season number is always current (not cached at import)
+def get_db_schema() -> str:
+    return _build_schema()
 
 # ── Known users — EXACT strings as stored in games.csv/tsl_history.db ────────
 # These are the historical usernames. Do NOT change to current Discord display names.
@@ -435,16 +436,19 @@ def get_db():
     return conn
 
 
-def run_sql(sql: str) -> tuple[list[dict], str | None]:
-    """Execute SQL, return (rows, error)."""
+def run_sql(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
+    """Execute SQL, return (rows, error).  Supports parameterized queries."""
+    conn = None
     try:
         conn = get_db()
-        cur = conn.execute(sql)
+        cur = conn.execute(sql, params)
         rows = [dict(r) for r in cur.fetchall()]
-        conn.close()
         return rows[:MAX_ROWS], None
     except Exception as e:
         return [], str(e)
+    finally:
+        if conn:
+            conn.close()
 
 
 def extract_sql(text: str) -> str | None:
@@ -479,7 +483,7 @@ async def gemini_sql(
     prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden franchise database.
 Your job: convert natural-language questions into a single correct SQLite SELECT query.
 
-{DB_SCHEMA}
+{get_db_schema()}
 {known_users_block}{alias_block}{conv_block}
 
 RULES:
@@ -528,7 +532,7 @@ Now generate a query for this question:
 
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None, _call)
-    return extract_sql(response.text)
+    return extract_sql(response.text) if response.text else None
 
 
 async def gemini_answer(
@@ -573,7 +577,7 @@ RESPONSE GUIDELINES:
 
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None, _call)
-    return response.text.strip()
+    return (response.text or "").strip()
 
 
 # ── Cog ──────────────────────────────────────────────────────────────────────
@@ -645,7 +649,7 @@ class CodexCog(commands.Cog):
                     f"REMINDER: ALL columns are stored as TEXT. Always use CAST(col AS INTEGER) "
                     f"for numeric comparisons.\n"
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{DB_SCHEMA}"
+                    f"Schema:\n{get_db_schema()}"
                 )
                 def _fix():
                     return self.gemini.models.generate_content(
@@ -794,11 +798,11 @@ class CodexCog(commands.Cog):
             await interaction.followup.send(f"Couldn't find an owner matching `{owner2}`.")
             return
 
-        sql = f"""
+        sql = """
         SELECT
             seasonIndex,
-            SUM(CASE WHEN winner_user = '{u1}' THEN 1 ELSE 0 END) AS u1_wins,
-            SUM(CASE WHEN winner_user = '{u2}' THEN 1 ELSE 0 END) AS u2_wins,
+            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u1_wins,
+            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u2_wins,
             COUNT(*) AS games_played,
             GROUP_CONCAT(
                 'S' || seasonIndex || ' W' || (CAST(weekIndex AS INTEGER)+1) ||
@@ -807,13 +811,13 @@ class CodexCog(commands.Cog):
         FROM games
         WHERE status IN ('2','3')
           AND stageIndex = '1'
-          AND ((homeUser = '{u1}' AND awayUser = '{u2}')
-            OR (homeUser = '{u2}' AND awayUser = '{u1}'))
+          AND ((homeUser = ? AND awayUser = ?)
+            OR (homeUser = ? AND awayUser = ?))
         GROUP BY seasonIndex
         ORDER BY CAST(seasonIndex AS INTEGER)
         """
 
-        rows, error = run_sql(sql)
+        rows, error = run_sql(sql, (u1, u2, u1, u2, u2, u1))
         if error or not rows:
             await interaction.followup.send(
                 f"No completed regular season games found between **{u1}** and **{u2}**."
@@ -839,7 +843,7 @@ note any sweep seasons, and make it entertaining.
             return self.gemini.models.generate_content(model="gemini-2.0-flash", contents=summary_prompt)
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, _call)
-        summary = response.text.strip()
+        summary = (response.text or "").strip() or "ATLAS has no words."
 
         embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=0xC9962A)
         embed.set_author(
@@ -873,14 +877,14 @@ note any sweep seasons, and make it entertaining.
             await interaction.followup.send(f"Valid seasons are 1 through {dm.CURRENT_SEASON}.")
             return
 
-        sql = f"""
+        sql = """
         SELECT winner_user, loser_user, winner_team, loser_team,
                homeScore, awayScore, weekIndex
         FROM games
-        WHERE seasonIndex='{season}' AND stageIndex='1' AND status IN ('2','3')
+        WHERE seasonIndex=? AND stageIndex='1' AND status IN ('2','3')
         ORDER BY CAST(weekIndex AS INTEGER)
         """
-        rows, _ = run_sql(sql)
+        rows, _ = run_sql(sql, (str(season),))
 
         wins   = Counter()
         losses = Counter()
