@@ -1,12 +1,13 @@
 """
-casino_db.py — TSL Casino Database Layer
-─────────────────────────────────────────────────────────────────────────────
+casino_db.py -- TSL Casino Database Layer
+---------------------------------------------------------------------------
 All async DB operations for the casino.  Uses aiosqlite with BEGIN IMMEDIATE
 transactions to prevent race conditions when multiple users gamble at once.
 
-Shares sportsbook.db — reads/writes the same users_table.balance column.
+Shares flow_economy.db -- reads/writes the same users_table.balance column.
+Balance operations delegate to flow_wallet for unified transaction logging.
 All casino tables are created here on first startup via setup_casino_db().
-─────────────────────────────────────────────────────────────────────────────
+---------------------------------------------------------------------------
 """
 
 import aiosqlite
@@ -16,13 +17,15 @@ import random
 import string
 from datetime import datetime, timezone, date
 
-# ── Shared DB path (same file as sportsbook) ──────────────────────────────────
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sportsbook.db")
+import flow_wallet
+
+# -- Shared DB path (unified economy DB) --------------------------------------
+DB_PATH = flow_wallet.DB_PATH
 
 CASINO_MAX_BET    = 100
 CASINO_DAILY_MIN  = 25
 CASINO_DAILY_MAX  = 150
-STARTING_BALANCE  = 1000   # mirrors sportsbook constant
+STARTING_BALANCE  = flow_wallet.STARTING_BALANCE
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -117,7 +120,15 @@ async def setup_casino_db() -> None:
             )
         """)
 
-        # ── Casino settings (max bet overrides, channel IDs, etc.) ────────
+        # -- Casino settings (max bet overrides, channel IDs, etc.) --------
+        # Ensure sportsbook_settings table exists (may not if casino loads
+        # before the sportsbook on a fresh DB)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sportsbook_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+        """)
         await db.execute("""
             INSERT OR IGNORE INTO sportsbook_settings (key, value)
             VALUES
@@ -192,27 +203,14 @@ async def get_max_bet() -> int:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def get_balance(discord_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
-            await db.execute(
-                "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
-                (discord_id, STARTING_BALANCE, STARTING_BALANCE)
-            )
-            await db.commit()
-            return STARTING_BALANCE
-        return row[0]
+    return await flow_wallet.get_balance(discord_id)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  CORE WAGER PROCESSOR  — race-condition safe
 # ═════════════════════════════════════════════════════════════════════════════
 
-class InsufficientFundsError(Exception):
-    pass
+InsufficientFundsError = flow_wallet.InsufficientFundsError
 
 class CasinoClosedError(Exception):
     pass
@@ -248,37 +246,22 @@ async def process_wager(
     now = datetime.now(timezone.utc).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # BEGIN IMMEDIATE gets a write lock immediately, preventing two
-        # concurrent transactions from reading the same stale balance.
         await db.execute("BEGIN IMMEDIATE")
 
         try:
-            # ── 1. Read fresh balance ──────────────────────────────────────
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-            ) as cur:
-                row = await cur.fetchone()
-
-            if row is None:
-                # Auto-create user (edge case: first casino use, no sportsbook history)
-                await db.execute(
-                    "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
-                    (discord_id, STARTING_BALANCE, STARTING_BALANCE)
+            # 1. Credit payout via flow_wallet (passes con -- no commit)
+            if payout > 0:
+                ref_key = f"CASINO_{game_type}_{discord_id}_{now}"
+                new_balance = await flow_wallet.credit(
+                    discord_id, payout, "CASINO",
+                    description=f"{game_type} {outcome}",
+                    reference_key=ref_key,
+                    con=db,
                 )
-                current_balance = STARTING_BALANCE
             else:
-                current_balance = row[0]
+                new_balance = await flow_wallet.get_balance(discord_id, con=db)
 
-            # ── 2. Credit payout ───────────────────────────────────────────
-            # At bet time the wager was already deducted from balance.
-            # Here we only add the payout (which is 0 for a loss).
-            new_balance = current_balance + payout
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, discord_id)
-            )
-
-            # ── 3. Log session ─────────────────────────────────────────────
+            # 2. Log session
             async with db.execute("""
                 INSERT INTO casino_sessions
                     (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, played_at)
@@ -286,10 +269,7 @@ async def process_wager(
             """, (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, now)) as cur:
                 session_id = cur.lastrowid
 
-            # ── 4. Log house bank ──────────────────────────────────────────
-            # House profit = wager collected - payout given out
-            # If player wins: house loses (payout > wager) → negative delta
-            # If player loses: house gains (payout = 0) → positive delta
+            # 3. Log house bank
             house_delta = wager - payout
             await db.execute("""
                 INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at)
@@ -310,66 +290,19 @@ async def deduct_wager(discord_id: int, wager: int) -> int:
     Deduct wager from balance at bet placement time.
     Returns new balance.
     Raises InsufficientFundsError if balance is too low.
-
-    Uses BEGIN IMMEDIATE to prevent double-spend race conditions.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-            ) as cur:
-                row = await cur.fetchone()
-
-            if row is None:
-                await db.execute(
-                    "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
-                    (discord_id, STARTING_BALANCE, STARTING_BALANCE)
-                )
-                current_balance = STARTING_BALANCE
-            else:
-                current_balance = row[0]
-
-            if current_balance < wager:
-                await db.rollback()
-                raise InsufficientFundsError(
-                    f"Balance {current_balance:,} < wager {wager:,}"
-                )
-
-            new_balance = current_balance - wager
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, discord_id)
-            )
-            await db.commit()
-
-        except Exception:
-            await db.rollback()
-            raise
-
-    return new_balance
+    return await flow_wallet.debit(
+        discord_id, wager, "CASINO",
+        description="casino wager",
+    )
 
 
 async def refund_wager(discord_id: int, amount: int) -> int:
     """Refund a wager (e.g. declined PvP challenge, crash round void). Returns new balance."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-            ) as cur:
-                row = await cur.fetchone()
-            current = row[0] if row else STARTING_BALANCE
-            new_balance = current + amount
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, discord_id)
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-    return new_balance
+    return await flow_wallet.credit(
+        discord_id, amount, "CASINO",
+        description="casino refund",
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -416,9 +349,12 @@ async def can_claim_scratch(discord_id: int) -> bool:
     return row is None or row[0] != today
 
 
-async def claim_scratch(discord_id: int) -> int | None:
+async def claim_scratch(discord_id: int, reward: int | None = None) -> int | None:
     """
-    Roll a scratch card reward and credit the balance.
+    Credit a scratch card reward to the user's balance.
+    Pass the pre-computed reward from the UI tiles so what the player
+    sees matches what they receive.  Falls back to a random roll if
+    reward is not provided (backwards compat).
     Returns the amount won, or None if already claimed today.
     """
     if not await can_claim_scratch(discord_id):
@@ -426,18 +362,20 @@ async def claim_scratch(discord_id: int) -> int | None:
 
     today = date.today().isoformat()
 
-    # Weighted reward pool
-    reward_pool = [
-        (25,  40),   # (amount, weight)
-        (50,  30),
-        (75,  15),
-        (100, 10),
-        (150,  5),
-    ]
-    amounts  = [r[0] for r in reward_pool]
-    weights  = [r[1] for r in reward_pool]
-    reward   = random.choices(amounts, weights=weights, k=1)[0]
+    # Fallback: roll if caller didn't pass a pre-computed reward
+    if reward is None:
+        reward_pool = [
+            (25,  40),   # (amount, weight)
+            (50,  30),
+            (75,  15),
+            (100, 10),
+            (150,  5),
+        ]
+        amounts  = [r[0] for r in reward_pool]
+        weights  = [r[1] for r in reward_pool]
+        reward   = random.choices(amounts, weights=weights, k=1)[0]
 
+    now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -447,19 +385,16 @@ async def claim_scratch(discord_id: int) -> int | None:
                 ON CONFLICT(discord_id) DO UPDATE SET last_claim=excluded.last_claim
             """, (discord_id, today))
 
-            # Credit balance
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-            ) as cur:
-                row = await cur.fetchone()
-            current = row[0] if row else STARTING_BALANCE
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (current + reward, discord_id)
+            # Credit balance via flow_wallet (passes con -- no commit)
+            ref_key = f"SCRATCH_{discord_id}_{today}"
+            await flow_wallet.credit(
+                discord_id, reward, "CASINO",
+                description="daily scratch",
+                reference_key=ref_key,
+                con=db,
             )
 
             # Log as casino session
-            now = datetime.now(timezone.utc).isoformat()
             await db.execute("""
                 INSERT INTO casino_sessions
                     (discord_id, game_type, wager, outcome, payout, multiplier, played_at)
@@ -549,8 +484,8 @@ async def add_crash_bet(round_id: int, discord_id: int, wager: int) -> int:
 async def cashout_crash_bet(bet_id: int, discord_id: int, multiplier: float) -> int:
     """
     Cash out a crash bet at the given multiplier.
-    Credits the balance and marks the bet as cashed.
-    Returns payout amount.
+    Marks the bet as cashed in the crash_bets table.
+    Returns payout amount.  Balance credit is handled by process_wager().
     """
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -565,25 +500,11 @@ async def cashout_crash_bet(bet_id: int, discord_id: int, multiplier: float) -> 
         wager  = row[0]
         payout = int(wager * multiplier)
 
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute(
-                "UPDATE crash_bets SET cashout_mult=?, payout=?, status='cashed' WHERE id=?",
-                (multiplier, payout, bet_id)
-            )
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-            ) as cur:
-                brow = await cur.fetchone()
-            current = brow[0] if brow else STARTING_BALANCE
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (current + payout, discord_id)
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        await db.execute(
+            "UPDATE crash_bets SET cashout_mult=?, payout=?, status='cashed' WHERE id=?",
+            (multiplier, payout, bet_id)
+        )
+        await db.commit()
 
     return payout
 
@@ -670,16 +591,15 @@ async def resolve_challenge(challenge_id: int, winner_id: int, loser_id: int, wa
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            # Credit winner
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (winner_id,)
-            ) as cur:
-                row = await cur.fetchone()
-            current = row[0] if row else STARTING_BALANCE
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (current + payout, winner_id)
+            # Credit winner via flow_wallet (passes con -- no commit)
+            ref_key = f"COINFLIP_WIN_{challenge_id}"
+            await flow_wallet.credit(
+                winner_id, payout, "CASINO",
+                description=f"coinflip PvP win vs {loser_id}",
+                reference_key=ref_key,
+                con=db,
             )
+
             # Update challenge record
             await db.execute("""
                 UPDATE coinflip_challenges

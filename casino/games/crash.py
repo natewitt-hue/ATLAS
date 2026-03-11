@@ -365,24 +365,26 @@ def _players_list(round_obj: CrashRound) -> str:
 
 async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.Client) -> None:
     """Join the current crash round, or start a new one."""
+    await interaction.response.defer(ephemeral=True)
+
     uid     = interaction.user.id
     ch_id   = interaction.channel_id
 
     # ── Guards ─────────────────────────────────────────────────────────────
     if not await is_casino_open("crash"):
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "🔴 Crash is currently closed.", ephemeral=True
         )
 
     crash_channel_id = await get_channel_id("crash")
     if crash_channel_id and ch_id != crash_channel_id:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"🚀 Crash is played in <#{crash_channel_id}>!", ephemeral=True
         )
 
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
             ephemeral=True
         )
@@ -390,20 +392,20 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
     # ── Check if a round is running (can't join mid-flight) ───────────────
     existing = active_rounds.get(ch_id)
     if existing and existing.status == "running":
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"🚀 A round is already in progress at **{existing.current_mult:.2f}x**.\n"
             "Wait for it to crash, then join the next round!",
             ephemeral=True
         )
 
     if existing and existing.status == "cooldown":
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"⏳ On cooldown — next round starts in a moment!", ephemeral=True
         )
 
     # ── Already in this round ──────────────────────────────────────────────
     if existing and uid in existing.players:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "You're already in this round!", ephemeral=True
         )
 
@@ -411,9 +413,9 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
     try:
         await deduct_wager(uid, wager)
     except Exception as e:
-        return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ You're in for **{wager:,} TSL Bucks**. Good luck! 🚀",
         ephemeral=True
     )

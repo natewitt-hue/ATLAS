@@ -15,11 +15,13 @@ from datetime import datetime, timezone
 
 import aiosqlite
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
-# ── Database ──────────────────────────────────────────────────────────────────
-DB_PATH          = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sportsbook.db")
-STARTING_BALANCE = 1000
+# -- Database ------------------------------------------------------------------
+import flow_wallet
+DB_PATH          = flow_wallet.DB_PATH
+STARTING_BALANCE = flow_wallet.STARTING_BALANCE
 
 INTERVAL_HOURS = {
     "daily":    24,
@@ -88,22 +90,22 @@ async def admin_give(discord_id: int, amount: int, admin_id: int,
                      reason: str = "") -> tuple[int, int]:
     """Give money to a user. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
+    ref_key = f"ADMIN_GIVE_{discord_id}_{int(datetime.now(timezone.utc).timestamp())}"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            old_balance = await _ensure_user(db, discord_id)
-            new_balance = old_balance + amount
-
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, discord_id)
+            old_balance = await flow_wallet.get_balance(discord_id, con=db)
+            new_balance = await flow_wallet.credit(
+                discord_id, amount, "ADMIN",
+                description=reason or "admin give",
+                reference_key=ref_key,
+                con=db,
             )
             await db.execute("""
                 INSERT INTO economy_log
                     (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
                 VALUES (?,?,?,?,?,?,?,?)
             """, (discord_id, "give", amount, old_balance, new_balance, reason, admin_id, now))
-
             await db.commit()
         except Exception:
             await db.rollback()
@@ -118,19 +120,21 @@ async def admin_take(discord_id: int, amount: int, admin_id: int,
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            old_balance = await _ensure_user(db, discord_id)
-            new_balance = max(0, old_balance - amount)
-
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, discord_id)
-            )
+            old_balance = await flow_wallet.get_balance(discord_id, con=db)
+            actual_take = min(amount, old_balance)  # floor at 0
+            if actual_take > 0:
+                new_balance = await flow_wallet.debit(
+                    discord_id, actual_take, "ADMIN",
+                    description=reason or "admin take",
+                    con=db,
+                )
+            else:
+                new_balance = old_balance
             await db.execute("""
                 INSERT INTO economy_log
                     (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
                 VALUES (?,?,?,?,?,?,?,?)
             """, (discord_id, "take", amount, old_balance, new_balance, reason, admin_id, now))
-
             await db.commit()
         except Exception:
             await db.rollback()
@@ -142,22 +146,20 @@ async def admin_set(discord_id: int, amount: int, admin_id: int,
                     reason: str = "") -> tuple[int, int]:
     """Set exact balance. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
+    new_amount = max(0, amount)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            old_balance = await _ensure_user(db, discord_id)
-            new_balance = max(0, amount)
-
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (new_balance, discord_id)
+            old_balance, new_balance = await flow_wallet.set_balance(
+                discord_id, new_amount, "ADMIN",
+                description=reason or "admin set",
+                con=db,
             )
             await db.execute("""
                 INSERT INTO economy_log
                     (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
                 VALUES (?,?,?,?,?,?,?,?)
             """, (discord_id, "set", amount, old_balance, new_balance, reason, admin_id, now))
-
             await db.commit()
         except Exception:
             await db.rollback()
@@ -167,12 +169,7 @@ async def admin_set(discord_id: int, amount: int, admin_id: int,
 
 async def admin_check(discord_id: int) -> int:
     """Return current balance."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    return row[0] if row else STARTING_BALANCE
+    return await flow_wallet.get_balance(discord_id)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -572,6 +569,170 @@ class EconomyCog(commands.Cog):
 
         await interaction.followup.send(
             f"✅ Processed **{count}** stipend(s).", ephemeral=True
+        )
+
+    # ── Public Commands ──────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="wallet",
+        description="View your TSL Bucks balance and recent transactions.",
+    )
+    async def wallet_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        uid = interaction.user.id
+        balance = await flow_wallet.get_balance(uid)
+        txns = await flow_wallet.get_transactions(uid, limit=10)
+
+        source_emoji = {
+            "TSL_BET": "\U0001f3c8",     # football
+            "CASINO": "\U0001f3b0",       # slot machine
+            "PREDICTION": "\U0001f52e",   # crystal ball
+            "REAL_BET": "\U0001f3c6",     # trophy
+            "STIPEND": "\U0001f4b5",      # dollar
+            "ADMIN": "\U0001f6e0",        # wrench
+        }
+
+        embed = discord.Embed(
+            title="TSL Wallet",
+            color=0xD4AF37,
+        )
+        embed.add_field(name="Balance", value=f"**${balance:,}**", inline=False)
+
+        if txns:
+            lines = []
+            for t in txns:
+                emoji = source_emoji.get(t["source"], "\U0001f4b0")
+                amt = t["amount"]
+                sign = "+" if amt >= 0 else ""
+                desc = t["description"][:30] if t["description"] else t["source"]
+                lines.append(f"{emoji} `{sign}{amt:,}` {desc}")
+            embed.add_field(
+                name="Recent Transactions",
+                value="\n".join(lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Recent Transactions", value="No transactions yet.", inline=False)
+
+        embed.set_footer(text="ATLAS Flow Economy")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="flow",
+        description="ATLAS Flow Economy hub -- access all economy features.",
+    )
+    async def flow_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        balance = await flow_wallet.get_balance(interaction.user.id)
+
+        embed = discord.Embed(
+            title="ATLAS Flow Economy",
+            description=f"Balance: **${balance:,}**\n\nUse the buttons below to navigate.",
+            color=0xD4AF37,
+        )
+        view = FlowHubView()
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    @app_commands.command(
+        name="leaderboard",
+        description="View the TSL Bucks leaderboard.",
+    )
+    async def leaderboard_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        leaders = await flow_wallet.get_leaderboard(limit=15)
+
+        if not leaders:
+            return await interaction.followup.send("No leaderboard data yet.", ephemeral=True)
+
+        medals = ["\U0001f947", "\U0001f948", "\U0001f949"]  # gold, silver, bronze
+        lines = []
+        for i, entry in enumerate(leaders):
+            prefix = medals[i] if i < 3 else f"`{i+1}.`"
+            uid = entry["discord_id"]
+            bal = entry["balance"]
+            lines.append(f"{prefix} <@{uid}> -- **${bal:,}**")
+
+        embed = discord.Embed(
+            title="TSL Bucks Leaderboard",
+            description="\n".join(lines),
+            color=0xD4AF37,
+        )
+        embed.set_footer(text="ATLAS Flow Economy")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Economy Health (admin impl) ──────────────────────────────────────
+
+    async def eco_health_impl(self, interaction: discord.Interaction):
+        """Show money supply stats."""
+        total_supply = await flow_wallet.get_total_supply()
+        leaders = await flow_wallet.get_leaderboard(limit=5)
+
+        # Count active users
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM users_table") as cur:
+                user_count = (await cur.fetchone())[0]
+
+            # Net flow this week
+            async with db.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM transactions "
+                "WHERE created_at >= datetime('now', '-7 days')"
+            ) as cur:
+                net_week = (await cur.fetchone())[0]
+
+        embed = discord.Embed(title="Economy Health", color=0xD4AF37)
+        embed.add_field(name="Total Supply", value=f"${total_supply:,}", inline=True)
+        embed.add_field(name="Active Users", value=str(user_count), inline=True)
+        embed.add_field(name="Net Flow (7d)", value=f"${net_week:+,}", inline=True)
+
+        if leaders:
+            top_lines = []
+            for i, entry in enumerate(leaders):
+                top_lines.append(f"{i+1}. <@{entry['discord_id']}> -- ${entry['balance']:,}")
+            embed.add_field(name="Top 5 Richest", value="\n".join(top_lines), inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class FlowHubView(discord.ui.View):
+    """Persistent hub view with buttons routing to each vertical."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="TSL Sportsbook", emoji="\U0001f3c8", style=discord.ButtonStyle.primary, row=0)
+    async def tsl_sb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Use `/sportsbook` to view TSL game odds and place bets.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Real Sports", emoji="\U0001f3c6", style=discord.ButtonStyle.primary, row=0)
+    async def real_sb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Use `/realsports` to bet on real NFL/NBA games.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Predictions", emoji="\U0001f52e", style=discord.ButtonStyle.primary, row=0)
+    async def predictions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Use `/predictions` to browse and bet on prediction markets.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Casino", emoji="\U0001f3b0", style=discord.ButtonStyle.secondary, row=1)
+    async def casino(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Use `/casino` to play Blackjack, Slots, Crash, and more.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Wallet", emoji="\U0001f4b0", style=discord.ButtonStyle.secondary, row=1)
+    async def wallet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Use `/wallet` to view your balance and transaction history.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Leaderboard", emoji="\U0001f3c5", style=discord.ButtonStyle.secondary, row=1)
+    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Use `/leaderboard` to see the richest TSL members.", ephemeral=True
         )
 
 

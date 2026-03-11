@@ -261,8 +261,10 @@ class CasinoCog(commands.Cog):
 
     @app_commands.command(name="casino", description="Open the TSL Casino lobby.")
     async def casino_hub(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         if not await db.is_casino_open():
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "🔴 The TSL Casino is currently closed. Check back soon!",
                 ephemeral=True
             )
@@ -287,7 +289,7 @@ class CasinoCog(commands.Cog):
         embed.add_field(name="Max Bet",      value=f"{max_bet:,} Bucks",          inline=True)
         embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
 
-        await interaction.response.send_message(embed=embed, view=CasinoHubView(), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=CasinoHubView(), ephemeral=True)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  COMMISSIONER COMMANDS

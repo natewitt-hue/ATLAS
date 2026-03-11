@@ -7,8 +7,9 @@ Uses delegation pattern — calls _impl methods on existing cogs.
 Structure:
   /commish sb <cmd>       — Sportsbook admin (15 commands)
   /commish casino <cmd>   — Casino admin (9 commands)
-  /commish eco <cmd>      — Economy admin (10 commands)
-  /commish markets <cmd>  — Prediction markets admin (3 commands)
+  /commish eco <cmd>      — Economy admin (11 commands)
+  /commish markets <cmd>  — Prediction markets admin (4 commands)
+  /commish realsb <cmd>   — Real sportsbook admin (5 commands)
   /commish <cmd>          — Flat admin commands (11 commands)
 
 Hidden from non-admins via default_permissions=administrator.
@@ -32,6 +33,7 @@ sb = app_commands.Group(name="sb", description="Sportsbook admin.", parent=commi
 casino_admin = app_commands.Group(name="casino", description="Casino admin.", parent=commish)
 eco_admin = app_commands.Group(name="eco", description="Economy admin.", parent=commish)
 markets_admin = app_commands.Group(name="markets", description="Markets admin.", parent=commish)
+realsb_admin = app_commands.Group(name="realsb", description="Real sportsbook admin.", parent=commish)
 
 
 class CommishCog(commands.Cog):
@@ -373,8 +375,16 @@ class CommishCog(commands.Cog):
             return await interaction.response.send_message("Economy not loaded.", ephemeral=True)
         await cog._eco_stipend_paynow_impl(interaction)
 
+    @eco_admin.command(name="health", description="Show economy health stats (supply, net flow, top users).")
+    async def eco_health(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("EconomyCog")
+        if not cog:
+            return await interaction.followup.send("Economy not loaded.", ephemeral=True)
+        await cog.eco_health_impl(interaction)
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # /commish markets — Prediction Markets Admin (3 commands)
+    # /commish markets — Prediction Markets Admin (4 commands)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     @markets_admin.command(name="resolve", description="Resolve a prediction market outcome.")
@@ -399,6 +409,61 @@ class CommishCog(commands.Cog):
         if not cog:
             return await interaction.response.send_message("Polymarket not loaded.", ephemeral=True)
         await cog._approve_market_impl(interaction, slug)
+
+    @markets_admin.command(name="refund_sports", description="Void all open contracts on sports markets and refund users.")
+    async def markets_refund_sports(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("PolymarketCog")
+        if not cog:
+            return await interaction.followup.send("Polymarket not loaded.", ephemeral=True)
+        await cog.refund_sports_impl(interaction)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # /commish realsb — Real Sportsbook Admin (5 commands)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @realsb_admin.command(name="status", description="Show real sportsbook sync status and API quota.")
+    async def realsb_status(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("RealSportsbookCog")
+        if not cog:
+            return await interaction.followup.send("Real sportsbook not loaded.", ephemeral=True)
+        await cog.status_impl(interaction)
+
+    @realsb_admin.command(name="lock", description="Manually lock a real sportsbook event.")
+    @app_commands.describe(event_id="The Odds API event ID to lock")
+    async def realsb_lock(self, interaction: discord.Interaction, event_id: str):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("RealSportsbookCog")
+        if not cog:
+            return await interaction.followup.send("Real sportsbook not loaded.", ephemeral=True)
+        await cog.lock_impl(interaction, event_id)
+
+    @realsb_admin.command(name="void", description="Void event + refund all pending bets.")
+    @app_commands.describe(event_id="The Odds API event ID to void")
+    async def realsb_void(self, interaction: discord.Interaction, event_id: str):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("RealSportsbookCog")
+        if not cog:
+            return await interaction.followup.send("Real sportsbook not loaded.", ephemeral=True)
+        await cog.void_impl(interaction, event_id)
+
+    @realsb_admin.command(name="grade", description="Force score sync + auto-grade bets.")
+    async def realsb_grade(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("RealSportsbookCog")
+        if not cog:
+            return await interaction.followup.send("Real sportsbook not loaded.", ephemeral=True)
+        await cog.grade_impl(interaction)
+
+    @realsb_admin.command(name="sync", description="Force odds sync for a specific sport.")
+    @app_commands.describe(sport_key="Sport key (americanfootball_nfl or basketball_nba)")
+    async def realsb_sync(self, interaction: discord.Interaction, sport_key: str):
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get("RealSportsbookCog")
+        if not cog:
+            return await interaction.followup.send("Real sportsbook not loaded.", ephemeral=True)
+        await cog.sync_impl(interaction, sport_key)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # /commish <flat> — Misc Admin Commands (11 commands)
