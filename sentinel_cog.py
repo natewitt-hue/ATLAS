@@ -36,6 +36,7 @@ from __future__ import annotations
 # ── Unified imports ───────────────────────────────────────────────────────────
 import asyncio
 import datetime
+from datetime import datetime as dt, timezone
 import io
 import json
 import os
@@ -112,7 +113,7 @@ def _load_state():
             print(f"[complaint_cog] State load error: {e}")
 
 
-def _save_state():
+def _save_complaint_state():
     try:
         with open(STATE_PATH, "w") as f:
             json.dump(_complaints, f, indent=2)
@@ -299,7 +300,7 @@ class ComplaintModal(discord.ui.Modal):
         }
 
         _complaints[complaint_id] = complaint
-        _save_state()
+        _save_complaint_state()
 
         # ── Create private thread in commissioner log channel ─────────────────
         admin_ch_id = _admin_chat_id()
@@ -328,7 +329,7 @@ class ComplaintModal(discord.ui.Modal):
                 await thread.add_user(accuser_member)
 
             complaint["thread_id"] = thread.id
-            _save_state()
+            _save_complaint_state()
 
             # ── Evidence upload prompt ────────────────────────────────────────
             upload_embed = discord.Embed(
@@ -443,7 +444,7 @@ class PenaltySelect(discord.ui.Select):
         if not c:
             return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
         c["penalty"] = self.values[0]
-        _save_state()
+        _save_complaint_state()
         pen_emoji, pen_label, _ = PENALTIES[self.values[0]]
         await interaction.response.send_message(
             f"✅ Penalty set to **{pen_emoji} {pen_label}**. "
@@ -476,7 +477,7 @@ class RulingNotesModal(discord.ui.Modal, title="📣 Add Ruling Notes"):
         c["verdict"]      = self.verdict
         c["ruling_notes"] = self.notes.value.strip()
         c["ruled_by_id"]  = interaction.user.id
-        _save_state()
+        _save_complaint_state()
 
         ruling_embed = _build_ruling_embed(c)
 
@@ -630,7 +631,7 @@ class ComplaintCog(commands.Cog):
 #  SENTINEL · FORCE REQUEST SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
 
-from datetime import datetime, timezone
+# datetime/timezone already imported at top of file
 
 
 # ── Channel routing via setup_cog (ID-based, rename-proof) ───────────────────
@@ -820,7 +821,7 @@ def _build_review_embed(
         title=f"⚖️ Force Request #{request_id} — Admin Review",
         description=f"**AI Ruling: {RULING_LABELS.get(ruling, ruling)}**",
         color=RULING_COLORS.get(ruling, discord.Color.greyple()),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=dt.now(timezone.utc),
     )
     embed.add_field(name="📋 Requester",     value=requester.mention,                    inline=True)
     embed.add_field(name="🎯 Opponent",      value=opponent_name or "Not specified",     inline=True)
@@ -864,7 +865,7 @@ def _build_result_embed(
         title=f"📋 Force Request Ruling — #{request_id}",
         description=f"**{RULING_LABELS.get(final_ruling, final_ruling)}**",
         color=RULING_COLORS.get(final_ruling, discord.Color.greyple()),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=dt.now(timezone.utc),
     )
     embed.add_field(name="Requester", value=requester.mention,  inline=True)
     embed.add_field(name="Opponent",  value=opponent_name,      inline=True)
@@ -925,6 +926,9 @@ class ForceRequestAdminView(discord.ui.View):
             return await interaction.response.send_message("Already decided.", ephemeral=True)
         self._acted = True
 
+        # Defer immediately — the work below can exceed 3 seconds
+        await interaction.response.defer(ephemeral=True)
+
         # Apply any overrides to analysis copy
         analysis_final = dict(self.analysis)
         analysis_final["ruling"] = final_ruling
@@ -965,7 +969,7 @@ class ForceRequestAdminView(discord.ui.View):
             content=f"✅ **Ruled by {interaction.user.display_name}: {RULING_LABELS.get(final_ruling, final_ruling)}**",
             view=self,
         )
-        await interaction.response.send_message("✅ Ruling posted and requester notified.", ephemeral=True)
+        await interaction.followup.send("✅ Ruling posted and requester notified.", ephemeral=True)
 
     # ── Button: Approve AI ruling as-is ──────────────────────────────────────
     @discord.ui.button(label="✅ Approve AI Ruling", style=discord.ButtonStyle.success, row=0)
@@ -1063,7 +1067,7 @@ class ForceRequestCog(commands.Cog):
 
     def _next_id(self) -> str:
         self._request_counter += 1
-        ts = datetime.now(timezone.utc).strftime("%m%d")
+        ts = dt.now(timezone.utc).strftime("%m%d")
         return f"{ts}-{self._request_counter:03d}"
 
     # ── /forcerequest ─────────────────────────────────────────────────────────
@@ -1302,7 +1306,7 @@ except ImportError:
             except Exception as e:
                 print(f"[positionchange_cog] State load error: {e}")
 
-    def _save_state():
+    def _save_parity_state():
         try:
             to_save = dict(_state)
             to_save["orphan_teams"] = list(_state.get("orphan_teams", set()))
@@ -1633,7 +1637,7 @@ def _make_record(
         "log_id":        log_id or str(uuid.uuid4())[:8].upper(),
         "season":        season or dm.CURRENT_SEASON,
         "week":          week   or dm.CURRENT_WEEK,
-        "timestamp":     datetime.datetime.utcnow().isoformat(),
+        "timestamp":     dt.utcnow().isoformat(),
         "player_name":   name,
         "roster_id":     player.get("rosterId"),
         "team":          team,
@@ -1931,7 +1935,7 @@ async def _run_position_change(
         week=week,
     )
     _state.setdefault("position_changes", []).append(record)
-    _save_state()
+    _save_parity_state()
 
     # 8. Route to announcement channel
     channel = bot.get_channel(_roster_moves_channel_id()) if _roster_moves_channel_id() else None
@@ -1986,8 +1990,8 @@ class PositionChangeCog(commands.Cog):
 
         record["status"]      = "approved"
         record["approved_by"] = str(interaction.user)
-        record["approved_at"] = datetime.datetime.utcnow().isoformat()
-        _save_state()
+        record["approved_at"] = dt.utcnow().isoformat()
+        _save_parity_state()
 
         await interaction.response.send_message(
             f"✅ Position change `{log_id.upper()}` approved: "
@@ -2031,7 +2035,7 @@ class PositionChangeCog(commands.Cog):
 
         record["status"]     = "denied"
         record["denied_by"]  = str(interaction.user)
-        record["denied_at"]  = datetime.datetime.utcnow().isoformat()
+        record["denied_at"]  = dt.utcnow().isoformat()
         record["denial_reason"] = reason
         _save_state()
 

@@ -199,11 +199,16 @@ async def get_balance(discord_id: int) -> int:
             row = await cur.fetchone()
         if row is None:
             await db.execute(
-                "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
+                "INSERT OR IGNORE INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
                 (discord_id, STARTING_BALANCE, STARTING_BALANCE)
             )
             await db.commit()
-            return STARTING_BALANCE
+            # Re-read in case a concurrent insert won the race
+            async with db.execute(
+                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            return row[0] if row else STARTING_BALANCE
         return row[0]
 
 
@@ -416,9 +421,12 @@ async def can_claim_scratch(discord_id: int) -> bool:
     return row is None or row[0] != today
 
 
-async def claim_scratch(discord_id: int) -> int | None:
+async def claim_scratch(discord_id: int, reward: int | None = None) -> int | None:
     """
-    Roll a scratch card reward and credit the balance.
+    Credit a scratch card reward to the user's balance.
+    Pass the pre-computed reward from the UI tiles so what the player
+    sees matches what they receive.  Falls back to a random roll if
+    reward is not provided (backwards compat).
     Returns the amount won, or None if already claimed today.
     """
     if not await can_claim_scratch(discord_id):
@@ -426,17 +434,18 @@ async def claim_scratch(discord_id: int) -> int | None:
 
     today = date.today().isoformat()
 
-    # Weighted reward pool
-    reward_pool = [
-        (25,  40),   # (amount, weight)
-        (50,  30),
-        (75,  15),
-        (100, 10),
-        (150,  5),
-    ]
-    amounts  = [r[0] for r in reward_pool]
-    weights  = [r[1] for r in reward_pool]
-    reward   = random.choices(amounts, weights=weights, k=1)[0]
+    # Fallback: roll if caller didn't pass a pre-computed reward
+    if reward is None:
+        reward_pool = [
+            (25,  40),   # (amount, weight)
+            (50,  30),
+            (75,  15),
+            (100, 10),
+            (150,  5),
+        ]
+        amounts  = [r[0] for r in reward_pool]
+        weights  = [r[1] for r in reward_pool]
+        reward   = random.choices(amounts, weights=weights, k=1)[0]
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -549,8 +558,8 @@ async def add_crash_bet(round_id: int, discord_id: int, wager: int) -> int:
 async def cashout_crash_bet(bet_id: int, discord_id: int, multiplier: float) -> int:
     """
     Cash out a crash bet at the given multiplier.
-    Credits the balance and marks the bet as cashed.
-    Returns payout amount.
+    Marks the bet as cashed in the crash_bets table.
+    Returns payout amount.  Balance credit is handled by process_wager().
     """
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -565,25 +574,11 @@ async def cashout_crash_bet(bet_id: int, discord_id: int, multiplier: float) -> 
         wager  = row[0]
         payout = int(wager * multiplier)
 
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute(
-                "UPDATE crash_bets SET cashout_mult=?, payout=?, status='cashed' WHERE id=?",
-                (multiplier, payout, bet_id)
-            )
-            async with db.execute(
-                "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-            ) as cur:
-                brow = await cur.fetchone()
-            current = brow[0] if brow else STARTING_BALANCE
-            await db.execute(
-                "UPDATE users_table SET balance=? WHERE discord_id=?",
-                (current + payout, discord_id)
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        await db.execute(
+            "UPDATE crash_bets SET cashout_mult=?, payout=?, status='cashed' WHERE id=?",
+            (multiplier, payout, bet_id)
+        )
+        await db.commit()
 
     return payout
 

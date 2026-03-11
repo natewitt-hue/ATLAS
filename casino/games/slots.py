@@ -94,21 +94,22 @@ def _calculate_payout(reels: list[str], wager: int) -> tuple[int, str, float]:
 
 async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     """Play one spin of the slot machine with animated reveal."""
+    await interaction.response.defer()
 
     if not await is_casino_open("slots"):
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "🔴 Slots are currently closed.", ephemeral=True
         )
 
     slots_channel_id = await get_channel_id("slots")
     if slots_channel_id and interaction.channel_id != slots_channel_id:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"🎰 Slots are played in <#{slots_channel_id}>!", ephemeral=True
         )
 
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
             ephemeral=True
         )
@@ -116,7 +117,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     try:
         await deduct_wager(interaction.user.id, wager)
     except Exception as e:
-        return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     reels = _spin()
 
@@ -131,10 +132,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     embed.set_image(url="attachment://slots.png")
     embed.set_footer(text="Spinning...")
 
-    await interaction.response.send_message(embed=embed, file=file)
-
-    # ── Animated reveal: reel 1 → 2 → 3 ──────────────────────────────────
-    msg = await interaction.original_response()
+    msg = await interaction.followup.send(embed=embed, file=file, wait=True)
 
     for revealed in (1, 2, 3):
         await asyncio.sleep(0.9)
@@ -264,10 +262,12 @@ def _build_scratch_embed(
 
 async def daily_scratch(interaction: discord.Interaction) -> None:
     """Claim and play the daily scratch card."""
+    await interaction.response.defer()
+
     uid = interaction.user.id
 
     if not await can_claim_scratch(uid):
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "⏰ You've already claimed your daily scratch card today.\n"
             "Come back tomorrow for another free card! (Resets at midnight UTC)",
             ephemeral=True
@@ -289,10 +289,10 @@ async def daily_scratch(interaction: discord.Interaction) -> None:
     is_match = len(set(tiles)) == 1
     total    = (tiles[0] * 3) if is_match else sum(tiles)
 
-    # Credit the reward
-    result = await claim_scratch(uid)
+    # Credit the reward (pass pre-rolled total so UI matches balance)
+    result = await claim_scratch(uid, reward=total)
     if result is None:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "⏰ Already claimed today!", ephemeral=True
         )
 
@@ -304,4 +304,4 @@ async def daily_scratch(interaction: discord.Interaction) -> None:
     embed.set_footer(text=f"Potential win: {total:,} TSL Bucks credited to your account")
 
     view = ScratchView(uid, tiles)
-    await interaction.response.send_message(embed=embed, file=file, view=view)
+    await interaction.followup.send(embed=embed, file=file, view=view)

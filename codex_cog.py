@@ -435,11 +435,11 @@ def get_db():
     return conn
 
 
-def run_sql(sql: str) -> tuple[list[dict], str | None]:
-    """Execute SQL, return (rows, error)."""
+def run_sql(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
+    """Execute SQL, return (rows, error).  Supports parameterized queries."""
     try:
         conn = get_db()
-        cur = conn.execute(sql)
+        cur = conn.execute(sql, params)
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
         return rows[:MAX_ROWS], None

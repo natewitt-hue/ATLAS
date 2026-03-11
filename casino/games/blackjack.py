@@ -399,10 +399,10 @@ async def _finish_hand(
     outcomes = []
 
     if session.split_active:
+        session.dealer_play()  # Dealer draws once, both hands resolve against same total
         outcome1, payout1, mult1 = session.resolve()
         outcomes.append((outcome1, payout1, mult1, session.wager))
         session.playing_split = True
-        session.dealer_play()
         outcome2, payout2, mult2 = session.resolve()
         outcomes.append((outcome2, payout2, mult2, session.wager))
     else:
@@ -517,28 +517,30 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     Begin a new blackjack hand for the interacting user.
     Called from the casino hub or directly in #casino-blackjack.
     """
+    await interaction.response.defer()
+
     uid = interaction.user.id
 
     if uid in active_sessions:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "❌ You already have an active blackjack hand! Finish it first.",
             ephemeral=True
         )
 
     if not await is_casino_open("blackjack"):
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "🔴 Blackjack is currently closed.", ephemeral=True
         )
 
     bj_channel_id = await get_channel_id("blackjack")
     if bj_channel_id and interaction.channel_id != bj_channel_id:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"🃏 Blackjack is played in <#{bj_channel_id}>!", ephemeral=True
         )
 
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
             ephemeral=True
         )
@@ -546,7 +548,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     try:
         await deduct_wager(uid, wager)
     except Exception as e:
-        return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     session = BlackjackSession(
         discord_id = uid,
@@ -627,7 +629,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         )
         embed.set_image(url="attachment://blackjack.png")
         embed.set_footer(text=f"New Balance: {bal:,} TSL Bucks")
-        return await interaction.response.send_message(embed=embed, file=file)
+        return await interaction.followup.send(embed=embed, file=file)
 
     # ── Normal deal: render and send active table ─────────────────────────
     bal  = await get_balance(uid)
@@ -650,6 +652,6 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     embed.set_footer(text=f"Wager: {wager:,} TSL Bucks  |  Balance: {bal:,}  |  5-min timeout")
 
     view = BlackjackView(session)
-    await interaction.response.send_message(embed=embed, file=file, view=view)
+    await interaction.followup.send(embed=embed, file=file, view=view)
 
 
