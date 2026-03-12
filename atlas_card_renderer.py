@@ -444,12 +444,12 @@ class ATLASCard:
         for section in self.sections:
             img, y_cursor = self._draw_section(img, section, y_cursor)
 
-        # Phase 5: Status bar
-        if self.status_bar:
-            _draw_status_bar(img, height - 3, 3, self.status_bar)
-
-        # Phase 6: Apply noise texture
+        # Phase 5: Apply noise texture
         img = _apply_noise(img)
+
+        # Phase 6: Status bar (after noise so it's crisp)
+        if self.status_bar:
+            _draw_status_bar(img, height - 4, 4, self.status_bar)
 
         # Phase 7: Outer border (gold glow)
         draw = ImageDraw.Draw(img, 'RGBA')
@@ -482,7 +482,7 @@ class ATLASCard:
             elif s.type == SectionType.TEXT_BLOCK:
                 h += 30
         if self.status_bar:
-            h += 3
+            h += 4
         return h
 
     # ── Background ────────────────────────────────────────────────────────────
@@ -815,9 +815,9 @@ class ATLASCard:
 
         # Footer background
         draw.rectangle([0, y, CARD_WIDTH, y + footer_h],
-                       fill=(0, 0, 0, 64))
+                       fill=(0, 0, 0, 140))
         # Top border
-        draw.line([(0, y), (CARD_WIDTH, y)], fill=(255, 255, 255, 6), width=1)
+        draw.line([(0, y), (CARD_WIDTH, y)], fill=(255, 255, 255, 20), width=1)
 
         # Sports
         sport_font = Fonts.display_semibold(10)
@@ -860,7 +860,7 @@ class ATLASCard:
                 sx += pill_w + 5
             else:
                 draw.text((sx, sy + 3), sport, font=sport_font,
-                          fill=(68, 68, 68))
+                          fill=(120, 120, 120))
                 sx += sw + 12
 
         # Tagline (right-aligned)
@@ -868,7 +868,7 @@ class ATLASCard:
             tag_font = Fonts.display_regular(8)
             tag_w = _text_width(draw, data["tagline"], tag_font)
             draw.text((CARD_WIDTH - pad_x - tag_w, sy + 5),
-                      data["tagline"], font=tag_font, fill=Colors.TEXT_MUTED)
+                      data["tagline"], font=tag_font, fill=(90, 90, 90))
 
         return img, y + footer_h
 

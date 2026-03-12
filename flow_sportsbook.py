@@ -1369,7 +1369,12 @@ class SportsbookHubView(discord.ui.View):
         try:
             ui_games = await _load_tsl_week_games()
         except ValueError as e:
-            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            msg = str(e)
+            if "No game data loaded" in msg:
+                msg = "⏳ Game data is still loading from the API. Please try again in ~30 seconds."
+            else:
+                msg = f"❌ {msg}"
+            return await interaction.followup.send(msg, ephemeral=True)
         except Exception as e:
             return await interaction.followup.send(
                 f"❌ Error loading TSL games: `{e}`", ephemeral=True
