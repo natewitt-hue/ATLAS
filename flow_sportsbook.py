@@ -56,6 +56,8 @@ import data_manager as dm
 import flow_wallet
 from odds_api_client import SUPPORTED_SPORTS as REAL_SPORTS
 from real_sportsbook_cog import EventListView, SPORT_EMOJI
+from sportsbook_cards import build_sportsbook_card, build_stats_card, card_to_file
+from db_migration_snapshots import setup_snapshots_table, take_daily_snapshot, backfill_from_bets
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 _DIR              = os.path.dirname(os.path.abspath(__file__))
@@ -1417,19 +1419,21 @@ class SportsbookHubView(discord.ui.View):
 
     # ── Row 1: Utility buttons ─────────────────────────────────────────────
 
-    @discord.ui.button(label="My Bets", emoji="\U0001f4cb",
+    @discord.ui.button(label="Stats", emoji="\U0001f4ca",
                        style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:my_bets", row=1)
-    async def my_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+                       custom_id="atlas:sportsbook:stats", row=1)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            await self.cog._mybets_impl(interaction)
+            img = await asyncio.to_thread(build_stats_card, interaction.user.id)
+            file = card_to_file(img, "stats.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://stats.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
         except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(label="History", emoji="\U0001f4ca",
+    @discord.ui.button(label="History", emoji="\U0001f4cb",
                        style=discord.ButtonStyle.secondary,
                        custom_id="atlas:sportsbook:history", row=1)
     async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1442,7 +1446,7 @@ class SportsbookHubView(discord.ui.View):
                 await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
     @discord.ui.button(label="Leaderboard", emoji="\U0001f3c6",
-                       style=discord.ButtonStyle.success,
+                       style=discord.ButtonStyle.danger,
                        custom_id="atlas:sportsbook:leaderboard", row=1)
     async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
@@ -1453,12 +1457,33 @@ class SportsbookHubView(discord.ui.View):
             else:
                 await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(label="Props", emoji="\U0001f3b2",
-                       style=discord.ButtonStyle.primary,
-                       custom_id="atlas:sportsbook:props", row=1)
-    async def props(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Parlay", emoji="\U0001f3b0",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:parlay", row=1)
+    async def parlay(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        cart = _get_cart(uid)
+        if not cart:
+            return await interaction.response.send_message(
+                "🎰 Your **parlay cart** is empty!\n"
+                "Place bets on individual games and choose **Add to Parlay** to build legs.",
+                ephemeral=True,
+            )
         try:
-            await self.cog._props_impl(interaction)
+            combined = _combine_parlay_odds([leg["odds"] for leg in cart])
+            embed = discord.Embed(
+                title="🎰  PARLAY CART",
+                color=TSL_GOLD,
+                description=f"**{len(cart)} Leg{'s' if len(cart) != 1 else ''}** — Combined: **{combined:+d}**",
+            )
+            for i, leg in enumerate(cart, 1):
+                embed.add_field(
+                    name=f"Leg {i}: {leg['pick']}",
+                    value=f"{leg['bet_type']} ({leg['odds']:+d})",
+                    inline=False,
+                )
+            view = ParlayCartView(uid, cart, combined)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception as e:
             if not interaction.response.is_done():
                 await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
@@ -1639,12 +1664,34 @@ class SportsbookCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         setup_db()
+        # Set up balance snapshots table (for sparklines & weekly deltas)
+        setup_snapshots_table()
         dm._autograde_callback = self._on_data_refresh
         self.auto_grade.start()
+        self.daily_snapshot.start()
 
     def cog_unload(self):
         self.auto_grade.cancel()
+        self.daily_snapshot.cancel()
         dm._autograde_callback = None
+
+    @tasks.loop(hours=24)
+    async def daily_snapshot(self):
+        """Take a daily balance snapshot for sparklines and weekly deltas."""
+        await asyncio.to_thread(take_daily_snapshot)
+
+    @daily_snapshot.before_loop
+    async def before_daily_snapshot(self):
+        await self.bot.wait_until_ready()
+        # Run backfill on first startup if snapshots table is empty
+        try:
+            import sqlite3
+            with sqlite3.connect(DB_PATH) as con:
+                count = con.execute("SELECT COUNT(*) FROM balance_snapshots").fetchone()[0]
+            if count == 0:
+                await asyncio.to_thread(backfill_from_bets)
+        except Exception:
+            pass  # Table might not exist yet on very first run
 
     async def _on_data_refresh(self):
         _invalidate_elo_cache()
@@ -1681,25 +1728,23 @@ class SportsbookCog(commands.Cog):
     @app_commands.command(name="sportsbook", description="Open the ATLAS Sportsbook \u2014 TSL + Real Sports")
     async def sportsbook(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        balance = _get_balance(interaction.user.id)
-        bet_week = dm.CURRENT_WEEK + 1
-
-        embed = discord.Embed(title="\U0001f3c6  ATLAS GLOBAL SPORTSBOOK", color=TSL_GOLD)
-        if interaction.guild and interaction.guild.icon:
-            embed.set_thumbnail(url=interaction.guild.icon.url)
-        embed.description = (
-            f"```\n"
-            f"SEASON {dm.CURRENT_SEASON}  \u2022  WEEK {bet_week}\n"
-            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-            f"\U0001f4b0 Your Balance:  ${balance:,}\n"
-            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-            f"```\n"
-            f"\U0001f3c8 **TSL** \u2014 Elo-based sim lines on weekly matchups\n"
-            f"\U0001f3c8 **NFL** \u00b7 \U0001f3c0 **NBA** \u00b7 \u26be **MLB** \u00b7 \U0001f3d2 **NHL** \u2014 Live odds via FanDuel\n\n"
-            f"Select a sport below to browse games, or use the utility buttons."
-        )
-        embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
-        await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
+        try:
+            img = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
+            file = card_to_file(img, "sportsbook.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://sportsbook.png")
+            await interaction.followup.send(embed=embed, file=file, view=SportsbookHubView(self))
+        except Exception as e:
+            # Fallback to text embed if card rendering fails
+            balance = _get_balance(interaction.user.id)
+            embed = discord.Embed(title="\U0001f3c6  ATLAS GLOBAL SPORTSBOOK", color=TSL_GOLD)
+            embed.description = (
+                f"\U0001f4b0 **Balance:** ${balance:,}\n\n"
+                f"Select a sport below to browse games.\n\n"
+                f"*Card render error: `{e}`*"
+            )
+            embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
+            await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
 
     # ── User-facing _impl methods (called by board buttons) ────────────────
 
