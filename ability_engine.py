@@ -17,6 +17,7 @@ Discord commands (registered in bot.py):
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
+import random
 import re
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -801,6 +802,269 @@ def summarize_audit(results: list[PlayerAuditResult]) -> dict:
 # If _players_cache is empty, the audit will silently skip all players (all appear
 # as Normal dev). Use /wittsync to reload, or check bot startup logs.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 6B: ABILITY REASSIGNMENT ENGINE
+# Once-per-season automated replacement of illegal abilities with stat-fitting
+# alternatives. Skips Normal and Star dev (Star cannot equip SS/XF abilities
+# in Madden 26 CFM). C-tier abilities are never flagged and never assigned as
+# replacements. Budget validation (DEV_BUDGET) is enforced as a post-check
+# on each replacement pick.
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ReassignmentResult:
+    """Result of ability reassignment for a single player."""
+    roster_id: int
+    name: str
+    team: str
+    pos: str
+    dev: str
+    archetype: str
+    original_abilities: list[str]       # all equipped before reassignment
+    kept: list[str]                     # abilities that passed audit
+    swaps: list[dict]                   # [{"slot_index","old","new","fit_score","old_reasons"}]
+    unresolved: list[dict]              # [{"slot_index","old","reasons"}]
+    has_changes: bool                   # True if any swaps or unresolved exist
+
+    def final_abilities(self) -> list[str]:
+        """Return the complete ability list after reassignment (kept + new)."""
+        result = list(self.kept)
+        for s in self.swaps:
+            result.append(s["new"])
+        return result
+
+    def to_dict(self) -> dict:
+        return {
+            "rosterId": self.roster_id,
+            "name": self.name,
+            "team": self.team,
+            "pos": self.pos,
+            "dev": self.dev,
+            "archetype": self.archetype,
+            "originalAbilities": self.original_abilities,
+            "finalAbilities": self.final_abilities(),
+            "swaps": [{"slotIndex": s["slot_index"], "old": s["old"],
+                        "new": s["new"], "fitScore": s["fit_score"]}
+                       for s in self.swaps],
+            "unresolved": [{"slotIndex": u["slot_index"], "old": u["old"],
+                            "reasons": u["reasons"]}
+                           for u in self.unresolved],
+        }
+
+
+def get_qualified_abilities(player: dict) -> list[tuple[str, int]]:
+    """
+    Scan ABILITY_TABLE for all abilities this player qualifies for.
+    Returns list of (ability_name, fit_score) where fit_score = sum of stat
+    surpluses over thresholds. C-tier abilities are excluded.
+    """
+    pos = player.get("pos", "")
+    qualified: list[tuple[str, int]] = []
+
+    for name, entry in ABILITY_TABLE.items():
+        # Skip C-tier — never assigned as replacements
+        if entry["tier"] == "C":
+            continue
+
+        # Position check
+        eligible = entry.get("positions", [])
+        if eligible and pos not in eligible:
+            continue
+
+        # Archetype check
+        required_arch = entry.get("archetype")
+        if required_arch is not None:
+            required_options = [r.strip() for r in required_arch.split("/")]
+            true_arch = calculate_true_archetype(player)
+            if true_arch not in required_options:
+                continue
+
+        # Threshold check + surplus computation
+        thresholds = entry.get("thresholds", {})
+        if not thresholds:
+            continue  # S/A/B with empty thresholds shouldn't exist, but skip
+
+        passes = True
+        surplus = 0
+
+        for key, min_val in thresholds.items():
+            if key == "_edge_pmv_or_fmv":
+                pmv = int(player.get("powerMovesRating", 0) or 0)
+                fmv = int(player.get("finesseMovesRating", 0) or 0)
+                best = max(pmv, fmv)
+                if best < min_val:
+                    passes = False
+                    break
+                surplus += best - min_val
+            elif key == "weight":
+                actual = int(player.get("weight", 0) or 0)
+                if actual < min_val:
+                    passes = False
+                    break
+                surplus += actual - min_val
+            else:
+                actual = int(player.get(key, 0) or 0)
+                if actual < min_val:
+                    passes = False
+                    break
+                surplus += actual - min_val
+
+        if passes:
+            qualified.append((name, surplus))
+
+    return qualified
+
+
+def pick_replacement(player: dict,
+                     excluded: list[str]) -> tuple[str, int] | None:
+    """
+    Pick a replacement ability for a player, excluding abilities already in use.
+    Top 3 by fit_score → random pick. Returns (name, fit_score) or None.
+    """
+    candidates = [(n, s) for n, s in get_qualified_abilities(player)
+                  if n not in excluded]
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return random.choice(candidates[:3])
+
+
+def reassign_roster(players: list[dict],
+                    player_abilities: list[dict]) -> list[ReassignmentResult]:
+    """
+    Audit every SS/XF player and replace illegal abilities with stat-fitting
+    alternatives. Normal and Star dev are skipped entirely.
+
+    player_abilities is accepted for API consistency with audit_roster() but
+    is intentionally unused — ability1-6 on the player dict is canonical.
+    """
+    results: list[ReassignmentResult] = []
+
+    for p in players:
+        dev = _normalize_dev(p)
+        if dev in ("Normal", "Star"):
+            continue
+
+        equipped = [p.get(f"ability{i}", "") for i in range(1, 7)]
+        equipped_filled = [ab for ab in equipped if ab]
+        if not equipped_filled:
+            continue
+
+        archetype = calculate_true_archetype(p)
+        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+        team = p.get("teamName", "Free Agent")
+
+        # Pass 1: identify kept abilities
+        kept: list[str] = []
+        violation_slots: list[tuple[int, str, list[str]]] = []  # (slot_idx, ability, reasons)
+
+        for i, ab in enumerate(equipped):
+            if not ab:
+                continue
+            earned, reasons = is_ability_earned(p, ab)
+            if earned:
+                kept.append(ab)
+            else:
+                violation_slots.append((i + 1, ab, reasons))
+
+        if not violation_slots:
+            results.append(ReassignmentResult(
+                roster_id=p.get("rosterId"),
+                name=name, team=team, pos=p.get("pos", "?"),
+                dev=dev, archetype=archetype,
+                original_abilities=equipped_filled,
+                kept=kept, swaps=[], unresolved=[],
+                has_changes=False,
+            ))
+            continue
+
+        # Pass 2: replace violations
+        in_use = list(kept)
+        swaps: list[dict] = []
+        unresolved: list[dict] = []
+
+        for slot_idx, old_ab, old_reasons in violation_slots:
+            replacement = pick_replacement(p, excluded=in_use)
+
+            if replacement:
+                rep_name, rep_score = replacement
+                # Budget post-check
+                test_loadout = list(in_use) + [rep_name]
+                budget_ok, _ = check_budget(dev, test_loadout)
+
+                if not budget_ok:
+                    # Linear scan for budget-compliant alternative
+                    all_cands = [(n, s) for n, s in get_qualified_abilities(p)
+                                 if n not in in_use]
+                    all_cands.sort(key=lambda x: x[1], reverse=True)
+                    found = False
+                    for cand_name, cand_score in all_cands:
+                        test2 = list(in_use) + [cand_name]
+                        b_ok, _ = check_budget(dev, test2)
+                        if b_ok:
+                            rep_name, rep_score = cand_name, cand_score
+                            budget_ok = True
+                            found = True
+                            break
+                    if not found:
+                        unresolved.append({
+                            "slot_index": slot_idx,
+                            "old": old_ab,
+                            "reasons": old_reasons + ["No replacement fits within budget"],
+                        })
+                        continue
+
+                rep_entry = ABILITY_TABLE.get(rep_name, {})
+                swaps.append({
+                    "slot_index": slot_idx,
+                    "old": old_ab,
+                    "new": rep_name,
+                    "new_tier": rep_entry.get("tier", "?"),
+                    "fit_score": rep_score,
+                    "old_reasons": old_reasons,
+                })
+                in_use.append(rep_name)
+            else:
+                unresolved.append({
+                    "slot_index": slot_idx,
+                    "old": old_ab,
+                    "reasons": old_reasons + ["No qualifying abilities available"],
+                })
+
+        results.append(ReassignmentResult(
+            roster_id=p.get("rosterId"),
+            name=name, team=team, pos=p.get("pos", "?"),
+            dev=dev, archetype=archetype,
+            original_abilities=equipped_filled,
+            kept=kept, swaps=swaps, unresolved=unresolved,
+            has_changes=True,
+        ))
+
+    results.sort(key=lambda r: (not r.has_changes, r.team, r.name))
+    return results
+
+
+def summarize_reassignment(results: list[ReassignmentResult]) -> dict:
+    """High-level summary counts for a reassignment run."""
+    changed = [r for r in results if r.has_changes]
+    return {
+        "totalProcessed":    len(results),
+        "playersWithSwaps":  sum(1 for r in results if r.swaps),
+        "playersClean":      len(results) - len(changed),
+        "playersUnresolved": sum(1 for r in results if r.unresolved),
+        "totalSwaps":        sum(len(r.swaps) for r in results),
+        "totalUnresolved":   sum(len(r.unresolved) for r in results),
+        "teamsAffected":     len(set(r.team for r in changed)),
+    }
+
+
+def export_reassignment_json(results: list[ReassignmentResult]) -> list[dict]:
+    """Export results as JSON-serializable dicts. Only players with changes."""
+    return [r.to_dict() for r in results if r.has_changes]
 
 
 # ═════════════════════════════════════════════════════════════════════════════

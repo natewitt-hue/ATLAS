@@ -1785,6 +1785,85 @@ def _build_league_ability_embed(
     return embed
 
 
+# ── Reassignment embed helpers ────────────────────────────────────────────────
+
+def _build_reassignment_summary_embed(summary: dict) -> discord.Embed:
+    """High-level league-wide reassignment summary embed."""
+    has_changes = summary["playersWithSwaps"] > 0 or summary["playersUnresolved"] > 0
+    color = discord.Color.orange() if has_changes else discord.Color.green()
+
+    embed = discord.Embed(
+        title=f"🔄 TSL Ability Reassignment — Season {dm.CURRENT_SEASON}",
+        color=color,
+        description=f"**{summary['totalProcessed']}** SS/XF players audited across the league",
+    )
+    embed.add_field(name="✅ Clean",        value=str(summary["playersClean"]),      inline=True)
+    embed.add_field(name="🔄 Changed",      value=str(summary["playersWithSwaps"]),  inline=True)
+    embed.add_field(name="🏟️ Teams",       value=str(summary["teamsAffected"]),      inline=True)
+    embed.add_field(name="🔀 Replacements", value=str(summary["totalSwaps"]),        inline=True)
+    embed.add_field(name="⚠️ Unresolved",  value=str(summary["totalUnresolved"]),    inline=True)
+
+    if not has_changes:
+        embed.set_footer(text="✅ All SS/XF abilities are earned. No reassignment needed.")
+    else:
+        embed.set_footer(text="Review team breakdowns below. Apply changes in Madden before next advance.")
+
+    embed.set_author(name="ATLAS™ Genesis Module", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+def _build_reassignment_team_embeds(
+    changed_results: "list[ae.ReassignmentResult]",
+) -> list[discord.Embed]:
+    """Build per-team embeds showing each player's ability changes."""
+    by_team: dict[str, list] = {}
+    for r in changed_results:
+        by_team.setdefault(r.team, []).append(r)
+
+    embeds: list[discord.Embed] = []
+
+    for team_name in sorted(by_team.keys()):
+        team_players = by_team[team_name]
+
+        embed = discord.Embed(
+            title=f"🏈 {team_name} — Ability Reassignment",
+            color=discord.Color.orange(),
+        )
+
+        for r in team_players:
+            lines = []
+
+            if r.kept:
+                lines.append(f"✅ Kept: {', '.join(r.kept)}")
+
+            for s in r.swaps:
+                tier_emoji = TIER_EMOJI.get(s.get("new_tier", "?"), "❓")
+                lines.append(
+                    f"🔄 Slot {s['slot_index']}: "
+                    f"~~{s['old']}~~ → {tier_emoji} **{s['new']}** "
+                    f"(fit: {s['fit_score']})"
+                )
+
+            for u in r.unresolved:
+                lines.append(
+                    f"⚠️ Slot {u['slot_index']}: "
+                    f"~~{u['old']}~~ → **EMPTY** "
+                    f"(no valid replacement)"
+                )
+
+            dev_badge = _dev_badge(r.dev)
+            embed.add_field(
+                name=f"{r.name} ({r.pos}, {dev_badge})",
+                value="\n".join(lines) if lines else "_No changes_",
+                inline=False,
+            )
+
+        embed.set_footer(text="ATLAS™ Genesis · Ability Reassignment Engine")
+        embeds.append(embed)
+
+    return embeds
+
+
 # ── Lottery helpers ────────────────────────────────────────────────────────────
 
 def _build_lottery_pool() -> list[tuple[str, int]]:
@@ -1924,7 +2003,8 @@ def _build_genesis_hub_embed() -> discord.Embed:
             "```\n"
             "💱 Trade       📜 Trades      🔍 Lookup\n"
             "📊 Dev Traits  🛡️ Ability Audit  👤 Ability Check\n"
-            "🔒 Cornerstone  📋 Contract  🎰 Lottery  🏈 Rules\n"
+            "🔒 Cornerstone  📋 Contract  🔄 Reassign\n"
+            "🎰 Lottery  🏈 Rules\n"
             "```"
         ),
         inline=False,
@@ -2050,7 +2130,26 @@ class GenesisHubView(discord.ui.View):
     async def btn_contract(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_ContractCheckModal())
 
-    # ── Row 2: Franchise Tools ────────────────────────────────────────────────
+    @discord.ui.button(
+        label="🔄 Ability Reassign", style=discord.ButtonStyle.danger,
+        row=2, custom_id="genesis:abilityreassign",
+    )
+    async def btn_abilityreassign(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        is_admin = (
+            interaction.user.id in ADMIN_USER_IDS or
+            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
+        )
+        if not is_admin:
+            return await interaction.response.send_message(
+                "❌ Ability Reassignment is a commissioner-only tool.", ephemeral=True
+            )
+        if not _AE_AVAILABLE:
+            return await interaction.response.send_message(
+                "❌ ability_engine.py not found.", ephemeral=True
+            )
+        await interaction.response.send_modal(_AbilityReassignModal())
+
+    # ── Row 3: Franchise Tools ───────────────────────────────────────────────
 
     @discord.ui.button(
         label="🎰 Lottery", style=discord.ButtonStyle.secondary,
@@ -2406,6 +2505,78 @@ class _CornerstoneModal(discord.ui.Modal, title="🔒 Cornerstone Designation"):
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Cornerstone error: `{e}`", ephemeral=True)
+
+
+class _AbilityReassignModal(discord.ui.Modal, title="🔄 Ability Reassignment"):
+    confirm = discord.ui.TextInput(
+        label="Type REASSIGN to confirm",
+        placeholder="REASSIGN",
+        min_length=8,
+        max_length=8,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.confirm.value.strip().upper() != "REASSIGN":
+            return await interaction.response.send_message(
+                "❌ Confirmation failed. Type `REASSIGN` exactly to proceed.", ephemeral=True
+            )
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            players = dm.get_players()
+            abilities = dm.get_player_abilities()
+            if not players:
+                return await interaction.followup.send(
+                    "⚠️ No roster data. Run `/wittsync` first.", ephemeral=True
+                )
+
+            results = ae.reassign_roster(players, abilities)
+
+            if not results:
+                return await interaction.followup.send(
+                    "⚠️ No SS/XF players found in the roster data.", ephemeral=True
+                )
+
+            summary = ae.summarize_reassignment(results)
+
+            # 1. Summary embed
+            await interaction.followup.send(
+                embed=_build_reassignment_summary_embed(summary), ephemeral=True
+            )
+
+            # 2. Team-by-team breakdown (only teams with changes)
+            changed = [r for r in results if r.has_changes]
+            if changed:
+                team_embeds = _build_reassignment_team_embeds(changed)
+                for i in range(0, len(team_embeds), 10):
+                    await interaction.followup.send(
+                        embeds=team_embeds[i:i+10], ephemeral=True
+                    )
+
+            # 3. JSON file attachment
+            export_data = ae.export_reassignment_json(results)
+            if export_data:
+                import io as _io
+                json_str = json.dumps(export_data, indent=2)
+                file = discord.File(
+                    _io.BytesIO(json_str.encode("utf-8")),
+                    filename=f"reassignment_S{dm.CURRENT_SEASON}.json",
+                )
+                await interaction.followup.send(
+                    content="📎 Full reassignment data attached.",
+                    file=file, ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "✅ No ability violations found — all SS/XF players are compliant.",
+                    ephemeral=True,
+                )
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Reassignment error: `{e}`", ephemeral=True
+            )
 
 
 # ── Genesis Hub Cog ────────────────────────────────────────────────────────────
