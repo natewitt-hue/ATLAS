@@ -949,8 +949,8 @@ def reassign_roster(players: list[dict],
         if dev in ("Normal", "Star"):
             continue
 
-        equipped = [p.get(f"ability{i}", "") for i in range(1, 7)]
-        equipped_filled = [ab for ab in equipped if ab]
+        equipped = [str(p.get(f"ability{i}", "") or "") for i in range(1, 7)]
+        equipped_filled = [ab for ab in equipped if ab and ab != "nan"]
         if not equipped_filled:
             continue
 
