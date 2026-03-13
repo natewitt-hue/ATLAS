@@ -32,7 +32,10 @@ PRO_DELAY  = 4  # seconds between Pro calls
 class CortexWriter:
 
     def __init__(self):
-        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.client = genai.Client(
+            api_key=os.getenv("GEMINI_API_KEY"),
+            http_options={"timeout": 180_000},
+        )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=20))
     def _synthesize(self, subject, section_title,

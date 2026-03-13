@@ -19,6 +19,7 @@ import re
 import json
 import hashlib
 import time
+import httpx
 
 from google import genai
 from google.genai import types
@@ -33,7 +34,10 @@ PASS_DELAY  = 5  # seconds between Flash calls to avoid 429s
 class CortexAnalyst:
 
     def __init__(self):
-        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.client = genai.Client(
+            api_key=os.getenv("GEMINI_API_KEY"),
+            http_options={"timeout": 120_000},
+        )
         os.makedirs(CACHE_DIR, exist_ok=True)
 
     # -- Cache helpers ---------------------------------------------------------
@@ -111,9 +115,10 @@ class CortexAnalyst:
     # -- Flash call wrapper ----------------------------------------------------
 
     @retry(
-        retry=retry_if_exception_type(ClientError),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, min=4, max=30),
+        retry=retry_if_exception_type((ClientError, httpx.TransportError)),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=3, min=5, max=90),
+        before_sleep=lambda rs: print(f"    [!] Retry {rs.attempt_number}/6 after error: {rs.outcome.exception().__class__.__name__} -- waiting {rs.next_action.sleep:.0f}s..."),
     )
     def _call_flash(self, prompt, pass_name="unknown"):
         t0 = time.time()

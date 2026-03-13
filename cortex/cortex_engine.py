@@ -34,7 +34,7 @@ DB_PATH = os.getenv("ORACLE_DB_PATH", "TSL_Archive.db")
 # All sizes chosen for high analytical confidence at ~$0.30-0.40 Flash cost.
 # ---------------------------------------------------------------------------
 
-SAMPLE_TONE              = 200    # lightweight irony pre-pass -- enough to build irony profile
+SAMPLE_TONE              = 150    # lightweight irony pre-pass -- enough to build irony profile
 SAMPLE_BROAD             = 2000   # vocabulary/structure baseline -- captures full lexical range
 SAMPLE_PEAK_MEDIUM       = 500    # top cognitive-scored medium msgs (81-300 chars)
                                   # ALL long msgs (300+) are always included on top of this
@@ -311,6 +311,23 @@ class CortexEngine:
             "fact_check": factcheck_pack,
             "nickname":   nickname,
         }
+
+
+    def get_all_messages(self, nickname):
+        """Return ALL messages for a subject, chronological. No sampling."""
+        search_term = f"%{nickname.replace(chr(37), '')}%"
+        ai_clause, ai_params = self._ai_filter_clause()
+        sql = f"""
+            SELECT message_id, author_nickname, timestamp_unix, content
+            FROM messages
+            WHERE author_nickname LIKE ?
+              AND LENGTH(TRIM(content)) > 3
+              AND content NOT LIKE 'http%'
+              AND type = 'Default'
+              AND {ai_clause}
+            ORDER BY timestamp_unix ASC
+        """
+        return self.execute_sql(sql, (search_term,) + ai_params)
 
 
 # ---------------------------------------------------------------------------

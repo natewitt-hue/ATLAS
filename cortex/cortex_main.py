@@ -9,6 +9,7 @@ Usage:
   python cortex_main.py run <nickname> --no-cache
   python cortex_main.py run <nickname> --no-docs
   python cortex_main.py diagnose <nickname>
+  python cortex_main.py export <nickname>
 
 Environment variables required (same as Oracle, from .env):
   GEMINI_API_KEY   - Google Gemini API key
@@ -22,6 +23,8 @@ Optional:
 
 import os
 import argparse
+import random
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -86,7 +89,19 @@ def cmd_run(args):
     print(f"    Fact check pool : {len(packs.get('fact_check', []))}")
 
     print("\n--- PHASE 2: SIGNAL EXTRACTION (Flash) ---")
-    signals = analyst.run_all_passes(nickname, packs)
+    try:
+        signals = analyst.run_all_passes(nickname, packs)
+    except Exception as e:
+        err_name = type(e).__name__
+        print("")
+        print(f"[-] PHASE 2 FAILED: {err_name}")
+        if "RetryError" in err_name or "TransportError" in err_name:
+            print("    The Gemini API server is not responding after multiple retries.")
+            print("    This is usually temporary. Wait 1-2 minutes and try again.")
+            print("    If it persists, check https://status.cloud.google.com for outages.")
+        else:
+            print(f"    Error details: {e}")
+        return
 
     # Save raw signals for debugging
     safe_name_json = "".join(c for c in nickname if c.isalnum())
@@ -127,6 +142,169 @@ def cmd_run(args):
                 print(f"    Report saved locally at: {local_path}")
     else:
         _print_complete(nickname, local_path, None)
+
+
+
+CHAIN_GAP = 90  # seconds -- same as cortex_engine
+
+SIZE_CAPS = {
+    "claude": 700_000,
+    "gemini": 3_200_000,
+    "full":   0,
+}
+
+
+def _merge_chains(msgs):
+    """Merge rapid-fire messages (<=90s gap) into blocks."""
+    blocks = []
+    current = None
+
+    for m in msgs:
+        ts = 0
+        try:
+            ts = float(m.get("timestamp_unix", 0))
+        except (ValueError, TypeError):
+            pass
+
+        if current is None:
+            current = {
+                "id": m.get("message_id", "?"),
+                "ts": ts,
+                "texts": [str(m.get("content", "")).strip()],
+                "count": 1,
+            }
+            continue
+
+        gap = ts - current["ts_last"] if "ts_last" in current else ts - current["ts"]
+        if 0 <= gap <= CHAIN_GAP:
+            current["texts"].append(str(m.get("content", "")).strip())
+            current["count"] += 1
+            current["ts_last"] = ts
+        else:
+            blocks.append(current)
+            current = {
+                "id": m.get("message_id", "?"),
+                "ts": ts,
+                "texts": [str(m.get("content", "")).strip()],
+                "count": 1,
+            }
+        current["ts_last"] = ts
+
+    if current:
+        blocks.append(current)
+
+    return blocks
+
+
+def _format_block(block):
+    """Format a merged block as plain text."""
+    mid = block["id"]
+    try:
+        dt = datetime.fromtimestamp(block["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError, OSError):
+        dt = "unknown"
+
+    count = block["count"]
+    header = f"[ID: {mid}] [{dt}]"
+    if count > 1:
+        header += f" [{count} msgs]"
+
+    body = chr(10).join(block["texts"])
+    return header + chr(10) + body + chr(10)
+
+
+def _stratified_sample(blocks, max_bytes):
+    """Sample blocks evenly across the timeline to fit under max_bytes."""
+    # Format all blocks and compute sizes
+    formatted = []
+    for b in blocks:
+        text = _format_block(b)
+        formatted.append((b, text, len(text.encode("utf-8")) + 1))  # +1 for separator newline
+
+    total_size = sum(s for _, _, s in formatted)
+    if max_bytes <= 0 or total_size <= max_bytes:
+        return formatted
+
+    # Divide into 100 time slices, sample proportionally from each
+    n_slices = 100
+    slice_size = len(formatted) // n_slices or 1
+    slices = []
+    for i in range(0, len(formatted), slice_size):
+        slices.append(formatted[i:i + slice_size])
+
+    # Target per slice
+    target_per_slice = max_bytes // len(slices)
+
+    sampled = []
+    remaining_budget = max_bytes
+    for sl in slices:
+        slice_items = []
+        slice_budget = min(target_per_slice, remaining_budget)
+        used = 0
+        # Shuffle within slice to avoid always picking first items
+        indices = list(range(len(sl)))
+        random.shuffle(indices)
+        for idx in indices:
+            b, text, size = sl[idx]
+            if used + size <= slice_budget:
+                slice_items.append((b, text, size))
+                used += size
+        # Sort back to chronological within this slice
+        slice_items.sort(key=lambda x: x[0]["ts"])
+        sampled.extend(slice_items)
+        remaining_budget -= used
+
+    return sampled
+
+
+def cmd_export(args):
+    """Export chain-merged messages sized for a specific LLM target."""
+    nickname = args.nickname
+    target = args.target
+    print(BANNER)
+    print(f"[Cortex] Exporting messages for: {nickname} (target: {target})")
+
+    db_path = os.getenv("ORACLE_DB_PATH", "TSL_Archive.db")
+    if not os.path.exists(db_path):
+        print(f"[-] Database not found: {db_path}")
+        return
+
+    engine = CortexEngine()
+    msgs = engine.get_all_messages(nickname)
+    if not msgs:
+        print(f"[-] No messages found for '{nickname}'.")
+        return
+
+    total_msgs = len(msgs)
+    print(f"    -> {total_msgs:,} messages retrieved")
+
+    # Chain merge
+    blocks = _merge_chains(msgs)
+    chain_blocks = sum(1 for b in blocks if b["count"] > 1)
+    standalone = len(blocks) - chain_blocks
+    print(f"    -> {len(blocks):,} blocks after chain merge ({chain_blocks:,} chains + {standalone:,} standalone)")
+
+    # Stratified sample to fit target
+    max_bytes = SIZE_CAPS.get(target, 0)
+    sampled = _stratified_sample(blocks, max_bytes)
+
+    # Write output
+    out_dir = os.path.join("output", "cortex")
+    os.makedirs(out_dir, exist_ok=True)
+    safe_name = "".join(c for c in nickname if c.isalnum())
+    out_path = os.path.join(out_dir, f"Cortex_Export_{safe_name}_{target}.txt")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        for _, text, _ in sampled:
+            f.write(text + chr(10))
+
+    size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    msg_count = sum(b["count"] for b, _, _ in sampled)
+    print(f"    -> {len(sampled):,} blocks written ({msg_count:,} messages)")
+    print(f"[+] Exported to: {out_path}")
+    print(f"    File size: {size_mb:.2f} MB")
+    if max_bytes > 0:
+        print(f"    Target cap: {max_bytes / 1024 / 1024:.1f} MB")
 
 
 def cmd_diagnose(args):
@@ -187,6 +365,8 @@ Examples:
   python cortex_main.py run TheWitt --no-cache
   python cortex_main.py run TheWitt --no-docs
   python cortex_main.py diagnose TheWitt
+  python cortex_main.py export TheWitt --target gemini
+  python cortex_main.py export TheWitt --target claude
         """
     )
 
@@ -200,6 +380,13 @@ Examples:
     p_run.add_argument("--no-docs",  action="store_true",
                        help="Skip Google Docs export (local markdown only)")
     p_run.set_defaults(func=cmd_run)
+
+    # export command
+    p_exp = subparsers.add_parser("export", help="Export chain-merged messages sized for LLM input")
+    p_exp.add_argument("nickname", help="Subject's nickname to export")
+    p_exp.add_argument("--target", choices=["claude", "gemini", "full"], default="gemini",
+                       help="Target LLM size cap (claude=700KB, gemini=3.2MB, full=no cap)")
+    p_exp.set_defaults(func=cmd_export)
 
     # diagnose command
     p_diag = subparsers.add_parser("diagnose", help="Check DB connection and sample counts")
