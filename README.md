@@ -46,7 +46,10 @@ Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog
 | `intelligence.py` | Hot/cold streaks, clutch stats, draft grades, owner profiles |
 | `roster.py` | Owner assignment system with team/conference lookups |
 | `player_picker.py` | Team/player autocomplete and picker |
-| `card_renderer.py` | Pillow-based image generation for team/player cards |
+| `card_renderer.py` | Playwright HTML→PNG trade card renderer |
+| `card_html_renderer.py` | Shared Playwright HTML→PNG rendering engine |
+| `sportsbook_card_html.py` | Sportsbook V6 card HTML template |
+| `atlas_card_renderer.py` | Pillow-based card renderer (legacy, being migrated) |
 | `lore_rag.py` | FAISS vector DB for Discord lore/history search |
 
 ## Casino Subsystem (`casino/`)
@@ -90,4 +93,4 @@ Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog
 
 ## Current Version
 
-**v2.1.0** — Hub-based UI with interactive views and select menus, Elo sportsbook v3, commissioner control room, draft class explorer, Echo persona system with affinity tracking.
+**v2.2.0** — Playwright HTML→PNG card renderer replaces Pillow for sportsbook card (browser-quality text rendering), Flow Hub button fixes, boss cog routing fixes.
