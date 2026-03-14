@@ -68,25 +68,37 @@ _loaded: bool = False
 # Section 3 — Team / Conference Lookups (from data_manager)
 # ══════════════════════════════════════════════════════════════════════════════
 
+_team_cache: dict[str, tuple[str, str]] = {}   # ABBR → (nickName, conference)
+
+def _build_team_cache() -> None:
+    """Rebuild team lookup cache from live API data."""
+    _team_cache.clear()
+    if dm is None or dm.df_teams is None:
+        return
+    for _, row in dm.df_teams.iterrows():
+        abbr = str(row.get("abbrName", "")).upper()
+        nick = str(row.get("nickName", ""))
+        div  = str(row.get("divName", ""))
+        conf = "AFC" if div.upper().startswith("AFC") else "NFC"
+        if abbr:
+            _team_cache[abbr] = (nick, conf)
+
+def _ensure_team_cache() -> None:
+    if not _team_cache:
+        _build_team_cache()
+
 def _team_name(abbr: str) -> str:
     """Look up full team nickname from live API data. 'CHI' → 'Bears'."""
-    if dm is None or dm.df_teams is None:
-        return abbr
-    for _, row in dm.df_teams.iterrows():
-        if str(row.get("abbrName", "")).upper() == abbr.upper():
-            return str(row.get("nickName", abbr))
-    return abbr
+    _ensure_team_cache()
+    entry = _team_cache.get(abbr.upper())
+    return entry[0] if entry else abbr
 
 
 def _team_conference(abbr: str) -> str:
     """Look up conference from live API data. Returns 'AFC' or 'NFC'."""
-    if dm is None or dm.df_teams is None:
-        return ""
-    for _, row in dm.df_teams.iterrows():
-        if str(row.get("abbrName", "")).upper() == abbr.upper():
-            div = str(row.get("divName", ""))
-            return "AFC" if div.upper().startswith("AFC") else "NFC"
-    return ""
+    _ensure_team_cache()
+    entry = _team_cache.get(abbr.upper())
+    return entry[1] if entry else ""
 
 
 def get_all_teams() -> list[dict]:

@@ -60,7 +60,7 @@ except ImportError:
 
 # ── Shared config ─────────────────────────────────────────────────────────────
 from permissions import ADMIN_USER_IDS
-ATLAS_ICON_URL = "https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
+from constants import ATLAS_ICON_URL
 
 try:
     from setup_cog import get_channel_id as _get_channel_id
@@ -149,6 +149,7 @@ def _serialize_player(p: dict) -> dict:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+_gemini_client = None  # lazily initialized
 STATE_PATH     = os.path.join(os.path.dirname(__file__), "trade_state.json")
 
 # ── Channel routing via setup_cog (ID-based, rename-proof) ───────────────────
@@ -351,7 +352,10 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        global _gemini_client
+        if _gemini_client is None:
+            _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        client = _gemini_client
 
         notes_text = "\n".join(result.notes) if result.notes else "No flags."
         prompt = (

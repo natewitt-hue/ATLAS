@@ -555,8 +555,12 @@ def build_context_string(data: dict) -> str:
         if d["defense"]:   lines.append("Defense: "   + " | ".join(f"{k}: {v}" for k, v in d["defense"].items()))
         if d["top_players"]: lines.append("Key Players: " + " | ".join(f"{k}: {v}" for k, v in d["top_players"].items()))
         if d["recent"]:
+            team = d.get("team", "")
             form = " ".join(
-                "W" if g.get("home_score", 0) > g.get("away_score", 0) else "L"
+                "W" if (
+                    (g.get("home", "") == team and g.get("home_score", 0) > g.get("away_score", 0))
+                    or (g.get("away", "") == team and g.get("away_score", 0) > g.get("home_score", 0))
+                ) else "L"
                 for g in d["recent"]
             )
             lines.append(f"Last 5 form: {form}")
@@ -590,29 +594,3 @@ def build_context_string(data: dict) -> str:
 
     return "(No data found)"
 
-def generate_bar_chart(df, x_col, y_col, title="TSL Stat Comparison"):
-    """Generates a bar chart and returns an io.BytesIO buffer."""
-    import io
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    plt.figure(figsize=(10, 6))
-    sns.set_theme(style="darkgrid")
-    
-    # Sort data for better visualization
-    df_sorted = df.sort_values(by=y_col, ascending=False).head(15)
-    
-    chart = sns.barplot(data=df_sorted, x=x_col, y=y_col, palette="viridis")
-    plt.title(title, fontsize=16, color='white')
-    plt.xticks(rotation=45, color='white')
-    plt.yticks(color='white')
-    
-    # Transparent background for Discord Dark Mode
-    plt.gcf().set_facecolor('#2f3136')
-    chart.set_facecolor('#2f3136')
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', facecolor='#2f3136')
-    buf.seek(0)
-    plt.close()
-    return buf

@@ -148,10 +148,6 @@ class AnalyticsNav(discord.ui.View):
 #  ORACLE · STATS HUB
 # ══════════════════════════════════════════════════════════════════════════════
 
-# analysis and intelligence already imported at top of file
-# Re-check availability for graceful degradation
-_ANALYSIS_OK = an is not None
-_INTEL_OK = ig is not None
 
 # ── Optional codex pipeline (SQL + Gemini NL queries) ────────────────────────
 # Module-scope defaults so names are always bound (Pyright safety)
@@ -192,11 +188,7 @@ except ImportError:
 
 
 # ── ATLAS branding constants ──────────────────────────────────────────────────
-ATLAS_ICON_URL = (
-    "https://cdn.discordapp.com/attachments/977007320259244055/"
-    "1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3"
-    "&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
-)
+from constants import ATLAS_ICON_URL
 ATLAS_GOLD = discord.Color.from_rgb(201, 150, 42)
 
 # ── Module-level cached Gemini client (avoids spinning up a new client per call)
