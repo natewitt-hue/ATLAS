@@ -1,6 +1,6 @@
 # ATLAS™ — Autonomous TSL League Administration System
 
-Discord bot powering **TSL (The Simulation League)**, a long-running Madden NFL simulation league with ~31 active human-controlled teams.
+Discord bot powering **TSL (The Simulation League)**, a long-running Madden NFL simulation league with ~31 active human-controlled teams across 95+ Super Bowl seasons.
 
 ## Architecture
 
@@ -15,52 +15,57 @@ data_manager.py  →  pandas DataFrames  →  Cog commands / Gemini AI
 tsl_history.db (SQLite)  ←  build_tsl_db.py
     │
     ▼
-Discord (slash commands, embeds, modals, views)
+Discord (slash commands, embeds, hub views, select menus)
 ```
 
-Bot runs locally on Windows. Python 3.14, discord.py with app_commands, cog-based architecture.
+Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog-based architecture.
 
 ## Module System
 
 | Module | Files | Purpose |
 |--------|-------|---------|
-| **Core** | `bot.py` | Orchestration, cog loading, event routing |
-| **Oracle** | `oracle_cog.py`, `analysis.py`, `intelligence.py` | Analytics, predictions, power rankings, weekly recaps |
-| **Sentinel** | `sentinel_cog.py` | Rule enforcement, blowout monitor, parity system |
-| **Codex** | `codex_cog.py`, `build_tsl_db.py` | History, stats, archive — backed by `tsl_history.db` |
-| **Genesis** | `genesis_cog.py`, `ability_engine.py` | Draft, prospects, ability audits *(sidelined)* |
-| **Flow** | `economy_cog.py`, `flow_sportsbook.py`, `casino/` | Economy (TSL Bucks), sportsbook, casino games |
-| **Echo** | `echo_cog.py`, `echo_loader.py`, `echo_voice_extractor.py` | Commissioner voice/comms via Gemini AI |
-| **Commish** | `commish_cog.py`, `setup_cog.py` | Commissioner tools, server provisioning |
+| **Core** | `bot.py`, `setup_cog.py`, `permissions.py`, `constants.py` | Orchestration, cog loading, channel routing, shared config |
+| **Oracle** | `oracle_cog.py`, `analysis.py`, `intelligence.py` | Analytics, power rankings, team cards, scouting reports, owner profiles |
+| **Sentinel** | `sentinel_cog.py` | Rule enforcement, blowout monitor, compliance, parity system |
+| **Codex** | `codex_cog.py`, `build_tsl_db.py`, `build_member_db.py` | Historical NL→SQL→NL queries via Gemini, member identity registry |
+| **Genesis** | `genesis_cog.py`, `ability_engine.py`, `trade_engine.py` | Trades, roster management, draft class explorer, ability audits |
+| **Flow** | `economy_cog.py`, `flow_sportsbook.py`, `casino/` | Economy (TSL Bucks), Elo-based sportsbook, casino games |
+| **Echo** | `echo_cog.py`, `echo_loader.py`, `affinity.py` | Commissioner persona system with per-user affinity tracking |
+| **Boss** | `boss_cog.py` | Commissioner Control Room — visual hub for all admin commands |
+| **Awards** | `awards_cog.py` | Awards and voting system |
 
 ## Key Infrastructure
 
 | Component | Description |
 |-----------|-------------|
-| `reasoning.py` | Gemini AI integration — Text-to-SQL, persona injection, two-phase reasoning |
+| `reasoning.py` | Two-phase Gemini engine (Analyst → ATLAS persona) |
 | `data_manager.py` | MaddenStats API fetcher, pandas transforms, DataFrame cache |
-| `tsl_history.db` | SQLite — 11+ tables: games, stats, trades, players, standings, abilities, owner_tenure, player_draft_map, tsl_members |
-| `analysis.py` | Stat leaders, power rankings, query routing |
-| `intelligence.py` | Advanced analytics — hot/cold streaks, clutch stats, owner profiles |
-| `lore_rag.py` | FAISS vector DB for Discord lore/history search |
+| `tsl_history.db` | SQLite — games, stats, trades, players, standings, abilities, owner_tenure, player_draft_map, tsl_members |
+| `sportsbook.db` | SQLite — balances, bets, casino economy, affinity scores |
+| `analysis.py` | Stat leaders, power rankings, query routing, context builder |
+| `intelligence.py` | Hot/cold streaks, clutch stats, draft grades, owner profiles |
+| `roster.py` | Owner assignment system with team/conference lookups |
+| `player_picker.py` | Team/player autocomplete and picker |
 | `card_renderer.py` | Pillow-based image generation for team/player cards |
+| `lore_rag.py` | FAISS vector DB for Discord lore/history search |
 
 ## Casino Subsystem (`casino/`)
 
-| File | Game |
-|------|------|
+| File | Purpose |
+|------|---------|
 | `casino.py` | Lobby, shared infrastructure, modals |
 | `casino_db.py` | SQLite layer for balances and ledger |
 | `games/blackjack.py` | Blackjack |
 | `games/coinflip.py` | Coinflip challenges |
 | `games/crash.py` | Crash multiplier game |
 | `games/slots.py` | Slot machine |
-| `games/sportsbook.py` | *(broken — needs rewrite)* |
+| `games/sportsbook.py` | Sportsbook betting engine |
+| `renderer/` | Card, casino card, and ledger renderers with assets |
 
 ## External Integrations
 
 - **MaddenStats API** — `https://mymadden.com/api/lg/tsl` — league data source
-- **Gemini AI** (`gemini-2.0-flash`) — Text-to-SQL, analytics narration, voice generation
+- **Gemini AI** (`gemini-2.0-flash`) — Text-to-SQL, analytics narration, persona voice
 - **Polymarket** — real-world prediction market data (`polymarket_cog.py`)
 
 ## Setup
@@ -85,10 +90,4 @@ Bot runs locally on Windows. Python 3.14, discord.py with app_commands, cog-base
 
 ## Current Version
 
-**v1.5.0** — Echo integration wired, Codex v1.4 patched, codebase audit in progress.
-
-## Audit Artifacts
-
-- `FINDINGS.txt` — Pyright static analysis output (693 errors)
-- `code_review.md` — Code review notes
-- `CLAUDE.md` — Claude Code session briefing document
+**v2.1.0** — Hub-based UI with interactive views and select menus, Elo sportsbook v3, commissioner control room, draft class explorer, Echo persona system with affinity tracking.
