@@ -60,6 +60,14 @@ except ImportError:
 DB_PATH   = os.path.join(os.path.dirname(__file__), "tsl_history.db")
 MAX_ROWS  = 50
 MAX_CHARS = 3000
+_EMBED_DESC_LIMIT = 4096
+
+
+def _truncate_for_embed(text: str, limit: int = _EMBED_DESC_LIMIT) -> str:
+    """Truncate text to fit within Discord embed description limit."""
+    if len(text) <= limit:
+        return text
+    return text[:limit - 3] + "..."
 
 ATLAS_PERSONA = """
 You are ATLAS — the official AI intelligence system for The Simulation League (TSL).
@@ -672,7 +680,7 @@ class CodexCog(commands.Cog):
 
             embed = discord.Embed(
                 title="📊 TSL Historical Intelligence",
-                description=answer,
+                description=_truncate_for_embed(answer),
                 color=0xC9962A  # ATLAS Gold
             )
             embed.set_author(
@@ -897,7 +905,7 @@ Keep it under 350 words.
 
         embed = discord.Embed(
             title=f"TSL Season {season} Recap",
-            description=response.text.strip(),
+            description=_truncate_for_embed(response.text.strip()),
             color=0xC9962A
         )
         embed.set_author(

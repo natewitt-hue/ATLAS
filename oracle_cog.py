@@ -61,6 +61,15 @@ def _get_user_tier(bot: commands.Bot, user_id: int) -> str:
         return support_cog.get_user_tier(user_id)
     return "Elite"
 
+
+_EMBED_DESC_LIMIT = 4096
+
+def _truncate_for_embed(text: str, limit: int = _EMBED_DESC_LIMIT) -> str:
+    """Truncate text to fit within Discord embed description limit."""
+    if len(text) <= limit:
+        return text
+    return text[:limit - 3] + "..."
+
 #  NAVIGATION VIEW (shared across all report types)
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTE: First AnalyticsNav class was removed — it was an exact duplicate
@@ -2519,7 +2528,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
 
             embed = discord.Embed(
                 title="🔬 ATLAS Intelligence — TSL League",
-                description=answer,
+                description=_truncate_for_embed(answer),
                 color=C_DARK,
                 timestamp=datetime.datetime.utcnow(),
             )
@@ -2594,7 +2603,7 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
 
             embed = discord.Embed(
                 title="🌐 ATLAS Intelligence — Open Intel",
-                description=answer,
+                description=_truncate_for_embed(answer),
                 color=C_BLUE,
                 timestamp=datetime.datetime.utcnow(),
             )
@@ -2663,7 +2672,7 @@ class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"
 
             embed = discord.Embed(
                 title="🏈 ATLAS Intelligence — Sports Intel",
-                description=answer,
+                description=_truncate_for_embed(answer),
                 color=ATLAS_GOLD,
                 timestamp=datetime.datetime.utcnow(),
             )
@@ -2789,7 +2798,7 @@ RESPONSE GUIDELINES:
 
             embed = discord.Embed(
                 title="🎯 ATLAS Intelligence — Player Scout",
-                description=answer,
+                description=_truncate_for_embed(answer),
                 color=discord.Color.from_rgb(30, 144, 255),
                 timestamp=datetime.datetime.utcnow(),
             )
@@ -2886,7 +2895,7 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
 
             embed = discord.Embed(
                 title="🧠 ATLAS Intelligence — Strategy Room",
-                description=answer,
+                description=_truncate_for_embed(answer),
                 color=discord.Color.from_rgb(34, 197, 94),
                 timestamp=datetime.datetime.utcnow(),
             )

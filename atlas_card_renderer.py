@@ -48,9 +48,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 #  CONFIGURATION & CONSTANTS
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Card dimensions
-CARD_WIDTH = 500
-CARD_CORNER_RADIUS = 12
+# Card dimensions — sized for mobile readability (1.5× scale)
+CARD_WIDTH = 750
+CARD_CORNER_RADIUS = 18
 
 # Resolve asset paths relative to this file's directory
 _BASE_DIR = Path(__file__).parent
@@ -449,7 +449,7 @@ class ATLASCard:
 
         # Phase 6: Status bar (after noise so it's crisp)
         if self.status_bar:
-            _draw_status_bar(img, height - 4, 4, self.status_bar)
+            _draw_status_bar(img, height - 6, 6, self.status_bar)
 
         # Phase 7: Outer border (gold glow)
         draw = ImageDraw.Draw(img, 'RGBA')
@@ -461,28 +461,28 @@ class ATLASCard:
 
     # ── Height Calculation ────────────────────────────────────────────────────
     def _calculate_height(self) -> int:
-        h = 50  # Header
+        h = 75  # Header
         for s in self.sections:
             if s.type == SectionType.HERO_NUMBER:
-                h += 95
+                h += 142
             elif s.type == SectionType.SPARKLINE:
                 # Sparkline is drawn inline with hero, no extra height
                 pass
             elif s.type == SectionType.WIN_LOSS_TICKER:
-                h += 30
+                h += 44
             elif s.type == SectionType.INFO_PANEL:
-                h += 72
+                h += 108
             elif s.type == SectionType.SPORT_FOOTER:
-                h += 38
+                h += 56
             elif s.type == SectionType.STAT_GRID:
                 rows = math.ceil(len(s.data["stats"]) / s.data["columns"])
-                h += 16 + (rows * 60) + 8
+                h += 24 + (rows * 90) + 12
             elif s.type == SectionType.DIVIDER:
-                h += 12
+                h += 18
             elif s.type == SectionType.TEXT_BLOCK:
-                h += 30
+                h += 44
         if self.status_bar:
-            h += 4
+            h += 6
         return h
 
     # ── Background ────────────────────────────────────────────────────────────
@@ -499,11 +499,11 @@ class ATLASCard:
     def _draw_header(self, img: Image.Image) -> int:
         draw = ImageDraw.Draw(img, 'RGBA')
         y = 0
-        pad_x = 24
-        header_h = 50
+        pad_x = 36
+        header_h = 75
 
         # Module icon
-        icon_size = 32
+        icon_size = 48
         icon_x = pad_x
         icon_y = (header_h - icon_size) // 2
 
@@ -514,26 +514,26 @@ class ATLASCard:
             mask = Image.new('L', (icon_size, icon_size), 0)
             mask_draw = ImageDraw.Draw(mask)
             mask_draw.rounded_rectangle([0, 0, icon_size - 1, icon_size - 1],
-                                         radius=7, fill=255)
+                                         radius=10, fill=255)
             img.paste(icon_img, (icon_x, icon_y), mask)
 
         # Title
-        title_x = icon_x + icon_size + 10
-        title_font = Fonts.display_bold(15)
+        title_x = icon_x + icon_size + 14
+        title_font = Fonts.display_bold(22)
         draw.text((title_x, icon_y + 2), self.module_title, font=title_font,
                   fill=Colors.TEXT_PRIMARY)
 
         # Subtitle
         if self.module_subtitle:
-            sub_font = Fonts.display_semibold(9)
+            sub_font = Fonts.display_semibold(13)
             sub_color = (*self.accent_color[:3], 191)  # 75% opacity
-            draw.text((title_x, icon_y + 20), self.module_subtitle,
+            draw.text((title_x, icon_y + 28), self.module_subtitle,
                       font=sub_font, fill=sub_color)
 
         # Version
-        ver_font = Fonts.mono_regular(8)
+        ver_font = Fonts.mono_regular(12)
         ver_w = _text_width(draw, self.version, ver_font)
-        draw.text((CARD_WIDTH - pad_x - ver_w, icon_y + 8),
+        draw.text((CARD_WIDTH - pad_x - ver_w, icon_y + 12),
                   self.version, font=ver_font, fill=Colors.TEXT_MUTED)
 
         # Gold gradient divider line under header
@@ -562,10 +562,10 @@ class ATLASCard:
     # ── Hero Number ───────────────────────────────────────────────────────────
     def _draw_hero(self, img: Image.Image, data: dict, y: int) -> tuple[Image.Image, int]:
         draw = ImageDraw.Draw(img, 'RGBA')
-        pad_y = 22
+        pad_y = 32
 
         # Label
-        label_font = Fonts.display_semibold(9)
+        label_font = Fonts.display_semibold(14)
         label = data["label"].upper()
         label_w = _text_width(draw, label, label_font)
         draw.text(((CARD_WIDTH - label_w) // 2, y + pad_y),
@@ -575,42 +575,42 @@ class ATLASCard:
         value = data["value"]
         # Split dollar sign from number if present
         if value.startswith("$"):
-            dollar_font = Fonts.mono_extrabold(28)
-            num_font = Fonts.mono_extrabold(48)
+            dollar_font = Fonts.mono_extrabold(42)
+            num_font = Fonts.mono_extrabold(72)
             num_text = value[1:]
 
             dollar_w = _text_width(draw, "$", dollar_font)
             num_w = _text_width(draw, num_text, num_font)
             num_h = _text_height(draw, num_text, num_font)
-            total_w = dollar_w + 2 + num_w
+            total_w = dollar_w + 3 + num_w
             start_x = (CARD_WIDTH - total_w) // 2
 
-            val_y = y + pad_y + 18
+            val_y = y + pad_y + 24
             # Align $ baseline with number baseline
             dollar_h = _text_height(draw, "$", dollar_font)
             dollar_y_offset = num_h - dollar_h
             draw.text((start_x, val_y + dollar_y_offset), "$", font=dollar_font,
                       fill=(255, 255, 255, 76))
-            draw.text((start_x + dollar_w + 2, val_y), num_text,
+            draw.text((start_x + dollar_w + 3, val_y), num_text,
                       font=num_font, fill=Colors.TEXT_PRIMARY)
         else:
-            num_font = Fonts.mono_extrabold(48)
+            num_font = Fonts.mono_extrabold(72)
             num_w = _text_width(draw, value, num_font)
-            val_y = y + pad_y + 18
+            val_y = y + pad_y + 24
             draw.text(((CARD_WIDTH - num_w) // 2, val_y), value,
                       font=num_font, fill=Colors.TEXT_PRIMARY)
 
         # Sub row: delta pill + sparkline
-        sub_y = val_y + 55
+        sub_y = val_y + 80
         sub_elements = []
 
         # Delta pill
         if data.get("delta"):
             delta_text = f"▲ {data['delta']}" if data.get("delta_positive", True) else f"▼ {data['delta']}"
-            delta_font = Fonts.mono_bold(12)
+            delta_font = Fonts.mono_bold(18)
             delta_w = _text_width(draw, delta_text, delta_font)
-            pill_w = delta_w + 20
-            pill_h = 22
+            pill_w = delta_w + 30
+            pill_h = 32
             sub_elements.append(("delta", pill_w, pill_h, delta_text, delta_font))
 
         # Sparkline (search for sparkline section data)
@@ -621,16 +621,16 @@ class ATLASCard:
                 break
 
         spark_label_w = 0
-        spark_chart_w = 80
+        spark_chart_w = 120
         spark_total_w = 0
         if spark_data:
-            spark_label_font = Fonts.display_semibold(7)
-            spark_label_w = _text_width(draw, spark_data["label"], spark_label_font) + 6
+            spark_label_font = Fonts.display_semibold(11)
+            spark_label_w = _text_width(draw, spark_data["label"], spark_label_font) + 8
             spark_total_w = spark_label_w + spark_chart_w
-            sub_elements.append(("spark", spark_total_w, 28, spark_data, spark_label_font))
+            sub_elements.append(("spark", spark_total_w, 40, spark_data, spark_label_font))
 
         # Center the sub elements
-        gap = 20
+        gap = 28
         total_sub_w = sum(e[1] for e in sub_elements) + gap * (len(sub_elements) - 1) if sub_elements else 0
         sub_x = (CARD_WIDTH - total_sub_w) // 2
 
@@ -639,20 +639,20 @@ class ATLASCard:
                 _, pw, ph, dt, df = elem
                 delta_color = Colors.GREEN if data.get("delta_positive", True) else Colors.RED
                 # Pill background
-                _rounded_rect(draw, (sub_x, sub_y, sub_x + pw, sub_y + ph), 4,
+                _rounded_rect(draw, (sub_x, sub_y, sub_x + pw, sub_y + ph), 6,
                               fill=(*delta_color[:3], 20))
-                _rounded_rect(draw, (sub_x, sub_y, sub_x + pw, sub_y + ph), 4,
+                _rounded_rect(draw, (sub_x, sub_y, sub_x + pw, sub_y + ph), 6,
                               outline=(*delta_color[:3], 30), width=1)
                 # Text
                 tw = _text_width(draw, dt, df)
-                draw.text((sub_x + (pw - tw) // 2, sub_y + 3), dt,
+                draw.text((sub_x + (pw - tw) // 2, sub_y + 5), dt,
                           font=df, fill=delta_color)
                 sub_x += pw + gap
 
             elif elem[0] == "spark":
                 _, sw, sh, sd, sf = elem
                 # Label
-                draw.text((sub_x, sub_y + 4), sd["label"],
+                draw.text((sub_x, sub_y + 6), sd["label"],
                           font=sf, fill=Colors.TEXT_MUTED)
                 # Draw sparkline
                 chart_x = sub_x + spark_label_w
@@ -661,7 +661,7 @@ class ATLASCard:
                                             chart_x, chart_y, spark_chart_w, sh)
                 sub_x += sw + gap
 
-        return img, sub_y + 30
+        return img, sub_y + 44
 
     # ── Sparkline (inline drawing helper) ─────────────────────────────────────
     def _draw_sparkline_inline(self, img: Image.Image, points: list[float],
@@ -707,23 +707,23 @@ class ATLASCard:
         results = data["results"]
         record = data.get("record", "")
 
-        label_font = Fonts.display_semibold(7)
-        record_font = Fonts.mono_regular(10)
+        label_font = Fonts.display_semibold(11)
+        record_font = Fonts.mono_regular(15)
 
         label_text = "LAST " + str(len(results))
         label_w = _text_width(draw, label_text, label_font)
 
-        dot_size = 10
-        dot_gap = 4
+        dot_size = 15
+        dot_gap = 6
         dots_w = len(results) * dot_size + (len(results) - 1) * dot_gap
         record_w = _text_width(draw, record, record_font) if record else 0
 
-        gap = 8
+        gap = 12
         total_w = label_w + gap + dots_w + (gap + record_w if record else 0)
         start_x = (CARD_WIDTH - total_w) // 2
 
         # Label
-        draw.text((start_x, y + 4), label_text, font=label_font,
+        draw.text((start_x, y + 6), label_text, font=label_font,
                   fill=Colors.TEXT_MUTED)
 
         # Dots
@@ -735,42 +735,42 @@ class ATLASCard:
                 color = Colors.RED
             else:
                 color = Colors.PUSH_GRAY
-            _rounded_rect(draw, (dx, y + 2, dx + dot_size, y + 2 + dot_size), 2,
+            _rounded_rect(draw, (dx, y + 4, dx + dot_size, y + 4 + dot_size), 3,
                           fill=color)
             dx += dot_size + dot_gap
 
         # Record
         if record:
-            draw.text((dx + gap - dot_gap, y + 2), record,
+            draw.text((dx + gap - dot_gap, y + 4), record,
                       font=record_font, fill=Colors.PUSH_GRAY)
 
-        return img, y + 30
+        return img, y + 44
 
     # ── Info Panel ────────────────────────────────────────────────────────────
     def _draw_info_panel(self, img: Image.Image, data: dict, y: int) -> tuple[Image.Image, int]:
         panels = data["panels"]
-        pad_x = 24
-        panel_y = y + 4
-        panel_h = 56
-        panel_w = (CARD_WIDTH - pad_x * 2 - 2) // len(panels)  # -2 for divider
+        pad_x = 36
+        panel_y = y + 6
+        panel_h = 84
+        panel_w = (CARD_WIDTH - pad_x * 2 - 3) // len(panels)  # -3 for divider
 
         for i, panel in enumerate(panels):
-            px = pad_x + i * (panel_w + 2)
+            px = pad_x + i * (panel_w + 3)
             py = panel_y
 
             # Beveled panel
-            radius = 8 if i == 0 else (8 if i == len(panels) - 1 else 0)
+            radius = 12 if i == 0 else (12 if i == len(panels) - 1 else 0)
             img, draw = _draw_beveled_panel(img, ImageDraw.Draw(img, 'RGBA'),
                                             (px, py, px + panel_w, py + panel_h),
                                             radius=radius)
 
             # Label
-            label_font = Fonts.display_semibold(8)
-            draw.text((px + 12, py + 8), panel["label"].upper(),
+            label_font = Fonts.display_semibold(12)
+            draw.text((px + 16, py + 10), panel["label"].upper(),
                       font=label_font, fill=Colors.TEXT_DIM)
 
             # Value
-            value_font = Fonts.mono_bold(18)
+            value_font = Fonts.mono_bold(26)
             value_color = Colors.TEXT_PRIMARY
             if panel.get("value_color") == "green":
                 value_color = Colors.GREEN
@@ -778,20 +778,20 @@ class ATLASCard:
                 value_color = Colors.RED
             elif panel.get("value_color") == "gold":
                 value_color = Colors.GOLD
-            draw.text((px + 12, py + 22), panel["value"],
+            draw.text((px + 16, py + 30), panel["value"],
                       font=value_font, fill=value_color)
 
             # Sub text
             if panel.get("sub"):
-                sub_font = Fonts.display_regular(9)
+                sub_font = Fonts.display_regular(13)
                 sub_text = panel["sub"]
                 highlight = panel.get("sub_highlight")
                 if highlight and highlight in sub_text:
                     # Split and draw highlight in gold
                     parts = sub_text.split(highlight)
-                    sx = px + 12
-                    sy = py + 42
-                    hl_font = Fonts.display_semibold(9)
+                    sx = px + 16
+                    sy = py + 62
+                    hl_font = Fonts.display_semibold(13)
                     for j, part in enumerate(parts):
                         if part:
                             draw.text((sx, sy), part, font=sub_font,
@@ -802,16 +802,16 @@ class ATLASCard:
                                       fill=Colors.GOLD)
                             sx += _text_width(draw, highlight, hl_font)
                 else:
-                    draw.text((px + 12, py + 42), sub_text,
+                    draw.text((px + 16, py + 62), sub_text,
                               font=sub_font, fill=Colors.PUSH_GRAY)
 
-        return img, panel_y + panel_h + 12
+        return img, panel_y + panel_h + 18
 
     # ── Sport Footer ──────────────────────────────────────────────────────────
     def _draw_sport_footer(self, img: Image.Image, data: dict, y: int) -> tuple[Image.Image, int]:
         draw = ImageDraw.Draw(img, 'RGBA')
-        pad_x = 24
-        footer_h = 38
+        pad_x = 36
+        footer_h = 56
 
         # Footer background
         draw.rectangle([0, y, CARD_WIDTH, y + footer_h],
@@ -820,9 +820,9 @@ class ATLASCard:
         draw.line([(0, y), (CARD_WIDTH, y)], fill=(255, 255, 255, 20), width=1)
 
         # Sports
-        sport_font = Fonts.display_semibold(10)
+        sport_font = Fonts.display_semibold(15)
         sx = pad_x
-        sy = y + (footer_h - 20) // 2
+        sy = y + (footer_h - 30) // 2
 
         for sport in data["sports"]:
             is_active = sport == data.get("active")
@@ -830,44 +830,44 @@ class ATLASCard:
 
             if is_active:
                 # Active pill
-                pill_w = sw + 30  # Extra space for dot + controller
-                _rounded_rect(draw, (sx, sy, sx + pill_w, sy + 20), 4,
+                pill_w = sw + 44  # Extra space for dot + controller
+                _rounded_rect(draw, (sx, sy, sx + pill_w, sy + 30), 6,
                               fill=(*self.accent_color[:3], 25))
-                _rounded_rect(draw, (sx, sy, sx + pill_w, sy + 20), 4,
+                _rounded_rect(draw, (sx, sy, sx + pill_w, sy + 30), 6,
                               outline=(*self.accent_color[:3], 38), width=1)
 
                 # Green live dot
-                dot_x = sx + 6
-                dot_cy = sy + 10
-                draw.ellipse([dot_x, dot_cy - 3, dot_x + 5, dot_cy + 2],
+                dot_x = sx + 8
+                dot_cy = sy + 15
+                draw.ellipse([dot_x, dot_cy - 4, dot_x + 7, dot_cy + 3],
                              fill=Colors.GREEN)
 
                 # Controller icon (simplified for Pillow)
                 if data.get("controller_icon"):
-                    cx = dot_x + 10
-                    cy = sy + 4
+                    cx = dot_x + 14
+                    cy = sy + 5
                     # Simple controller shape
-                    draw.rounded_rectangle([cx, cy + 2, cx + 12, cy + 10], radius=3,
+                    draw.rounded_rectangle([cx, cy + 3, cx + 18, cy + 15], radius=4,
                                             outline=self.accent_color, width=1)
-                    draw.point((cx + 4, cy + 6), fill=self.accent_color)
-                    draw.point((cx + 8, cy + 6), fill=self.accent_color)
-                    text_x = cx + 16
+                    draw.point((cx + 6, cy + 9), fill=self.accent_color)
+                    draw.point((cx + 12, cy + 9), fill=self.accent_color)
+                    text_x = cx + 22
                 else:
-                    text_x = dot_x + 10
+                    text_x = dot_x + 14
 
-                draw.text((text_x, sy + 3), sport, font=sport_font,
+                draw.text((text_x, sy + 5), sport, font=sport_font,
                           fill=self.accent_color)
-                sx += pill_w + 5
+                sx += pill_w + 8
             else:
-                draw.text((sx, sy + 3), sport, font=sport_font,
+                draw.text((sx, sy + 5), sport, font=sport_font,
                           fill=(120, 120, 120))
-                sx += sw + 12
+                sx += sw + 18
 
         # Tagline (right-aligned)
         if data.get("tagline"):
-            tag_font = Fonts.display_regular(8)
+            tag_font = Fonts.display_regular(12)
             tag_w = _text_width(draw, data["tagline"], tag_font)
-            draw.text((CARD_WIDTH - pad_x - tag_w, sy + 5),
+            draw.text((CARD_WIDTH - pad_x - tag_w, sy + 8),
                       data["tagline"], font=tag_font, fill=(90, 90, 90))
 
         return img, y + footer_h
@@ -876,12 +876,12 @@ class ATLASCard:
     def _draw_stat_grid(self, img: Image.Image, data: dict, y: int) -> tuple[Image.Image, int]:
         stats = data["stats"]
         cols = data["columns"]
-        pad_x = 24
-        gap = 8
+        pad_x = 36
+        gap = 12
         cell_w = (CARD_WIDTH - pad_x * 2 - gap * (cols - 1)) // cols
-        cell_h = 52
+        cell_h = 78
 
-        cy = y + 8
+        cy = y + 12
         for i, stat in enumerate(stats):
             col = i % cols
             row = i // cols
@@ -891,15 +891,15 @@ class ATLASCard:
             # Beveled panel
             img, draw = _draw_beveled_panel(img, ImageDraw.Draw(img, 'RGBA'),
                                             (cx, ry, cx + cell_w, ry + cell_h),
-                                            radius=6)
+                                            radius=9)
 
             # Label
-            label_font = Fonts.display_semibold(8)
-            draw.text((cx + 10, ry + 6), stat["label"].upper(),
+            label_font = Fonts.display_semibold(12)
+            draw.text((cx + 14, ry + 10), stat["label"].upper(),
                       font=label_font, fill=Colors.TEXT_DIM)
 
             # Value
-            val_font = Fonts.mono_bold(16)
+            val_font = Fonts.mono_bold(24)
             val_color = Colors.TEXT_PRIMARY
             vc = stat.get("value_color", "")
             if vc == "green":
@@ -908,23 +908,23 @@ class ATLASCard:
                 val_color = Colors.RED
             elif vc == "gold":
                 val_color = Colors.GOLD
-            draw.text((cx + 10, ry + 24), stat["value"],
+            draw.text((cx + 14, ry + 36), stat["value"],
                       font=val_font, fill=val_color)
 
         rows = math.ceil(len(stats) / cols)
-        return img, cy + rows * (cell_h + gap) + 4
+        return img, cy + rows * (cell_h + gap) + 6
 
     # ── Divider ───────────────────────────────────────────────────────────────
     def _draw_divider(self, img: Image.Image, data: dict, y: int) -> tuple[Image.Image, int]:
         draw = ImageDraw.Draw(img, 'RGBA')
-        draw.line([(24, y + 6), (CARD_WIDTH - 24, y + 6)],
+        draw.line([(36, y + 9), (CARD_WIDTH - 36, y + 9)],
                   fill=(255, 255, 255, 8), width=1)
-        return img, y + 12
+        return img, y + 18
 
     # ── Text Block ────────────────────────────────────────────────────────────
     def _draw_text_block(self, img: Image.Image, data: dict, y: int) -> tuple[Image.Image, int]:
         draw = ImageDraw.Draw(img, 'RGBA')
-        font = Fonts.display_regular(data.get("font_size", 11))
+        font = Fonts.display_regular(int(data.get("font_size", 11) * 1.5))
         color = data.get("color") or Colors.TEXT_SECONDARY
         text = data["text"]
 
@@ -932,9 +932,9 @@ class ATLASCard:
             tw = _text_width(draw, text, font)
             x = (CARD_WIDTH - tw) // 2
         else:
-            x = 24
-        draw.text((x, y + 8), text, font=font, fill=color)
-        return img, y + 30
+            x = 36
+        draw.text((x, y + 12), text, font=font, fill=color)
+        return img, y + 44
 
 
 # ═════════════════════════════════════════════════════════════════════════════
