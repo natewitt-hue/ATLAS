@@ -55,13 +55,14 @@ REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
     ("crash",              "crash",               "ATLAS — Casino", False, False),
     ("coinflip",           "coinflip",            "ATLAS — Casino", False, False),
     ("sportsbook",         "sportsbook",          "ATLAS — Casino", False, False),
-    ("real_sportsbook",    "real-sportsbook",     "ATLAS — Casino", False, False),
     ("prediction_markets", "prediction-markets",  "ATLAS — Casino", False, False),
 ]
 
 # Legacy channel name aliases for remap (old name → config_key)
 _CHANNEL_ALIASES: dict[str, str] = {
     "askwittgpt": "ask_atlas",
+    "real_sportsbook": "sportsbook",    # merged in v2.1
+    "real-sportsbook": "sportsbook",    # display name variant
 }
 
 # Channels where /complaint and /forcerequest are silently routed to DM → admin-chat.
@@ -275,6 +276,18 @@ async def _provision_channels(guild: discord.Guild) -> dict:
             except Exception as e:
                 results["failed"].append((config_key, str(e)))
                 print(f"[SETUP]   FAILED: {config_key} — {e}")
+
+    # ── Migration: remove orphaned real_sportsbook config ─────────────────
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            deleted = con.execute(
+                "DELETE FROM server_config WHERE config_key = 'real_sportsbook'"
+            ).rowcount
+            if deleted:
+                con.commit()
+                print(f"[SETUP]   Migration: removed orphaned real_sportsbook config entry")
+    except Exception as e:
+        print(f"[SETUP]   Migration cleanup note: {e}")
 
     # ── Bridge casino per-game channel IDs to casino_db ─────────────────
     try:

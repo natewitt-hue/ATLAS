@@ -10,7 +10,7 @@ Register in bot.py setup_hook():
     await bot.load_extension("sentinel_cog")
 
 Slash commands:
-  /rulehub                — Open the ATLAS Sentinel Rules Hub (interactive button view)
+  /sentinel               — Open the ATLAS Sentinel Hub (interactive button view)
   /caselist               — [Commissioner] List pending complaints
   /caseview               — View a specific case
   /forcerequest           — Submit a force win request with screenshot evidence
@@ -19,7 +19,7 @@ Slash commands:
   /positionchangeapprove  — [Admin] Approve a pending position change
   /positionchangedeny     — [Admin] Deny a pending position change
 
-Hub buttons (via /rulehub):
+Hub buttons (via /sentinel):
   File Complaint          — Opens complaint filing flow (was /complaint)
   Force Request           — Directs to /forcerequest (requires file attachment)
   4th Down                — Directs to /fourthdown (requires file attachment)
@@ -2617,10 +2617,22 @@ class SentinelHubView(discord.ui.View):
     )
     async def btn_forcerequest(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
-            await interaction.response.send_message(
-                "Use `/forcerequest` to submit a force win request (requires screenshot attachment).",
-                ephemeral=True,
+            embed = discord.Embed(
+                title="🏳️ Force Win Request",
+                description=(
+                    "Force requests require screenshot evidence of your DM "
+                    "conversation with your opponent.\n\n"
+                    "**How to submit:**\n"
+                    "```/forcerequest opponent:<name> screenshot1:<attach>```\n\n"
+                    "1. Type `/forcerequest` in any channel\n"
+                    "2. Enter your opponent's name\n"
+                    "3. Attach 1-3 screenshots of your DM conversation\n"
+                    "4. ATLAS will analyze the screenshots and file the request"
+                ),
+                color=discord.Color.orange(),
             )
+            embed.set_footer(text="ATLAS Sentinel — Force Request Protocol")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
         except Exception as e:
             traceback.print_exception(type(e), e, e.__traceback__)
 
@@ -2630,10 +2642,21 @@ class SentinelHubView(discord.ui.View):
     )
     async def btn_fourthdown(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
-            await interaction.response.send_message(
-                "Use `/fourthdown` to submit a 4th down ruling request (requires screenshot attachment).",
-                ephemeral=True,
+            embed = discord.Embed(
+                title="🏈 4th Down Ruling",
+                description=(
+                    "4th down rulings require a Madden screenshot of the "
+                    "play situation.\n\n"
+                    "**How to submit:**\n"
+                    "```/fourthdown screenshot:<attach>```\n\n"
+                    "1. Type `/fourthdown` in any channel\n"
+                    "2. Attach your Madden game screenshot\n"
+                    "3. ATLAS Vision will analyze the situation and issue a ruling"
+                ),
+                color=discord.Color.orange(),
             )
+            embed.set_footer(text="ATLAS Sentinel — 4th Down Protocol")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
         except Exception as e:
             traceback.print_exception(type(e), e, e.__traceback__)
 
@@ -2719,8 +2742,49 @@ class SentinelHubView(discord.ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SENTINEL HUB — /rulehub
+#  SENTINEL HUB — /sentinel
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _build_sentinel_hub_embed() -> discord.Embed:
+    """Landing embed for /sentinel — extracted so GenesisHub can cross-link."""
+    embed = discord.Embed(
+        title="⚔️ ATLAS Sentinel — Rules Hub",
+        description=(
+            "Your one-stop panel for TSL rule enforcement, compliance, and dispute resolution.\n"
+            "Use the buttons below to access enforcement tools."
+        ),
+        color=discord.Color.from_rgb(201, 150, 42),
+    )
+    embed.set_thumbnail(url=ATLAS_ICON_URL)
+    embed.add_field(
+        name="⚖️ Core Enforcement",
+        value=(
+            "**File Complaint** — Report a rule violation or conduct issue\n"
+            "**Force Request** — Submit a force win request (screenshot required)\n"
+            "**4th Down** — Request an official 4th down ruling (screenshot required)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏈 Quick Lookups",
+        value=(
+            "**DC Protocol** — Look up disconnect protocol by quarter & margin\n"
+            "**Blowout Check** — Check blowout protocol compliance\n"
+            "**Stat Check** — Flag a potential stat-padding concern"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📋 Roster Compliance",
+        value=(
+            "**Position Change** — Request a position change for a player\n"
+            "**Position Log** — View position change history this season"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="ATLAS™ Sentinel Module · TSL Enforcement & Compliance")
+    return embed
+
 
 class SentinelHubCog(commands.Cog):
     """ATLAS Sentinel — rules hub navigation command."""
@@ -2729,47 +2793,11 @@ class SentinelHubCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(
-        name="rulehub",
-        description="Open the ATLAS Sentinel Rules Hub — enforcement tools & compliance.",
+        name="sentinel",
+        description="Open the ATLAS Sentinel Hub — enforcement, compliance, and dispute resolution.",
     )
-    async def rulehub(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="⚔️ ATLAS Sentinel — Rules Hub",
-            description=(
-                "Your one-stop panel for TSL rule enforcement, compliance, and dispute resolution.\n"
-                "Use the buttons below to access enforcement tools."
-            ),
-            color=discord.Color.from_rgb(201, 150, 42),
-        )
-        embed.set_thumbnail(url=ATLAS_ICON_URL)
-
-        embed.add_field(
-            name="⚖️ Core Enforcement",
-            value=(
-                "**File Complaint** — Report a rule violation or conduct issue\n"
-                "**Force Request** — Submit a force win request (screenshot required)\n"
-                "**4th Down** — Request an official 4th down ruling (screenshot required)"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="🏈 Quick Lookups",
-            value=(
-                "**DC Protocol** — Look up disconnect protocol by quarter & margin\n"
-                "**Blowout Check** — Check blowout protocol compliance\n"
-                "**Stat Check** — Flag a potential stat-padding concern"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="📋 Roster Compliance",
-            value=(
-                "**Position Change** — Request a position change for a player\n"
-                "**Position Log** — View position change history this season"
-            ),
-            inline=False,
-        )
-        embed.set_footer(text="ATLAS™ Sentinel Module · TSL Enforcement & Compliance")
+    async def sentinel(self, interaction: discord.Interaction):
+        embed = _build_sentinel_hub_embed()
         await interaction.response.send_message(
             embed=embed, view=SentinelHubView(self.bot), ephemeral=True
         )

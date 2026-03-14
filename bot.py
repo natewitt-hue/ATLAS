@@ -99,11 +99,11 @@ v2.0.0 changes:
           /sportsbook board buttons).
   - RMV:  /bet, /portfolio (absorbed into /markets browser).
   - RMV:  /complaint, /disconnectlookup, /blowoutcheck, /statcheck,
-          /positionchange, /positionchangelog (absorbed into /rulehub).
+          /positionchange, /positionchangelog (absorbed into /sentinel).
   - RMV:  /h2h, /season_recap (absorbed into oracle HubView buttons).
   - RMV:  /tradelookup, /devaudit, /abilityaudit, /abilitycheck,
           /cornerstonedesignate, /lotterystandings, /contractcheck
-          (absorbed into /rosterhub buttons).
+          (absorbed into /genesis buttons).
   - RMV:  /statshub (redundant with /stats hub).
 ─────────────────────────────────────────────────────────────────────────────
 """

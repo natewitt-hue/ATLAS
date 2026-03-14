@@ -9,13 +9,13 @@ Register in bot.py setup_hook():
     await bot.load_extension("genesis_cog")
 
 Slash commands:
-  /rosterhub               — Open the ATLAS Genesis Roster Hub
+  /genesis                 — Open the ATLAS Genesis Hub
   /trade                   — Open the TSL Trade Center (autocomplete team select)
   /tradelist               — [Commissioner] List pending trades
   /runlottery              — [Admin] Run the draft lottery
   /orphanfranchise         — [Admin] Flag/unflag a team as orphaned
 
-Hub-only tools (via /rosterhub buttons):
+Hub-only tools (via /genesis buttons):
   Trade Lookup, Dev Traits, Ability Audit, Ability Check,
   Cornerstone Designation, Contract Check, Lottery Standings
 ─────────────────────────────────────────────────────────────────────────────
@@ -1586,7 +1586,7 @@ class TradeCenterCog(commands.Cog):
                 ),
                 inline=False,
             )
-        embed.set_footer(text="Use 🔍 Trade Lookup in /rosterhub for full details.")
+        embed.set_footer(text="Use 🔍 Trade Lookup in /genesis for full details.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1981,13 +1981,13 @@ class ParityCog(commands.Cog):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  GENESIS HUB — /rosterhub
+#  GENESIS HUB — /genesis
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Genesis Hub embed ─────────────────────────────────────────────────────────
 
 def _build_genesis_hub_embed() -> discord.Embed:
-    """Landing embed for /rosterhub — mirrors _build_hub_embed() style."""
+    """Landing embed for /genesis — mirrors _build_hub_embed() style."""
     embed = discord.Embed(
         title="🧬 ATLAS Genesis — Roster Hub",
         description=(
@@ -2018,7 +2018,7 @@ def _build_genesis_hub_embed() -> discord.Embed:
 
 class GenesisHubView(discord.ui.View):
     """
-    Persistent button panel for /rosterhub.
+    Persistent button panel for /genesis.
     Mirrors HubView pattern from oracle_cog.
     timeout=None + custom_id = survives bot restarts.
     """
@@ -2034,22 +2034,21 @@ class GenesisHubView(discord.ui.View):
         row=0, custom_id="genesis:trade",
     )
     async def btn_trade(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        """Open the Trade Center directly — shows team autocomplete instructions."""
+        """Open the Trade Center directly — launches conference select flow."""
+        if dm.df_teams.empty or not dm.get_players():
+            return await interaction.response.send_message(
+                "Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True,
+            )
         embed = discord.Embed(
-            title="💱 TSL Trade Center",
-            description=(
-                "Use `/trade` with team autocomplete to start a trade.\n\n"
-                "**How it works:**\n"
-                "1. Type `/trade` in any channel\n"
-                "2. Start typing a team name in the `team_a` field — suggestions appear\n"
-                "3. Do the same for `team_b`\n"
-                "4. Use the picker to select players for each side\n\n"
-                "💡 All 32 teams are searchable via autocomplete — no dropdown cap."
-            ),
+            title="💱 Trade Center — Step 1",
+            description="Pick a conference to select **Team A** (the team sending).",
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="TSL Trade Engine · ATLAS™ Genesis")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
+        view = ConferenceSelectView(
+            bot=self.bot, proposer_id=interaction.user.id, step="A",
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(
         label="📜 Pending Trades", style=discord.ButtonStyle.secondary,
@@ -2083,7 +2082,7 @@ class GenesisHubView(discord.ui.View):
                 ),
                 inline=False,
             )
-        embed.set_footer(text="Use 🔍 Trade Lookup in /rosterhub for full details.")
+        embed.set_footer(text="Use 🔍 Trade Lookup in /genesis for full details.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(
@@ -2187,12 +2186,17 @@ class GenesisHubView(discord.ui.View):
         row=3, custom_id="genesis:rulehub",
     )
     async def btn_rulehub(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        """Cross-link to Sentinel rules hub."""
-        await interaction.response.send_message(
-            "Use `/rulehub` to open the ATLAS Sentinel Rules Hub — "
-            "complaints, force requests, position changes, and ability audits.",
-            ephemeral=True,
-        )
+        """Cross-link to Sentinel rules hub — opens inline."""
+        try:
+            from sentinel_cog import SentinelHubView, _build_sentinel_hub_embed
+            embed = _build_sentinel_hub_embed()
+            view = SentinelHubView(self.bot)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception:
+            await interaction.response.send_message(
+                "Use `/sentinel` to open the ATLAS Sentinel Rules Hub.",
+                ephemeral=True,
+            )
 
 
 # ── Helper modals for hub buttons ─────────────────────────────────────────────
@@ -2590,10 +2594,10 @@ class GenesisHubCog(commands.Cog):
         self.bot.add_view(GenesisHubView(bot))
 
     @app_commands.command(
-        name="rosterhub",
-        description="Open the ATLAS Genesis Roster Hub — trades, dev traits, and roster tools.",
+        name="genesis",
+        description="Open the ATLAS Genesis Hub — trades, dev traits, abilities, and franchise tools.",
     )
-    async def rosterhub(self, interaction: discord.Interaction):
+    async def genesis(self, interaction: discord.Interaction):
         embed = _build_genesis_hub_embed()
         view  = GenesisHubView(self.bot)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
