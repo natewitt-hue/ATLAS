@@ -1734,8 +1734,9 @@ class SportsbookCog(commands.Cog):
     async def sportsbook(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            img = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
-            file = card_to_file(img, "sportsbook.png")
+            import io
+            png_bytes = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
+            file = discord.File(io.BytesIO(png_bytes), filename="sportsbook.png")
             embed = discord.Embed(color=TSL_GOLD)
             embed.set_image(url="attachment://sportsbook.png")
             await interaction.followup.send(embed=embed, file=file, view=SportsbookHubView(self))

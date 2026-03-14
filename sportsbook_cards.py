@@ -275,73 +275,16 @@ def _determine_status(user_id: int) -> str:
 #  MAIN SPORTSBOOK CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_sportsbook_card(user_id: int) -> "Image.Image":
+def build_sportsbook_card(user_id: int) -> bytes:
     """
     Build the main sportsbook hub card (V6 design).
-    Returns a Pillow Image.
+    Returns PNG bytes rendered via Playwright.
     """
-    # ── Data queries ─────────────────────────────────────────────────────────
-    balance = _get_balance(user_id)
-    delta = _get_weekly_delta(user_id)
-    rank, total_users = _get_leaderboard_rank(user_id)
-    wins, losses, pushes = _get_lifetime_record(user_id)
-    streak = _get_current_streak(user_id)
-    status = _determine_status(user_id)
+    from card_html_renderer import render_card_png_sync
+    from sportsbook_card_html import build_sportsbook_html
 
-    total_bets = wins + losses + pushes
-    win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
-    roi = ((balance - STARTING_BALANCE) / STARTING_BALANCE * 100) if STARTING_BALANCE > 0 else 0
-
-    # ── Season / week subtitle ───────────────────────────────────────────────
-    if dm is not None:
-        season = dm.CURRENT_SEASON
-        week = dm.CURRENT_WEEK + 1
-    else:
-        season, week = 96, 8  # Fallback for testing
-
-    # ── Build card ───────────────────────────────────────────────────────────
-    card = ATLASCard(
-        module_icon=SPORTSBOOK_ICON,
-        module_title="FLOW SPORTSBOOK",
-        module_subtitle=f"SEASON {season} · WEEK {week}",
-        version="",  # V6: no version number
-        width=700,
-        corner_radius=20,
-    )
-    card.set_status_bar(status, position="top")
-
-    # Gold divider under header
-    card.add_section(CardSection.gold_divider())
-
-    # Hero balance (centered, massive)
-    card.add_section(CardSection.hero_balance(balance))
-
-    # Rank + weekly delta pills
-    card.add_section(CardSection.rank_delta_row(rank, total_users, delta))
-
-    # Separator
-    card.add_section(CardSection.divider())
-
-    # 2×2 stat grid
-    record_str = f"{wins}-{losses}"
-    if pushes:
-        record_str += f"-{pushes}"
-
-    card.add_section(CardSection.stat_grid([
-        {"label": "RECORD", "value": record_str},
-        {"label": "WIN RATE", "value": f"{win_rate:.0f}%",
-         "value_color": "green" if win_rate >= 50 else "red" if total_bets > 0 else ""},
-        {"label": "ROI", "value": f"{roi:+.0f}%",
-         "value_color": "green" if roi >= 0 else "red"},
-        {"label": "STREAK", "value": streak,
-         "value_color": "green" if streak.startswith("W") else
-                        "red" if streak.startswith("L") else ""},
-    ], columns=2, style="v6"))
-
-    # Dark watermark footer
-    card.add_section(CardSection.dark_footer("ATLAS™ · FLOW", "THE SIMULATION LEAGUE"))
-
-    return card.render()
+    html = build_sportsbook_html(user_id)
+    return render_card_png_sync(html, width=700, selector=".card")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
