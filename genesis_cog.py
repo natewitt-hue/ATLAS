@@ -2088,7 +2088,7 @@ class GenesisHubView(discord.ui.View):
 
     @discord.ui.button(
         label="💱 Trade", style=discord.ButtonStyle.primary,
-        row=0, custom_id="genesis:trade",
+        row=0, custom_id="atlas:genesis:trade",
     )
     async def btn_trade(self, interaction: discord.Interaction, _b: discord.ui.Button):
         """Open the Trade Center directly — launches conference select flow."""
@@ -2109,7 +2109,7 @@ class GenesisHubView(discord.ui.View):
 
     @discord.ui.button(
         label="📜 Pending Trades", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="genesis:tradelist",
+        row=0, custom_id="atlas:genesis:tradelist",
     )
     async def btn_tradelist(self, interaction: discord.Interaction, _b: discord.ui.Button):
         is_admin = (
@@ -2144,7 +2144,7 @@ class GenesisHubView(discord.ui.View):
 
     @discord.ui.button(
         label="🔍 Trade Lookup", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="genesis:tradelookup",
+        row=0, custom_id="atlas:genesis:tradelookup",
     )
     async def btn_tradelookup(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_TradeLookupModal())
@@ -2153,42 +2153,42 @@ class GenesisHubView(discord.ui.View):
 
     @discord.ui.button(
         label="📊 Dev Traits", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:devaudit",
+        row=1, custom_id="atlas:genesis:devaudit",
     )
     async def btn_devaudit(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_DevAuditModal())
 
     @discord.ui.button(
         label="🛡️ Ability Audit", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:abilityaudit",
+        row=1, custom_id="atlas:genesis:abilityaudit",
     )
     async def btn_abilityaudit(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_AbilityAuditModal())
 
     @discord.ui.button(
         label="👤 Ability Check", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:abilitycheck",
+        row=1, custom_id="atlas:genesis:abilitycheck",
     )
     async def btn_abilitycheck(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_AbilityCheckModal())
 
     @discord.ui.button(
         label="🔒 Cornerstone", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="genesis:cornerstone",
+        row=2, custom_id="atlas:genesis:cornerstone",
     )
     async def btn_cornerstone(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_CornerstoneModal())
 
     @discord.ui.button(
         label="📋 Contract Check", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="genesis:contract",
+        row=2, custom_id="atlas:genesis:contract",
     )
     async def btn_contract(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_ContractCheckModal())
 
     @discord.ui.button(
         label="🔄 Ability Reassign", style=discord.ButtonStyle.danger,
-        row=2, custom_id="genesis:abilityreassign",
+        row=2, custom_id="atlas:genesis:abilityreassign",
     )
     async def btn_abilityreassign(self, interaction: discord.Interaction, _b: discord.ui.Button):
         is_admin = (
@@ -2209,7 +2209,7 @@ class GenesisHubView(discord.ui.View):
 
     @discord.ui.button(
         label="🎰 Lottery", style=discord.ButtonStyle.secondary,
-        row=3, custom_id="genesis:lottery",
+        row=3, custom_id="atlas:genesis:lottery",
     )
     async def btn_lottery(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -2241,22 +2241,6 @@ class GenesisHubView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"❌ Lottery data error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(
-        label="🏈 Rules Hub", style=discord.ButtonStyle.secondary,
-        row=3, custom_id="genesis:rulehub",
-    )
-    async def btn_rulehub(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        """Cross-link to Sentinel rules hub — opens inline."""
-        try:
-            from sentinel_cog import SentinelHubView, _build_sentinel_hub_embed
-            embed = _build_sentinel_hub_embed()
-            view = SentinelHubView(self.bot)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        except Exception:
-            await interaction.response.send_message(
-                "Use `/sentinel` to open the ATLAS Sentinel Rules Hub.",
-                ephemeral=True,
-            )
 
 
 # ── Helper modals for hub buttons ─────────────────────────────────────────────

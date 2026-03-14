@@ -1752,7 +1752,27 @@ class SportsbookCog(commands.Cog):
             embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
             await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
 
-    # ── User-facing _impl methods (called by board buttons) ────────────────
+    # ── User-facing _impl methods (called by board buttons / FlowHub) ──────
+
+    async def _sportsbook_hub_impl(self, interaction: discord.Interaction):
+        """Core sportsbook hub — called by FlowHub button."""
+        try:
+            import io
+            png_bytes = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
+            file = discord.File(io.BytesIO(png_bytes), filename="sportsbook.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://sportsbook.png")
+            await interaction.followup.send(embed=embed, file=file, view=SportsbookHubView(self), ephemeral=True)
+        except Exception as e:
+            balance = _get_balance(interaction.user.id)
+            embed = discord.Embed(title="\U0001f3c6  ATLAS GLOBAL SPORTSBOOK", color=TSL_GOLD)
+            embed.description = (
+                f"\U0001f4b0 **Balance:** ${balance:,}\n\n"
+                f"Select a sport below to browse games.\n\n"
+                f"*Card render error: `{e}`*"
+            )
+            embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
+            await interaction.followup.send(embed=embed, view=SportsbookHubView(self), ephemeral=True)
 
     async def _mybets_impl(self, interaction: discord.Interaction):
         if not interaction.response.is_done():
