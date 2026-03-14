@@ -1755,7 +1755,8 @@ class SportsbookCog(commands.Cog):
     # ── User-facing _impl methods (called by board buttons) ────────────────
 
     async def _mybets_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         uid     = interaction.user.id
         balance = _get_balance(uid)
 
@@ -1818,7 +1819,8 @@ class SportsbookCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _bethistory_impl(self, interaction: discord.Interaction, weeks: int = 99):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id
 
         with _db_con() as con:
@@ -1874,7 +1876,8 @@ class SportsbookCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _leaderboard_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         with _db_con() as con:
             users = con.execute(
                 "SELECT discord_id, balance, season_start_balance "
@@ -1903,7 +1906,8 @@ class SportsbookCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _props_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         with _db_con() as con:
             prop_list = con.execute(
                 "SELECT prop_id, week, description, option_a, option_b, odds_a, odds_b "

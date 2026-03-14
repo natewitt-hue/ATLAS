@@ -446,7 +446,7 @@ async def on_ready():
             {"discord_id": m.id, "username": m.name, "display_name": m.display_name}
             for m in human_members
         ]
-        result = build_member_db.discover_guild_members(member_list)
+        result = member_db.discover_guild_members(member_list)
         print(f"   Registry: {result['known']} known, {result['new']} new, {result['updated']} display names updated")
 
     # Restore persistent hub views from ui_state table
