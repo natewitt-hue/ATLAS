@@ -193,6 +193,7 @@ async def setup_hook():
     _EXTENSIONS = [
         "echo_cog",           # ATLAS Echo — voice personas (MUST be first)
         "setup_cog",          # ATLAS Setup — server config (MUST be second)
+        "guide_cog",          # ATLAS Guide — user onboarding guides
         "flow_sportsbook",    # ATLAS Flow — TSL sportsbook
         "casino.casino",      # ATLAS Casino — games & economy
         "oracle_cog",         # ATLAS Oracle — stats, profiles, analytics
