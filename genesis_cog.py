@@ -1838,7 +1838,13 @@ def _build_reassignment_summary_embed(summary: dict) -> discord.Embed:
 def _build_reassignment_team_embeds(
     changed_results: "list[ae.ReassignmentResult]",
 ) -> list[discord.Embed]:
-    """Build per-team embeds showing each player's ability changes."""
+    """Build per-team embeds showing each player's ability changes.
+
+    Splits into multiple embeds per team if the total character count
+    would exceed Discord's 6 000-char embed limit.
+    """
+    EMBED_CHAR_LIMIT = 5_800  # leave headroom below Discord's 6 000
+
     by_team: dict[str, list] = {}
     for r in changed_results:
         by_team.setdefault(r.team, []).append(r)
@@ -1848,11 +1854,8 @@ def _build_reassignment_team_embeds(
     for team_name in sorted(by_team.keys()):
         team_players = by_team[team_name]
 
-        embed = discord.Embed(
-            title=f"🏈 {team_name} — Ability Reassignment",
-            color=discord.Color.orange(),
-        )
-
+        # Pre-build field tuples: (name, value)
+        fields: list[tuple[str, str]] = []
         for r in team_players:
             lines = []
 
@@ -1875,14 +1878,45 @@ def _build_reassignment_team_embeds(
                 )
 
             dev_badge = _dev_badge(r.dev)
-            embed.add_field(
-                name=f"{r.name} ({r.pos}, {dev_badge})",
-                value="\n".join(lines) if lines else "_No changes_",
-                inline=False,
-            )
+            fields.append((
+                f"{r.name} ({r.pos}, {dev_badge})",
+                "\n".join(lines) if lines else "_No changes_",
+            ))
 
-        embed.set_footer(text="ATLAS™ Genesis · Ability Reassignment Engine")
-        embeds.append(embed)
+        # Chunk fields into embeds that stay under the char limit
+        part = 1
+        cur_chars = 0
+        cur_embed: discord.Embed | None = None
+
+        def _make_embed(part_num: int, total_known: bool = False) -> discord.Embed:
+            suffix = f" (pt. {part_num})" if part_num > 1 or not total_known else ""
+            e = discord.Embed(
+                title=f"🏈 {team_name} — Ability Reassignment{suffix}",
+                color=discord.Color.orange(),
+            )
+            return e
+
+        for fname, fval in fields:
+            field_chars = len(fname) + len(fval)
+
+            if cur_embed is None:
+                cur_embed = _make_embed(part)
+                cur_chars = len(cur_embed.title or "")
+
+            if cur_chars + field_chars > EMBED_CHAR_LIMIT and cur_embed.fields:
+                # Finalize current embed and start a new one
+                cur_embed.set_footer(text="ATLAS™ Genesis · Ability Reassignment Engine")
+                embeds.append(cur_embed)
+                part += 1
+                cur_embed = _make_embed(part)
+                cur_chars = len(cur_embed.title or "")
+
+            cur_embed.add_field(name=fname, value=fval, inline=False)
+            cur_chars += field_chars
+
+        if cur_embed is not None:
+            cur_embed.set_footer(text="ATLAS™ Genesis · Ability Reassignment Engine")
+            embeds.append(cur_embed)
 
     return embeds
 
