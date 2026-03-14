@@ -1358,3 +1358,4 @@ class BossCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BossCog(bot))
+    print("ATLAS: Boss \u00b7 Commissioner Control Room loaded. \U0001f3db\ufe0f")
