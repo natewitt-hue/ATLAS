@@ -30,6 +30,11 @@ import discord
 # Import the renderer (adjust path as needed for your project layout)
 from atlas_card_renderer import ATLASCard, CardSection, ICON_DIR
 
+try:
+    import data_manager as dm
+except ImportError:
+    dm = None  # Fallback for standalone testing
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
@@ -233,6 +238,29 @@ def _get_total_won(user_id: int) -> int:
     return total
 
 
+def _get_current_streak(user_id: int) -> str:
+    """Get current win/loss streak. Returns 'W4', 'L2', or '—'."""
+    with sqlite3.connect(DB_PATH) as con:
+        rows = con.execute(
+            """SELECT status FROM bets_table
+               WHERE discord_id = ? AND status IN ('Won', 'Lost')
+               AND parlay_id IS NULL
+               ORDER BY created_at DESC LIMIT 20""",
+            (user_id,)
+        ).fetchall()
+    if not rows:
+        return "—"
+    first = rows[0][0]
+    count = 0
+    for (status,) in rows:
+        if status == first:
+            count += 1
+        else:
+            break
+    prefix = "W" if first == "Won" else "L"
+    return f"{prefix}{count}"
+
+
 def _determine_status(user_id: int) -> str:
     """Determine status bar: 'top10', 'positive', or 'negative'."""
     rank, _ = _get_leaderboard_rank(user_id)
@@ -249,63 +277,70 @@ def _determine_status(user_id: int) -> str:
 
 def build_sportsbook_card(user_id: int) -> "Image.Image":
     """
-    Build the main sportsbook hub card for a user.
+    Build the main sportsbook hub card (V6 design).
     Returns a Pillow Image.
     """
+    # ── Data queries ─────────────────────────────────────────────────────────
     balance = _get_balance(user_id)
     delta = _get_weekly_delta(user_id)
-    spark_data = _get_sparkline_data(user_id, days=7)
-    results, record = _get_last_n_results(user_id, n=5)
-    open_count, wagered, payout = _get_open_bets(user_id)
+    rank, total_users = _get_leaderboard_rank(user_id)
+    wins, losses, pushes = _get_lifetime_record(user_id)
+    streak = _get_current_streak(user_id)
     status = _determine_status(user_id)
 
+    total_bets = wins + losses + pushes
+    win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
+    roi = ((balance - STARTING_BALANCE) / STARTING_BALANCE * 100) if STARTING_BALANCE > 0 else 0
+
+    # ── Season / week subtitle ───────────────────────────────────────────────
+    if dm is not None:
+        season = dm.CURRENT_SEASON
+        week = dm.CURRENT_WEEK + 1
+    else:
+        season, week = 96, 8  # Fallback for testing
+
+    # ── Build card ───────────────────────────────────────────────────────────
     card = ATLASCard(
         module_icon=SPORTSBOOK_ICON,
-        module_title="ATLAS SPORTSBOOK",
-        module_subtitle="GLOBAL WAGERING",
-        version="v5.0",
+        module_title="FLOW SPORTSBOOK",
+        module_subtitle=f"SEASON {season} · WEEK {week}",
+        version="",  # V6: no version number
+        width=700,
+        corner_radius=20,
     )
+    card.set_status_bar(status, position="top")
 
-    # Hero balance
-    delta_str = f"+${delta}" if delta >= 0 else f"-${abs(delta)}"
-    card.add_section(CardSection.hero_number(
-        "YOUR BALANCE",
-        f"${balance:,}",
-        delta=f"{delta_str} this week",
-        delta_positive=delta >= 0,
-    ))
+    # Gold divider under header
+    card.add_section(CardSection.gold_divider())
 
-    # Sparkline (drawn inline with hero)
-    card.add_section(CardSection.sparkline("7-DAY", spark_data))
+    # Hero balance (centered, massive)
+    card.add_section(CardSection.hero_balance(balance))
 
-    # Win/Loss ticker
-    if results:
-        card.add_section(CardSection.win_loss_ticker(results, record=record))
+    # Rank + weekly delta pills
+    card.add_section(CardSection.rank_delta_row(rank, total_users, delta))
 
-    # Open bets / Potential payout
-    card.add_section(CardSection.info_panel([
-        {
-            "label": "OPEN BETS",
-            "value": str(open_count),
-            "sub": f"${wagered:,} wagered",
-            "sub_highlight": f"${wagered:,}",
-        },
-        {
-            "label": "POTENTIAL PAYOUT",
-            "value": f"${payout:,}",
-            "sub": "if all bets hit",
-            "value_color": "green",
-        },
-    ]))
+    # Separator
+    card.add_section(CardSection.divider())
 
-    # Sport footer
-    card.add_section(CardSection.sport_footer(
-        sports=["TSL", "NFL", "NBA", "MLB", "NHL"],
-        active="TSL",
-        controller_icon=True,
-    ))
+    # 2×2 stat grid
+    record_str = f"{wins}-{losses}"
+    if pushes:
+        record_str += f"-{pushes}"
 
-    card.set_status_bar(status)
+    card.add_section(CardSection.stat_grid([
+        {"label": "RECORD", "value": record_str},
+        {"label": "WIN RATE", "value": f"{win_rate:.0f}%",
+         "value_color": "green" if win_rate >= 50 else "red" if total_bets > 0 else ""},
+        {"label": "ROI", "value": f"{roi:+.0f}%",
+         "value_color": "green" if roi >= 0 else "red"},
+        {"label": "STREAK", "value": streak,
+         "value_color": "green" if streak.startswith("W") else
+                        "red" if streak.startswith("L") else ""},
+    ], columns=2, style="v6"))
+
+    # Dark watermark footer
+    card.add_section(CardSection.dark_footer("ATLAS™ · FLOW", "THE SIMULATION LEAGUE"))
+
     return card.render()
 
 
