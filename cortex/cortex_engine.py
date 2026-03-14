@@ -313,21 +313,32 @@ class CortexEngine:
         }
 
 
-    def get_all_messages(self, nickname):
-        """Return ALL messages for a subject, chronological. No sampling."""
-        search_term = f"%{nickname.replace(chr(37), '')}%"
+    def get_all_messages(self, nickname, author_id: str = None):
+        """Return ALL messages for a subject, chronological. No sampling.
+
+        If author_id is provided, queries by exact Discord snowflake ID.
+        Otherwise falls back to author_nickname LIKE %nickname%.
+        """
         ai_clause, ai_params = self._ai_filter_clause()
+
+        if author_id:
+            id_clause = "author_id = ?"
+            id_params = (author_id,)
+        else:
+            id_clause = "author_nickname LIKE ?"
+            id_params = (f"%{nickname.replace(chr(37), '')}%",)
+
         sql = f"""
             SELECT message_id, author_nickname, timestamp_unix, content
             FROM messages
-            WHERE author_nickname LIKE ?
+            WHERE {id_clause}
               AND LENGTH(TRIM(content)) > 3
               AND content NOT LIKE 'http%'
               AND type = 'Default'
               AND {ai_clause}
             ORDER BY timestamp_unix ASC
         """
-        return self.execute_sql(sql, (search_term,) + ai_params)
+        return self.execute_sql(sql, id_params + ai_params)
 
 
 # ---------------------------------------------------------------------------

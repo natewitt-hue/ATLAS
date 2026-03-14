@@ -315,18 +315,24 @@ in this report -- the one thing that most changes how you would interpret this p
 
         return "\n".join(report)
 
-    def save_markdown(self, text, filename):
-        """Save report to output/cortex/ folder."""
-        out_dir = os.path.join("output", "cortex")
+    def save_markdown(self, text, filename, subfolder=None):
+        """Save report to output/cortex/<subfolder>/ folder."""
+        parts = ["output", "cortex"]
+        if subfolder:
+            parts.append(subfolder)
+        out_dir = os.path.join(*parts)
         os.makedirs(out_dir, exist_ok=True)
         path = os.path.join(out_dir, filename)
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return path
 
-    def save_json_signals(self, signals, filename):
-        """Save raw JSON signals to output/cortex/ for debugging."""
-        out_dir = os.path.join("output", "cortex")
+    def save_json_signals(self, signals, filename, subfolder=None):
+        """Save raw JSON signals to output/cortex/<subfolder>/ for debugging."""
+        parts = ["output", "cortex"]
+        if subfolder:
+            parts.append(subfolder)
+        out_dir = os.path.join(*parts)
         os.makedirs(out_dir, exist_ok=True)
         path = os.path.join(out_dir, filename)
         with open(path, "w", encoding="utf-8") as f:
