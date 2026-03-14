@@ -434,6 +434,11 @@ class SetupChoiceView(discord.ui.View):
         try:
             results = await _provision_channels(guild)
 
+            # Post user guides to category channels
+            guide_cog = self.bot.get_cog("GuideCog")
+            if guide_cog:
+                await guide_cog.post_all_guides(guild)
+
             embed = discord.Embed(
                 title="ATLAS Setup — Full Provisioning Complete",
                 color=0x00C851

@@ -1474,7 +1474,7 @@ class CompliancePanelView(discord.ui.View):
 
     @discord.ui.button(label="Force History", emoji="\U0001f4ca", style=discord.ButtonStyle.secondary, row=0)
     async def force_history(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = interaction.client.get_cog("SentinelHubCog") or interaction.client.get_cog("ForceRequestCog")
+        cog = interaction.client.get_cog("ForceRequestCog") or interaction.client.get_cog("SentinelHubCog")
         if not cog:
             return await _send_cog_error(interaction, "Sentinel")
         await cog.forcehistory_impl(interaction)

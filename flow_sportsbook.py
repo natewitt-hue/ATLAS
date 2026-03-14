@@ -1734,8 +1734,9 @@ class SportsbookCog(commands.Cog):
     async def sportsbook(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            img = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
-            file = card_to_file(img, "sportsbook.png")
+            import io
+            png_bytes = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
+            file = discord.File(io.BytesIO(png_bytes), filename="sportsbook.png")
             embed = discord.Embed(color=TSL_GOLD)
             embed.set_image(url="attachment://sportsbook.png")
             await interaction.followup.send(embed=embed, file=file, view=SportsbookHubView(self))
@@ -1751,10 +1752,31 @@ class SportsbookCog(commands.Cog):
             embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
             await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
 
-    # ── User-facing _impl methods (called by board buttons) ────────────────
+    # ── User-facing _impl methods (called by board buttons / FlowHub) ──────
+
+    async def _sportsbook_hub_impl(self, interaction: discord.Interaction):
+        """Core sportsbook hub — called by FlowHub button."""
+        try:
+            import io
+            png_bytes = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
+            file = discord.File(io.BytesIO(png_bytes), filename="sportsbook.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://sportsbook.png")
+            await interaction.followup.send(embed=embed, file=file, view=SportsbookHubView(self), ephemeral=True)
+        except Exception as e:
+            balance = _get_balance(interaction.user.id)
+            embed = discord.Embed(title="\U0001f3c6  ATLAS GLOBAL SPORTSBOOK", color=TSL_GOLD)
+            embed.description = (
+                f"\U0001f4b0 **Balance:** ${balance:,}\n\n"
+                f"Select a sport below to browse games.\n\n"
+                f"*Card render error: `{e}`*"
+            )
+            embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
+            await interaction.followup.send(embed=embed, view=SportsbookHubView(self), ephemeral=True)
 
     async def _mybets_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         uid     = interaction.user.id
         balance = _get_balance(uid)
 
@@ -1817,7 +1839,8 @@ class SportsbookCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _bethistory_impl(self, interaction: discord.Interaction, weeks: int = 99):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id
 
         with _db_con() as con:
@@ -1873,7 +1896,8 @@ class SportsbookCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _leaderboard_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         with _db_con() as con:
             users = con.execute(
                 "SELECT discord_id, balance, season_start_balance "
@@ -1902,7 +1926,8 @@ class SportsbookCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _props_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         with _db_con() as con:
             prop_list = con.execute(
                 "SELECT prop_id, week, description, option_a, option_b, odds_a, odds_b "

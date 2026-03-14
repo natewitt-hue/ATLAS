@@ -707,43 +707,46 @@ class FlowHubView(discord.ui.View):
     @discord.ui.button(
         label="Sportsbook", emoji="\U0001f4ca",
         style=discord.ButtonStyle.primary, row=0,
-        custom_id="flow:sportsbook",
+        custom_id="atlas:flow:sportsbook",
     )
     async def btn_sportsbook(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("SportsbookCog")
         if cog:
-            await cog.sportsbook.callback(cog, interaction)
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            await cog._sportsbook_hub_impl(interaction)
         else:
             await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
 
     @discord.ui.button(
         label="Casino", emoji="\U0001f3b0",
         style=discord.ButtonStyle.primary, row=0,
-        custom_id="flow:casino",
+        custom_id="atlas:flow:casino",
     )
     async def btn_casino(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("CasinoCog")
         if cog:
-            await cog.casino_hub.callback(cog, interaction)
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            await cog._casino_hub_impl(interaction)
         else:
             await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
 
     @discord.ui.button(
         label="Markets", emoji="\U0001f52e",
         style=discord.ButtonStyle.primary, row=0,
-        custom_id="flow:markets",
+        custom_id="atlas:flow:markets",
     )
     async def btn_markets(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("Polymarket")
         if cog:
-            await cog.markets_cmd.callback(cog, interaction)
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            await cog._markets_impl(interaction)
         else:
             await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
 
     @discord.ui.button(
         label="Leaderboard", emoji="\U0001f3c6",
         style=discord.ButtonStyle.secondary, row=0,
-        custom_id="flow:leaderboard",
+        custom_id="atlas:flow:leaderboard",
     )
     async def btn_leaderboard(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -758,7 +761,7 @@ class FlowHubView(discord.ui.View):
     @discord.ui.button(
         label="My Bets", emoji="\U0001f4cb",
         style=discord.ButtonStyle.secondary, row=1,
-        custom_id="flow:mybets",
+        custom_id="atlas:flow:mybets",
     )
     async def btn_mybets(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("SportsbookCog")
@@ -771,19 +774,20 @@ class FlowHubView(discord.ui.View):
     @discord.ui.button(
         label="Portfolio", emoji="\U0001f4c1",
         style=discord.ButtonStyle.secondary, row=1,
-        custom_id="flow:portfolio",
+        custom_id="atlas:flow:portfolio",
     )
     async def btn_portfolio(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("Polymarket")
         if cog:
-            await cog.portfolio_cmd.callback(cog, interaction)
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            await cog._portfolio_impl(interaction)
         else:
             await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
 
     @discord.ui.button(
         label="Wallet", emoji="\U0001f4b0",
         style=discord.ButtonStyle.secondary, row=1,
-        custom_id="flow:wallet",
+        custom_id="atlas:flow:wallet",
     )
     async def btn_wallet(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -796,7 +800,7 @@ class FlowHubView(discord.ui.View):
     @discord.ui.button(
         label="Scratch", emoji="\U0001f39f",
         style=discord.ButtonStyle.success, row=1,
-        custom_id="flow:scratch",
+        custom_id="atlas:flow:scratch",
     )
     async def btn_scratch(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:

@@ -483,6 +483,12 @@ def load_all() -> None:
     for p in rush_stats: p["statType"] = "rushing"
     for p in rec_stats:  p["statType"] = "receiving"
     _l_df_offense = _df(pass_stats + rush_stats + rec_stats)
+    # Strip 'total' prefix from column names (API returns totalPassYds, totalRecYds, etc.
+    # but downstream code references passYds, recYds, etc.)
+    _l_df_offense.columns = [
+        c[5:6].lower() + c[6:] if c.startswith("total") else c
+        for c in _l_df_offense.columns
+    ]
 
     print("  → sack leaders...")
     sack_stats = _paginate("/stats/players/sackLeaders",    max_pages=999)
@@ -540,6 +546,10 @@ def load_all() -> None:
         _l_df_defense = _df(sack_stats + int_stats + tck_stats)
 
     _l_df_players = _df(pass_stats + rush_stats + rec_stats + sack_stats + int_stats + tck_stats)
+    _l_df_players.columns = [
+        c[5:6].lower() + c[6:] if c.startswith("total") else c
+        for c in _l_df_players.columns
+    ]
 
     # ── Trades ─────────────────────────────────────────────────────────────
     print("Fetching trades...")

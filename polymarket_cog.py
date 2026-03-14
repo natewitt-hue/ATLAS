@@ -790,13 +790,13 @@ class MarketBrowserView(discord.ui.View):
             yes_btn = discord.ui.Button(
                 label=f"YES {yes_p:.0%}",
                 style=discord.ButtonStyle.success,
-                custom_id=f"yes_{i}_{self.page}",
+                custom_id=f"atlas:markets:yes_{i}_{self.page}",
                 row=row,
             )
             no_btn = discord.ui.Button(
                 label=f"NO {no_p:.0%}",
                 style=discord.ButtonStyle.danger,
-                custom_id=f"no_{i}_{self.page}",
+                custom_id=f"atlas:markets:no_{i}_{self.page}",
                 row=row,
             )
             yes_btn.callback = self._make_bet_cb(m, "YES")
@@ -808,21 +808,21 @@ class MarketBrowserView(discord.ui.View):
         prev_btn = discord.ui.Button(
             label="◀ Prev",
             style=discord.ButtonStyle.secondary,
-            custom_id="nav_prev",
+            custom_id="atlas:markets:nav_prev",
             disabled=self.page == 0,
             row=4,
         )
         page_btn = discord.ui.Button(
             label=f"{self.page + 1}/{self._max_page() + 1}",
             style=discord.ButtonStyle.secondary,
-            custom_id="nav_page",
+            custom_id="atlas:markets:nav_page",
             disabled=True,
             row=4,
         )
         next_btn = discord.ui.Button(
             label="Next ▶",
             style=discord.ButtonStyle.secondary,
-            custom_id="nav_next",
+            custom_id="atlas:markets:nav_next",
             disabled=self.page >= self._max_page(),
             row=4,
         )
@@ -1374,6 +1374,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return  # interaction expired before we could respond
+        await self._markets_impl(interaction)
+
+    async def _markets_impl(self, interaction: discord.Interaction):
+        """Core markets browser logic — called by slash command and FlowHub."""
         await self._ensure_db()
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1443,14 +1447,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             kwargs["file"] = card_file
         await interaction.followup.send(**kwargs)
 
-    # ── Slash: /bet <slug> ──────────────────
+    # ── Impl: bet (called by /markets browser) ──────────────────
 
-    @app_commands.command(
-        name="bet",
-        description="Place a TSL Bucks wager on a prediction market."
-    )
-    @app_commands.describe(slug="The market slug/ID from /markets")
-    async def bet_cmd(self, interaction: discord.Interaction, slug: str):
+    async def _bet_impl(self, interaction: discord.Interaction, slug: str):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -1565,13 +1564,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-    # ── Slash: /portfolio ─────────────────────
+    # ── Impl: portfolio (called by FlowHub) ─────────────────────
 
-    @app_commands.command(
-        name="portfolio",
-        description="View your open prediction market contracts."
-    )
-    async def portfolio_cmd(self, interaction: discord.Interaction):
+    async def _portfolio_impl(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -1594,7 +1589,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         if not rows:
             await interaction.followup.send(
-                "You have no prediction market contracts. Use `/bet` to place one!",
+                "You have no prediction market contracts. Use `/markets` to browse and place bets!",
                 ephemeral=True,
             )
             return
@@ -1624,18 +1619,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ── Slash: /resolve_market (admin) ────────
+    # ── Impl: resolve_market (called by Boss panel) ────────
 
-    @app_commands.command(
-        name="resolve_market",
-        description="[Admin] Resolve a prediction market outcome."
-    )
-    @app_commands.describe(
-        slug="Market slug to resolve",
-        result="The winning side: YES or NO, or VOID to refund all",
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def resolve_market_cmd(
+    async def _resolve_market_impl(
         self,
         interaction: discord.Interaction,
         slug: str,
@@ -1684,6 +1670,33 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             f"Processed {resolved['won']} winning and {resolved['lost']} losing contracts."
             + (f" Voided {resolved['voided']}." if resolved["voided"] else ""),
             ephemeral=True,
+        )
+
+    async def _approve_market_impl(self, interaction: discord.Interaction, slug: str):
+        """Approve a long-term market for betting (called by Boss panel)."""
+        await self._ensure_db()
+        slug = slug.strip().lower()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT market_id, title, status FROM prediction_markets WHERE slug = ?",
+                (slug,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row:
+            await interaction.followup.send(f"❌ Market `{slug}` not found.", ephemeral=True)
+            return
+        market_id, title, status = row
+        if status == "active":
+            await interaction.followup.send(f"⚠️ Market `{slug}` is already active.", ephemeral=True)
+            return
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE prediction_markets SET status='active' WHERE market_id=?",
+                (market_id,),
+            )
+            await db.commit()
+        await interaction.followup.send(
+            f"✅ Market `{slug}` approved and set to **active**.", ephemeral=True,
         )
 
     async def _resolve(self, market_id: str, result: str,
@@ -1741,14 +1754,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         log.info(f"_resolve({market_id}, {result}, by={resolved_by}): {counts}")
         return counts
 
-    # ── Slash: /market_status (admin) ─────────
+    # ── Impl: market_status (called by Boss panel) ─────────
 
-    @app_commands.command(
-        name="market_status",
-        description="[Admin] Show Polymarket sync status and stats."
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def market_status_cmd(self, interaction: discord.Interaction):
+    async def _market_status_impl(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:

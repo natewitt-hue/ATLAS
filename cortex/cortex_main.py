@@ -53,6 +53,7 @@ BANNER = """
 
 def cmd_run(args):
     nickname     = args.nickname
+    author_id    = getattr(args, 'id', None)
     skip_cache   = args.no_cache
     skip_docs    = args.no_docs
 
@@ -74,7 +75,7 @@ def cmd_run(args):
 
     # -- PHASE 1: Evidence Packs -----------------------------------------------
     print("--- PHASE 1: EVIDENCE COLLECTION ---")
-    packs = engine.get_evidence_packs(nickname)
+    packs = engine.get_evidence_packs(nickname, author_id=author_id)
     if not packs:
         print(f"[-] No messages found for '{nickname}'. Exiting.")
         return
@@ -107,7 +108,7 @@ def cmd_run(args):
     safe_name_json = "".join(c for c in nickname if c.isalnum())
     writer_temp = CortexWriter()
     json_path = writer_temp.save_json_signals(
-        signals, f"Cortex_Signals_{safe_name_json}.json"
+        signals, f"Cortex_Signals_{safe_name_json}.json", subfolder=safe_name_json
     )
     print(f"[+] Raw signals saved: {json_path}")
 
@@ -119,7 +120,7 @@ def cmd_run(args):
     print("\n--- PHASE 4: SAVING OUTPUTS ---")
     safe_name  = "".join(c for c in nickname if c.isalnum())
     local_path = writer.save_markdown(
-        report_text, f"Cortex_Intelligence_{safe_name}.md"
+        report_text, f"Cortex_Intelligence_{safe_name}.md", subfolder=safe_name
     )
     print(f"[+] Local backup: {local_path}")
 
@@ -260,9 +261,11 @@ def _stratified_sample(blocks, max_bytes):
 def cmd_export(args):
     """Export chain-merged messages sized for a specific LLM target."""
     nickname = args.nickname
+    author_id = getattr(args, 'id', None)
     target = args.target
     print(BANNER)
-    print(f"[Cortex] Exporting messages for: {nickname} (target: {target})")
+    id_note = f" [id: {author_id}]" if author_id else ""
+    print(f"[Cortex] Exporting messages for: {nickname}{id_note} (target: {target})")
 
     db_path = os.getenv("ORACLE_DB_PATH", "TSL_Archive.db")
     if not os.path.exists(db_path):
@@ -270,7 +273,7 @@ def cmd_export(args):
         return
 
     engine = CortexEngine()
-    msgs = engine.get_all_messages(nickname)
+    msgs = engine.get_all_messages(nickname, author_id=author_id)
     if not msgs:
         print(f"[-] No messages found for '{nickname}'.")
         return
@@ -288,10 +291,10 @@ def cmd_export(args):
     max_bytes = SIZE_CAPS.get(target, 0)
     sampled = _stratified_sample(blocks, max_bytes)
 
-    # Write output
-    out_dir = os.path.join("output", "cortex")
-    os.makedirs(out_dir, exist_ok=True)
+    # Write output — per-username subfolder
     safe_name = "".join(c for c in nickname if c.isalnum())
+    out_dir = os.path.join("output", "cortex", safe_name)
+    os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"Cortex_Export_{safe_name}_{target}.txt")
 
     with open(out_path, "w", encoding="utf-8") as f:
@@ -310,9 +313,10 @@ def cmd_export(args):
 def cmd_diagnose(args):
     """Run engine diagnostics -- verify DB connection and sample counts."""
     print(BANNER)
+    author_id = getattr(args, 'id', None)
     print(f"[Cortex] Running diagnostics for: {args.nickname}")
     engine = CortexEngine()
-    packs  = engine.get_evidence_packs(args.nickname)
+    packs  = engine.get_evidence_packs(args.nickname, author_id=author_id)
     if packs:
         stats = packs["cognitive"]["stats"]
         print(f"\n[Diagnostics Complete]")
@@ -361,12 +365,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python cortex_main.py run TheWitt
+  python cortex_main.py run TheWitt --id 322498632542846987
   python cortex_main.py run TheWitt --no-cache
-  python cortex_main.py run TheWitt --no-docs
-  python cortex_main.py diagnose TheWitt
-  python cortex_main.py export TheWitt --target gemini
-  python cortex_main.py export TheWitt --target claude
+  python cortex_main.py export JT --id 871448457414598737 --target full
+  python cortex_main.py export JT --id 871448457414598737 --target claude
+  python cortex_main.py diagnose TheWitt --id 322498632542846987
         """
     )
 
@@ -374,7 +377,8 @@ Examples:
 
     # run command
     p_run = subparsers.add_parser("run", help="Run full Cortex intelligence assessment")
-    p_run.add_argument("nickname",  help="Subject's nickname as stored in the message DB")
+    p_run.add_argument("nickname",  help="Display name / folder name for the subject")
+    p_run.add_argument("--id", help="Discord snowflake ID (exact match, preferred over nickname)")
     p_run.add_argument("--no-cache", action="store_true",
                        help="Clear .cortex_cache and run all passes fresh")
     p_run.add_argument("--no-docs",  action="store_true",
@@ -383,14 +387,16 @@ Examples:
 
     # export command
     p_exp = subparsers.add_parser("export", help="Export chain-merged messages sized for LLM input")
-    p_exp.add_argument("nickname", help="Subject's nickname to export")
+    p_exp.add_argument("nickname", help="Display name / folder name for the subject")
+    p_exp.add_argument("--id", help="Discord snowflake ID (exact match, preferred over nickname)")
     p_exp.add_argument("--target", choices=["claude", "gemini", "full"], default="gemini",
                        help="Target LLM size cap (claude=700KB, gemini=3.2MB, full=no cap)")
     p_exp.set_defaults(func=cmd_export)
 
     # diagnose command
     p_diag = subparsers.add_parser("diagnose", help="Check DB connection and sample counts")
-    p_diag.add_argument("nickname", help="Subject's nickname to diagnose")
+    p_diag.add_argument("nickname", help="Display name / folder name for the subject")
+    p_diag.add_argument("--id", help="Discord snowflake ID (exact match, preferred over nickname)")
     p_diag.set_defaults(func=cmd_diagnose)
 
     args = parser.parse_args()

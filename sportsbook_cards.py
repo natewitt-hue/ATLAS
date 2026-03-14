@@ -30,6 +30,11 @@ import discord
 # Import the renderer (adjust path as needed for your project layout)
 from atlas_card_renderer import ATLASCard, CardSection, ICON_DIR
 
+try:
+    import data_manager as dm
+except ImportError:
+    dm = None  # Fallback for standalone testing
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
@@ -233,6 +238,29 @@ def _get_total_won(user_id: int) -> int:
     return total
 
 
+def _get_current_streak(user_id: int) -> str:
+    """Get current win/loss streak. Returns 'W4', 'L2', or '—'."""
+    with sqlite3.connect(DB_PATH) as con:
+        rows = con.execute(
+            """SELECT status FROM bets_table
+               WHERE discord_id = ? AND status IN ('Won', 'Lost')
+               AND parlay_id IS NULL
+               ORDER BY created_at DESC LIMIT 20""",
+            (user_id,)
+        ).fetchall()
+    if not rows:
+        return "—"
+    first = rows[0][0]
+    count = 0
+    for (status,) in rows:
+        if status == first:
+            count += 1
+        else:
+            break
+    prefix = "W" if first == "Won" else "L"
+    return f"{prefix}{count}"
+
+
 def _determine_status(user_id: int) -> str:
     """Determine status bar: 'top10', 'positive', or 'negative'."""
     rank, _ = _get_leaderboard_rank(user_id)
@@ -247,66 +275,16 @@ def _determine_status(user_id: int) -> str:
 #  MAIN SPORTSBOOK CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_sportsbook_card(user_id: int) -> "Image.Image":
+def build_sportsbook_card(user_id: int) -> bytes:
     """
-    Build the main sportsbook hub card for a user.
-    Returns a Pillow Image.
+    Build the main sportsbook hub card (V6 design).
+    Returns PNG bytes rendered via Playwright.
     """
-    balance = _get_balance(user_id)
-    delta = _get_weekly_delta(user_id)
-    spark_data = _get_sparkline_data(user_id, days=7)
-    results, record = _get_last_n_results(user_id, n=5)
-    open_count, wagered, payout = _get_open_bets(user_id)
-    status = _determine_status(user_id)
+    from card_html_renderer import render_card_png_sync
+    from sportsbook_card_html import build_sportsbook_html
 
-    card = ATLASCard(
-        module_icon=SPORTSBOOK_ICON,
-        module_title="ATLAS SPORTSBOOK",
-        module_subtitle="GLOBAL WAGERING",
-        version="v5.0",
-    )
-
-    # Hero balance
-    delta_str = f"+${delta}" if delta >= 0 else f"-${abs(delta)}"
-    card.add_section(CardSection.hero_number(
-        "YOUR BALANCE",
-        f"${balance:,}",
-        delta=f"{delta_str} this week",
-        delta_positive=delta >= 0,
-    ))
-
-    # Sparkline (drawn inline with hero)
-    card.add_section(CardSection.sparkline("7-DAY", spark_data))
-
-    # Win/Loss ticker
-    if results:
-        card.add_section(CardSection.win_loss_ticker(results, record=record))
-
-    # Open bets / Potential payout
-    card.add_section(CardSection.info_panel([
-        {
-            "label": "OPEN BETS",
-            "value": str(open_count),
-            "sub": f"${wagered:,} wagered",
-            "sub_highlight": f"${wagered:,}",
-        },
-        {
-            "label": "POTENTIAL PAYOUT",
-            "value": f"${payout:,}",
-            "sub": "if all bets hit",
-            "value_color": "green",
-        },
-    ]))
-
-    # Sport footer
-    card.add_section(CardSection.sport_footer(
-        sports=["TSL", "NFL", "NBA", "MLB", "NHL"],
-        active="TSL",
-        controller_icon=True,
-    ))
-
-    card.set_status_bar(status)
-    return card.render()
+    html = build_sportsbook_html(user_id)
+    return render_card_png_sync(html, width=700, selector=".card")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

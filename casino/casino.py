@@ -183,7 +183,7 @@ class CasinoHubView(discord.ui.View):
     async def scratch(self, interaction: discord.Interaction, button: discord.ui.Button):
         await daily_scratch(interaction)
 
-    @discord.ui.button(label="📊 My Stats", style=discord.ButtonStyle.secondary, custom_id="casino:stats", row=1)
+    @discord.ui.button(label="📊 My Stats", style=discord.ButtonStyle.secondary, custom_id="atlas:casino:stats", row=1)
     async def my_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id
@@ -265,6 +265,38 @@ class CasinoCog(commands.Cog):
     async def casino_hub(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
+        if not await db.is_casino_open():
+            return await interaction.followup.send(
+                "🔴 The TSL Casino is currently closed. Check back soon!",
+                ephemeral=True
+            )
+
+        balance = await db.get_balance(interaction.user.id)
+        max_bet = await db.get_max_bet()
+
+        embed = discord.Embed(
+            title       = "🎰 Welcome to the TSL Casino",
+            description = (
+                "**The Sim League — Gold Standard Gaming**\n\n"
+                "Pick a game below to get started.\n\n"
+                "🃏 **Blackjack** — Beat the dealer (3:2 BJ payout)\n"
+                "🎰 **Slots** — 3-reel TSL-themed machine (up to 50x)\n"
+                "🚀 **Crash** — Shared multiplier — cash out before it crashes\n"
+                "🪙 **Coin Flip** — 50/50, even money\n"
+                "🎟️ **Daily Scratch** — Free daily card (25–150 Bucks)\n"
+            ),
+            color = discord.Color.from_rgb(212, 175, 55),
+        )
+        embed.add_field(name="Your Balance", value=f"**{balance:,} TSL Bucks**", inline=True)
+        embed.add_field(name="Max Bet",      value=f"{max_bet:,} Bucks",          inline=True)
+        embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
+
+        await interaction.followup.send(embed=embed, view=CasinoHubView(), ephemeral=True)
+
+    # ── Impl: casino hub (called by FlowHub) ────────────────────────────
+
+    async def _casino_hub_impl(self, interaction: discord.Interaction):
+        """Core casino lobby — called by FlowHub button."""
         if not await db.is_casino_open():
             return await interaction.followup.send(
                 "🔴 The TSL Casino is currently closed. Check back soon!",

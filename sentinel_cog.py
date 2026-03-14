@@ -2619,7 +2619,7 @@ class SentinelHubView(discord.ui.View):
 
     @discord.ui.button(
         label="File Complaint", style=discord.ButtonStyle.primary,
-        row=0, custom_id="sentinel:complaint", emoji="📋",
+        row=0, custom_id="atlas:sentinel:complaint", emoji="📋",
     )
     async def btn_complaint(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2659,8 +2659,8 @@ class SentinelHubView(discord.ui.View):
                 )
 
     @discord.ui.button(
-        label="Force Request", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="sentinel:forcerequest", emoji="🏳️",
+        label="How to Request", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="atlas:sentinel:forcerequest", emoji="ℹ️",
     )
     async def btn_forcerequest(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2684,8 +2684,8 @@ class SentinelHubView(discord.ui.View):
             traceback.print_exception(type(e), e, e.__traceback__)
 
     @discord.ui.button(
-        label="4th Down", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="sentinel:fourthdown", emoji="🏈",
+        label="4th Down Guide", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="atlas:sentinel:fourthdown", emoji="ℹ️",
     )
     async def btn_fourthdown(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2711,7 +2711,7 @@ class SentinelHubView(discord.ui.View):
 
     @discord.ui.button(
         label="DC Protocol", style=discord.ButtonStyle.success,
-        row=1, custom_id="sentinel:dcprotocol", emoji="📡",
+        row=1, custom_id="atlas:sentinel:dcprotocol", emoji="📡",
     )
     async def btn_dcprotocol(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2725,7 +2725,7 @@ class SentinelHubView(discord.ui.View):
 
     @discord.ui.button(
         label="Blowout Check", style=discord.ButtonStyle.success,
-        row=1, custom_id="sentinel:blowout", emoji="💥",
+        row=1, custom_id="atlas:sentinel:blowout", emoji="💥",
     )
     async def btn_blowout(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2739,7 +2739,7 @@ class SentinelHubView(discord.ui.View):
 
     @discord.ui.button(
         label="Stat Check", style=discord.ButtonStyle.success,
-        row=1, custom_id="sentinel:statcheck", emoji="📊",
+        row=1, custom_id="atlas:sentinel:statcheck", emoji="📊",
     )
     async def btn_statcheck(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2755,7 +2755,7 @@ class SentinelHubView(discord.ui.View):
 
     @discord.ui.button(
         label="Position Change", style=discord.ButtonStyle.primary,
-        row=2, custom_id="sentinel:poschange", emoji="🔄",
+        row=2, custom_id="atlas:sentinel:poschange", emoji="🔄",
     )
     async def btn_poschange(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2769,7 +2769,7 @@ class SentinelHubView(discord.ui.View):
 
     @discord.ui.button(
         label="Position Log", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="sentinel:poslog", emoji="📜",
+        row=2, custom_id="atlas:sentinel:poslog", emoji="📜",
     )
     async def btn_poslog(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:

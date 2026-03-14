@@ -33,5 +33,5 @@ aiosqlite>=0.19.0
 # Image processing (casino card renderer)
 Pillow>=10.0.0
 
-# HTML-to-image card renderer (optional — requires playwright install)
-# playwright>=1.40.0
+# HTML-to-image card renderer (requires: playwright install chromium)
+playwright>=1.40.0

@@ -53,6 +53,7 @@ build_member_db              →  tsl_members table (identity registry)
 | `tsl_history.db` | ~16MB | Game history, player stats, member registry, server config |
 | `sportsbook.db` | ~2.5MB | Balances, bets, casino economy, affinity scores |
 | `TSL_Archive.db` | ~1.2GB | Full Discord chat history archive (for Oracle/Codex queries) |
+| `discord_history.db` | — | Internal message/chat history, referenced in `data_manager.py:158` |
 
 ### ATLAS Module Map (Conceptual → Code)
 
