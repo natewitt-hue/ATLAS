@@ -425,13 +425,27 @@ ABILITY_TABLE: dict[str, dict] = {
 # SECTION 3: HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
+import math
+
+def _safe_int(val, default: int = 0) -> int:
+    """Convert a value to int, returning default for NaN/None/empty."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f):
+            return default
+        return int(f)
+    except (ValueError, TypeError):
+        return default
+
 def _normalize_dev(player: dict) -> str:
     """Return canonical dev string regardless of which field/format is present."""
     dev = player.get("dev", "")
     if dev in DEV_BUDGET:
         return dev
     dev_int = player.get("devTrait", 0)
-    return DEV_INT_TO_STR.get(int(dev_int), "Normal")
+    return DEV_INT_TO_STR.get(_safe_int(dev_int), "Normal")
 
 
 def calculate_true_archetype(player: dict) -> str:
@@ -543,7 +557,7 @@ def check_physics_floor(player: dict, ability_name: str) -> tuple[bool, str]:
             if actual < min_val:
                 return False, f"weight {actual}lbs < {min_val}lbs floor"
         else:
-            actual = int(player.get(key, 0) or 0)
+            actual = _safe_int(player.get(key, 0))
             if actual < min_val:
                 stat_label = key.replace("Rating", "").replace("Trait", "★")
                 return False, f"{stat_label}={actual} < {min_val}"
@@ -891,21 +905,21 @@ def get_qualified_abilities(player: dict) -> list[tuple[str, int]]:
 
         for key, min_val in thresholds.items():
             if key == "_edge_pmv_or_fmv":
-                pmv = int(player.get("powerMovesRating", 0) or 0)
-                fmv = int(player.get("finesseMovesRating", 0) or 0)
+                pmv = _safe_int(player.get("powerMovesRating", 0))
+                fmv = _safe_int(player.get("finesseMovesRating", 0))
                 best = max(pmv, fmv)
                 if best < min_val:
                     passes = False
                     break
                 surplus += best - min_val
             elif key == "weight":
-                actual = int(player.get("weight", 0) or 0)
+                actual = _safe_int(player.get("weight", 0))
                 if actual < min_val:
                     passes = False
                     break
                 surplus += actual - min_val
             else:
-                actual = int(player.get(key, 0) or 0)
+                actual = _safe_int(player.get(key, 0))
                 if actual < min_val:
                     passes = False
                     break
@@ -1192,19 +1206,19 @@ def check_position_change(player: dict, from_pos: str, to_pos: str) -> tuple[boo
     # ── Minimum thresholds ────────────────────────────────────────────────────
     for stat, min_val in thresholds.items():
         if stat == "heightInches":
-            actual = int(player.get("height", 0) or player.get("heightInches", 0) or 0)
+            actual = _safe_int(player.get("height") or player.get("heightInches", 0))
             if actual < min_val:
                 feet, inches = divmod(min_val, 12)
                 reasons.append(f"Height {actual}\" < {min_val}\" ({feet}'{inches}\" required)")
         else:
-            actual = int(player.get(stat, 0) or 0)
+            actual = _safe_int(player.get(stat, 0))
             if actual < min_val:
                 label = stat.replace("Rating", "").replace("Inches", "")
                 reasons.append(f"{label}={actual} < {min_val} required")
 
     # ── Maximum thresholds (upper caps) ───────────────────────────────────────
     for stat, max_val in max_thresholds.items():
-        actual = int(player.get(stat, 0) or 0)
+        actual = _safe_int(player.get(stat, 0))
         if actual > max_val:
             label = stat.replace("Rating", "")
             reasons.append(f"{label}={actual} > {max_val} cap (too high for {to_pos})")

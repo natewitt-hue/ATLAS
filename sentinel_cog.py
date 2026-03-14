@@ -115,8 +115,10 @@ def _load_state():
 
 def _save_complaint_state():
     try:
-        with open(STATE_PATH, "w") as f:
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(_complaints, f, indent=2)
+        os.replace(tmp, STATE_PATH)
     except Exception as e:
         print(f"[complaint_cog] State save error: {e}")
 
@@ -991,6 +993,8 @@ class ForceRequestAdminView(discord.ui.View):
             return await interaction.response.send_message("Already decided.", ephemeral=True)
         self._acted = True
 
+        await interaction.response.defer(ephemeral=True)
+
         try:
             await self.requester.send(
                 f"**Your force request #{self.request_id} was denied.**\n"
@@ -1005,7 +1009,7 @@ class ForceRequestAdminView(discord.ui.View):
             content=f"❌ **Denied by {interaction.user.display_name}**",
             view=self,
         )
-        await interaction.response.send_message("Request denied. Requester notified.", ephemeral=True)
+        await interaction.followup.send("Request denied. Requester notified.", ephemeral=True)
 
     # ── Button: Ask for more screenshots ─────────────────────────────────────
     @discord.ui.button(label="📎 Need More Info", style=discord.ButtonStyle.secondary, row=1)
@@ -1274,9 +1278,11 @@ except ImportError:
         try:
             to_save = dict(_state)
             to_save["orphan_teams"] = list(_state.get("orphan_teams", set()))
-            with open(_STATE_PATH, "w") as f:
+            tmp = _STATE_PATH + ".tmp"
+            with open(tmp, "w") as f:
                 import json as _json
                 _json.dump(to_save, f, indent=2)
+            os.replace(tmp, _STATE_PATH)
         except Exception as e:
             print(f"[positionchange_cog] State save error: {e}")
 

@@ -173,8 +173,10 @@ def _load_trade_state():
 
 def _save_trade_state():
     try:
-        with open(STATE_PATH, "w") as f:
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(_trades, f, indent=2)
+        os.replace(tmp, STATE_PATH)
     except Exception as e:
         print(f"[trade_center] State save error: {e}")
 
@@ -1640,8 +1642,10 @@ def _save_state():
     try:
         to_save = dict(_state)
         to_save["orphan_teams"] = list(_state["orphan_teams"])
-        with open(_STATE_PATH, "w") as f:
+        tmp = _STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(to_save, f, indent=2)
+        os.replace(tmp, _STATE_PATH)
     except Exception as e:
         print(f"[parity_cog] State save error: {e}")
 
