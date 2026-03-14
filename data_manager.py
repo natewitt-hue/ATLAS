@@ -667,6 +667,33 @@ def get_player_abilities() -> list:
     return _abilities_cache
 
 
+def find_trades_by_player(player_name: str) -> list[dict]:
+    """Search df_trades for any trade mentioning a player by name.
+
+    Returns list of dicts with keys: team1Name, team2Name, team1Sent, team2Sent,
+    seasonIndex, weekIndex.  Most recent trade first.
+    """
+    if df_trades.empty:
+        return []
+    name_lower = player_name.lower()
+    results = []
+    for _, row in df_trades.iterrows():
+        t1s = str(row.get("team1Sent", "")).lower()
+        t2s = str(row.get("team2Sent", "")).lower()
+        if name_lower in t1s or name_lower in t2s:
+            results.append({
+                "team1Name":   str(row.get("team1Name", "")),
+                "team2Name":   str(row.get("team2Name", "")),
+                "team1Sent":   str(row.get("team1Sent", "")),
+                "team2Sent":   str(row.get("team2Sent", "")),
+                "seasonIndex": row.get("seasonIndex", ""),
+                "weekIndex":   row.get("weekIndex", ""),
+            })
+    # Most recent first
+    results.sort(key=lambda t: (str(t["seasonIndex"]), str(t["weekIndex"])), reverse=True)
+    return results
+
+
 def get_team_record(team: str) -> str:
     """Return 'W-L-T' string for a team. '?-?-?' if not found."""
     if df_standings.empty:

@@ -113,9 +113,18 @@ class AnalyticsNav(discord.ui.View):
 
     @discord.ui.button(label="📋 Draft History", style=discord.ButtonStyle.secondary, row=1)
     async def btn_draft(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        embed = _build_draft_comparison_embed() # Keeping overview free
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed = discord.Embed(
+            title="📜 Draft Class Explorer",
+            description=(
+                "Select a **team** and **season** to view their draft class.\n\n"
+                "Each player shows their round, pick, OVR, dev trait, and grade.\n"
+                "Traded players are flagged with 🔄 — click their button for the full trade breakdown."
+            ),
+            color=C_GOLD,
+        )
+        embed.set_footer(text="ATLAS™ Oracle · Draft Class Explorer", icon_url=ATLAS_ICON_URL)
+        view = DraftClassView(self.bot_ref)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="📅 Recap", style=discord.ButtonStyle.secondary, row=1)
     async def btn_recap(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1344,6 +1353,232 @@ def _build_draft_season_embeds(season: int) -> list[discord.Embed]:
 
     e1.set_footer(text=f"Draft Class Analysis · Season {season} · ATLAS™ Oracle")
     return [e1]
+
+
+# Aliases referenced elsewhere in the file
+_build_draft_comparison_embed = _build_draft_overview_embed
+_build_draft_embed = _build_draft_season_embeds
+
+
+# ── Draft Class Drilldown View ────────────────────────────────────────────────
+
+def _build_team_draft_embed(team_abbr: str, team_nick: str, season: int) -> discord.Embed:
+    """Build rich embed showing a team's draft class with per-player fields."""
+    data = ig.get_team_draft_class(team_abbr, season)
+
+    if "error" in data:
+        return discord.Embed(
+            title=f"📜 {team_nick} Draft Class — Season {season}",
+            description=f"❌ {data['error']}",
+            color=C_RED,
+        )
+
+    players = data.get("players", [])
+    grade = data.get("team_grade", "N/A")
+    grade_score = data.get("team_grade_score", 0)
+    avg_ovr = data.get("avg_ovr", 0)
+    total = data.get("total_picks", 0)
+    color = _grade_color(grade) if grade != "N/A" else C_NEUTRAL
+
+    embed = discord.Embed(
+        title=f"📜 {team_nick} Draft Class — Season {season}",
+        description=(
+            f"**Grade: {grade}** ({grade_score:.2f}) | "
+            f"**{total} picks** | Avg OVR: **{avg_ovr}**"
+        ) if players else "No draft picks this season.",
+        color=color,
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
+    )
+
+    for p in players:
+        dev_e = _dev_emoji(p["dev"])
+        traded_tag = ""
+        if p["was_traded"]:
+            traded_tag = f"\n🔄 Now on **{p['current_team']}**"
+
+        embed.add_field(
+            name=f"{dev_e} {p['extendedName']} — {p['pos']} — {p['playerBestOvr']} OVR",
+            value=(
+                f"{p['roundLabel']} Pick {p['draftPick']} • "
+                f"Grade: **{p['grade']}** • {p['dev']}"
+                f"{traded_tag}"
+            ),
+            inline=False,
+        )
+
+    embed.set_footer(
+        text=f"Draft Class · {team_nick} · Season {season} · ATLAS™ Oracle",
+        icon_url=ATLAS_ICON_URL,
+    )
+    return embed
+
+
+def _build_trade_card_embed(player_name: str) -> discord.Embed:
+    """Build a trade card embed for a traded draft pick."""
+    trades = dm.find_trades_by_player(player_name)
+
+    if not trades:
+        return discord.Embed(
+            title=f"🔄 Trade Details — {player_name}",
+            description="Trade details unavailable. The trade may have occurred in a prior season.",
+            color=C_NEUTRAL,
+        )
+
+    # Show most recent trade
+    t = trades[0]
+    embed = discord.Embed(
+        title=f"🔄 Trade Breakdown — {player_name}",
+        color=C_GOLD,
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
+    )
+    embed.add_field(
+        name=f"📦 {t['team1Name']} sent:",
+        value=t["team1Sent"].strip() or "Unknown",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"📦 {t['team2Name']} sent:",
+        value=t["team2Sent"].strip() or "Unknown",
+        inline=False,
+    )
+    s = t.get("seasonIndex", "?")
+    w = t.get("weekIndex", "?")
+    try:
+        w = int(float(w)) + 1
+    except (ValueError, TypeError):
+        pass
+    embed.set_footer(text=f"Season {s} · Week {w} · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+    return embed
+
+
+class DraftTradeView(discord.ui.View):
+    """Dynamically generated buttons for traded players in a draft class."""
+
+    def __init__(self, traded_players: list[dict]):
+        super().__init__(timeout=120)
+        for p in traded_players[:5]:  # Discord max 5 buttons per row
+            btn = discord.ui.Button(
+                label=f"🔄 {p['extendedName'][:70]}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"draft_trade_{p['extendedName'][:80]}",
+            )
+            btn.callback = self._make_callback(p["extendedName"])
+            self.add_item(btn)
+
+    @staticmethod
+    def _make_callback(player_name: str):
+        async def callback(interaction: discord.Interaction):
+            embed = _build_trade_card_embed(player_name)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        return callback
+
+
+class DraftClassView(discord.ui.View):
+    """Team draft class drilldown with AFC/NFC team selects and season picker."""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=300)
+        self.bot_ref = bot
+        self._selected_team_abbr: str | None = None
+        self._selected_team_nick: str | None = None
+        self._selected_season: int = dm.CURRENT_SEASON
+
+        # Build team options
+        try:
+            import roster
+            all_teams = roster.get_all_teams()
+        except Exception:
+            all_teams = []
+
+        afc = [t for t in all_teams if t["conference"] == "AFC"]
+        nfc = [t for t in all_teams if t["conference"] == "NFC"]
+
+        # AFC select
+        afc_options = [
+            discord.SelectOption(label=f"{t['nickName']} ({t['abbrName']})", value=t["abbrName"])
+            for t in afc
+        ]
+        if afc_options:
+            afc_select = discord.ui.Select(
+                placeholder="AFC Team...",
+                options=afc_options,
+                row=0,
+            )
+            afc_select.callback = self._team_selected
+            self.add_item(afc_select)
+
+        # NFC select
+        nfc_options = [
+            discord.SelectOption(label=f"{t['nickName']} ({t['abbrName']})", value=t["abbrName"])
+            for t in nfc
+        ]
+        if nfc_options:
+            nfc_select = discord.ui.Select(
+                placeholder="NFC Team...",
+                options=nfc_options,
+                row=1,
+            )
+            nfc_select.callback = self._team_selected
+            self.add_item(nfc_select)
+
+        # Season select
+        season_options = [
+            discord.SelectOption(
+                label=f"Season {s}",
+                value=str(s),
+                default=(s == dm.CURRENT_SEASON),
+            )
+            for s in range(2, dm.CURRENT_SEASON + 1)
+        ]
+        if season_options:
+            season_select = discord.ui.Select(
+                placeholder="Season...",
+                options=season_options[:25],
+                row=2,
+            )
+            season_select.callback = self._season_selected
+            self.add_item(season_select)
+
+        # Store team lookup for nick resolution
+        self._team_lookup = {t["abbrName"]: t["nickName"] for t in all_teams}
+
+    async def _team_selected(self, interaction: discord.Interaction):
+        self._selected_team_abbr = interaction.data["values"][0]
+        self._selected_team_nick = self._team_lookup.get(self._selected_team_abbr, self._selected_team_abbr)
+        await self._send_draft(interaction)
+
+    async def _season_selected(self, interaction: discord.Interaction):
+        try:
+            self._selected_season = int(interaction.data["values"][0])
+        except (ValueError, TypeError):
+            pass
+
+        if self._selected_team_abbr:
+            await self._send_draft(interaction)
+        else:
+            await interaction.response.defer()
+
+    async def _send_draft(self, interaction: discord.Interaction):
+        if not self._selected_team_abbr:
+            await interaction.response.defer()
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = _build_team_draft_embed(
+            self._selected_team_abbr,
+            self._selected_team_nick or self._selected_team_abbr,
+            self._selected_season,
+        )
+
+        # Check for traded players — add trade buttons
+        data = ig.get_team_draft_class(self._selected_team_abbr, self._selected_season)
+        traded = [p for p in data.get("players", []) if p.get("was_traded")]
+
+        if traded:
+            trade_view = DraftTradeView(traded)
+            await interaction.followup.send(embed=embed, view=trade_view, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ── Player Leaders ────────────────────────────────────────────────────────────

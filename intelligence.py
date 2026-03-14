@@ -233,6 +233,89 @@ def get_draft_class(season: int) -> dict:
     }
 
 
+def get_team_draft_class(team_abbr: str, season: int) -> dict:
+    """
+    Draft class breakdown for a single team in a given season.
+    Returns per-player details with individual grades and trade status.
+    """
+    if season < 2 or season > dm.CURRENT_SEASON:
+        return {"error": f"No draft data for season {season}. TSL drafts started season 2."}
+
+    team_abbr_upper = team_abbr.upper()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("""
+            SELECT extendedName, drafting_team, draftRound, draftPick,
+                   dev, playerBestOvr, pos, was_traded, current_team
+            FROM player_draft_map
+            WHERE CAST(drafting_season AS INTEGER) = ?
+              AND UPPER(drafting_team) LIKE ?
+        """, (season, f"%{team_abbr_upper}%")).fetchall()
+        conn.close()
+    except Exception as e:
+        return {"error": f"DB unavailable: {e}. Run build_tsl_db.py first."}
+
+    target_year = SEASON_TO_YEAR.get(season, season + _YEAR_BASE)
+
+    if not rows:
+        return {
+            "type": "team_draft_class",
+            "team_abbr": team_abbr_upper,
+            "season": season,
+            "year": target_year,
+            "players": [],
+            "team_grade": "N/A",
+            "team_grade_score": 0,
+            "avg_ovr": 0,
+            "total_picks": 0,
+        }
+
+    players = []
+    grade_scores = []
+    for row in rows:
+        name, draft_team, rd, pick, dev, ovr, pos, traded, cur_team = row
+        rd = int(float(rd or 0))
+        pick = int(float(pick or 0))
+        ovr = int(float(ovr or 0))
+        dev_score = DEV_SCORE.get(dev or "", 1)
+        ovr_norm = max(ovr - 60, 0) / 40
+        grade_score = dev_score * 0.6 + ovr_norm * 0.4
+        grade_scores.append(grade_score)
+
+        players.append({
+            "extendedName": name,
+            "pos": pos or "?",
+            "playerBestOvr": ovr,
+            "dev": dev or "Normal",
+            "draftRound": rd,
+            "roundLabel": ROUND_LABELS.get(rd, "UDFA"),
+            "draftPick": pick,
+            "gradeScore": round(grade_score, 2),
+            "grade": _letter_grade(grade_score),
+            "was_traded": int(traded or 0),
+            "current_team": cur_team or "",
+            "drafting_team": draft_team or "",
+        })
+
+    # Sort by round then pick
+    players.sort(key=lambda p: (p["draftRound"], p["draftPick"]))
+
+    avg_grade = sum(grade_scores) / len(grade_scores) if grade_scores else 0
+    avg_ovr = sum(p["playerBestOvr"] for p in players) / len(players) if players else 0
+
+    return {
+        "type": "team_draft_class",
+        "team_abbr": team_abbr_upper,
+        "season": season,
+        "year": target_year,
+        "players": players,
+        "team_grade": _letter_grade(avg_grade),
+        "team_grade_score": round(avg_grade, 2),
+        "avg_ovr": round(avg_ovr, 1),
+        "total_picks": len(players),
+    }
+
+
 def compare_draft_classes() -> dict:
     """Compare all TSL draft classes (seasons 2-current) side by side."""
     classes = []
