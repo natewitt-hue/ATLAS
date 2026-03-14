@@ -41,7 +41,7 @@ import analysis as an
 import data_manager as dm
 import intelligence as ig
 
-ADMIN_USER_IDS = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+from permissions import ADMIN_USER_IDS
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 
@@ -448,28 +448,29 @@ def _franchise_punching_bag(tn: str) -> Optional[dict]:
 
 def _franchise_signature_moments(tn: str) -> tuple[Optional[dict], Optional[dict]]:
     """(biggest_win, worst_loss) all-time."""
-    big_w = _safe_sql(f"""
+    pat = f"%{tn}%"
+    big_w = _safe_sql("""
         SELECT homeTeamName,awayTeamName,homeScore,awayScore,
                ABS(CAST(homeScore AS INT)-CAST(awayScore AS INT)) as margin,
                seasonIndex,weekIndex
         FROM games
-        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
           AND status IN ('2','3') AND stageIndex='1'
-          AND ((homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)>CAST(homeScore AS INT)))
+          AND ((homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT)))
         ORDER BY margin DESC LIMIT 1
-    """)
-    worst_l = _safe_sql(f"""
+    """, (pat, pat, pat, pat))
+    worst_l = _safe_sql("""
         SELECT homeTeamName,awayTeamName,homeScore,awayScore,
                ABS(CAST(homeScore AS INT)-CAST(awayScore AS INT)) as margin,
                seasonIndex,weekIndex
         FROM games
-        WHERE (homeTeamName LIKE '%{tn}%' OR awayTeamName LIKE '%{tn}%')
+        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
           AND status IN ('2','3') AND stageIndex='1'
-          AND ((homeTeamName LIKE '%{tn}%' AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE '%{tn}%' AND CAST(awayScore AS INT)<CAST(homeScore AS INT)))
+          AND ((homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
+            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT)))
         ORDER BY margin DESC LIMIT 1
-    """)
+    """, (pat, pat, pat, pat))
     return (big_w[0] if big_w else None), (worst_l[0] if worst_l else None)
 
 
@@ -2586,19 +2587,19 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
             await interaction.followup.send(f"❓ Couldn't find `{self.owner2.value}`. Check spelling.", ephemeral=True)
             return
 
-        rows, err = run_sql(f"""
+        rows, err = run_sql("""
             SELECT
                 seasonIndex,
-                SUM(CASE WHEN winner_user='{u1}' THEN 1 ELSE 0 END) AS u1_wins,
-                SUM(CASE WHEN winner_user='{u2}' THEN 1 ELSE 0 END) AS u2_wins,
+                SUM(CASE WHEN winner_user=? THEN 1 ELSE 0 END) AS u1_wins,
+                SUM(CASE WHEN winner_user=? THEN 1 ELSE 0 END) AS u2_wins,
                 COUNT(*) AS games_played
             FROM games
             WHERE status IN ('2','3') AND stageIndex='1'
-              AND ((homeUser='{u1}' AND awayUser='{u2}')
-                OR (homeUser='{u2}' AND awayUser='{u1}'))
+              AND ((homeUser=? AND awayUser=?)
+                OR (homeUser=? AND awayUser=?))
             GROUP BY seasonIndex
             ORDER BY CAST(seasonIndex AS INTEGER)
-        """)
+        """, (u1, u2, u1, u2, u2, u1))
 
         embed = discord.Embed(
             title=f"⚔️ Rivalry Report: {u1} vs {u2}",
@@ -3342,13 +3343,13 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
             await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
             return
 
-        rows, _ = run_sql(f"""
+        rows, _ = run_sql("""
             SELECT winner_user, loser_user, winner_team, loser_team,
                    homeScore, awayScore, weekIndex
             FROM games
-            WHERE seasonIndex='{season_num}' AND stageIndex='1' AND status IN ('2','3')
+            WHERE seasonIndex=? AND stageIndex='1' AND status IN ('2','3')
             ORDER BY CAST(weekIndex AS INTEGER)
-        """)
+        """, (str(season_num),))
 
         wins: Counter = Counter()
         losses: Counter = Counter()

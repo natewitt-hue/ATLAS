@@ -506,10 +506,10 @@ def get_clutch_records(margin: int = 7) -> dict:
     games[home_score_col] = pd.to_numeric(games[home_score_col], errors="coerce").fillna(0)
     games[away_score_col] = pd.to_numeric(games[away_score_col], errors="coerce").fillna(0)
 
-    # Final games only — status==3 if available, otherwise score>0 fallback
+    # Completed games — status IN (2,3) if available, otherwise score>0 fallback
     if status_col:
         games[status_col] = pd.to_numeric(games[status_col], errors="coerce").fillna(0).astype(int)
-        played = games[games[status_col] == 3].copy()
+        played = games[games[status_col].isin([2, 3])].copy()
     else:
         played = games[
             (games[home_score_col] > 0) | (games[away_score_col] > 0)
@@ -816,17 +816,36 @@ class PaginatedResult:
         return f"Page {self.current + 1} / {self.total}"
 
 
-_paginated_messages: dict[int, PaginatedResult] = {}
+import time as _time
+
+_paginated_messages: dict[int, tuple[PaginatedResult, float]] = {}
+_PAGINATION_TTL = 1800  # 30 minutes
+
+
+def _prune_stale_pages():
+    """Remove pagination entries older than TTL."""
+    now = _time.monotonic()
+    stale = [k for k, (_, ts) in _paginated_messages.items() if now - ts > _PAGINATION_TTL]
+    for k in stale:
+        del _paginated_messages[k]
 
 
 def register_pagination(message_id: int, pages: list, title: str = "") -> PaginatedResult:
+    _prune_stale_pages()
     pr = PaginatedResult(pages, title)
-    _paginated_messages[message_id] = pr
+    _paginated_messages[message_id] = (pr, _time.monotonic())
     return pr
 
 
 def get_pagination(message_id: int) -> PaginatedResult | None:
-    return _paginated_messages.get(message_id)
+    entry = _paginated_messages.get(message_id)
+    if entry is None:
+        return None
+    pr, ts = entry
+    if _time.monotonic() - ts > _PAGINATION_TTL:
+        del _paginated_messages[message_id]
+        return None
+    return pr
 
 
 def cleanup_pagination(message_id: int):

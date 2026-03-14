@@ -8,9 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-# Read lazily so load_dotenv() in bot.py has already run before this is checked
-def _admin_ids() -> list[int]:
-    return [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+from permissions import ADMIN_USER_IDS
 
 # ── Poll persistence ──────────────────────────────────────────────────────────
 _POLLS_PATH = os.path.join(os.path.dirname(__file__), "polls_state.json")

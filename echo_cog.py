@@ -25,10 +25,8 @@ class EchoCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._admin_ids: list[int] = []
-
-        raw = os.getenv("ADMIN_USER_IDS", "")
-        self._admin_ids = [int(x) for x in raw.split(",") if x.strip()]
+        from permissions import ADMIN_USER_IDS
+        self._admin_ids = ADMIN_USER_IDS
 
     @commands.Cog.listener()
     async def on_ready(self):

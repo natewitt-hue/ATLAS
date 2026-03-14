@@ -59,7 +59,7 @@ except ImportError:
     _AE_AVAILABLE = False
 
 # ── Shared config ─────────────────────────────────────────────────────────────
-ADMIN_USER_IDS = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+from permissions import ADMIN_USER_IDS
 ATLAS_ICON_URL = "https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
 
 try:

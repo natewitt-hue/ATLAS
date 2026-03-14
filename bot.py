@@ -170,7 +170,7 @@ ATLAS_BLUE      = discord.Color.from_rgb(30,  144, 255)
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
-ADMIN_USER_IDS   = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+from permissions import ADMIN_USER_IDS
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None

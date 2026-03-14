@@ -804,9 +804,9 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
         if "stageIndex" in df.columns:
             df = df[df["stageIndex"] == CURRENT_STAGE]
 
-        # Only final games (status == 3). Status 2 = in-progress, scores unreliable.
+        # Completed games (status 2 or 3). Both have final scores.
         if "status" in df.columns:
-            df = df[df["status"] == 3]
+            df = df[df["status"].isin([2, 3])]
 
         results = []
         for _, g in df.iterrows():

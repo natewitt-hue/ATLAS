@@ -92,6 +92,8 @@ async def post_to_ledger(
 
 
 def _is_admin(interaction: discord.Interaction) -> bool:
+    if not interaction.guild:
+        return False
     return (
         interaction.user.guild_permissions.administrator
         or any(r.name == ADMIN_ROLE_NAME for r in interaction.user.roles)

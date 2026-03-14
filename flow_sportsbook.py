@@ -70,7 +70,7 @@ TSL_RED           = 0xC0392B
 TSL_GREEN         = 0x27AE60
 
 ADMIN_ROLE_NAME   = "Commissioner"
-ADMIN_USER_IDS    = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
+from permissions import ADMIN_USER_IDS
 
 STARTING_BALANCE  = 1000
 MIN_BET           = 10
@@ -356,7 +356,7 @@ def _compute_elo_ratings() -> dict:
                    CAST(seasonIndex AS INTEGER) AS season,
                    CAST(weekIndex AS INTEGER) AS week
             FROM games
-            WHERE CAST(status AS TEXT) = '3'
+            WHERE CAST(status AS TEXT) IN ('2', '3')
               AND homeUser IS NOT NULL AND homeUser != '' AND homeUser != 'CPU'
               AND awayUser IS NOT NULL AND awayUser != '' AND awayUser != 'CPU'
               AND homeScore IS NOT NULL AND CAST(homeScore AS INTEGER) >= 0
