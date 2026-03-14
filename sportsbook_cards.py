@@ -22,7 +22,7 @@ Integration:
 import io
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import discord
@@ -63,7 +63,7 @@ def _get_season_start_balance(user_id: int) -> int:
 def _get_weekly_delta(user_id: int) -> int:
     """Calculate balance change over the past 7 days from snapshots."""
     with sqlite3.connect(DB_PATH) as con:
-        week_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
         row = con.execute(
             """SELECT balance FROM balance_snapshots
                WHERE discord_id = ? AND snapshot_date <= ?
@@ -78,7 +78,7 @@ def _get_weekly_delta(user_id: int) -> int:
 def _get_sparkline_data(user_id: int, days: int = 7) -> list[int]:
     """Get balance snapshots for sparkline rendering."""
     with sqlite3.connect(DB_PATH) as con:
-        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
         rows = con.execute(
             """SELECT balance FROM balance_snapshots
                WHERE discord_id = ? AND snapshot_date >= ?

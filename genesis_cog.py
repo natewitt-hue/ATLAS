@@ -432,7 +432,7 @@ def _build_trade_card(
     embed = discord.Embed(
         title=f"💱 Trade Proposal — {s_emoji} {s_label}",
         color=color,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     # ── Side A ────────────────────────────────────────────────────────────────
@@ -704,7 +704,7 @@ async def _evaluate_and_post(
         "delta_pct":     result.delta_pct,
         "band":          result.band,
         "status":        "pending",
-        "submitted_at":  datetime.datetime.utcnow().isoformat(),
+        "submitted_at":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "resolved_at":   None,
         "resolved_by":   None,
     }
@@ -1322,7 +1322,7 @@ class TradeActionView(discord.ui.View):
         await interaction.response.defer()
 
         trade["status"]      = new_status
-        trade["resolved_at"] = datetime.datetime.utcnow().isoformat()
+        trade["resolved_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         trade["resolved_by"] = interaction.user.id
         _save_trade_state()
 
@@ -1980,7 +1980,7 @@ class ParityCog(commands.Cog):
         """Log a cap-clear attempt to the audit trail."""
         import datetime
         _state["cap_clear_log"].append({
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "admin_id":  admin_id,
             "team":      team,
             "action":    action,
@@ -2004,7 +2004,7 @@ def _build_genesis_hub_embed() -> discord.Embed:
             "Trades, dev traits, and franchise tools — **private to you**.\u200b"
         ),
         color=discord.Color.from_rgb(201, 150, 42),
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
     embed.add_field(
         name="Navigation",

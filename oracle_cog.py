@@ -59,6 +59,7 @@ def _get_user_tier(bot: commands.Bot, user_id: int) -> str:
     support_cog = bot.get_cog("SupportCog")
     if support_cog and hasattr(support_cog, "get_user_tier"):
         return support_cog.get_user_tier(user_id)
+    # SupportCog not loaded — default to Elite so nothing breaks
     return "Elite"
 
 
@@ -172,6 +173,7 @@ try:
     _HISTORY_OK = True
 except ImportError:
     _HISTORY_OK = False
+    print("[oracle_cog] codex_cog not available — /ask history queries disabled")
 
 # Optional affinity module
 try:
@@ -680,7 +682,7 @@ def _build_hub_embed() -> discord.Embed:
             "Drill-downs are **private to you** — no channel flood.\n\u200b"
         ),
         color=C_GOLD,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     # ── Watercooler snapshots ─────────────────────────────────────────────
@@ -749,7 +751,7 @@ def _build_hotcold_league(top_n: int = 5) -> tuple[discord.Embed, list[str]]:
         title="🔥🥶 TSL Hot / Cold Report",
         description=f"League-wide performance trends — {_season_label()}",
         color=C_HOT,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     hot_players, cold_players = [], []
@@ -819,7 +821,7 @@ def _build_hotcold_single(data: dict) -> discord.Embed:
         title=f"{icon} {name} — {trend}",
         description=f"**{pos}** · {team} · Last {n} vs Season Avg",
         color=color,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     STAT_LABELS = {
@@ -895,7 +897,7 @@ def _build_clutch_embed(margin: int = 7, highlight_team: str = "") -> discord.Em
         title=f"⚡ TSL Clutch Rankings — Games Decided by ≤{margin} Points",
         description=desc,
         color=C_GOLD,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     ranked = sorted(
@@ -958,7 +960,7 @@ def _build_power_embed() -> discord.Embed:
     embed = discord.Embed(
         title=f"📊 TSL Power Rankings — {_season_label()}",
         color=C_GOLD,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     top10, rest = rankings[:10], rankings[10:]
@@ -992,7 +994,7 @@ def _build_standings_embed(caller_team: str = "") -> discord.Embed:
     embed = discord.Embed(
         title=f"🏆 TSL Standings — {_season_label()}",
         color=C_GOLD,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     divs: dict[str, list] = {}
@@ -1033,7 +1035,7 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
     embed = discord.Embed(
         title=f"👤 {nickname}",
         color=C_PURPLE,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
     embed.set_thumbnail(url=target.display_avatar.url)
 
@@ -1183,7 +1185,7 @@ def _build_recap_embed(week: int | None = None) -> discord.Embed:
         title=f"📅 TSL Week {actual_week} Recap",
         description=f"*{len(games)} games played · {_season_label()}*",
         color=C_BLUE,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     score_lines = []
@@ -1219,7 +1221,7 @@ def _build_draft_overview_embed() -> discord.Embed:
     embed = discord.Embed(
         title="📜 TSL Draft Class History — All Seasons",
         color=C_GOLD,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     if not classes:
@@ -1270,7 +1272,7 @@ def _build_draft_season_embeds(season: int) -> list[discord.Embed]:
             f"*{_season_label()}*"
         ),
         color=color,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     xf = dev_counts.get("Superstar X-Factor", 0)
@@ -1445,7 +1447,7 @@ def _build_player_leaders_embed(
             title=f"🎯 {position} — {stat_label} Leaders",
             description=f"Top 10 · Season totals · {_season_label()}",
             color=C_BLUE,
-            timestamp=datetime.datetime.utcnow(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
 
         lines, player_names = [], []
@@ -1500,7 +1502,7 @@ async def _build_team_card_snapshot(
     embed = discord.Embed(
         title=f"🏈  {team_name}{'  ◄  Your Team' if is_yours else ''}",
         color=_team_color(team_name),
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
     logo = _team_logo(team_name)
     if logo:
@@ -1764,7 +1766,7 @@ def _build_team_card_history(team_name: str) -> discord.Embed:
     embed = discord.Embed(
         title=f"📖  {team_name} — Franchise History",
         color=_team_color(team_name),
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
     logo = _team_logo(team_name)
     if logo:
@@ -1847,7 +1849,7 @@ def _build_team_card_scouting(team_name: str) -> discord.Embed:
         title=f"🔬  {team_name} — Scouting Report",
         description="*How to beat this team. Don't share this with them.*",
         color=_team_color(team_name),
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
     logo = _team_logo(team_name)
     if logo:
@@ -1981,7 +1983,7 @@ async def _build_team_matchup_embed(team_a: str, team_b: str) -> discord.Embed:
     embed = discord.Embed(
         title=f"⚔️  {team_a}  vs  {team_b}",
         color=_team_color(team_a),
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     # ── All-time H2H ──────────────────────────────────────────────────────────
@@ -2085,7 +2087,7 @@ def _build_alltime_embed() -> discord.Embed:
         title="🏛️ TSL All-Time Records",
         description="6 seasons of history — regular season",
         color=C_GOLD,
-        timestamp=datetime.datetime.utcnow(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
     if not _HISTORY_OK:
@@ -2353,7 +2355,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
         embed = discord.Embed(
             title=f"⚔️ Rivalry Report: {u1} vs {u2}",
             color=C_RED,
-            timestamp=datetime.datetime.utcnow(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
 
         if err or not rows or all(int(r.get("games_played", 0)) == 0 for r in rows):
@@ -2530,7 +2532,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                 title="🔬 ATLAS Intelligence — TSL League",
                 description=_truncate_for_embed(answer),
                 color=C_DARK,
-                timestamp=datetime.datetime.utcnow(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             footer_parts = [f"🔍 {len(rows)} records analyzed"]
             if alias_map:
@@ -2605,7 +2607,7 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
                 title="🌐 ATLAS Intelligence — Open Intel",
                 description=_truncate_for_embed(answer),
                 color=C_BLUE,
-                timestamp=datetime.datetime.utcnow(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             embed.set_footer(
                 text="Open Intel mode · Web search enabled · ATLAS™ Oracle",
@@ -2674,7 +2676,7 @@ class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"
                 title="🏈 ATLAS Intelligence — Sports Intel",
                 description=_truncate_for_embed(answer),
                 color=ATLAS_GOLD,
-                timestamp=datetime.datetime.utcnow(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             embed.set_footer(
                 text="Sports Intel mode · Web search enabled · ATLAS™ Oracle",
@@ -2800,7 +2802,7 @@ RESPONSE GUIDELINES:
                 title="🎯 ATLAS Intelligence — Player Scout",
                 description=_truncate_for_embed(answer),
                 color=discord.Color.from_rgb(30, 144, 255),
-                timestamp=datetime.datetime.utcnow(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             embed.set_footer(
                 text=f"🔍 {len(rows)} players analyzed · ATLAS™ Oracle · Scout Mode",
@@ -2897,7 +2899,7 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
                 title="🧠 ATLAS Intelligence — Strategy Room",
                 description=_truncate_for_embed(answer),
                 color=discord.Color.from_rgb(34, 197, 94),
-                timestamp=datetime.datetime.utcnow(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             embed.set_footer(
                 text="Strategy Room · TSL context + web search · ATLAS™ Oracle",
@@ -3114,7 +3116,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
         embed = discord.Embed(
             title=f"📅 TSL Season {season_num} Recap",
             color=ATLAS_GOLD,
-            timestamp=datetime.datetime.utcnow(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
 
         if not rows:

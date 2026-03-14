@@ -212,7 +212,7 @@ def _build_ruling_embed(c: dict) -> discord.Embed:
     cat_key         = c["category"]
     emoji, label, _ = CATEGORIES.get(cat_key, ("📝", cat_key, ""))
 
-    embed = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
+    embed = discord.Embed(title=title, color=color, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="📤 Complainant", value=f"<@{c['accuser_id']}>", inline=True)
     embed.add_field(name="📥 Accused",     value=f"<@{c['accused_id']}>", inline=True)
     embed.add_field(name="📋 Category",    value=f"{emoji} {label}",      inline=True)
@@ -293,7 +293,7 @@ class ComplaintModal(discord.ui.Modal):
             "accused_id":   accused.id,
             "explanation":  self.explanation_input.value.strip(),
             "extra_urls":   extra_urls,
-            "submitted_at": datetime.datetime.utcnow().isoformat(),
+            "submitted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "verdict":      "pending",
             "penalty":      None,
             "ruling_notes": "",
@@ -1648,7 +1648,7 @@ def _make_record(
         "log_id":        log_id or str(uuid.uuid4())[:8].upper(),
         "season":        season or dm.CURRENT_SEASON,
         "week":          week   or dm.CURRENT_WEEK,
-        "timestamp":     dt.utcnow().isoformat(),
+        "timestamp":     dt.now(timezone.utc).isoformat(),
         "player_name":   name,
         "roster_id":     player.get("rosterId"),
         "team":          team,
@@ -2001,7 +2001,7 @@ class PositionChangeCog(commands.Cog):
 
         record["status"]      = "approved"
         record["approved_by"] = str(interaction.user)
-        record["approved_at"] = dt.utcnow().isoformat()
+        record["approved_at"] = dt.now(timezone.utc).isoformat()
         _save_state()
 
         await interaction.response.send_message(
@@ -2031,7 +2031,7 @@ class PositionChangeCog(commands.Cog):
 
         record["status"]     = "denied"
         record["denied_by"]  = str(interaction.user)
-        record["denied_at"]  = dt.utcnow().isoformat()
+        record["denied_at"]  = dt.now(timezone.utc).isoformat()
         record["denial_reason"] = reason
         _save_state()
 

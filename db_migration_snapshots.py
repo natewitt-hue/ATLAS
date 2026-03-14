@@ -21,7 +21,7 @@ Integration into bot.py:
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
@@ -51,7 +51,7 @@ def take_daily_snapshot():
     Snapshot every active user's balance for today.
     Uses INSERT OR REPLACE so it's safe to call multiple times per day.
     """
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with sqlite3.connect(DB_PATH) as con:
         users = con.execute("SELECT discord_id, balance FROM users_table").fetchall()
         for discord_id, balance in users:
