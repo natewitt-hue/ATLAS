@@ -438,6 +438,20 @@ async def on_ready():
     print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
     print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
 
+    # Discover guild members — log all, flag unknowns, update display names
+    for guild in bot.guilds:
+        human_members = [m for m in guild.members if not m.bot]
+        print(f"\n📋 Guild: {guild.name} — {len(human_members)} human members")
+        for m in sorted(human_members, key=lambda m: m.display_name.lower()):
+            print(f"   {m.display_name:<25} @{m.name:<25} ID: {m.id}")
+
+        member_list = [
+            {"discord_id": m.id, "username": m.name, "display_name": m.display_name}
+            for m in human_members
+        ]
+        result = build_member_db.discover_guild_members(member_list)
+        print(f"   Registry: {result['known']} known, {result['new']} new, {result['updated']} display names updated")
+
     # Restore persistent hub views from ui_state table
     await bot.ui_state.restore_all_views()
 

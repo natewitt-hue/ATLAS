@@ -1352,6 +1352,54 @@ def upsert_member(member: dict, db_path: str = DB_PATH):
     conn.close()
 
 
+def discover_guild_members(members: list[dict], db_path: str = DB_PATH) -> dict:
+    """Compare live guild members against tsl_members and log unknowns.
+
+    Args:
+        members: list of dicts with keys: discord_id (int), username (str),
+                 display_name (str)
+
+    Returns:
+        {"known": int, "new": int, "updated": int, "new_members": list[dict]}
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    known_ids = {
+        row["discord_id"]
+        for row in conn.execute("SELECT discord_id FROM tsl_members WHERE discord_id IS NOT NULL").fetchall()
+    }
+
+    new_members = []
+    updated = 0
+    known = 0
+
+    for m in members:
+        did = str(m["discord_id"])
+        if did in known_ids:
+            known += 1
+            # Update display_name and discord_username to stay current
+            conn.execute("""
+                UPDATE tsl_members
+                SET display_name = ?, discord_username = ?
+                WHERE discord_id = ?
+            """, (m["display_name"], m["username"], did))
+            updated += 1
+        else:
+            new_members.append(m)
+
+    conn.commit()
+    conn.close()
+
+    if new_members:
+        print(f"\n⚠️  {len(new_members)} guild member(s) NOT in tsl_members registry:")
+        for m in new_members:
+            print(f"   {m['display_name']:<25} @{m['username']:<25} ID: {m['discord_id']}")
+        print("   → Use /boss assign or add to MEMBERS list in build_member_db.py\n")
+
+    return {"known": known, "new": len(new_members), "updated": updated, "new_members": new_members}
+
+
 if __name__ == "__main__":
     print(f"Building tsl_members table in: {DB_PATH}")
     result = build_member_table()

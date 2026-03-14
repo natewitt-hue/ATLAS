@@ -102,7 +102,7 @@ def _display_name(p: dict) -> str:
 
 
 def _player_label(p: dict) -> str:
-    """Short label for Select option: 'J. Jefferson WR · OVR 96 · Vikes'"""
+    """Short label for Select option: 'J. Jefferson WR · OVR 96 · Vikings'"""
     name = _display_name(p)
     # Abbreviate first name
     parts = name.split()

@@ -124,6 +124,28 @@ df_all_games  = pd.DataFrame()   # full season schedule with scores
 DATA_DIR = ""
 BASE_URL = API_BASE
 
+# ── Normalize API nicknames → official NFL team names ─────────────────────────
+_NICK_NORMALIZE: dict[str, str] = {
+    "Vikes":   "Vikings",
+    "G-Men":   "Giants",
+    "GMen":    "Giants",
+    "Phins":   "Dolphins",
+    "Bolts":   "Chargers",
+    "Pats":    "Patriots",
+    "Pack":    "Packers",
+    "Niners":  "49ers",
+    "Boys":    "Cowboys",
+    "Skins":   "Commanders",
+    "Nats":    "Commanders",
+    "Jags":    "Jaguars",
+    "Cards":   "Cardinals",
+    "Bucs":    "Buccaneers",
+}
+
+def _normalize_nick(name: str) -> str:
+    """Map informal API nicknames to official NFL team names."""
+    return _NICK_NORMALIZE.get(name, name)
+
 # ── Internal lookup table ─────────────────────────────────────────────────────
 _team_id_to_name: dict[int, str] = {}   # teamId (int) → displayName (str)
 _team_id_to_abbr: dict[int, str] = {}   # teamId (int) → abbrName (str)
@@ -374,8 +396,11 @@ def load_all() -> None:
     for t in teams_raw:
         tid = int(t.get("id", 0))
         if tid:
-            _l_name_map[tid] = t.get("nickName") or t.get("displayName", "")
+            _l_name_map[tid] = _normalize_nick(t.get("nickName") or t.get("displayName", ""))
             _l_abbr_map[tid] = t.get("abbrName", "")
+        # Normalize nickName in raw data so df_teams is also clean
+        if "nickName" in t:
+            t["nickName"] = _normalize_nick(t["nickName"])
     _l_df_teams = _df(teams_raw)
 
     # Local lookup helpers (use the local map, not the global one)
@@ -391,7 +416,10 @@ def load_all() -> None:
     for s in standings_raw:
         tid = int(s.get("teamId", 0))
         if tid and tid not in _l_name_map:
-            _l_name_map[tid] = s.get("teamName", "")
+            _l_name_map[tid] = _normalize_nick(s.get("teamName", ""))
+        # Also normalize teamName in the raw standings data
+        if "teamName" in s:
+            s["teamName"] = _normalize_nick(s["teamName"])
     _l_df_standings = _df(standings_raw)
 
     # ── Games ──────────────────────────────────────────────────────────────
@@ -432,7 +460,7 @@ def load_all() -> None:
     power_raw = raw_power_resp.get("data", []) if isinstance(raw_power_resp, dict) else (raw_power_resp or [])
     for p in power_raw:
         t = p.pop("team", {}) or {}
-        p["teamName"]    = t.get("nickName", t.get("displayName", ""))
+        p["teamName"]    = _normalize_nick(t.get("nickName", t.get("displayName", "")))
         p["abbrName"]    = t.get("abbrName", "")
         p["userName"]    = t.get("userName", "")
         p["ovrRating"]   = t.get("ovrRating", 0)
@@ -465,7 +493,51 @@ def load_all() -> None:
     for p in sack_stats: p["statType"] = "sacks"
     for p in int_stats:  p["statType"] = "interceptions"
     for p in tck_stats:  p["statType"] = "tackles"
-    _l_df_defense = _df(sack_stats + int_stats + tck_stats)
+
+    # Load full defensive stats from CSV export (has defTotalTackles, defFumRec, etc.)
+    print("  → defensive export (full stats)...")
+    def_export = _fetch_csv("/export/defensive")
+    if def_export:
+        # Normalize team names in defensive export
+        for d in def_export:
+            if "teamName" not in d:
+                tid = d.get("teamId")
+                if tid:
+                    try:
+                        d["teamName"] = _l_name_map.get(int(tid), "")
+                    except (ValueError, TypeError):
+                        pass
+            elif d.get("teamName"):
+                d["teamName"] = _normalize_nick(d["teamName"])
+
+        _l_df_def_full = _df(def_export)
+
+        # Filter to current season + regular season, then aggregate per player
+        _l_df_def_full["seasonIndex"] = pd.to_numeric(_l_df_def_full.get("seasonIndex"), errors="coerce")
+        _l_df_def_full["stageIndex"]  = pd.to_numeric(_l_df_def_full.get("stageIndex"),  errors="coerce")
+        cur = _l_df_def_full[
+            (_l_df_def_full["seasonIndex"] == _l_season) &
+            (_l_df_def_full["stageIndex"] == REGULAR_STAGE)
+        ].copy()
+
+        # Aggregate per-game rows into season totals per player
+        _def_num_cols = [c for c in cur.columns if c.startswith("def") and c != "defPts"]
+        for c in _def_num_cols:
+            cur[c] = pd.to_numeric(cur[c], errors="coerce").fillna(0)
+
+        # Keep identity columns + sum stat columns
+        id_cols = ["rosterId", "fullName", "extendedName", "teamName", "pos"]
+        id_cols = [c for c in id_cols if c in cur.columns]
+        if id_cols and _def_num_cols:
+            _l_df_defense = cur.groupby(id_cols, as_index=False)[_def_num_cols].sum()
+        else:
+            _l_df_defense = cur
+
+        print(f"     {len(def_export)} raw rows → {len(_l_df_defense)} player season totals")
+    else:
+        # Fallback to stat leader endpoints (limited columns)
+        print("     ⚠️  /export/defensive empty — falling back to stat leader endpoints")
+        _l_df_defense = _df(sack_stats + int_stats + tck_stats)
 
     _l_df_players = _df(pass_stats + rush_stats + rec_stats + sack_stats + int_stats + tck_stats)
 
@@ -748,8 +820,8 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
         away_obj = g.get("awayTeam") or {}
         results.append({
             "week":       target,
-            "home":       g.get("homeTeamName") or home_obj.get("nickName") or home_obj.get("displayName") or team_name(g.get("homeTeamId", 0)),
-            "away":       g.get("awayTeamName") or away_obj.get("nickName") or away_obj.get("displayName") or team_name(g.get("awayTeamId", 0)),
+            "home":       _normalize_nick(g.get("homeTeamName") or home_obj.get("nickName") or home_obj.get("displayName") or team_name(g.get("homeTeamId", 0))),
+            "away":       _normalize_nick(g.get("awayTeamName") or away_obj.get("nickName") or away_obj.get("displayName") or team_name(g.get("awayTeamId", 0))),
             "home_score": hs,
             "away_score": aws,
             "homeUser":   str(g.get("homeUser", "")),

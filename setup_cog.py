@@ -120,6 +120,7 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
 
 
 def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
+    _ensure_table()
     with sqlite3.connect(DB_PATH) as con:
         con.execute("""
             INSERT INTO server_config (config_key, channel_id, guild_id)
