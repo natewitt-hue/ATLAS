@@ -879,12 +879,24 @@ class ForceRequestAdminView(discord.ui.View):
     ):
         super().__init__(timeout=None)
         self.requester          = requester
+        self.requester_id       = requester.id
+        self.requester_name     = requester.display_name
         self.opponent_name      = opponent_name
         self.note               = note
         self.analysis           = analysis
         self.request_id         = request_id
         self.results_channel_id = results_channel_id
         self._acted             = False
+
+    async def _resolve_requester(self, interaction: discord.Interaction) -> discord.Member | None:
+        """Re-fetch the requester member from the guild (survives stale refs)."""
+        if interaction.guild:
+            try:
+                return interaction.guild.get_member(self.requester_id) or \
+                       await interaction.guild.fetch_member(self.requester_id)
+            except discord.NotFound:
+                pass
+        return self.requester
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id in ADMIN_USER_IDS
@@ -910,11 +922,13 @@ class ForceRequestAdminView(discord.ui.View):
         analysis_final["winner"] = winner
         analysis_final["loser"]  = loser
 
+        requester = await self._resolve_requester(interaction)
+
         # Get results channel
         results_ch = interaction.guild.get_channel(self.results_channel_id)
         if results_ch:
             result_embed = _build_result_embed(
-                requester=self.requester,
+                requester=requester or self.requester,
                 opponent_name=self.opponent_name,
                 analysis=analysis_final,
                 admin=interaction.user,
@@ -925,17 +939,18 @@ class ForceRequestAdminView(discord.ui.View):
             await results_ch.send(embed=result_embed)
 
         # DM requester
-        try:
-            dm_lines = [
-                f"**Your force request #{self.request_id} has been decided.**",
-                f"**Ruling: {RULING_LABELS.get(final_ruling, final_ruling)}**",
-                f"Reason: {analysis_final['reason'][:400]}",
-            ]
-            if admin_note:
-                dm_lines.append(f"\nCommissioner: {admin_note}")
-            await self.requester.send("\n".join(dm_lines))
-        except discord.Forbidden:
-            pass
+        if requester:
+            try:
+                dm_lines = [
+                    f"**Your force request #{self.request_id} has been decided.**",
+                    f"**Ruling: {RULING_LABELS.get(final_ruling, final_ruling)}**",
+                    f"Reason: {analysis_final['reason'][:400]}",
+                ]
+                if admin_note:
+                    dm_lines.append(f"\nCommissioner: {admin_note}")
+                await requester.send("\n".join(dm_lines))
+            except discord.Forbidden:
+                pass
 
         # Disable all buttons
         for item in self.children:
@@ -980,7 +995,7 @@ class ForceRequestAdminView(discord.ui.View):
             interaction,
             final_ruling=RULING_FORCE_OPPONENT,
             winner=self.opponent_name,
-            loser=self.requester.display_name,
+            loser=self.requester_name,
             admin_note="Commissioner determined the opponent should receive the force win.",
         )
 
@@ -995,13 +1010,15 @@ class ForceRequestAdminView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            await self.requester.send(
-                f"**Your force request #{self.request_id} was denied.**\n"
-                "Please reach out to a commissioner directly if you have questions."
-            )
-        except discord.Forbidden:
-            pass
+        requester = await self._resolve_requester(interaction)
+        if requester:
+            try:
+                await requester.send(
+                    f"**Your force request #{self.request_id} was denied.**\n"
+                    "Please reach out to a commissioner directly if you have questions."
+                )
+            except discord.Forbidden:
+                pass
 
         for item in self.children:
             item.disabled = True
@@ -1016,19 +1033,22 @@ class ForceRequestAdminView(discord.ui.View):
     async def more_info(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._is_admin(interaction):
             return await interaction.response.send_message("🚫 Admins only.", ephemeral=True)
-        try:
-            await self.requester.send(
-                f"**Your force request #{self.request_id} requires more evidence.**\n\n"
-                "Please resubmit using `/forcerequest` with additional screenshots that show:\n"
-                "• Full conversation history with timestamps\n"
-                "• Both sides of the conversation\n"
-                "• Any agreed-upon times that were missed\n\n"
-                "Without sufficient evidence, the ruling may default to Fair Sim."
-            )
-        except discord.Forbidden:
-            pass
-        await interaction.response.send_message(
-            f"📎 {self.requester.mention} has been asked to provide more evidence.",
+        await interaction.response.defer(ephemeral=True)
+        requester = await self._resolve_requester(interaction)
+        if requester:
+            try:
+                await requester.send(
+                    f"**Your force request #{self.request_id} requires more evidence.**\n\n"
+                    "Please resubmit using `/forcerequest` with additional screenshots that show:\n"
+                    "• Full conversation history with timestamps\n"
+                    "• Both sides of the conversation\n"
+                    "• Any agreed-upon times that were missed\n\n"
+                    "Without sufficient evidence, the ruling may default to Fair Sim."
+                )
+            except discord.Forbidden:
+                pass
+        await interaction.followup.send(
+            f"📎 <@{self.requester_id}> has been asked to provide more evidence.",
             ephemeral=True,
         )
 
@@ -1205,14 +1225,35 @@ DC_PROTOCOL = {
 # ── Gameplay helper functions (used by hub modals) ────────────────────────────
 
 def _dc_protocol_embed(quarter: int, score_margin: int) -> discord.Embed | str:
-    """Build a DC protocol embed. Returns error string if invalid quarter."""
+    """Build a DC protocol embed with margin-specific ruling."""
     if quarter not in DC_PROTOCOL:
         return "❌ Invalid Quarter (1-4)."
-    return discord.Embed(
+
+    # Determine ruling based on quarter + margin
+    if quarter == 1:
+        ruling = "🔄 **Replay required** unless both sides agree to continue."
+    elif quarter == 2:
+        if score_margin <= 21:
+            ruling = f"🔄 Margin is {score_margin} (≤ 21) → **Replay required.**"
+        else:
+            ruling = f"▶️ Margin is {score_margin} (> 21) → **Continue from current score.**"
+    elif quarter == 3:
+        if score_margin <= 28:
+            ruling = f"🔄 Margin is {score_margin} (≤ 28) → **Replay required.**"
+        else:
+            ruling = f"🏁 Margin is {score_margin} (> 28) → **No replay; result stands.**"
+    else:  # Q4
+        if score_margin <= 7:
+            ruling = f"⚖️ Margin is {score_margin} (≤ 7) → **Commissioner review required.**"
+        else:
+            ruling = f"🏁 Margin is {score_margin} (> 7) → **No replay; result stands.**"
+
+    embed = discord.Embed(
         title=f"📡 Disconnect Protocol — Q{quarter}",
-        description=DC_PROTOCOL[quarter],
+        description=f"{DC_PROTOCOL[quarter]}\n\n**Ruling:** {ruling}",
         color=discord.Color.blurple(),
     )
+    return embed
 
 
 def _blowout_check_embed(home_team: str, home_score: int, away_team: str, away_score: int) -> discord.Embed:

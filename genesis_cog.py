@@ -534,13 +534,16 @@ def _build_trade_card(
         )
 
     # ── AI commentary ─────────────────────────────────────────────────────────
+    commentary_text = f"*{ai_commentary}*"
+    if len(commentary_text) > 1024:
+        commentary_text = commentary_text[:1021] + "…*"
     embed.add_field(
         name="🔬 ATLAS Echo · Analysis",
-        value=f"*{ai_commentary}*",
+        value=commentary_text,
         inline=False,
     )
 
-    embed.set_footer(text=f"Trade ID: {trade_id} • Proposed by <@{proposer_id}>")
+    embed.set_footer(text=f"Trade ID: {trade_id} • Proposer ID: {proposer_id}")
     return embed
 
 
@@ -1019,9 +1022,11 @@ class PickerTradeView(discord.ui.View):
         b_names = [f"{p.get('firstName','')} {p.get('lastName','')}".strip() for p in self.players_b]
 
         if a_names:
-            embed.add_field(name=f"📤 {a_nick} gives", value="\n".join(f"• {n}" for n in a_names), inline=True)
+            a_val = "\n".join(f"• {n}" for n in a_names)
+            embed.add_field(name=f"📤 {a_nick} gives", value=a_val[:1024], inline=True)
         if b_names:
-            embed.add_field(name=f"📥 {b_nick} gives", value="\n".join(f"• {n}" for n in b_names), inline=True)
+            b_val = "\n".join(f"• {n}" for n in b_names)
+            embed.add_field(name=f"📥 {b_nick} gives", value=b_val[:1024], inline=True)
 
         embed.set_footer(text="TSL Trade Engine v2.7 — picker mode")
         return embed
@@ -2166,13 +2171,16 @@ class GenesisHubView(discord.ui.View):
             if dm.df_standings.empty:
                 return await interaction.followup.send("⚠️ No standings data. Run `/wittsync` first.", ephemeral=True)
 
+            # Build set of team names that have a cornerstone designated
+            cs_teams = {v.get("team") for v in cornerstones.values() if v.get("team")}
+
             rows = []
             for _, row in dm.df_standings.iterrows():
                 wins   = int(row.get("totalWins",   0) or 0)
                 losses = int(row.get("totalLosses", 0) or 0)
                 tname  = str(row.get("teamName", "?"))
                 tickets = max(losses - wins, 1)
-                cs_flag = "🔒" if str(row.get("teamId","")) in cornerstones else ""
+                cs_flag = "🔒" if tname in cs_teams else ""
                 rows.append(f"{cs_flag} **{tname}** — {wins}W-{losses}L · {tickets} ticket(s)")
 
             embed = discord.Embed(
