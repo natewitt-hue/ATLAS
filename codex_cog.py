@@ -336,43 +336,27 @@ OWNER-FILTERED QUERY PATTERN:
 # Called at prompt-build time so the season number is always current
 DB_SCHEMA = _build_schema()
 
-# ── Known users — EXACT strings as stored in games.csv/tsl_history.db ────────
-# These are the historical usernames. Do NOT change to current Discord display names.
-KNOWN_USERS = [
-    'AgrarianPeasant','B3AST_M0DE_NC','BDiddy86','BennyGalactic',
-    'BramptonWasteMan','Chokolate_Thunda','CoolSkillsBroo','D-TownDon',
-    'DirtyWeenur','Drakee_GG','DrewBreesus2192','DunkinDonutz915',
-    'Find_the_Door','Gi0D0g88','JB3v3','Jnolte','KJJ205','Keem_50kFG',
-    'KillaE94','KingCaleb_18','KingMak__','LIXODYSSEY','Maola11',
-    'Masrimadden','MeLLoW_FiRe','MizzGMB','Mr_Clutch723','NutzonJorge',
-    'OliveiraYourFace','Ronfk','Saucy0134','SuaveShaunTTV','Swole_Shell50',
-    'TheGasGOD_423','TheNotoriousLTH','TheWitt','The_KG_518',
-    'TrombettaThanYou','Villanova46','Will_Chamberlain','YoungSeeThrough',
-    'ayyepea','cfar89','kickerbog10','quickcroom','thekingf_1014'
-]
+# ── Known users — loaded dynamically from tsl_members DB ─────────────────────
+# Previously hardcoded lists; now populated on first use from build_member_db.
+# KNOWN_USERS = list of db_usernames (exact strings as stored in tsl_history.db)
+# NICKNAME_TO_USER = alias → db_username map (nicknames, PSN, discord usernames, etc.)
+KNOWN_USERS: list[str] = []
+NICKNAME_TO_USER: dict[str, str] = {}
+_codex_identity_loaded = False
 
-# Nickname → DB username map for fuzzy resolution
-NICKNAME_TO_USER = {
-    "jt":        "TrombettaThanYou",
-    "killa":     "KillaE94",
-    "nova":      "Villanova46",
-    "ken":       "KJJ205",
-    "jo":        "OliveiraYourFace",
-    "jorge":     "NutzonJorge",
-    "witt":      "TheWitt",
-    "lth":       "TheNotoriousLTH",
-    "chok":      "Chokolate_Thunda",
-    "diddy":     "BDiddy86",
-    "bdiddy":    "BDiddy86",
-    "keem":      "Keem_50kFG",
-    "kg":        "The_KG_518",
-    "ronfk":     "Ronfk",
-    "ron":       "Ronfk",
-    "shelly":    "Swole_Shell50",
-    "ruck":      "quickcroom",
-    "tuna":      "SuaveShaunTTV",
-    "shaun":     "SuaveShaunTTV",
-}
+
+def _ensure_codex_identity():
+    """Lazy-load identity data from tsl_members DB on first use."""
+    global KNOWN_USERS, NICKNAME_TO_USER, _codex_identity_loaded
+    if _codex_identity_loaded:
+        return
+    try:
+        import build_member_db as member_db
+        KNOWN_USERS = member_db.get_known_users()
+        NICKNAME_TO_USER = member_db.get_alias_map()  # all aliases → db_username
+        _codex_identity_loaded = True
+    except Exception as e:
+        print(f"[codex_cog] Failed to load identity data: {e}")
 
 
 def fuzzy_resolve_user(name: str) -> str | None:
@@ -386,6 +370,7 @@ def fuzzy_resolve_user(name: str) -> str | None:
            - 5+ chars:  cutoff 0.65 (standard)
       4. Substring fallback — min 4 chars
     """
+    _ensure_codex_identity()
     nl = name.lower()
     # 1. Nickname dict — no length gate; handles short aliases like "jt", "kg", "troy"
     if nl in NICKNAME_TO_USER:

@@ -642,9 +642,18 @@ def _resolve_owner_team(
     """
     Universal auto-detect resolver.
     Returns (discord_username, team_name) for the interaction caller or override member.
-    Used by every button that has a personal/team context.
+    Checks roster first (single source of truth), falls back to intelligence profile.
     """
-    target  = override or interaction.user
+    target = override or interaction.user
+    # Primary: roster module (owner assignments from tsl_members)
+    try:
+        import roster
+        team = roster.get_team_name(target.id)
+        if team:
+            return target.name, team
+    except Exception:
+        pass
+    # Fallback: intelligence profile (API username fuzzy match)
     profile = ig.get_or_create_profile(target.id, target.name)
     return target.name, profile.get("team") or ""
 
@@ -1099,7 +1108,11 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
                 ig.get_nickname(b["opponent_id"])
                 or (opp_member.display_name if opp_member else str(b["opponent_id"]))
             )
-            opp_team  = ig.KNOWN_MEMBER_TEAMS.get(b["opponent_id"], "")
+            try:
+                import roster as _r
+                opp_team = _r.get_team_name(b["opponent_id"]) or ""
+            except Exception:
+                opp_team = ig.KNOWN_MEMBER_TEAMS.get(b["opponent_id"], "")
             h2h_str   = ""
             if team and opp_team:
                 h2h = dm.get_h2h_record(team, opp_team)

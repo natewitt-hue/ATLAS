@@ -61,82 +61,50 @@ GRADE_THRESHOLDS = [
     (0.0, "D"),
 ]
 
-# ── Known Discord ID → nickname table ────────────────────────────────────────
-KNOWN_MEMBERS: dict[int, str] = {
-    1253510201626329208: "Jo",
-    456226577798135808:  "Jo",        # Jo's second account
-    478233196408995850:  "RonDon",
-    606222129779965972:  "Will",
-    138759200812695554:  "Chok",
-    374225201501700097:  "Don",
-    413478492563570701:  "Jadon",
-    406316042076422155:  "Shaun",
-    972717991886213140:  "AP",
-    705567998710382722:  "Diddy",
-    590340736705363978:  "Benny",
-    287696480888684545:  "Bodak",
-    966861614546559086:  "Bryan",
-    402604212732821504:  "Cfar",
-    520354406001016833:  "Clutch",
-    762900687536390154:  "GIO",
-    937303476034228245:  "Jmoney",
-    808838150083706920:  "Johnson",
-    871448457414598737:  "JT",
-    308657934815068161:  "Ken",
-    346817461527642112:  "KG",
-    217340612452679682:  "Khaled",
-    600087875970924557:  "Jorge",
-    209416082786746368:  "Killa",
-    966021499322515466:  "Nastymofo",
-    710648515566633052:  "Neff",
-    694316056206114827:  "Newman",
-    968230853920559114:  "Pnick",
-    432242024163442688:  "Rissa",
-    934556990045310996:  "Shelly",
-    634221098250010634:  "Shottaz",
-    208978020210442240:  "Signman",
-    1012890489114083329: "Troy",
-    809583145908305940:  "Zee",
-    801157966056259604:  "Noodle",
-}
+# ── Identity caches (populated dynamically from tsl_members DB) ───────────────
+# Previously hardcoded; now loaded at startup via _load_identity_cache().
+KNOWN_MEMBERS: dict[int, str] = {}          # discord_id → nickname
+_nickname_to_ids: dict[str, list[int]] = {} # lowercase nickname → [discord_ids]
+KNOWN_MEMBER_TEAMS: dict[int, str] = {}     # discord_id → team nickname
 
-# Reverse map: lowercase nickname → list of Discord IDs
-_nickname_to_ids: dict[str, list[int]] = {}
-for _id, _nick in KNOWN_MEMBERS.items():
-    _nickname_to_ids.setdefault(_nick.lower(), []).append(_id)
 
-# Explicit Discord ID → team overrides
-KNOWN_MEMBER_TEAMS: dict[int, str] = {
-    972717991886213140:  "Saints",      # AP        = AgrarianPeasant
-    705567998710382722:  "Pack",        # Diddy     = BDiddy86
-    374225201501700097:  "Broncos",     # Don       = D-TownDon
-    413478492563570701:  "Jets",        # Jadon     = Jnolte
-    762900687536390154:  "Bolts",       # GIO       = Gi0D0g88
-    937303476034228245:  "Cowboys",     # Jmoney    = Find_the_Door
-    808838150083706920:  "Niners",      # Johnson   = Drakee_GG
-    346817461527642112:  "Vikes",       # KG        = B3AST_M0DE_NC
-    217340612452679682:  "Chiefs",      # Khaled    = DrewBreesus2192
-    600087875970924557:  "Phins",       # Jorge     = MizzGMB
-    209416082786746368:  "Jags",        # Killa     = MeLLoW_FiRe
-    966021499322515466:  "Seahawks",    # Nastymofo = CoolSkillsBroo
-    694316056206114827:  "Texans",      # Newman    = TheNotoriousLTH
-    432242024163442688:  "Panthers",    # Rissa     = YoungSeeThrough
-    634221098250010634:  "Steelers",    # Shottaz   = TheGasGOD_423
-    208978020210442240:  "Bucs",        # Signman   = kickerbog10
-    1012890489114083329: "Bears",       # Troy      = KingCaleb_18
-    809583145908305940:  "Falcons",     # Zee       = LIXODYSSEY
-    287696480888684545:  "Browns",      # Bodak     = BramptonWasteMan
-    966861614546559086:  "Bills",       # Bryan     = JB3v3
-    402604212732821504:  "Rams",        # Cfar      = cfar89
-    520354406001016833:  "Cardinals",   # Clutch    = Mr_Clutch723
-    590340736705363978:  "Colts",       # Benny     = BennyGalactic
-    478233196408995850:  "Commanders",  # RonDon    = Ronfk
-    606222129779965972:  "Eagles",      # Will      = Will_Chamberlain
-    406316042076422155:  "Ravens",      # Shaun     = SuaveShaunTTV
-    710648515566633052:  "Pats",        # Neff      = Saucy0134
-    871448457414598737:  "Bengals",     # JT        = current Bengals owner
-    934556990045310996:  "Raiders",     # Shelly    = current Raiders owner
-}
+def _load_identity_cache():
+    """Populate identity caches from tsl_members + roster.
+
+    Called by build_owner_map() during startup — after build_member_table()
+    and roster.load() have run.
+    """
+    try:
+        import build_member_db as member_db
+        members = member_db.get_active_members()
+    except Exception:
+        return
+
+    KNOWN_MEMBERS.clear()
+    _nickname_to_ids.clear()
+    KNOWN_MEMBER_TEAMS.clear()
+
+    for m in members:
+        did_str = m.get("discord_id")
+        if not did_str:
+            continue
+        try:
+            did = int(did_str)
+        except (ValueError, TypeError):
+            continue
+
+        nick = m.get("nickname")
+        if nick:
+            KNOWN_MEMBERS[did] = nick
+            _nickname_to_ids.setdefault(nick.lower(), []).append(did)
+
+    # Team assignments from roster (team nicknames like "Bears", "Bengals")
+    try:
+        import roster
+        for entry in roster.get_all():
+            KNOWN_MEMBER_TEAMS[entry.discord_id] = entry.team_name
+    except Exception:
+        pass
 
 
 # ── Draft class analysis ──────────────────────────────────────────────────────
@@ -525,9 +493,13 @@ def get_ids_for_nickname(nickname: str) -> list[int]:
 
 
 def build_owner_map():
-    """Build username ↔ team lookup from df_teams (has userName field)."""
+    """Build username ↔ team lookup from df_teams + roster identity cache."""
     global _username_to_team, _team_to_username
-    if dm.df_teams.empty:
+
+    # Load identity caches from tsl_members DB + roster
+    _load_identity_cache()
+
+    if dm.df_teams is None or dm.df_teams.empty:
         return
     for _, row in dm.df_teams.iterrows():
         uname = str(row.get("userName", "")).strip()
@@ -536,11 +508,12 @@ def build_owner_map():
             _username_to_team[uname.lower()] = team
             _team_to_username[team.lower()]  = uname
 
+    # Cross-reference nicknames with API usernames for fuzzy lookup
     for discord_id, nickname in KNOWN_MEMBERS.items():
         nick_lower = nickname.lower()
         if nick_lower in _username_to_team:
             continue
-        for uname, team in _username_to_team.items():
+        for uname, team in list(_username_to_team.items()):
             if nick_lower in uname:
                 _username_to_team[nick_lower] = team
                 break
@@ -557,11 +530,21 @@ def get_team_owner_username(team_name: str) -> str | None:
 def get_or_create_profile(discord_user_id: int, discord_username: str) -> dict:
     if discord_user_id not in _owner_profiles:
         nickname = get_nickname(discord_user_id) or discord_username
-        team = (
-            KNOWN_MEMBER_TEAMS.get(discord_user_id) or
-            get_owner_team(nickname) or
-            get_owner_team(discord_username)
-        )
+
+        # Team lookup priority: roster → KNOWN_MEMBER_TEAMS → username fuzzy
+        team = None
+        try:
+            import roster
+            team = roster.get_team_name(discord_user_id)
+        except Exception:
+            pass
+        if not team:
+            team = (
+                KNOWN_MEMBER_TEAMS.get(discord_user_id) or
+                get_owner_team(nickname) or
+                get_owner_team(discord_username)
+            )
+
         _owner_profiles[discord_user_id] = {
             "discord_id":       discord_user_id,
             "discord_username": discord_username,

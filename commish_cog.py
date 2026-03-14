@@ -10,7 +10,10 @@ Structure:
   /commish eco <cmd>      — Economy admin (11 commands)
   /commish markets <cmd>  — Prediction markets admin (4 commands)
   /commish realsb <cmd>   — Real sportsbook admin (5 commands)
-  /commish <cmd>          — Flat admin commands (11 commands)
+  /commish assign         — Assign a member to a team
+  /commish unassign       — Remove a member's team assignment
+  /commish roster         — Show all owner-team assignments
+  /commish <cmd>          — Other flat admin commands (11 commands)
 
 Hidden from non-admins via default_permissions=administrator.
 """
@@ -553,6 +556,90 @@ class CommishCog(commands.Cog):
         if not cog:
             return await interaction.response.send_message("Codex not loaded.", ephemeral=True)
         await cog._ask_debug_impl(interaction, question)
+
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # /commish assign | unassign | roster — Owner Registry
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @commish.command(name="assign", description="Assign a Discord member to a team.")
+    @app_commands.describe(member="The Discord member to assign")
+    async def assign_cmd(self, interaction: discord.Interaction, member: discord.Member):
+        import roster
+        embed = discord.Embed(
+            title="Team Assignment",
+            description=f"Pick a conference to assign **{member.display_name}** to a team.",
+            color=discord.Color.from_rgb(201, 150, 42),
+        )
+        view = roster.AssignConferenceView(member)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @commish.command(name="unassign", description="Remove a member's team assignment.")
+    @app_commands.describe(member="The Discord member to unassign")
+    async def unassign_cmd(self, interaction: discord.Interaction, member: discord.Member):
+        import roster
+        entry = roster.get_entry_by_id(member.id)
+        if not entry:
+            return await interaction.response.send_message(
+                f"**{member.display_name}** is not assigned to any team.", ephemeral=True,
+            )
+        old_team = entry.team_name
+        success = roster.unassign(member.id)
+        if not success:
+            return await interaction.response.send_message(
+                f"Failed to unassign **{member.display_name}**.", ephemeral=True,
+            )
+        embed = discord.Embed(
+            title="Team Assignment Removed",
+            description=(
+                f"**{member.display_name}** (<@{member.id}>) has been "
+                f"unassigned from the **{old_team}**."
+            ),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commish.command(name="roster", description="Show all current owner-team assignments.")
+    async def roster_cmd(self, interaction: discord.Interaction):
+        import roster
+
+        all_teams = roster.get_all_teams()
+        afc_teams = [t for t in all_teams if t["conference"] == "AFC"]
+        nfc_teams = [t for t in all_teams if t["conference"] == "NFC"]
+
+        def _format_conference(teams: list[dict]) -> str:
+            lines = []
+            for t in teams:
+                owner = roster.get_owner(t["abbrName"])
+                if owner:
+                    nick = owner.nickname or owner.discord_username
+                    lines.append(f"`{t['nickName']:<14}` <@{owner.discord_id}>  ({nick})")
+                else:
+                    lines.append(f"`{t['nickName']:<14}` *Unassigned*")
+            return "\n".join(lines) if lines else "*No teams*"
+
+        embed = discord.Embed(
+            title="TSL Owner Roster",
+            color=discord.Color.from_rgb(201, 150, 42),
+        )
+        embed.add_field(
+            name="\U0001f3c8 AFC",
+            value=_format_conference(afc_teams),
+            inline=False,
+        )
+        embed.add_field(
+            name="\U0001f3c8 NFC",
+            value=_format_conference(nfc_teams),
+            inline=False,
+        )
+
+        # Count unassigned
+        assigned_abbrs = {e.team_abbr for e in roster.get_all()}
+        unassigned = [t["nickName"] for t in all_teams if t["abbrName"] not in assigned_abbrs]
+        if unassigned:
+            embed.set_footer(text=f"Unassigned: {', '.join(unassigned)}")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

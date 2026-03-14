@@ -1072,13 +1072,17 @@ MEMBERS = [
     },
 ]
 def build_member_table(db_path: str = DB_PATH):
-    """Create tsl_members table and seed with all known members."""
+    """Create tsl_members table (if needed) and upsert all known members.
+
+    Uses CREATE TABLE IF NOT EXISTS + INSERT ... ON CONFLICT so that
+    runtime team assignments (set via /commish assign) survive bot restarts.
+    Seed data fills empty fields but never overwrites a runtime team assignment.
+    """
     conn = sqlite3.connect(db_path)
     cur  = conn.cursor()
 
-    cur.execute("DROP TABLE IF EXISTS tsl_members")
     cur.execute("""
-        CREATE TABLE tsl_members (
+        CREATE TABLE IF NOT EXISTS tsl_members (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
             discord_id       TEXT UNIQUE,
             discord_username TEXT NOT NULL UNIQUE,
@@ -1096,14 +1100,38 @@ def build_member_table(db_path: str = DB_PATH):
         )
     """)
 
-    cur.executemany("""
-        INSERT INTO tsl_members
-            (discord_id, discord_username, db_username, nickname, display_name,
-             psn, xbox, twitch, team, status, joined_date, active, notes)
-        VALUES
-            (:discord_id, :discord_username, :db_username, :nickname, :display_name,
-             :psn, :xbox, :twitch, :team, :status, :joined_date, :active, :notes)
-    """, MEMBERS)
+    # Upsert each member: insert new rows, update existing ones.
+    # Key: team uses COALESCE(tsl_members.team, excluded.team) so runtime
+    # assignments (set via /commish assign) are never overwritten by seed data.
+    for m in MEMBERS:
+        defaults = {
+            "discord_id": None, "discord_username": None, "db_username": None,
+            "nickname": None, "display_name": None, "psn": None, "xbox": None,
+            "twitch": None, "team": None, "status": "Member", "joined_date": None,
+            "active": 1, "notes": None,
+        }
+        row = {**defaults, **m}
+        cur.execute("""
+            INSERT INTO tsl_members
+                (discord_id, discord_username, db_username, nickname, display_name,
+                 psn, xbox, twitch, team, status, joined_date, active, notes)
+            VALUES
+                (:discord_id, :discord_username, :db_username, :nickname, :display_name,
+                 :psn, :xbox, :twitch, :team, :status, :joined_date, :active, :notes)
+            ON CONFLICT(discord_username) DO UPDATE SET
+                discord_id   = COALESCE(excluded.discord_id,   tsl_members.discord_id),
+                db_username  = COALESCE(excluded.db_username,  tsl_members.db_username),
+                nickname     = COALESCE(excluded.nickname,     tsl_members.nickname),
+                display_name = COALESCE(excluded.display_name, tsl_members.display_name),
+                psn          = COALESCE(excluded.psn,          tsl_members.psn),
+                xbox         = COALESCE(excluded.xbox,         tsl_members.xbox),
+                twitch       = COALESCE(excluded.twitch,       tsl_members.twitch),
+                team         = COALESCE(tsl_members.team,      excluded.team),
+                status       = COALESCE(excluded.status,       tsl_members.status),
+                joined_date  = COALESCE(excluded.joined_date,  tsl_members.joined_date),
+                active       = excluded.active,
+                notes        = COALESCE(excluded.notes,        tsl_members.notes)
+        """, row)
 
     conn.commit()
     count  = cur.execute("SELECT COUNT(*) FROM tsl_members").fetchone()[0]

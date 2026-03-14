@@ -830,8 +830,18 @@ def _build_conference_team_options(
         if not div_name.upper().startswith(conf_upper):
             continue
         nick  = t.get("nickName", t.get("displayName", "Unknown"))
-        owner = t.get("userName", "")
-        label = f"{nick} — {owner}" if owner else nick
+        abbr  = t.get("abbrName", "")
+        # Show owner nickname from roster if available, else API userName
+        owner_label = ""
+        try:
+            import roster
+            entry = roster.get_owner(abbr) if abbr else None
+            owner_label = entry.nickname or entry.discord_username if entry else ""
+        except Exception:
+            pass
+        if not owner_label:
+            owner_label = t.get("userName", "")
+        label = f"{nick} — {owner_label}" if owner_label else nick
         options.append(discord.SelectOption(label=label[:100], value=str(tid)))
     return options
 

@@ -125,6 +125,7 @@ import data_manager as dm
 import reasoning
 import build_tsl_db as db_builder
 import build_member_db as member_db
+import roster
 from ui_state import UIStateManager
 
 # Optional modules
@@ -314,11 +315,6 @@ def _startup_load():
     """
     print("[Startup] Loading league data from MaddenStats API...")
     dm.load_all()
-    if intel:
-        try:
-            intel.build_owner_map()
-        except Exception as e:
-            print(f"ATLAS: build_owner_map() failed: {e}")
 
     # Rebuild tsl_history.db from live API data after every load
     # Pass pre-loaded player/ability data from dm to avoid duplicate API hits
@@ -353,6 +349,20 @@ def _startup_load():
             print(f"[MemberDB] validate_db_usernames() failed: {e}")
     except Exception as e:
         print(f"[MemberDB] Startup registry build failed: {e}")
+
+    # Load owner roster (must run after member_db + dm.load_all)
+    try:
+        count = roster.load()
+        print(f"[Roster] {count} team assignments loaded")
+    except Exception as e:
+        print(f"[Roster] Failed to load: {e}")
+
+    # Build intelligence owner map (reads from roster + API data)
+    if intel:
+        try:
+            intel.build_owner_map()
+        except Exception as e:
+            print(f"ATLAS: build_owner_map() failed: {e}")
 
     # Load Echo voice personas into memory — must run after file system is ready.
     # If echo/ files don't exist yet, fallback stubs activate automatically.
@@ -589,6 +599,12 @@ async def _sync_impl(interaction: discord.Interaction):
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, dm.load_all)
+
+    # Refresh roster cache after data reload
+    try:
+        roster.load()
+    except Exception as e:
+        print(f"[Roster] Refresh failed during sync: {e}")
 
     if intel:
         try:
