@@ -207,6 +207,7 @@ async def setup_hook():
         "economy_cog",        # ATLAS Economy — money management & stipends
         "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
         "commish_cog",        # ATLAS Commissioner — unified admin commands
+        "boss_cog",           # ATLAS Boss — visual commissioner control room
     ]
 
     for ext in _EXTENSIONS:
