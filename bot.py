@@ -206,7 +206,7 @@ async def setup_hook():
         "polymarket_cog",     # ATLAS Flow — Polymarket prediction markets
         "economy_cog",        # ATLAS Economy — money management & stipends
         "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
-        "commish_cog",        # ATLAS Commissioner — unified admin commands
+        # "commish_cog",      # RETIRED — replaced by boss_cog visual hub
         "boss_cog",           # ATLAS Boss — visual commissioner control room
     ]
 
