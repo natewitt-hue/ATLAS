@@ -35,6 +35,13 @@ GOLD = discord.Color(0xC9962A)
 VALID_CASINO_GAMES = ("blackjack", "crash", "slots", "coinflip")
 VALID_INTERVALS = ("daily", "weekly", "biweekly", "monthly")
 VALID_PROP_RESULTS = ("a", "b", "push")
+VALID_MARKET_RESULTS = ("YES", "NO", "VOID")
+VALID_SPORT_KEYS = (
+    ("americanfootball_nfl", "NFL"), ("basketball_nba", "NBA"),
+    ("baseball_mlb", "MLB"), ("icehockey_nhl", "NHL"),
+    ("americanfootball_ncaaf", "NCAAF"), ("basketball_ncaab", "NCAAB"),
+    ("soccer_epl", "EPL"), ("mma_mixed_martial_arts", "MMA"),
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -270,15 +277,21 @@ class SBLinesPanelView(discord.ui.View):
 
     @discord.ui.button(label="Set Spread", style=discord.ButtonStyle.primary, row=0)
     async def set_spread(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBSetSpreadModal())
+        await interaction.response.send_message(
+            "Select a matchup to set spread:", view=SBMatchupSelectView("spread"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Set ML", style=discord.ButtonStyle.primary, row=0)
     async def set_ml(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBSetMLModal())
+        await interaction.response.send_message(
+            "Select a matchup to set moneyline:", view=SBMatchupSelectView("ml"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Set O/U", style=discord.ButtonStyle.primary, row=0)
     async def set_ou(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBSetOUModal())
+        await interaction.response.send_message(
+            "Select a matchup to set O/U:", view=SBMatchupSelectView("ou"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Reset All Lines", emoji="\U0001f504", style=discord.ButtonStyle.danger, row=1)
     async def reset_lines(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -296,11 +309,15 @@ class SBLinesPanelView(discord.ui.View):
 
     @discord.ui.button(label="Lock Game", emoji="\U0001f512", style=discord.ButtonStyle.secondary, row=2)
     async def lock_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBLockGameModal())
+        await interaction.response.send_message(
+            "Select a matchup to lock/unlock:", view=SBMatchupSelectView("lock"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Cancel Game", emoji="\u274c", style=discord.ButtonStyle.danger, row=2)
     async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBCancelGameModal())
+        await interaction.response.send_message(
+            "Select a matchup to cancel:", view=SBMatchupSelectView("cancel"), ephemeral=True,
+        )
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -327,7 +344,9 @@ class SBBetsPanelView(discord.ui.View):
 
     @discord.ui.button(label="Balance Adjust", emoji="\U0001f4b0", style=discord.ButtonStyle.secondary, row=1)
     async def balance(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBBalanceModal())
+        await interaction.response.send_message(
+            "Select a member to adjust balance:", view=SBBalanceMemberSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="Add Prop", emoji="\U0001f4dd", style=discord.ButtonStyle.primary, row=2)
     async def add_prop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -335,7 +354,9 @@ class SBBetsPanelView(discord.ui.View):
 
     @discord.ui.button(label="Settle Prop", emoji="\u2696\ufe0f", style=discord.ButtonStyle.secondary, row=2)
     async def settle_prop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossSBSettlePropModal())
+        await interaction.response.send_message(
+            "Select the prop result:", view=SettlePropSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -347,9 +368,52 @@ class SBBetsPanelView(discord.ui.View):
 
 # ── Sportsbook Modals ────────────────────────────────────────────────────────
 
-class BossSBSetSpreadModal(discord.ui.Modal, title="Set Spread Override"):
-    matchup = discord.ui.TextInput(label="Matchup", placeholder="e.g., CHI @ DET", required=True)
+class SBMatchupSelectView(discord.ui.View):
+    """Dynamic matchup select populated from current week games."""
+    def __init__(self, mode: str):
+        super().__init__(timeout=120)
+        self.mode = mode
+        import data_manager as dm
+        games = dm.df_games
+        if games is not None and not games.empty and "matchup_key" in games.columns:
+            options = [
+                discord.SelectOption(label=mk, value=mk)
+                for mk in games["matchup_key"].unique()
+            ][:25]
+        else:
+            options = [discord.SelectOption(label="No games loaded", value="none")]
+        select = discord.ui.Select(placeholder="Select a matchup...", options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        matchup = interaction.data["values"][0]
+        if matchup == "none":
+            return await interaction.response.send_message("❌ No games available.", ephemeral=True)
+        if self.mode == "spread":
+            await interaction.response.send_modal(SBSpreadFollowUpModal(matchup))
+        elif self.mode == "ml":
+            await interaction.response.send_modal(SBMLFollowUpModal(matchup))
+        elif self.mode == "ou":
+            await interaction.response.send_modal(SBOUFollowUpModal(matchup))
+        elif self.mode == "lock":
+            await interaction.response.send_message(
+                f"**{matchup}** \u2014 Lock or Unlock?",
+                view=SBLockConfirmView(matchup), ephemeral=True,
+            )
+        elif self.mode == "cancel":
+            await interaction.response.send_message(
+                f"\u26a0\ufe0f Cancel **{matchup}** and refund all bets?",
+                view=SBCancelConfirmView(matchup), ephemeral=True,
+            )
+
+
+class SBSpreadFollowUpModal(discord.ui.Modal, title="Set Spread Override"):
     home_spread = discord.ui.TextInput(label="Home Spread", placeholder="e.g., -3.5", required=True)
+
+    def __init__(self, matchup: str):
+        super().__init__()
+        self.matchup = matchup
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("SportsbookCog")
@@ -359,13 +423,16 @@ class BossSBSetSpreadModal(discord.ui.Modal, title="Set Spread Override"):
             spread = float(self.home_spread.value)
         except ValueError:
             return await interaction.response.send_message("❌ Spread must be a number.", ephemeral=True)
-        await cog._sb_setspread_impl(interaction, self.matchup.value, spread)
+        await cog._sb_setspread_impl(interaction, self.matchup, spread)
 
 
-class BossSBSetMLModal(discord.ui.Modal, title="Set Moneyline Override"):
-    matchup = discord.ui.TextInput(label="Matchup", placeholder="e.g., CHI @ DET", required=True)
+class SBMLFollowUpModal(discord.ui.Modal, title="Set Moneyline Override"):
     home_ml = discord.ui.TextInput(label="Home ML", placeholder="e.g., -150", required=True)
     away_ml = discord.ui.TextInput(label="Away ML", placeholder="e.g., +130", required=True)
+
+    def __init__(self, matchup: str):
+        super().__init__()
+        self.matchup = matchup
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("SportsbookCog")
@@ -376,12 +443,15 @@ class BossSBSetMLModal(discord.ui.Modal, title="Set Moneyline Override"):
             aml = int(self.away_ml.value)
         except ValueError:
             return await interaction.response.send_message("❌ Moneylines must be integers.", ephemeral=True)
-        await cog._sb_setml_impl(interaction, self.matchup.value, hml, aml)
+        await cog._sb_setml_impl(interaction, self.matchup, hml, aml)
 
 
-class BossSBSetOUModal(discord.ui.Modal, title="Set Over/Under Override"):
-    matchup = discord.ui.TextInput(label="Matchup", placeholder="e.g., CHI @ DET", required=True)
+class SBOUFollowUpModal(discord.ui.Modal, title="Set Over/Under Override"):
     ou_line = discord.ui.TextInput(label="O/U Total", placeholder="e.g., 45.5", required=True)
+
+    def __init__(self, matchup: str):
+        super().__init__()
+        self.matchup = matchup
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("SportsbookCog")
@@ -391,38 +461,44 @@ class BossSBSetOUModal(discord.ui.Modal, title="Set Over/Under Override"):
             ou = float(self.ou_line.value)
         except ValueError:
             return await interaction.response.send_message("❌ O/U total must be a number.", ephemeral=True)
-        await cog._sb_setou_impl(interaction, self.matchup.value, ou)
+        await cog._sb_setou_impl(interaction, self.matchup, ou)
 
 
-class BossSBLockGameModal(discord.ui.Modal, title="Lock/Unlock Game"):
-    matchup = discord.ui.TextInput(label="Matchup", placeholder="e.g., CHI @ DET", required=True)
-    locked = discord.ui.TextInput(
-        label="Lock? (true/false)", placeholder="true", required=True, max_length=5,
-    )
+class SBLockConfirmView(discord.ui.View):
+    def __init__(self, matchup: str):
+        super().__init__(timeout=60)
+        self.matchup = matchup
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.button(label="Lock", emoji="\U0001f512", style=discord.ButtonStyle.danger)
+    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
-        lock_val = self.locked.value.strip().lower() in ("true", "yes", "1")
-        await cog._sb_lock_impl(interaction, self.matchup.value, lock_val)
+        await cog._sb_lock_impl(interaction, self.matchup, True)
 
-
-class BossSBCancelGameModal(discord.ui.Modal, title="Cancel Game & Refund Bets"):
-    matchup = discord.ui.TextInput(label="Matchup", placeholder="e.g., CHI @ DET", required=True)
-    confirm = discord.ui.TextInput(
-        label="Type CONFIRM to proceed", placeholder="CONFIRM", required=True, max_length=7,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if self.confirm.value.strip().upper() != "CONFIRM":
-            return await interaction.response.send_message(
-                "❌ Cancelled \u2014 you must type CONFIRM to proceed.", ephemeral=True,
-            )
+    @discord.ui.button(label="Unlock", emoji="\U0001f513", style=discord.ButtonStyle.success)
+    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
-        await cog._sb_cancelgame_impl(interaction, self.matchup.value)
+        await cog._sb_lock_impl(interaction, self.matchup, False)
+
+
+class SBCancelConfirmView(discord.ui.View):
+    def __init__(self, matchup: str):
+        super().__init__(timeout=30)
+        self.matchup = matchup
+
+    @discord.ui.button(label="Confirm Cancel & Refund", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("SportsbookCog")
+        if not cog:
+            return await _send_cog_error(interaction, "Sportsbook")
+        await cog._sb_cancelgame_impl(interaction, self.matchup)
+
+    @discord.ui.button(label="Nevermind", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled.", view=None)
 
 
 class BossSBGradeModal(discord.ui.Modal, title="Grade Bets for Week"):
@@ -453,29 +529,36 @@ class BossSBRefundModal(discord.ui.Modal, title="Refund a Bet"):
         await cog._sb_refund_impl(interaction, bid)
 
 
-class BossSBBalanceModal(discord.ui.Modal, title="Adjust Member Balance"):
-    member_name = discord.ui.TextInput(
-        label="Member (name, nickname, or ID)", placeholder="e.g., JT", required=True,
-    )
+class SBBalanceMemberSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member...")
+    async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        await interaction.response.send_modal(SBBalanceFollowUpModal(select.values[0]))
+
+
+class SBBalanceFollowUpModal(discord.ui.Modal, title="Adjust Member Balance"):
     adjustment = discord.ui.TextInput(label="Adjustment (+/-)", placeholder="e.g., 500 or -200", required=True)
     reason = discord.ui.TextInput(
         label="Reason", placeholder="Commissioner adjustment", required=False,
         default="Commissioner adjustment",
     )
 
+    def __init__(self, member: discord.Member):
+        super().__init__()
+        self.member = member
+
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
-        member = await _resolve_member(interaction, self.member_name.value)
-        if not member:
-            return await _send_not_found(interaction, "member", self.member_name.value)
         try:
             adj = int(self.adjustment.value)
         except ValueError:
             return await interaction.response.send_message("❌ Adjustment must be an integer.", ephemeral=True)
         reason = self.reason.value or "Commissioner adjustment"
-        await cog._sb_balance_impl(interaction, member, adj, reason)
+        await cog._sb_balance_impl(interaction, self.member, adj, reason)
 
 
 class BossSBAddPropModal(discord.ui.Modal, title="Create Prop Bet"):
@@ -502,11 +585,28 @@ class BossSBAddPropModal(discord.ui.Modal, title="Create Prop Bet"):
         )
 
 
-class BossSBSettlePropModal(discord.ui.Modal, title="Settle Prop Bet"):
-    prop_id = discord.ui.TextInput(label="Prop ID", placeholder="e.g., 5", required=True)
-    result = discord.ui.TextInput(
-        label="Result (a / b / push)", placeholder="a", required=True, max_length=4,
+class SettlePropSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.select(
+        placeholder="Select result...",
+        options=[
+            discord.SelectOption(label="Option A", value="a"),
+            discord.SelectOption(label="Option B", value="b"),
+            discord.SelectOption(label="Push (refund)", value="push"),
+        ],
     )
+    async def result_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.send_modal(SettlePropFollowUpModal(select.values[0]))
+
+
+class SettlePropFollowUpModal(discord.ui.Modal, title="Settle Prop Bet"):
+    prop_id = discord.ui.TextInput(label="Prop ID", placeholder="e.g., 5", required=True)
+
+    def __init__(self, result: str):
+        super().__init__()
+        self.result = result
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("SportsbookCog")
@@ -516,12 +616,7 @@ class BossSBSettlePropModal(discord.ui.Modal, title="Settle Prop Bet"):
             pid = int(self.prop_id.value)
         except ValueError:
             return await interaction.response.send_message("❌ Prop ID must be a number.", ephemeral=True)
-        r = self.result.value.strip().lower()
-        if r not in VALID_PROP_RESULTS:
-            return await interaction.response.send_message(
-                f"❌ Result must be one of: {', '.join(VALID_PROP_RESULTS)}", ephemeral=True,
-            )
-        await cog._sb_settleprop_impl(interaction, pid, r)
+        await cog._sb_settleprop_impl(interaction, pid, self.result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -556,11 +651,15 @@ class CasinoPanelView(discord.ui.View):
 
     @discord.ui.button(label="Open Game", emoji="\u25b6\ufe0f", style=discord.ButtonStyle.success, row=1)
     async def open_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossCasinoGameModal("open"))
+        await interaction.response.send_message(
+            "Select a game to **open**:", view=CasinoGameSelectView("open"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Close Game", emoji="\u23f9\ufe0f", style=discord.ButtonStyle.danger, row=1)
     async def close_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossCasinoGameModal("close"))
+        await interaction.response.send_message(
+            "Select a game to **close**:", view=CasinoGameSelectView("close"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Set Limits", emoji="\u2699\ufe0f", style=discord.ButtonStyle.secondary, row=1)
     async def set_limits(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -575,11 +674,15 @@ class CasinoPanelView(discord.ui.View):
 
     @discord.ui.button(label="Clear Session", emoji="\U0001f9f9", style=discord.ButtonStyle.secondary, row=2)
     async def clear_session(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossCasinoMemberModal("clearsession"))
+        await interaction.response.send_message(
+            "Select a member to clear session:", view=CasinoMemberSelectView("clearsession"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Give Scratch", emoji="\U0001f3ab", style=discord.ButtonStyle.secondary, row=2)
     async def give_scratch(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossCasinoMemberModal("givescratch"))
+        await interaction.response.send_message(
+            "Select a member:", view=CasinoMemberSelectView("givescratch"), ephemeral=True,
+        )
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -588,28 +691,23 @@ class CasinoPanelView(discord.ui.View):
 
 # ── Casino Modals ─────────────────────────────────────────────────────────────
 
-class BossCasinoGameModal(discord.ui.Modal):
-    game = discord.ui.TextInput(
-        label="Game Name",
-        placeholder="blackjack / crash / slots / coinflip",
-        required=True,
-        max_length=10,
-    )
-
+class CasinoGameSelectView(discord.ui.View):
     def __init__(self, mode: str):
-        title = "Open Casino Game" if mode == "open" else "Close Casino Game"
-        super().__init__(title=title)
+        super().__init__(timeout=120)
         self.mode = mode
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(
+        placeholder="Select a game...",
+        options=[
+            discord.SelectOption(label=g.title(), value=g)
+            for g in VALID_CASINO_GAMES
+        ],
+    )
+    async def game_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         cog = interaction.client.get_cog("CasinoCog")
         if not cog:
             return await _send_cog_error(interaction, "Casino")
-        game = self.game.value.strip().lower()
-        if game not in VALID_CASINO_GAMES:
-            return await interaction.response.send_message(
-                f"❌ Invalid game. Choose: {', '.join(VALID_CASINO_GAMES)}", ephemeral=True,
-            )
+        game = select.values[0]
         if self.mode == "open":
             await cog._casino_open_game_impl(interaction, game)
         else:
@@ -642,23 +740,17 @@ class BossCasinoLimitsModal(discord.ui.Modal, title="Set Casino Limits"):
         await cog._casino_set_limits_impl(interaction, mb, dmin, dmax)
 
 
-class BossCasinoMemberModal(discord.ui.Modal):
-    member_name = discord.ui.TextInput(
-        label="Member (name, nickname, or ID)", placeholder="e.g., JT", required=True,
-    )
-
+class CasinoMemberSelectView(discord.ui.View):
     def __init__(self, mode: str):
-        titles = {"clearsession": "Clear Blackjack Session", "givescratch": "Give Scratch Card"}
-        super().__init__(title=titles.get(mode, "Casino Member Action"))
+        super().__init__(timeout=120)
         self.mode = mode
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member...")
+    async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         cog = interaction.client.get_cog("CasinoCog")
         if not cog:
             return await _send_cog_error(interaction, "Casino")
-        member = await _resolve_member(interaction, self.member_name.value)
-        if not member:
-            return await _send_not_found(interaction, "member", self.member_name.value)
+        member = select.values[0]
         if self.mode == "clearsession":
             await cog._casino_clear_session_impl(interaction, member)
         elif self.mode == "givescratch":
@@ -717,19 +809,27 @@ class BalancesPanelView(discord.ui.View):
 
     @discord.ui.button(label="Give", emoji="\U0001f4b5", style=discord.ButtonStyle.success, row=0)
     async def give(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoTransferModal("give"))
+        await interaction.response.send_message(
+            "Select a member to **give** TSL Bucks:", view=EcoMemberSelectView("give"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Take", emoji="\U0001f4b8", style=discord.ButtonStyle.danger, row=0)
     async def take(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoTransferModal("take"))
+        await interaction.response.send_message(
+            "Select a member to **take** TSL Bucks from:", view=EcoMemberSelectView("take"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Set", emoji="\u270f\ufe0f", style=discord.ButtonStyle.primary, row=0)
     async def set_bal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoTransferModal("set"))
+        await interaction.response.send_message(
+            "Select a member to **set** balance:", view=EcoMemberSelectView("set"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Check", emoji="\U0001f50d", style=discord.ButtonStyle.secondary, row=0)
     async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoCheckModal())
+        await interaction.response.send_message(
+            "Select a member to check balance:", view=EcoCheckMemberSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -748,11 +848,15 @@ class StipendsPanelView(discord.ui.View):
 
     @discord.ui.button(label="Add Stipend", emoji="\u2795", style=discord.ButtonStyle.success, row=0)
     async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoStipendAddModal())
+        await interaction.response.send_message(
+            "Select the stipend interval:", view=StipendIntervalSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="Remove Stipend", emoji="\u2796", style=discord.ButtonStyle.danger, row=0)
     async def remove(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoStipendRemoveModal())
+        await interaction.response.send_message(
+            "Select the role to remove stipend from:", view=StipendRemoveRoleSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="List Stipends", emoji="\U0001f4cb", style=discord.ButtonStyle.secondary, row=1)
     async def list_stipends(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -785,11 +889,15 @@ class BulkPanelView(discord.ui.View):
 
     @discord.ui.button(label="Give to Role", emoji="\U0001f4b5", style=discord.ButtonStyle.success, row=0)
     async def give_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoRoleModal("give"))
+        await interaction.response.send_message(
+            "Select a role to **give** TSL Bucks:", view=EcoRoleSelectView("give"), ephemeral=True,
+        )
 
     @discord.ui.button(label="Take from Role", emoji="\U0001f4b8", style=discord.ButtonStyle.danger, row=0)
     async def take_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossEcoRoleModal("take"))
+        await interaction.response.send_message(
+            "Select a role to **take** TSL Bucks from:", view=EcoRoleSelectView("take"), ephemeral=True,
+        )
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -801,91 +909,119 @@ class BulkPanelView(discord.ui.View):
 
 # ── Treasury Modals ───────────────────────────────────────────────────────────
 
-class BossEcoTransferModal(discord.ui.Modal):
-    member_name = discord.ui.TextInput(
-        label="Member (name, nickname, or ID)", placeholder="e.g., JT", required=True,
-    )
+class EcoMemberSelectView(discord.ui.View):
+    """Step 1: Pick a guild member for economy operations."""
+    def __init__(self, mode: str):
+        super().__init__(timeout=120)
+        self.mode = mode
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member...")
+    async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        member = select.values[0]
+        titles = {"give": "Give TSL Bucks", "take": "Take TSL Bucks", "set": "Set Balance"}
+        await interaction.response.send_modal(
+            EcoTransferFollowUpModal(self.mode, member, titles.get(self.mode, "Transfer TSL Bucks")),
+        )
+
+
+class EcoTransferFollowUpModal(discord.ui.Modal):
     amount = discord.ui.TextInput(label="Amount", placeholder="e.g., 500", required=True)
     reason = discord.ui.TextInput(label="Reason", placeholder="Commissioner action", required=False)
 
-    def __init__(self, mode: str):
-        titles = {"give": "Give TSL Bucks", "take": "Take TSL Bucks", "set": "Set Balance"}
-        super().__init__(title=titles.get(mode, "Transfer TSL Bucks"))
+    def __init__(self, mode: str, member: discord.Member, title: str):
+        super().__init__(title=title)
         self.mode = mode
+        self.member = member
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("EconomyCog")
         if not cog:
             return await _send_cog_error(interaction, "Economy")
-        member = await _resolve_member(interaction, self.member_name.value)
-        if not member:
-            return await _send_not_found(interaction, "member", self.member_name.value)
         try:
             amt = int(self.amount.value)
         except ValueError:
             return await interaction.response.send_message("❌ Amount must be a number.", ephemeral=True)
         reason = self.reason.value or "Commissioner action"
         if self.mode == "give":
-            await cog._eco_give_impl(interaction, member, amt, reason)
+            await cog._eco_give_impl(interaction, self.member, amt, reason)
         elif self.mode == "take":
-            await cog._eco_take_impl(interaction, member, amt, reason)
+            await cog._eco_take_impl(interaction, self.member, amt, reason)
         elif self.mode == "set":
-            await cog._eco_set_impl(interaction, member, amt, reason)
+            await cog._eco_set_impl(interaction, self.member, amt, reason)
 
 
-class BossEcoCheckModal(discord.ui.Modal, title="Check Balance"):
-    member_name = discord.ui.TextInput(
-        label="Member (name, nickname, or ID)", placeholder="e.g., JT", required=True,
-    )
+class EcoCheckMemberSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member...")
+    async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         cog = interaction.client.get_cog("EconomyCog")
         if not cog:
             return await _send_cog_error(interaction, "Economy")
-        member = await _resolve_member(interaction, self.member_name.value)
-        if not member:
-            return await _send_not_found(interaction, "member", self.member_name.value)
-        await cog._eco_check_impl(interaction, member)
+        await cog._eco_check_impl(interaction, select.values[0])
 
 
-class BossEcoRoleModal(discord.ui.Modal):
-    role_name = discord.ui.TextInput(
-        label="Role Name", placeholder="e.g., TSL Owner", required=True,
-    )
+class EcoRoleSelectView(discord.ui.View):
+    """Step 1: Pick a role for bulk economy operations."""
+    def __init__(self, mode: str):
+        super().__init__(timeout=120)
+        self.mode = mode
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Select a role...")
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        role = select.values[0]
+        title = "Give Bucks to Role" if self.mode == "give" else "Take Bucks from Role"
+        await interaction.response.send_modal(EcoRoleFollowUpModal(self.mode, role, title))
+
+
+class EcoRoleFollowUpModal(discord.ui.Modal):
     amount = discord.ui.TextInput(label="Amount", placeholder="e.g., 500", required=True)
     reason = discord.ui.TextInput(label="Reason", placeholder="Role action", required=False)
 
-    def __init__(self, mode: str):
-        title = "Give Bucks to Role" if mode == "give" else "Take Bucks from Role"
+    def __init__(self, mode: str, role: discord.Role, title: str):
         super().__init__(title=title)
         self.mode = mode
+        self.role = role
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("EconomyCog")
         if not cog:
             return await _send_cog_error(interaction, "Economy")
-        role = await _resolve_role(interaction, self.role_name.value)
-        if not role:
-            return await _send_not_found(interaction, "role", self.role_name.value)
         try:
             amt = int(self.amount.value)
         except ValueError:
             return await interaction.response.send_message("❌ Amount must be a number.", ephemeral=True)
         reason = self.reason.value or "Role action"
         if self.mode == "give":
-            await cog._eco_give_role_impl(interaction, role, amt, reason)
+            await cog._eco_give_role_impl(interaction, self.role, amt, reason)
         elif self.mode == "take":
-            await cog._eco_take_role_impl(interaction, role, amt, reason)
+            await cog._eco_take_role_impl(interaction, self.role, amt, reason)
 
 
-class BossEcoStipendAddModal(discord.ui.Modal, title="Add Recurring Stipend"):
+class StipendIntervalSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.select(
+        placeholder="Select interval...",
+        options=[
+            discord.SelectOption(label=i.title(), value=i)
+            for i in VALID_INTERVALS
+        ],
+    )
+    async def interval_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.send_modal(StipendAddFollowUpModal(select.values[0]))
+
+
+class StipendAddFollowUpModal(discord.ui.Modal, title="Add Recurring Stipend"):
     role_name = discord.ui.TextInput(label="Role Name", placeholder="e.g., TSL Owner", required=True)
     amount = discord.ui.TextInput(label="Amount", placeholder="e.g., 100", required=True)
-    interval = discord.ui.TextInput(
-        label="Interval (daily/weekly/biweekly/monthly)",
-        placeholder="weekly", required=True, max_length=9,
-    )
     reason = discord.ui.TextInput(label="Reason", placeholder="Recurring stipend", required=False)
+
+    def __init__(self, interval: str):
+        super().__init__()
+        self.interval = interval
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("EconomyCog")
@@ -898,26 +1034,20 @@ class BossEcoStipendAddModal(discord.ui.Modal, title="Add Recurring Stipend"):
             amt = int(self.amount.value)
         except ValueError:
             return await interaction.response.send_message("❌ Amount must be a number.", ephemeral=True)
-        interval = self.interval.value.strip().lower()
-        if interval not in VALID_INTERVALS:
-            return await interaction.response.send_message(
-                f"❌ Interval must be one of: {', '.join(VALID_INTERVALS)}", ephemeral=True,
-            )
         reason = self.reason.value or "Recurring stipend"
-        await cog._eco_stipend_add_impl(interaction, role, amt, interval, reason)
+        await cog._eco_stipend_add_impl(interaction, role, amt, self.interval, reason)
 
 
-class BossEcoStipendRemoveModal(discord.ui.Modal, title="Remove Stipend"):
-    role_name = discord.ui.TextInput(label="Role Name", placeholder="e.g., TSL Owner", required=True)
+class StipendRemoveRoleSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Select a role...")
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
         cog = interaction.client.get_cog("EconomyCog")
         if not cog:
             return await _send_cog_error(interaction, "Economy")
-        role = await _resolve_role(interaction, self.role_name.value)
-        if not role:
-            return await _send_not_found(interaction, "role", self.role_name.value)
-        await cog._eco_stipend_remove_impl(interaction, role)
+        await cog._eco_stipend_remove_impl(interaction, select.values[0])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -932,7 +1062,9 @@ class MarketsPanelView(discord.ui.View):
     # ── Polymarket ─────────────────────────────────────────────────────────
     @discord.ui.button(label="Resolve Market", emoji="\u2696\ufe0f", style=discord.ButtonStyle.primary, row=0)
     async def resolve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossMarketResolveModal())
+        await interaction.response.send_message(
+            "Select the market result:", view=MarketResolveSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="Approve Market", emoji="\u2705", style=discord.ButtonStyle.success, row=0)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -984,7 +1116,9 @@ class MarketsPanelView(discord.ui.View):
 
     @discord.ui.button(label="Sync Sport", emoji="\U0001f504", style=discord.ButtonStyle.secondary, row=3)
     async def rsb_sync(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossRealSBSyncModal())
+        await interaction.response.send_message(
+            "Select a sport to sync:", view=RealSBSyncSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -993,11 +1127,27 @@ class MarketsPanelView(discord.ui.View):
 
 # ── Markets Modals ────────────────────────────────────────────────────────────
 
-class BossMarketResolveModal(discord.ui.Modal, title="Resolve Prediction Market"):
-    slug = discord.ui.TextInput(label="Market Slug", placeholder="e.g., will-x-happen", required=True)
-    result = discord.ui.TextInput(
-        label="Result (YES / NO / VOID)", placeholder="YES", required=True, max_length=4,
+class MarketResolveSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.select(
+        placeholder="Select result...",
+        options=[
+            discord.SelectOption(label=r, value=r)
+            for r in VALID_MARKET_RESULTS
+        ],
     )
+    async def result_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.send_modal(MarketResolveFollowUpModal(select.values[0]))
+
+
+class MarketResolveFollowUpModal(discord.ui.Modal, title="Resolve Prediction Market"):
+    slug = discord.ui.TextInput(label="Market Slug", placeholder="e.g., will-x-happen", required=True)
+
+    def __init__(self, result: str):
+        super().__init__()
+        self.result = result
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("PolymarketCog")
@@ -1007,7 +1157,7 @@ class BossMarketResolveModal(discord.ui.Modal, title="Resolve Prediction Market"
             return await interaction.response.send_message(
                 "\u23f3 Market resolution is not yet implemented.", ephemeral=True,
             )
-        await cog._resolve_market_impl(interaction, self.slug.value, self.result.value)
+        await cog._resolve_market_impl(interaction, self.slug.value, self.result)
 
 
 class BossMarketApproveModal(discord.ui.Modal, title="Approve Market"):
@@ -1045,19 +1195,23 @@ class BossRealSBEventModal(discord.ui.Modal):
             await cog.void_impl(interaction, self.event_id.value)
 
 
-class BossRealSBSyncModal(discord.ui.Modal, title="Sync Real Sportsbook"):
-    sport_key = discord.ui.TextInput(
-        label="Sport Key",
-        placeholder="e.g., americanfootball_nfl",
-        required=True,
-    )
+class RealSBSyncSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(
+        placeholder="Select a sport...",
+        options=[
+            discord.SelectOption(label=label, value=key)
+            for key, label in VALID_SPORT_KEYS
+        ],
+    )
+    async def sport_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         cog = interaction.client.get_cog("RealSportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Real Sportsbook")
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await cog.sync_impl(interaction, self.sport_key.value)
+        await cog.sync_impl(interaction, select.values[0])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1086,7 +1240,9 @@ class LeaguePanelView(discord.ui.View):
 
     @discord.ui.button(label="Orphan Flag", emoji="\U0001f3e0", style=discord.ButtonStyle.secondary, row=0)
     async def orphan(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossOrphanModal())
+        await interaction.response.send_message(
+            "Select a team to set orphan status:", view=OrphanTeamSelectView(), ephemeral=True,
+        )
 
     # ── Awards ─────────────────────────────────────────────────────────────
     @discord.ui.button(label="Create Poll", emoji="\U0001f4ca", style=discord.ButtonStyle.primary, row=1)
@@ -1105,11 +1261,15 @@ class LeaguePanelView(discord.ui.View):
     # ── Roster ─────────────────────────────────────────────────────────────
     @discord.ui.button(label="Assign", emoji="\u2705", style=discord.ButtonStyle.success, row=2)
     async def assign(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossAssignModal())
+        await interaction.response.send_message(
+            "Select a member to assign to a team:", view=AssignMemberSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="Unassign", emoji="\u274c", style=discord.ButtonStyle.danger, row=2)
     async def unassign(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BossUnassignModal())
+        await interaction.response.send_message(
+            "Select a member to unassign:", view=UnassignMemberSelectView(), ephemeral=True,
+        )
 
     @discord.ui.button(label="View Roster", emoji="\U0001f4cb", style=discord.ButtonStyle.secondary, row=3)
     async def view_roster(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1149,18 +1309,61 @@ class LeaguePanelView(discord.ui.View):
 
 # ── League Modals ─────────────────────────────────────────────────────────────
 
-class BossOrphanModal(discord.ui.Modal, title="Set Orphan Flag"):
-    team = discord.ui.TextInput(label="Team Abbreviation", placeholder="e.g., BUF", required=True)
-    flag = discord.ui.TextInput(
-        label="Orphan? (true/false)", placeholder="true", required=True, max_length=5,
-    )
+class OrphanTeamSelectView(discord.ui.View):
+    """Pick a team (AFC/NFC selects), then set orphan status via buttons."""
+    def __init__(self):
+        super().__init__(timeout=120)
+        import roster
+        teams = roster.get_all_teams()
+        afc = [t for t in teams if t["conference"] == "AFC"]
+        nfc = [t for t in teams if t["conference"] == "NFC"]
+        afc_select = discord.ui.Select(
+            placeholder="AFC Team...",
+            options=[
+                discord.SelectOption(label=f"{t['nickName']} ({t['abbrName']})", value=t["abbrName"])
+                for t in afc
+            ],
+            row=0,
+        )
+        afc_select.callback = self._on_team
+        self.add_item(afc_select)
+        nfc_select = discord.ui.Select(
+            placeholder="NFC Team...",
+            options=[
+                discord.SelectOption(label=f"{t['nickName']} ({t['abbrName']})", value=t["abbrName"])
+                for t in nfc
+            ],
+            row=1,
+        )
+        nfc_select.callback = self._on_team
+        self.add_item(nfc_select)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def _on_team(self, interaction: discord.Interaction):
+        team = interaction.data["values"][0]
+        await interaction.response.send_message(
+            f"Set orphan status for **{team}**:",
+            view=OrphanFlagView(team), ephemeral=True,
+        )
+
+
+class OrphanFlagView(discord.ui.View):
+    def __init__(self, team_abbr: str):
+        super().__init__(timeout=60)
+        self.team_abbr = team_abbr
+
+    @discord.ui.button(label="Mark as Orphan", emoji="\U0001f3e0", style=discord.ButtonStyle.danger)
+    async def mark_orphan(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = interaction.client.get_cog("GenesisHubCog") or interaction.client.get_cog("TradeCenterCog")
         if not cog:
             return await _send_cog_error(interaction, "Genesis")
-        flag_val = self.flag.value.strip().lower() in ("true", "yes", "1")
-        await cog._orphanfranchise_impl(interaction, self.team.value.strip().upper(), flag_val)
+        await cog._orphanfranchise_impl(interaction, self.team_abbr, True)
+
+    @discord.ui.button(label="Remove Orphan Flag", emoji="\u2705", style=discord.ButtonStyle.success)
+    async def remove_orphan(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("GenesisHubCog") or interaction.client.get_cog("TradeCenterCog")
+        if not cog:
+            return await _send_cog_error(interaction, "Genesis")
+        await cog._orphanfranchise_impl(interaction, self.team_abbr, False)
 
 
 class BossCreatePollModal(discord.ui.Modal, title="Create Award Poll"):
@@ -1204,16 +1407,14 @@ class BossAskDebugModal(discord.ui.Modal, title="Ask Debug (SQL + Rows)"):
         await cog._ask_debug_impl(interaction, self.question.value)
 
 
-class BossAssignModal(discord.ui.Modal, title="Assign Owner to Team"):
-    member_name = discord.ui.TextInput(
-        label="Member (name, nickname, or ID)", placeholder="e.g., JT", required=True,
-    )
+class AssignMemberSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member to assign...")
+    async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         import roster
-        member = await _resolve_member(interaction, self.member_name.value)
-        if not member:
-            return await _send_not_found(interaction, "member", self.member_name.value)
+        member = select.values[0]
         embed = discord.Embed(
             title="Team Assignment",
             description=f"Pick a conference to assign **{member.display_name}** to a team.",
@@ -1223,16 +1424,14 @@ class BossAssignModal(discord.ui.Modal, title="Assign Owner to Team"):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-class BossUnassignModal(discord.ui.Modal, title="Unassign Owner"):
-    member_name = discord.ui.TextInput(
-        label="Member (name, nickname, or ID)", placeholder="e.g., JT", required=True,
-    )
+class UnassignMemberSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member to unassign...")
+    async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         import roster
-        member = await _resolve_member(interaction, self.member_name.value)
-        if not member:
-            return await _send_not_found(interaction, "member", self.member_name.value)
+        member = select.values[0]
         entry = roster.get_entry_by_id(member.id)
         if not entry:
             return await interaction.response.send_message(
