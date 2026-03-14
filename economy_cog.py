@@ -574,11 +574,33 @@ class EconomyCog(commands.Cog):
     # ── Public Commands ──────────────────────────────────────────────────
 
     @app_commands.command(
-        name="wallet",
-        description="View your TSL Bucks balance and recent transactions.",
+        name="flow",
+        description="ATLAS Flow Economy hub — your complete financial command center.",
     )
-    async def wallet_cmd(self, interaction: discord.Interaction):
+    async def flow_cmd(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        uid = interaction.user.id
+
+        # Render the Flow Hub card (sync Pillow, runs fast)
+        import functools
+        from flow_cards import build_flow_card, card_to_file
+        loop = interaction.client.loop
+        img = await loop.run_in_executor(
+            None, functools.partial(build_flow_card, uid)
+        )
+        file = card_to_file(img, filename="flow.png")
+
+        embed = discord.Embed(color=0xD4AF37)
+        embed.set_image(url="attachment://flow.png")
+        embed.set_footer(text="ATLAS Flow Economy")
+
+        view = FlowHubView()
+        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+
+    # ── _impl methods (called by hub buttons and commish_cog) ─────────
+
+    async def _wallet_impl(self, interaction: discord.Interaction):
+        """Show wallet with balance and recent transactions."""
         uid = interaction.user.id
         balance = await flow_wallet.get_balance(uid)
         txns = await flow_wallet.get_transactions(uid, limit=10)
@@ -592,10 +614,7 @@ class EconomyCog(commands.Cog):
             "ADMIN": "\U0001f6e0",        # wrench
         }
 
-        embed = discord.Embed(
-            title="TSL Wallet",
-            color=0xD4AF37,
-        )
+        embed = discord.Embed(title="TSL Wallet", color=0xD4AF37)
         embed.add_field(name="Balance", value=f"**${balance:,}**", inline=False)
 
         if txns:
@@ -617,106 +636,8 @@ class EconomyCog(commands.Cog):
         embed.set_footer(text="ATLAS Flow Economy")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(
-        name="flow",
-        description="ATLAS Flow Economy dashboard — your complete financial overview.",
-    )
-    async def flow_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        uid = interaction.user.id
-
-        # ── Balance ──
-        balance = await flow_wallet.get_balance(uid)
-
-        # ── Recent transactions ──
-        txns = await flow_wallet.get_transactions(uid, limit=5)
-
-        # ── Betting stats from sportsbook DB ──
-        import sqlite3 as _sql
-        sb_db = os.path.join(os.path.dirname(__file__), "flow_economy.db")
-        straight, parlays, wins, losses, pushes = [], [], 0, 0, 0
-        try:
-            with _sql.connect(sb_db) as con:
-                straight = con.execute(
-                    "SELECT matchup, bet_type, pick, wager_amount, odds "
-                    "FROM bets_table WHERE discord_id=? AND status='Pending' "
-                    "ORDER BY bet_id DESC LIMIT 5", (uid,)
-                ).fetchall()
-                parlays = con.execute(
-                    "SELECT parlay_id, legs, combined_odds, wager_amount "
-                    "FROM parlays_table WHERE discord_id=? AND status='Pending' "
-                    "ORDER BY rowid DESC LIMIT 3", (uid,)
-                ).fetchall()
-                row = con.execute(
-                    "SELECT "
-                    "  SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END),"
-                    "  SUM(CASE WHEN status='Lost' THEN 1 ELSE 0 END),"
-                    "  SUM(CASE WHEN status='Push' THEN 1 ELSE 0 END) "
-                    "FROM bets_table WHERE discord_id=?", (uid,)
-                ).fetchone()
-                if row:
-                    wins, losses, pushes = (row[0] or 0), (row[1] or 0), (row[2] or 0)
-        except Exception:
-            pass  # sportsbook DB may not exist yet
-
-        # ── Build embed ──
-        embed = discord.Embed(
-            title="ATLAS Flow — Economy Dashboard",
-            color=0xD4AF37,
-        )
-        embed.add_field(name="Balance", value=f"**${balance:,}**", inline=True)
-        embed.add_field(
-            name="Lifetime Record",
-            value=f"**{wins}W - {losses}L - {pushes}P**",
-            inline=True,
-        )
-
-        # Active bets
-        active_count = len(straight) + len(parlays)
-        if active_count:
-            bet_lines = []
-            for matchup, btype, pick, amt, odds in straight:
-                bet_lines.append(f"**{pick}** ({btype}) ${amt:,} @ {int(odds):+d}")
-            for pid, legs_json, c_odds, amt in parlays:
-                import json as _json
-                try:
-                    leg_count = len(_json.loads(legs_json)) if legs_json else 0
-                except Exception:
-                    leg_count = 0
-                bet_lines.append(f"Parlay ({leg_count} legs) ${amt:,} @ {c_odds:+d}")
-            embed.add_field(
-                name=f"Active Bets ({active_count})",
-                value="\n".join(bet_lines[:8]),
-                inline=False,
-            )
-        else:
-            embed.add_field(name="Active Bets", value="No open bets", inline=False)
-
-        # Recent transactions
-        if txns:
-            source_emoji = {
-                "TSL_BET": "\U0001f3c8", "CASINO": "\U0001f3b0",
-                "PREDICTION": "\U0001f52e", "REAL_BET": "\U0001f3c6",
-                "STIPEND": "\U0001f4b5", "ADMIN": "\U0001f6e0",
-            }
-            txn_lines = []
-            for t in txns:
-                emoji = source_emoji.get(t["source"], "\U0001f4b0")
-                sign = "+" if t["amount"] >= 0 else ""
-                desc = (t["description"] or t["source"])[:25]
-                txn_lines.append(f"{emoji} `{sign}{t['amount']:,}` {desc}")
-            embed.add_field(name="Recent Activity", value="\n".join(txn_lines), inline=False)
-
-        embed.set_footer(text="ATLAS Flow Economy")
-        view = FlowDashboardView()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-    @app_commands.command(
-        name="leaderboard",
-        description="View the TSL Bucks leaderboard.",
-    )
-    async def leaderboard_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+    async def _leaderboard_impl(self, interaction: discord.Interaction):
+        """Show TSL Bucks leaderboard."""
         leaders = await flow_wallet.get_leaderboard(limit=15)
 
         if not leaders:
@@ -771,36 +692,121 @@ class EconomyCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-class FlowDashboardView(discord.ui.View):
-    """Quick-nav buttons for the /flow economy dashboard."""
+# ═══════════════════════════════════════════════════════════════════════════
+#  FLOW HUB VIEW — Unified navigation for the entire TSL economy
+# ═══════════════════════════════════════════════════════════════════════════
+
+class FlowHubView(discord.ui.View):
+    """Persistent 8-button hub for navigating all economy modules."""
 
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Sportsbook", emoji="\U0001f3c8", style=discord.ButtonStyle.primary, row=0)
-    async def sportsbook(self, interaction: discord.Interaction, _b: discord.ui.Button):
+    # ── Row 0: Module hubs ────────────────────────────────────────────
+
+    @discord.ui.button(
+        label="Sportsbook", emoji="\U0001f4ca",
+        style=discord.ButtonStyle.primary, row=0,
+        custom_id="flow:sportsbook",
+    )
+    async def btn_sportsbook(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("SportsbookCog")
         if cog:
             await cog.sportsbook.callback(cog, interaction)
         else:
             await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
 
-    @discord.ui.button(label="Casino", emoji="\U0001f3b0", style=discord.ButtonStyle.secondary, row=0)
-    async def casino(self, interaction: discord.Interaction, _b: discord.ui.Button):
+    @discord.ui.button(
+        label="Casino", emoji="\U0001f3b0",
+        style=discord.ButtonStyle.primary, row=0,
+        custom_id="flow:casino",
+    )
+    async def btn_casino(self, interaction: discord.Interaction, _b: discord.ui.Button):
         cog = interaction.client.get_cog("CasinoCog")
         if cog:
-            await cog.casino_cmd.callback(cog, interaction)
+            await cog.casino_hub.callback(cog, interaction)
         else:
             await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
 
-    @discord.ui.button(label="Leaderboard", emoji="\U0001f3c5", style=discord.ButtonStyle.secondary, row=0)
-    async def leaderboard(self, interaction: discord.Interaction, _b: discord.ui.Button):
+    @discord.ui.button(
+        label="Markets", emoji="\U0001f52e",
+        style=discord.ButtonStyle.primary, row=0,
+        custom_id="flow:markets",
+    )
+    async def btn_markets(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        cog = interaction.client.get_cog("Polymarket")
+        if cog:
+            await cog.markets_cmd.callback(cog, interaction)
+        else:
+            await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
+
+    @discord.ui.button(
+        label="Leaderboard", emoji="\U0001f3c6",
+        style=discord.ButtonStyle.secondary, row=0,
+        custom_id="flow:leaderboard",
+    )
+    async def btn_leaderboard(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
         cog = interaction.client.get_cog("EconomyCog")
         if cog:
-            await cog.leaderboard_cmd.callback(cog, interaction)
+            await cog._leaderboard_impl(interaction)
         else:
-            await interaction.response.send_message("Economy module not loaded.", ephemeral=True)
+            await interaction.followup.send("Economy module not loaded.", ephemeral=True)
+
+    # ── Row 1: Quick actions ──────────────────────────────────────────
+
+    @discord.ui.button(
+        label="My Bets", emoji="\U0001f4cb",
+        style=discord.ButtonStyle.secondary, row=1,
+        custom_id="flow:mybets",
+    )
+    async def btn_mybets(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        cog = interaction.client.get_cog("SportsbookCog")
+        if cog:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            await cog._mybets_impl(interaction)
+        else:
+            await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
+
+    @discord.ui.button(
+        label="Portfolio", emoji="\U0001f4c1",
+        style=discord.ButtonStyle.secondary, row=1,
+        custom_id="flow:portfolio",
+    )
+    async def btn_portfolio(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        cog = interaction.client.get_cog("Polymarket")
+        if cog:
+            await cog.portfolio_cmd.callback(cog, interaction)
+        else:
+            await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
+
+    @discord.ui.button(
+        label="Wallet", emoji="\U0001f4b0",
+        style=discord.ButtonStyle.secondary, row=1,
+        custom_id="flow:wallet",
+    )
+    async def btn_wallet(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        cog = interaction.client.get_cog("EconomyCog")
+        if cog:
+            await cog._wallet_impl(interaction)
+        else:
+            await interaction.followup.send("Economy module not loaded.", ephemeral=True)
+
+    @discord.ui.button(
+        label="Scratch", emoji="\U0001f39f",
+        style=discord.ButtonStyle.success, row=1,
+        custom_id="flow:scratch",
+    )
+    async def btn_scratch(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            from casino.games.slots import daily_scratch
+            await daily_scratch(interaction)
+        except Exception:
+            await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EconomyCog(bot))
+    # Register persistent view so buttons work across restarts
+    bot.add_view(FlowHubView())
