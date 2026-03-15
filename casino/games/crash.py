@@ -299,7 +299,7 @@ class CrashView(discord.ui.View):
         profit = payout - player.wager
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** cashed out at **{mult:.2f}x** "
-            f"— **+{profit:,} TSL Bucks!**",
+            f"— **+{profit:,} Bucks!**",
             ephemeral=False,
         )
 
@@ -402,7 +402,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
-            f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
+            f"❌ Wager must be between **1** and **{max_bet:,} Bucks**.",
             ephemeral=True
         )
 
@@ -433,7 +433,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     await interaction.followup.send(
-        f"✅ You're in for **{wager:,} TSL Bucks**. Good luck! 🚀",
+        f"✅ You're in for **{wager:,} Bucks**. Good luck! 🚀",
         ephemeral=True
     )
 

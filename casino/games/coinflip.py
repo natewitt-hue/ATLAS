@@ -71,7 +71,7 @@ async def play_coinflip(
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
-            f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
+            f"❌ Wager must be between **1** and **{max_bet:,} Bucks**.",
             ephemeral=True
         )
 
@@ -129,7 +129,7 @@ async def play_coinflip(
     embed.add_field(name="Result",     value=f"{result.capitalize()} {'🌕' if result == 'heads' else '🌑'}",     inline=True)
     embed.add_field(name="Outcome",    value=f"**{'WIN' if won else 'LOSS'}** — {profit_str} Bucks", inline=True)
     embed.set_image(url="attachment://coinflip.png")
-    embed.set_footer(text=f"Balance: ${db_result['new_balance']:,} TSL Bucks")
+    embed.set_footer(text=f"Balance: ${db_result['new_balance']:,} Bucks")
 
     replay_view = PlayAgainView(
         user_id=uid,
@@ -348,7 +348,7 @@ async def send_challenge(
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
         return await interaction.response.send_message(
-            f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
+            f"❌ Wager must be between **1** and **{max_bet:,} Bucks**.",
             ephemeral=True
         )
 
@@ -373,7 +373,7 @@ async def send_challenge(
         title       = "🪙 FLOW Casino — Coin Flip — PvP Challenge",
         description = (
             f"{interaction.user.mention} has challenged {opponent.mention} "
-            f"to a **{wager:,} TSL Bucks** coin flip!\n\n"
+            f"to a **{wager:,} Bucks** coin flip!\n\n"
             f"Winner takes **{int(wager * 1.9):,} Bucks** (1.9x)\n\n"
             f"{opponent.mention} — you have **5 minutes** to accept or decline."
         ),

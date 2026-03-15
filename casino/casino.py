@@ -86,7 +86,7 @@ class CasinoHubModal(discord.ui.Modal):
         super().__init__(title=f"TSL Casino — {game.capitalize()}")
         self.game = game
         self.wager_input = discord.ui.TextInput(
-            label       = "Wager (TSL Bucks)",
+            label       = "Wager (Bucks)",
             placeholder = "Enter amount (e.g. 50)",
             min_length  = 1,
             max_length  = 6,
@@ -183,7 +183,7 @@ class CasinoHubView(discord.ui.View):
             title = f"🎰 {interaction.user.display_name}'s Casino Stats",
             color = discord.Color.from_rgb(212, 175, 55),
         )
-        embed.add_field(name="Balance", value=f"**{balance:,} TSL Bucks**", inline=False)
+        embed.add_field(name="Balance", value=f"**{balance:,} Bucks**", inline=False)
 
         total_wagered = total_returned = total_hands = 0
         for row in rows:
@@ -270,7 +270,7 @@ class CasinoCog(commands.Cog):
             ),
             color = discord.Color.from_rgb(212, 175, 55),
         )
-        embed.add_field(name="Your Balance", value=f"**{balance:,} TSL Bucks**", inline=True)
+        embed.add_field(name="Your Balance", value=f"**{balance:,} Bucks**", inline=True)
         embed.add_field(name="Max Bet",      value=f"{max_bet:,} Bucks",          inline=True)
         embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
 
