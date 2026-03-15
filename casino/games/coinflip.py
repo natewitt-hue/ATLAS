@@ -91,7 +91,7 @@ async def play_coinflip(
         channel_id = interaction.channel_id,
     )
 
-    # Post to #casino-ledger
+    # Post to #ledger
     from casino.casino import post_to_ledger
     await post_to_ledger(
         bot=interaction.client, guild_id=interaction.guild_id,
@@ -99,6 +99,7 @@ async def play_coinflip(
         wager=wager, outcome=outcome, payout=payout,
         multiplier=2.0 if won else 0.0,
         new_balance=db_result["new_balance"],
+        txn_id=db_result.get("txn_id"),
     )
 
     profit     = payout - wager
@@ -200,7 +201,7 @@ class ChallengeView(discord.ui.View):
         self.clear_items()
         await interaction.response.edit_message(embed=embed, view=self)
 
-        # Post to #casino-ledger (winner + loser)
+        # Post to #ledger (winner + loser)
         from casino.casino import post_to_ledger
         from casino.casino_db import get_balance
         winner_bal = await get_balance(winner_id)

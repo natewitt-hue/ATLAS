@@ -168,13 +168,14 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         channel_id = interaction.channel_id,
     )
 
-    # Post to #casino-ledger
+    # Post to #ledger
     from casino.casino import post_to_ledger
     await post_to_ledger(
         bot=interaction.client, guild_id=interaction.guild_id,
         discord_id=interaction.user.id, game_type=GAME_TYPE,
         wager=wager, outcome=outcome, payout=payout,
         multiplier=mult, new_balance=result["new_balance"],
+        txn_id=result.get("txn_id"),
     )
 
     # ── Final render with result ───────────────────────────────────────────

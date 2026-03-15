@@ -337,15 +337,23 @@ class EconomyCog(commands.Cog):
         paid_count = 0
         for member in members:
             if stipend["amount"] > 0:
-                await admin_give(
+                old, new_bal = await admin_give(
                     member.id, stipend["amount"], stipend["created_by"],
                     f"Stipend: {stipend['reason']}"
                 )
             else:
-                await admin_take(
+                old, new_bal = await admin_take(
                     member.id, abs(stipend["amount"]), stipend["created_by"],
                     f"Deduction: {stipend['reason']}"
                 )
+            # Post to #ledger
+            txn_id = await flow_wallet.get_last_txn_id(member.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                self.bot, guild.id, member.id,
+                "STIPEND", stipend["amount"], new_bal,
+                stipend["reason"] or "Stipend payout", txn_id,
+            )
             paid_count += 1
 
         await mark_stipend_paid(stipend["stipend_id"])
@@ -372,6 +380,13 @@ class EconomyCog(commands.Cog):
             f"**{member.display_name}** ({old:,} → {new:,})\n"
             f"Reason: *{reason}*"
         )
+        # Post to #ledger
+        txn_id = await flow_wallet.get_last_txn_id(member.id)
+        from ledger_poster import post_transaction
+        await post_transaction(
+            self.bot, interaction.guild_id, member.id,
+            "ADMIN", amount, new, reason or "Commissioner grant", txn_id,
+        )
         embed = discord.Embed(
             title="✅ Money Given",
             description=(
@@ -392,6 +407,14 @@ class EconomyCog(commands.Cog):
             f"**{member.display_name}** ({old:,} → {new:,})\n"
             f"Reason: *{reason}*"
         )
+        # Post to #ledger
+        if taken > 0:
+            txn_id = await flow_wallet.get_last_txn_id(member.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                self.bot, interaction.guild_id, member.id,
+                "ADMIN", -taken, new, reason or "Commissioner deduction", txn_id,
+            )
         embed = discord.Embed(
             title="💸 Money Taken",
             description=(
@@ -411,6 +434,15 @@ class EconomyCog(commands.Cog):
             f"balance to **{new:,}** (was {old:,})\n"
             f"Reason: *{reason}*"
         )
+        # Post to #ledger
+        delta = new - old
+        if delta != 0:
+            txn_id = await flow_wallet.get_last_txn_id(member.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                self.bot, interaction.guild_id, member.id,
+                "ADMIN", delta, new, reason or "Balance set", txn_id,
+            )
         embed = discord.Embed(
             title="🔧 Balance Set",
             description=(

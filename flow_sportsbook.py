@@ -1148,6 +1148,19 @@ class BetSlipModal(discord.ui.Modal):
         embed.set_footer(text=f"TSL Sportsbook • Week {self.bet_week}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        # Post to #ledger
+        try:
+            txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                interaction.client, interaction.guild_id, interaction.user.id,
+                "TSL_BET", -amt, new_bal,
+                f"Bet: {self.team} {self.bet_type} @ {_american_to_str(self.odds)}",
+                txn_id,
+            )
+        except Exception:
+            pass
+
 
 class ParlayWagerModal(discord.ui.Modal):
     def __init__(self, uid, legs, combined_odds):
@@ -1211,6 +1224,21 @@ class ParlayWagerModal(discord.ui.Modal):
         _clear_cart(interaction.user.id)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        # Post to #ledger
+        try:
+            new_bal = _get_balance(interaction.user.id)
+            txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+            from ledger_poster import post_transaction
+            leg_summary = " + ".join(l["pick"] for l in self.legs)
+            await post_transaction(
+                interaction.client, interaction.guild_id, interaction.user.id,
+                "TSL_BET", -amt, new_bal,
+                f"Parlay ({len(self.legs)}L): {leg_summary[:60]}",
+                txn_id,
+            )
+        except Exception:
+            pass
+
 
 class PropBetModal(discord.ui.Modal):
     """Modal for placing a prop bet wager."""
@@ -1273,6 +1301,19 @@ class PropBetModal(discord.ui.Modal):
         embed.add_field(name="To Win",  value=f"**${profit:,}**",    inline=True)
         embed.add_field(name="Balance", value=f"${new_bal:,}",       inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # Post to #ledger
+        try:
+            txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                interaction.client, interaction.guild_id, interaction.user.id,
+                "TSL_BET", -amt, new_bal,
+                f"Prop: {self.pick} — {self.description[:50]}",
+                txn_id,
+            )
+        except Exception:
+            pass
 
 
 class GameCardViewWithParlay(discord.ui.View):
@@ -2117,6 +2158,32 @@ class SportsbookCog(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
+        # Post individual ledger slips for graded bets (wins/pushes)
+        try:
+            from ledger_poster import post_transaction
+            for entry in bet_log:
+                if entry["result"] == "Won":
+                    payout = entry["wager"] + entry["profit"]
+                    bal = _get_balance(entry["uid"])
+                    txn_id = await flow_wallet.get_last_txn_id(entry["uid"])
+                    await post_transaction(
+                        interaction.client, interaction.guild_id, entry["uid"],
+                        "TSL_BET", payout, bal,
+                        f"Won: {entry['pick']} {entry['bet_type']} on {entry['matchup']}",
+                        txn_id,
+                    )
+                elif entry["result"] == "Push":
+                    bal = _get_balance(entry["uid"])
+                    txn_id = await flow_wallet.get_last_txn_id(entry["uid"])
+                    await post_transaction(
+                        interaction.client, interaction.guild_id, entry["uid"],
+                        "TSL_BET", entry["wager"], bal,
+                        f"Push: {entry['pick']} {entry['bet_type']} on {entry['matchup']}",
+                        txn_id,
+                    )
+        except Exception:
+            pass
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — OVERVIEW
     # ─────────────────────────────────────────────────────────────────────────
@@ -2422,6 +2489,31 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
+        # Post ledger slips for each refunded bet
+        try:
+            from ledger_poster import post_transaction
+            refund_users = set()
+            for bid, uid, amt in pending:
+                refund_users.add(uid)
+            for pid, uid, legs_json, amt in parlay_rows:
+                try:
+                    legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
+                except Exception:
+                    continue
+                if any(key in leg.get("matchup", "").lower() for leg in legs):
+                    refund_users.add(uid)
+            for uid in refund_users:
+                bal = _get_balance(uid)
+                txn_id = await flow_wallet.get_last_txn_id(uid)
+                await post_transaction(
+                    interaction.client, interaction.guild_id, uid,
+                    "TSL_BET", 0, bal,
+                    f"Refund: Game cancelled — {matchup}",
+                    txn_id,
+                )
+        except Exception:
+            pass
+
     async def _sb_refund_impl(self, interaction: discord.Interaction, bet_id: int):
         with _db_con() as con:
             bet = con.execute(
@@ -2452,6 +2544,20 @@ class SportsbookCog(commands.Cog):
             ephemeral=True
         )
 
+        # Post to #ledger
+        try:
+            bal = _get_balance(uid)
+            txn_id = await flow_wallet.get_last_txn_id(uid)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                interaction.client, interaction.guild_id, uid,
+                "TSL_BET", amt, bal,
+                f"Refund: {pick} {btype} on {matchup} (bet #{bet_id})",
+                txn_id,
+            )
+        except Exception:
+            pass
+
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — BALANCE MANAGEMENT
     # ─────────────────────────────────────────────────────────────────────────
@@ -2471,6 +2577,17 @@ class SportsbookCog(commands.Cog):
             f"Reason: *{reason}*",
             ephemeral=True
         )
+
+        # Post to #ledger
+        try:
+            txn_id = await flow_wallet.get_last_txn_id(member.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                interaction.client, interaction.guild_id, member.id,
+                "ADMIN", adjustment, new_balance, reason, txn_id,
+            )
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — PROP BET MANAGEMENT
@@ -2560,6 +2677,33 @@ class SportsbookCog(commands.Cog):
         embed.add_field(name="🔁 Push",     value=str(pushes),         inline=True)
         embed.add_field(name="💸 Paid Out", value=f"${total_paid:,}",  inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # Post ledger slips for prop settlement (wins/pushes)
+        try:
+            from ledger_poster import post_transaction
+            for wid, uid, pick, amt, odds in wagers:
+                pick_lower = pick.lower().strip()
+                if result == "push":
+                    bal = _get_balance(uid)
+                    txn_id = await flow_wallet.get_last_txn_id(uid)
+                    await post_transaction(
+                        interaction.client, interaction.guild_id, uid,
+                        "TSL_BET", amt, bal,
+                        f"Push: Prop #{prop_id} — {desc[:40]}", txn_id,
+                    )
+                else:
+                    winning_pick = opt_a if result == "a" else opt_b
+                    if pick_lower == winning_pick.lower().strip():
+                        payout = _payout_calc(amt, int(odds))
+                        bal = _get_balance(uid)
+                        txn_id = await flow_wallet.get_last_txn_id(uid)
+                        await post_transaction(
+                            interaction.client, interaction.guild_id, uid,
+                            "TSL_BET", payout, bal,
+                            f"Won: Prop #{prop_id} — {desc[:40]}", txn_id,
+                        )
+        except Exception:
+            pass
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SportsbookCog(bot))

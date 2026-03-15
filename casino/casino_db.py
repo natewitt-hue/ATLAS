@@ -270,7 +270,18 @@ async def process_wager(
             """, (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, now)) as cur:
                 session_id = cur.lastrowid
 
-            # 3. Log house bank
+            # 3. Get txn_id from the credit we just inserted
+            txn_id = None
+            async with db.execute(
+                "SELECT txn_id FROM transactions "
+                "WHERE discord_id=? ORDER BY txn_id DESC LIMIT 1",
+                (discord_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    txn_id = row[0]
+
+            # 4. Log house bank
             house_delta = wager - payout
             await db.execute("""
                 INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at)
@@ -283,7 +294,7 @@ async def process_wager(
             await db.rollback()
             raise
 
-    return {"session_id": session_id, "new_balance": new_balance}
+    return {"session_id": session_id, "new_balance": new_balance, "txn_id": txn_id}
 
 
 async def deduct_wager(discord_id: int, wager: int) -> int:

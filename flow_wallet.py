@@ -288,6 +288,18 @@ async def set_balance(
     return old, amount
 
 
+async def get_last_txn_id(discord_id: int) -> Optional[int]:
+    """Return the most recent txn_id for a user, or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT txn_id FROM transactions "
+            "WHERE discord_id=? ORDER BY txn_id DESC LIMIT 1",
+            (discord_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def get_transactions(
     discord_id: int,
     limit: int = 20,
