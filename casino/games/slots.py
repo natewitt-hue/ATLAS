@@ -19,6 +19,7 @@ Symbols and payouts (3-match):
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 
 import discord
@@ -28,6 +29,7 @@ from casino.casino_db import (
     is_casino_open, get_channel_id, get_max_bet,
     can_claim_scratch, claim_scratch,
 )
+from casino.play_again import PlayAgainView
 from casino.renderer.card_renderer import (
     render_slot_result, render_scratch_card,
 )
@@ -199,7 +201,12 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     embed3.set_image(url="attachment://slots.png")
     embed3.set_footer(text=f"New Balance: {result['new_balance']:,} TSL Bucks")
 
-    await msg.edit(embed=embed3, attachments=[file3])
+    replay_view = PlayAgainView(
+        user_id=interaction.user.id,
+        wager=wager,
+        replay_callback=functools.partial(play_slots, wager=wager),
+    )
+    await msg.edit(embed=embed3, attachments=[file3], view=replay_view)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

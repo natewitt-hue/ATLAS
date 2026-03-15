@@ -17,6 +17,7 @@ Rules:
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
     is_casino_open, get_channel_id, get_max_bet,
 )
+from casino.play_again import PlayAgainView
 from casino.renderer.card_renderer import render_blackjack_table, SUITS, VALUES
 
 
@@ -89,6 +91,7 @@ class BlackjackSession:
     discord_id:    int
     wager:         int
     channel_id:    int
+    original_wager: int = 0   # preserved through double/split for Play Again
     message_id:    int = 0
 
     shoe:          list = field(default_factory=lambda: _build_shoe())
@@ -504,7 +507,12 @@ async def _finish_hand(
     embed.set_image(url="attachment://blackjack.png")
     embed.set_footer(text=f"New Balance: {bal:,} TSL Bucks")
 
-    await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+    replay_view = PlayAgainView(
+        user_id=session.discord_id,
+        wager=session.original_wager,
+        replay_callback=functools.partial(start_blackjack, wager=session.original_wager),
+    )
+    await interaction.response.edit_message(embed=embed, attachments=[file], view=replay_view)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -554,9 +562,10 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     session = BlackjackSession(
-        discord_id = uid,
-        wager      = wager,
-        channel_id = interaction.channel_id,
+        discord_id     = uid,
+        wager          = wager,
+        channel_id     = interaction.channel_id,
+        original_wager = wager,
     )
     session.deal()
     active_sessions[uid] = session
@@ -633,7 +642,12 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         )
         embed.set_image(url="attachment://blackjack.png")
         embed.set_footer(text=f"New Balance: {bal:,} TSL Bucks")
-        return await interaction.followup.send(embed=embed, file=file)
+        replay_view = PlayAgainView(
+            user_id=uid,
+            wager=wager,
+            replay_callback=functools.partial(start_blackjack, wager=wager),
+        )
+        return await interaction.followup.send(embed=embed, file=file, view=replay_view)
 
     # ── Normal deal: render and send active table ─────────────────────────
     bal  = await get_balance(uid)

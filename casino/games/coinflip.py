@@ -16,6 +16,7 @@ PvP:     /challenge @user [amount]
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 from datetime import datetime, timezone
 
@@ -26,6 +27,7 @@ from casino.casino_db import (
     is_casino_open, get_channel_id, get_max_bet,
     create_challenge, get_challenge, resolve_challenge, decline_challenge,
 )
+from casino.play_again import PlayAgainView
 
 GAME_TYPE = "coinflip"
 
@@ -118,7 +120,12 @@ async def play_coinflip(
     embed.add_field(name="Payout",     value=f"{payout:,} Bucks",                       inline=True)
     embed.add_field(name="Balance",    value=f"{db_result['new_balance']:,} Bucks",      inline=True)
 
-    await interaction.followup.send(embed=embed)
+    replay_view = PlayAgainView(
+        user_id=uid,
+        wager=wager,
+        replay_callback=functools.partial(play_coinflip, pick=pick_clean, wager=wager),
+    )
+    await interaction.followup.send(embed=embed, view=replay_view)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
