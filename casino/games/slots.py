@@ -31,8 +31,7 @@ from casino.casino_db import (
     can_claim_scratch, claim_scratch,
 )
 from casino.play_again import PlayAgainView
-from casino.renderer.card_renderer import render_scratch_card
-from casino.renderer.casino_html_renderer import render_slots_card
+from casino.renderer.casino_html_renderer import render_slots_card, render_scratch_card_v6
 
 GAME_TYPE = "slots"
 
@@ -218,10 +217,12 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 class ScratchView(discord.ui.View):
     """Handles sequential tile reveals for the scratch card."""
 
-    def __init__(self, discord_id: int, tiles: list[int]):
+    def __init__(self, discord_id: int, tiles: list[int], total: int = 0, balance: int = 0):
         super().__init__(timeout=120)
         self.discord_id = discord_id
         self.tiles      = tiles
+        self.total      = total
+        self.balance    = balance
         self.revealed   = 0
         self.is_match   = len(set(tiles)) == 1
 
@@ -238,8 +239,15 @@ class ScratchView(discord.ui.View):
             button.disabled = True
             button.label    = "Done!"
 
-        buf   = render_scratch_card(self.tiles, revealed=self.revealed, is_match=self.is_match)
-        file  = discord.File(buf, filename="scratch.png")
+        png = await render_scratch_card_v6(
+            self.tiles,
+            revealed=self.revealed,
+            is_match=self.is_match,
+            player_name=interaction.user.display_name,
+            total=self.total,
+            balance=self.balance,
+        )
+        file = discord.File(io.BytesIO(png), filename="scratch.png")
         embed = _build_scratch_embed(
             interaction.user.display_name,
             self.tiles,
@@ -312,12 +320,18 @@ async def daily_scratch(interaction: discord.Interaction) -> None:
             "⏰ Already claimed today!", ephemeral=True
         )
 
+    balance = await get_balance(uid)
+
     # Render initial card (0 tiles revealed)
-    buf   = render_scratch_card(tiles, revealed=0, is_match=False)
-    file  = discord.File(buf, filename="scratch.png")
+    png = await render_scratch_card_v6(
+        tiles, revealed=0, is_match=is_match,
+        player_name=interaction.user.display_name, total=total,
+        balance=balance,
+    )
+    file  = discord.File(io.BytesIO(png), filename="scratch.png")
     embed = _build_scratch_embed(interaction.user.display_name, tiles, 0, is_match)
     embed.set_image(url="attachment://scratch.png")
     embed.set_footer(text=f"Potential win: {total:,} TSL Bucks credited to your account")
 
-    view = ScratchView(uid, tiles)
+    view = ScratchView(uid, tiles, total=total, balance=balance)
     await interaction.followup.send(embed=embed, file=file, view=view)

@@ -1407,3 +1407,212 @@ async def render_coinflip_card(
         is_pvp, opponent_name, opponent_pick,
     )
     return await _render_card_html(html)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  SCRATCH CARD
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_scratch_html(
+    tiles: list[int],
+    revealed: int = 0,
+    is_match: bool = False,
+    player_name: str = "Player",
+    total: int = 0,
+    balance: int = 0,
+) -> str:
+    """Build scratch card HTML with V6 design. 3 tiles, sequential reveal."""
+
+    # Determine outcome state
+    all_revealed = revealed >= 3
+    if all_revealed and is_match:
+        status_class = "jackpot"
+        outcome = "jackpot"
+        badge_text = "TRIPLE MATCH!"
+    elif all_revealed:
+        status_class = "win"
+        outcome = "win"
+        badge_text = f"+${total:,}"
+    else:
+        status_class = "push"
+        outcome = "active"
+        badge_text = f"{3 - revealed} LEFT"
+
+    header = _build_header_html(
+        icon="\U0001f3ab",  # 🎫
+        title="DAILY SCRATCH",
+        players=[player_name],
+        outcome=outcome,
+        badge_text=badge_text,
+    )
+
+    # Build tile HTML
+    tiles_html = ""
+    for i in range(3):
+        if i < revealed:
+            # Revealed tile
+            value = tiles[i]
+            glow = "glow" if (is_match and all_revealed) else ""
+            tiles_html += f"""
+            <div class="scratch-tile revealed {glow}">
+              <div class="tile-value">${value:,}</div>
+              <div class="tile-label">BUCKS</div>
+            </div>"""
+        else:
+            # Unrevealed tile
+            tiles_html += """
+            <div class="scratch-tile hidden">
+              <div class="tile-mystery">?</div>
+            </div>"""
+
+    # Result message
+    if all_revealed and is_match:
+        result_html = f"""
+        <div class="scratch-result match">
+          \U0001f3c6 TRIPLE MATCH — ${tiles[0]:,} × 3 = +${total:,} TSL Bucks!
+        </div>"""
+    elif all_revealed:
+        result_html = f"""
+        <div class="scratch-result normal">
+          \u2705 You won ${total:,} TSL Bucks!
+        </div>"""
+    else:
+        remaining = 3 - revealed
+        result_html = f"""
+        <div class="scratch-result pending">
+          Tap Scratch! to reveal ({remaining} tile{"s" if remaining > 1 else ""} left)
+        </div>"""
+
+    footer = _build_footer_html(balance)
+
+    game_css = """<style>
+    .scratch-area {
+      display: flex;
+      justify-content: center;
+      gap: 14px;
+      padding: 20px 24px 10px;
+    }
+    .scratch-tile {
+      width: 160px;
+      height: 120px;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .scratch-tile.hidden {
+      background: rgba(140,115,36,0.12);
+      border: 2px solid var(--gold-dim);
+      box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), inset 0 -1px 2px rgba(255,255,255,0.03);
+      /* Cross-hatch pattern */
+      background-image:
+        repeating-linear-gradient(
+          45deg,
+          transparent,
+          transparent 8px,
+          rgba(212,175,55,0.06) 8px,
+          rgba(212,175,55,0.06) 9px
+        ),
+        repeating-linear-gradient(
+          -45deg,
+          transparent,
+          transparent 8px,
+          rgba(212,175,55,0.06) 8px,
+          rgba(212,175,55,0.06) 9px
+        );
+    }
+    .tile-mystery {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800;
+      font-size: 42px;
+      color: var(--gold-dim);
+      opacity: 0.5;
+    }
+    .scratch-tile.revealed {
+      background: rgba(212,175,55,0.08);
+      border: 2px solid var(--gold);
+      box-shadow: inset 0 2px 6px rgba(0,0,0,0.45), inset 0 -1px 3px rgba(255,255,255,0.04);
+    }
+    /* Scratched grain texture on revealed tiles */
+    .scratch-tile.revealed::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 10px;
+      opacity: 0.07;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 128 128' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+      pointer-events: none;
+    }
+    .scratch-tile.revealed.glow {
+      border-color: var(--gold-light);
+      box-shadow: 0 0 20px rgba(212,175,55,0.35), inset 0 2px 8px rgba(0,0,0,0.4), inset 0 -1px 3px rgba(255,218,80,0.06);
+    }
+    .tile-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800;
+      font-size: 32px;
+      color: var(--text-primary);
+      line-height: 1;
+    }
+    .scratch-tile.glow .tile-value {
+      color: var(--gold-light);
+    }
+    .tile-label {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      font-size: 11px;
+      color: var(--gold-dim);
+      letter-spacing: 2px;
+      margin-top: 6px;
+    }
+    .scratch-result {
+      text-align: center;
+      padding: 8px 20px 14px;
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .scratch-result.match {
+      color: var(--gold-light);
+      font-size: 16px;
+    }
+    .scratch-result.normal {
+      color: var(--win);
+    }
+    .scratch-result.pending {
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+    </style>"""
+
+    content = f"""
+    {game_css}
+    {header}
+    <div class="gold-divider"></div>
+
+    <div class="scratch-area">
+      {tiles_html}
+    </div>
+
+    {result_html}
+
+    <div class="gold-divider"></div>
+    {footer}"""
+
+    return _wrap_card(status_class, content)
+
+
+async def render_scratch_card_v6(
+    tiles: list[int],
+    revealed: int = 0,
+    is_match: bool = False,
+    player_name: str = "Player",
+    total: int = 0,
+    balance: int = 0,
+) -> bytes:
+    """Render a scratch card to PNG bytes using V6 Playwright renderer."""
+    html = _build_scratch_html(tiles, revealed, is_match, player_name, total, balance)
+    return await _render_card_html(html)
