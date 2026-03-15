@@ -300,36 +300,37 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         all_scores = await self.client.fetch_all_scores(days_from=3)
 
         graded_total = 0
-        for sport_key, events in all_scores.items():
-            for ev in events:
-                event_id = ev.get("id", "")
-                completed = ev.get("completed", False)
-                scores = ev.get("scores")
-                if not event_id or not scores:
-                    continue
+        # Hoist DB connection outside the loop to avoid reconnecting per-event
+        async with aiosqlite.connect(DB_PATH) as db:
+            for sport_key, events in all_scores.items():
+                for ev in events:
+                    event_id = ev.get("id", "")
+                    completed = ev.get("completed", False)
+                    scores = ev.get("scores")
+                    if not event_id or not scores:
+                        continue
 
-                home_score = None
-                away_score = None
-                home_team = ev.get("home_team", "")
-                away_team = ev.get("away_team", "")
+                    home_score = None
+                    away_score = None
+                    home_team = ev.get("home_team", "")
+                    away_team = ev.get("away_team", "")
 
-                for s in scores:
-                    if s.get("name") == home_team:
-                        try:
-                            home_score = int(s.get("score", 0))
-                        except (ValueError, TypeError):
-                            pass
-                    elif s.get("name") == away_team:
-                        try:
-                            away_score = int(s.get("score", 0))
-                        except (ValueError, TypeError):
-                            pass
+                    for s in scores:
+                        if s.get("name") == home_team:
+                            try:
+                                home_score = int(s.get("score", 0))
+                            except (ValueError, TypeError):
+                                pass
+                        elif s.get("name") == away_team:
+                            try:
+                                away_score = int(s.get("score", 0))
+                            except (ValueError, TypeError):
+                                pass
 
-                if home_score is None or away_score is None:
-                    continue
+                    if home_score is None or away_score is None:
+                        continue
 
-                now = datetime.now(timezone.utc).isoformat()
-                async with aiosqlite.connect(DB_PATH) as db:
+                    now = datetime.now(timezone.utc).isoformat()
                     await db.execute("""
                         UPDATE real_events SET
                             home_score = ?, away_score = ?,
@@ -339,11 +340,11 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                     """, (home_score, away_score, 1 if completed else 0, now, event_id))
                     await db.commit()
 
-                # Only grade when game is fully completed
-                if completed:
-                    count = await self._grade_event(event_id, home_team, away_team,
-                                                     home_score, away_score)
-                    graded_total += count
+                    # Only grade when game is fully completed
+                    if completed:
+                        count = await self._grade_event(event_id, home_team, away_team,
+                                                         home_score, away_score)
+                        graded_total += count
 
         log.info(f"Score sync complete. Graded {graded_total} bets.")
 
@@ -370,35 +371,51 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
             # result: "Won", "Lost", "Push"
             ref_key = f"REAL_BET_{bet_id}_{result.lower()}"
 
-            if result == "Won":
-                payout = _payout_calc(wager, odds)
-                try:
-                    await flow_wallet.credit(
-                        uid, payout, "REAL_BET",
-                        description=f"Won: {pick} ({bet_type})",
-                        reference_key=ref_key,
-                    )
-                except Exception as e:
-                    log.error(f"Failed to pay bet {bet_id}: {e}")
-                    continue
-            elif result == "Push":
-                try:
-                    await flow_wallet.credit(
-                        uid, wager, "REAL_BET",
-                        description=f"Push: {pick} ({bet_type})",
-                        reference_key=ref_key,
-                    )
-                except Exception as e:
-                    log.error(f"Failed to refund push bet {bet_id}: {e}")
-                    continue
-
+            # Atomic: credit + status update in single transaction
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "UPDATE real_bets SET status = ? WHERE bet_id = ?",
-                    (result, bet_id),
-                )
-                await db.commit()
-            graded += 1
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    # Check if already graded (idempotency)
+                    row = await db.execute_fetchall(
+                        "SELECT status FROM real_bets WHERE bet_id = ?", (bet_id,)
+                    )
+                    if not row or row[0][0] != "Pending":
+                        await db.rollback()
+                        continue
+
+                    if result == "Won":
+                        payout = _payout_calc(wager, odds)
+                        try:
+                            await flow_wallet.credit(
+                                uid, payout, "REAL_BET",
+                                description=f"Won: {pick} ({bet_type})",
+                                reference_key=ref_key,
+                            )
+                        except Exception as e:
+                            log.error(f"Failed to pay bet {bet_id}: {e}")
+                            await db.rollback()
+                            continue
+                    elif result == "Push":
+                        try:
+                            await flow_wallet.credit(
+                                uid, wager, "REAL_BET",
+                                description=f"Push: {pick} ({bet_type})",
+                                reference_key=ref_key,
+                            )
+                        except Exception as e:
+                            log.error(f"Failed to refund push bet {bet_id}: {e}")
+                            await db.rollback()
+                            continue
+
+                    await db.execute(
+                        "UPDATE real_bets SET status = ? WHERE bet_id = ?",
+                        (result, bet_id),
+                    )
+                    await db.commit()
+                    graded += 1
+                except Exception:
+                    await db.rollback()
+                    raise
 
         return graded
 
@@ -413,6 +430,8 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         total = home_score + away_score
 
         if bet_type == "Moneyline":
+            if home_score == away_score:
+                return "Push"
             if pick == home_team:
                 return "Won" if home_score > away_score else "Lost"
             else:
@@ -510,39 +529,42 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     async def void_impl(self, interaction: discord.Interaction, event_id: str):
         """Void an event and refund all pending bets."""
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT bet_id, discord_id, wager_amount "
-                "FROM real_bets WHERE event_id = ? AND status = 'Pending'",
-                (event_id,),
-            ) as cur:
-                bets = await cur.fetchall()
-
-        refunded = 0
-        for bet_id, uid, wager in bets:
-            ref_key = f"REAL_BET_{bet_id}_void"
+            await db.execute("BEGIN IMMEDIATE")
             try:
-                await flow_wallet.credit(uid, wager, "REAL_BET",
-                                          description="Voided event refund",
-                                          reference_key=ref_key)
-            except Exception as e:
-                log.error(f"Failed to refund bet {bet_id}: {e}")
-                continue
+                async with db.execute(
+                    "SELECT bet_id, discord_id, wager_amount "
+                    "FROM real_bets WHERE event_id = ? AND status = 'Pending'",
+                    (event_id,),
+                ) as cur:
+                    bets = await cur.fetchall()
 
-            async with aiosqlite.connect(DB_PATH) as db:
+                refunded = 0
+                for bet_id, uid, wager in bets:
+                    ref_key = f"REAL_BET_{bet_id}_void"
+                    try:
+                        await flow_wallet.credit(uid, wager, "REAL_BET",
+                                                  description="Voided event refund",
+                                                  reference_key=ref_key,
+                                                  con=db)
+                    except Exception as e:
+                        log.error(f"Failed to refund bet {bet_id}: {e}")
+                        continue
+
+                    await db.execute(
+                        "UPDATE real_bets SET status = 'Void' WHERE bet_id = ?",
+                        (bet_id,),
+                    )
+                    refunded += 1
+
+                # Mark event locked + completed
                 await db.execute(
-                    "UPDATE real_bets SET status = 'Void' WHERE bet_id = ?",
-                    (bet_id,),
+                    "UPDATE real_events SET locked = 1, completed = 1 WHERE event_id = ?",
+                    (event_id,),
                 )
                 await db.commit()
-            refunded += 1
-
-        # Mark event locked + completed
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE real_events SET locked = 1, completed = 1 WHERE event_id = ?",
-                (event_id,),
-            )
-            await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
         await interaction.followup.send(
             f"Voided event `{event_id}`. Refunded **{refunded}** bets.",

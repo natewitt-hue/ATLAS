@@ -160,7 +160,12 @@ class OddsAPIClient:
         markets: str = "h2h,spreads,totals",
         bookmakers: str = DEFAULT_BOOKMAKERS,
     ) -> dict[str, list[dict]]:
-        """Fetch odds for all supported sports. Returns {sport_key: [events]}."""
+        """Fetch odds for all supported sports. Returns {sport_key: [events]}.
+
+        NOTE: Sports are fetched sequentially to stay within API rate limits.
+        If rate limits allow, consider using asyncio.gather() for parallel
+        fetches to reduce total latency.
+        """
         results = {}
         for sport_key in SUPPORTED_SPORTS:
             events = await self.fetch_odds(sport_key, markets, bookmakers)

@@ -75,7 +75,8 @@ async def is_tsl_owner(interaction: discord.Interaction) -> bool:
     """
     member = interaction.user
     if not isinstance(member, discord.Member):
-        return True  # DM context — allow
+        # DM context — only allow admins (prevents permission bypass via DMs)
+        return interaction.user.id in ADMIN_USER_IDS
 
     guild = interaction.guild
     if guild is None:

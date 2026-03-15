@@ -175,7 +175,7 @@ def _filter_players(
 def _build_player_options(players: list[dict]) -> list[discord.SelectOption]:
     options = []
     for p in players:
-        rid   = str(p.get("rosterId") or p.get("id") or id(p))
+        rid   = str(p.get("rosterId") or p.get("id") or hash((_display_name(p), _ovr(p), p.get("position", ""))))
         label = _player_label(p)
         desc  = f"{_display_name(p)} · {_team_nick(p)}"[:100]
         options.append(discord.SelectOption(label=label, value=rid, description=desc))
@@ -384,9 +384,14 @@ class PlayerPickerView(discord.ui.View):
         await interaction.response.edit_message(embed=self.current_embed(), view=self)
 
     async def on_timeout(self):
-        # Disable all items silently
+        # Disable all items and update the message
         for item in self.children:
             item.disabled = True
+        if hasattr(self, "message") and self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
 
 
 # ── Convenience factory functions ─────────────────────────────────────────────

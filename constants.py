@@ -2,6 +2,8 @@
 
 import discord
 
+# TODO: Host on a permanent URL (e.g. GitHub raw, S3, or Imgur).
+# This signed Discord CDN link will expire and break embed icons.
 ATLAS_ICON_URL = (
     "https://cdn.discordapp.com/attachments/977007320259244055/"
     "1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3"

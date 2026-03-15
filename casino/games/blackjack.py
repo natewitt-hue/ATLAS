@@ -20,8 +20,6 @@ import asyncio
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-
 import discord
 
 from casino.casino_db import (
@@ -30,8 +28,6 @@ from casino.casino_db import (
 )
 from casino.renderer.card_renderer import render_blackjack_table, SUITS, VALUES
 
-if TYPE_CHECKING:
-    pass
 
 # ── Session registry: discord_id → BlackjackSession ──────────────────────────
 active_sessions: dict[int, "BlackjackSession"] = {}
@@ -43,6 +39,8 @@ TIMEOUT_SECS = 300   # 5 minutes
 # ═════════════════════════════════════════════════════════════════════════════
 #  DECK & HAND LOGIC
 # ═════════════════════════════════════════════════════════════════════════════
+
+_FULL_SHOE_SIZE = 312  # 6 decks * 52 cards
 
 def _build_shoe(decks: int = 6) -> list[tuple[str, str]]:
     shoe = [(v, s) for s in SUITS for v in VALUES] * decks
@@ -110,7 +108,7 @@ class BlackjackSession:
         for _ in range(2):
             self.player_hand.append(self.shoe.pop())
             self.dealer_hand.append(self.shoe.pop())
-        if len(self.shoe) < len(_build_shoe()) * 0.3:
+        if len(self.shoe) < _FULL_SHOE_SIZE * 0.3:
             self.shoe = _build_shoe()
 
     @property
@@ -144,7 +142,7 @@ class BlackjackSession:
         Resolve the current active hand against the dealer.
         Returns (outcome, payout, multiplier).
         """
-        wager   = wager_override or self.wager
+        wager   = wager_override if wager_override is not None else self.wager
         p_score = _hand_value(self.active_hand)
         d_score = _hand_value(self.dealer_hand)
         p_bj    = _is_blackjack(self.active_hand) and not self.split_active
@@ -545,9 +543,13 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             ephemeral=True
         )
 
+    # Set sentinel BEFORE any await to prevent TOCTOU double-session
+    active_sessions[uid] = "PENDING"
+
     try:
         await deduct_wager(uid, wager)
     except Exception as e:
+        active_sessions.pop(uid, None)
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     session = BlackjackSession(

@@ -10,8 +10,11 @@ All commands are accessed through /commish eco <cmd> via commish_cog.py.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
+
+log = logging.getLogger(__name__)
 
 import aiosqlite
 import discord
@@ -94,6 +97,8 @@ async def admin_give(discord_id: int, amount: int, admin_id: int,
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            # flow_wallet.get_balance and .credit both honor the `con` param:
+            # when passed, they use the caller's connection without committing.
             old_balance = await flow_wallet.get_balance(discord_id, con=db)
             new_balance = await flow_wallet.credit(
                 discord_id, amount, "ADMIN",
@@ -307,7 +312,11 @@ class EconomyCog(commands.Cog):
 
     async def _process_stipend(self, stipend: dict) -> None:
         """Process a single stipend payment."""
-        guild = self.bot.guilds[0] if self.bot.guilds else None
+        # Prefer configured guild ID; fall back to first available guild
+        configured_id = int(os.getenv("DISCORD_GUILD_ID", "0"))
+        guild = self.bot.get_guild(configured_id) if configured_id else None
+        if not guild:
+            guild = self.bot.guilds[0] if self.bot.guilds else None
         if not guild:
             return
 
@@ -319,6 +328,9 @@ class EconomyCog(commands.Cog):
             target_name = f"@{role.name}"
         else:
             member = guild.get_member(stipend["target_id"])
+            if not member:
+                log.warning("Stipend %s targets departed member %s — skipping",
+                            stipend["stipend_id"], stipend["target_id"])
             members = [member] if member else []
             target_name = f"<@{stipend['target_id']}>"
 
@@ -668,6 +680,7 @@ class EconomyCog(commands.Cog):
 
         # Count active users
         async with aiosqlite.connect(DB_PATH) as db:
+            # NOTE: "users_table" is the canonical table name used by flow_wallet
             async with db.execute("SELECT COUNT(*) FROM users_table") as cur:
                 user_count = (await cur.fetchone())[0]
 

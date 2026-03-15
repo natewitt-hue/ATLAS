@@ -17,8 +17,12 @@ Discord commands (registered in bot.py):
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
+import logging
+import math
 import random
 import re
+
+log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1: DEV TRAIT BUDGET
@@ -51,8 +55,8 @@ DEV_INT_TO_STR = {0: "Normal", 1: "Star", 2: "Superstar", 3: "Superstar X-Factor
 #   C = Common/universal (recovery, stamina, generic traits) — no stat gate
 #
 # Threshold format: dict of {stat_field: min_value} — ALL must be met (AND logic)
-#   EXCEPT fields ending in "__or" which use OR logic with the next __or field.
 #   Physical floor fields are also included here under the same AND logic.
+#   For dual-attribute checks, use OR logic (see CLAUDE.md: MaddenStats API Gotchas).
 #
 # Archetype field: if set, calculate_true_archetype() must return that value.
 #   None = any archetype qualifies.
@@ -327,7 +331,7 @@ ABILITY_TABLE: dict[str, dict] = {
     # ── DEFENSIVE TACKLES ─────────────────────────────────────────────────────
     "Interior Threat":   {"tier":"S","positions":["DT"],"archetype":None,
                           "thresholds":{"blockShedRating":95,"powerMovesRating":88}},
-    "Inside Stuff":      {"tier":"A","positions":["DT","LEDGE","MIKE"],"archetype":"Power/Run Stopper",
+    "Inside Stuff":      {"tier":"A","positions":["DT","LEDGE","MIKE"],"archetype":"Power Rusher/Run Stopper",
                           "thresholds":{"blockShedRating":92,"strengthRating":90}},
     "Enforcer Supreme":  {"tier":"A","positions":["DT"],"archetype":None,
                           "thresholds":{"hitPowerRating":92,"strengthRating":92,"weight":280}},
@@ -424,8 +428,6 @@ ABILITY_TABLE: dict[str, dict] = {
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 3: HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
-
-import math
 
 def _safe_int(val, default: int = 0) -> int:
     """Convert a value to int, returning default for NaN/None/empty."""
@@ -553,7 +555,7 @@ def check_physics_floor(player: dict, ability_name: str) -> tuple[bool, str]:
             if best < min_val:
                 return False, f"PMV({pmv}) or FMV({fmv}) must be ≥{min_val} (best={best})"
         elif key == "weight":
-            actual = player.get("weight", 0)
+            actual = _safe_int(player.get("weight", 0))
             if actual < min_val:
                 return False, f"weight {actual}lbs < {min_val}lbs floor"
         else:
@@ -635,7 +637,11 @@ def check_budget(dev: str, equipped_abilities: list[str]) -> tuple[bool, str]:
         if not ab:
             continue
         entry = ABILITY_TABLE.get(ab)
-        tier = entry["tier"] if entry else "C"  # unknown = treat as C, don't flag budget
+        if entry:
+            tier = entry["tier"]
+        else:
+            log.warning("Unknown ability '%s' not in ABILITY_TABLE — treating as C-tier", ab)
+            tier = "C"  # unknown = treat as C, don't flag budget
         counts[tier] = counts.get(tier, 0) + 1
 
     violations = []
@@ -734,7 +740,7 @@ def audit_roster(players: list[dict], player_abilities: list[dict],
         rid = p.get("rosterId")
         # ability1-6 = canonical currently-equipped abilities
         equipped = [p.get(f"ability{i}", "") for i in range(1, 7)
-                    if p.get(f"ability{i}", "")]
+                    if p.get(f"ability{i}", "") and p.get(f"ability{i}", "") != "nan"]
 
         if not equipped:
             continue  # no abilities equipped, nothing to audit
@@ -1055,7 +1061,7 @@ def reassign_roster(players: list[dict],
             dev=dev, archetype=archetype,
             original_abilities=equipped_filled,
             kept=kept, swaps=swaps, unresolved=unresolved,
-            has_changes=True,
+            has_changes=bool(swaps or unresolved),
         ))
 
     results.sort(key=lambda r: (not r.has_changes, r.team, r.name))

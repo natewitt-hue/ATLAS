@@ -148,6 +148,8 @@ def _get_active_positions(user_id: int) -> dict:
 
 
 def _get_leaderboard_rank(user_id: int) -> tuple[int, int]:
+    # NOTE: Could use SQL RANK() window function for O(1) lookup instead of
+    # fetching all rows, but user count is small (~31 owners) so linear scan is fine.
     with sqlite3.connect(DB_PATH) as con:
         rows = con.execute(
             "SELECT discord_id FROM users_table ORDER BY balance DESC"
@@ -188,7 +190,8 @@ def build_flow_card(user_id: int) -> Image.Image:
 
     total_bets = wins + losses + pushes
     win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
-    roi = ((balance - STARTING_BALANCE) / STARTING_BALANCE * 100) if STARTING_BALANCE > 0 else 0
+    season_start = _get_season_start_balance(user_id)
+    roi = ((balance - season_start) / season_start * 100) if season_start > 0 else 0
 
     card = ATLASCard(
         module_icon=FLOW_ICON,

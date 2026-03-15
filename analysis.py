@@ -286,12 +286,20 @@ def power_rankings() -> list[dict]:
         mn, mx = series.min(), series.max()
         return (series - mn) / (mx - mn + 1e-9)
 
+    # Canonical power-ranking formula — weights must sum to 100:
+    #   Win%: 40, Net Points: 30, Turnover Diff: 15, Off Yds Rank: 8, Def Yds Rank: 7
+    WEIGHT_WIN_PCT  = 40
+    WEIGHT_NET_PTS  = 30
+    WEIGHT_TO_DIFF  = 15
+    WEIGHT_OFF_RANK = 8
+    WEIGHT_DEF_RANK = 7
+
     df["score"] = (
-        normalize(df["winPct"])    * 40 +
-        normalize(df["netPts"])    * 30 +
-        normalize(df["tODiff"])    * 15 +
-        normalize(32 - df["offTotalYdsRank"]) * 8 +
-        normalize(32 - df["defTotalYdsRank"]) * 7
+        normalize(df["winPct"])    * WEIGHT_WIN_PCT +
+        normalize(df["netPts"])    * WEIGHT_NET_PTS +
+        normalize(df["tODiff"])    * WEIGHT_TO_DIFF +
+        normalize(32 - df["offTotalYdsRank"]) * WEIGHT_OFF_RANK +
+        normalize(32 - df["defTotalYdsRank"]) * WEIGHT_DEF_RANK
     ).round(1)
 
     df = df.sort_values("score", ascending=False).reset_index(drop=True)
@@ -360,6 +368,8 @@ def recent_trades(season: int = None, n: int = 5) -> dict:
         df = df[df["seasonIndex"] == target_season]
     if "status" in df.columns:
         df = df[df["status"].str.lower() == "accepted"]
+    if "tradeId" in df.columns:
+        df = df.sort_values("tradeId", ascending=False)
     trades = df.head(n).to_dict("records")
     return {
         "type":   "trades",

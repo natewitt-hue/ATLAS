@@ -112,13 +112,8 @@ async def get_balance(discord_id: int, *, con=None) -> int:
         return await _ensure_user(con, discord_id)
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            bal = await _ensure_user(db, discord_id)
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        bal = await _ensure_user(db, discord_id)
+        await db.commit()
     return bal
 
 
@@ -440,4 +435,7 @@ def update_balance_sync(
         return _run(con)
     else:
         with _db_con_sync() as c:
-            return _run(c)
+            c.execute("BEGIN IMMEDIATE")
+            result = _run(c)
+            c.commit()
+            return result

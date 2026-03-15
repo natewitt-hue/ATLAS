@@ -346,6 +346,8 @@ def build_exec_env() -> dict:
     # internally. We exec it in a SEPARATE env with FULL builtins (intentional —
     # this is our own trusted code, not LLM-generated) so those imports work,
     # then inject only the resulting functions into the restricted sandbox.
+    # TRUST BOUNDARY: PREBUILT_METRICS_CODE is a hardcoded constant defined in this
+    # module, not user input. Unrestricted builtins are intentional for metric computation.
     prebuilt_env = {"pd": pd, "np": np}
     exec(PREBUILT_METRICS_CODE, prebuilt_env)
     # Copy only the functions we defined (skip __builtins__, pd, np)
@@ -445,7 +447,9 @@ async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) ->
     log = logging.getLogger(__name__)
 
     try:
-        response = gemini_client.models.generate_content(
+        import asyncio
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
             model="gemini-2.0-flash",
             config=types.GenerateContentConfig(
                 system_instruction=ANALYST_SYSTEM,
@@ -453,7 +457,7 @@ async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) ->
                 top_p=0.9,
             ),
             contents=[prompt],
-        )
+        ))
         if not response.text:
             return ""
         code = response.text.strip()
@@ -677,6 +681,8 @@ _BANNED_SQL_KEYWORDS = _re.compile(
     _re.IGNORECASE,
 )
 
+# NOTE: This regex alone doesn't prevent injection. It works together with
+# _BANNED_SQL_KEYWORDS (checked in _sanitize_sql) to reject dangerous queries.
 _SELECT_PATTERN    = _re.compile(r"^\s*(--[^\n]*)?\s*SELECT\b", _re.IGNORECASE | _re.DOTALL)
 _ALLOWED_TABLES    = {"messages", "messages_fts"}
 _TABLE_REF_PATTERN = _re.compile(
@@ -765,7 +771,9 @@ async def generate_sql(question: str, gemini_client) -> str:
 
     schema = dm.get_discord_db_schema()
     try:
-        response = gemini_client.models.generate_content(
+        import asyncio
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
             model="gemini-2.0-flash",
             config=types.GenerateContentConfig(
                 system_instruction=_SQL_SYSTEM_PROMPT.format(schema=schema),
@@ -773,7 +781,7 @@ async def generate_sql(question: str, gemini_client) -> str:
                 top_p=0.9,
             ),
             contents=[_SQL_USER_TEMPLATE.format(question=question)],
-        )
+        ))
         raw = response.text.strip() if response.text else ""
         return _sanitize_sql(raw)
     except Exception as e:
@@ -809,7 +817,7 @@ def execute_sql_safe(sql: str) -> _SQLResult:
         _sql_log.warning(f"[SQL] Rejected: {detail}\nSQL: {sql[:200]}")
         return result
 
-    if is_safe and detail != sql and not detail.upper().startswith("ONLY"):
+    if is_safe and detail != sql:
         sql             = detail
         result.sql_used = sql
 
@@ -962,7 +970,9 @@ async def query_discord_history(question: str, gemini_client) -> dict:
         )
 
         try:
-            fix_response = gemini_client.models.generate_content(
+            import asyncio
+            loop = asyncio.get_running_loop()
+            fix_response = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
                 model="gemini-2.0-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=_SQL_SYSTEM_PROMPT.format(schema=schema),
@@ -970,7 +980,7 @@ async def query_discord_history(question: str, gemini_client) -> dict:
                     top_p=0.85,
                 ),
                 contents=[fix_prompt],
-            )
+            ))
             if fix_response.text:
                 sql = _sanitize_sql(fix_response.text.strip())
                 _sql_log.info(f"[SQL] Retry {attempt} rewritten SQL: {sql[:150]}")

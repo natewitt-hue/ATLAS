@@ -1229,8 +1229,8 @@ def _build_recap_embed(week: int | None = None) -> discord.Embed:
 
 # ── Draft History ─────────────────────────────────────────────────────────────
 
-def _build_draft_overview_embed() -> discord.Embed:
-    data    = ig.compare_draft_classes()
+async def _build_draft_overview_embed() -> discord.Embed:
+    data    = await ig.compare_draft_classes()
     classes = data.get("classes", [])
 
     embed = discord.Embed(
@@ -1264,8 +1264,8 @@ def _build_draft_overview_embed() -> discord.Embed:
     return embed
 
 
-def _build_draft_season_embeds(season: int) -> list[discord.Embed]:
-    data = ig.get_draft_class(season)
+async def _build_draft_season_embeds(season: int) -> list[discord.Embed]:
+    data = await ig.get_draft_class(season)
 
     if "error" in data:
         return [discord.Embed(
@@ -2815,14 +2815,8 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
         try:
             from google.genai import types
 
-            system_instruction = (
-                "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
-                "You are in Open Intel mode — answering general knowledge and sports questions "
-                "outside the TSL database. "
-                "Always refer to yourself as ATLAS. Keep responses concise and direct (3–5 sentences max). "
-                "Use web search when you need current or factual information. "
-                "Be confident, sharp, and authoritative."
-            )
+            from echo_loader import get_persona
+            system_instruction = get_persona("analytical")
 
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
@@ -2883,15 +2877,8 @@ class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"
         try:
             from google.genai import types
 
-            system_instruction = (
-                "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
-                "You are in Sports Intel mode — answering real-world NFL and sports questions. "
-                "Use web search to find current stats, news, standings, scores, and trade rumors. "
-                "Be authoritative on sports analysis. Give sharp, opinionated takes with conviction. "
-                "Use bold (**text**) for key stats and names (Discord markdown). "
-                "Keep responses concise (3-5 sentences) unless the user asks for detail. "
-                "Always refer to yourself as ATLAS."
-            )
+            from echo_loader import get_persona
+            system_instruction = get_persona("analytical")
 
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
@@ -3104,15 +3091,8 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
 
             tsl_context = "\n\n".join(context_parts) if context_parts else ""
 
-            system_instruction = (
-                "You are ATLAS in Strategy Room mode — the TSL's top strategic advisor. "
-                "Provide trade advice, roster management tips, game strategy, and competitive analysis. "
-                "Use the TSL context data provided to give SPECIFIC, ACTIONABLE recommendations. "
-                "Reference actual team names, standings, and ratings when relevant. "
-                "Be opinionated and decisive — don't hedge. Give a clear recommendation. "
-                "Use **bold** for key points (Discord markdown). "
-                "Keep responses under 400 words. Always refer to yourself as ATLAS."
-            )
+            from echo_loader import get_persona
+            system_instruction = get_persona("analytical")
 
             contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
 
@@ -3246,7 +3226,7 @@ class PlayerDrillView(discord.ui.View):
             for name in player_names[:25]
         ]
 
-    @discord.ui.select(placeholder="Drill into a player's Hot/Cold...")
+    @discord.ui.select(placeholder="Drill into a player's Hot/Cold...", options=[])
     async def player_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         player_name = select.values[0]
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -3269,17 +3249,17 @@ class DraftSeasonView(discord.ui.View):
             discord.SelectOption(label=f"Season {s}", value=str(s))
             for s in range(1, dm.CURRENT_SEASON + 1)
         ]
-        self.season_select.options = options
+        self.season_select.options = options[-25:]
 
-    @discord.ui.select(placeholder="Select season...")
+    @discord.ui.select(placeholder="Select season...", options=[])
     async def season_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.defer(thinking=True, ephemeral=True)
         season = int(select.values[0])
         if season == 0:
-            embed  = _build_draft_overview_embed()
+            embed  = await _build_draft_overview_embed()
             embeds = [embed]
         else:
-            embeds = _build_draft_season_embeds(season)
+            embeds = await _build_draft_season_embeds(season)
         await interaction.followup.send(embeds=embeds, view=DraftSeasonView(), ephemeral=True)
 
 
@@ -3297,7 +3277,7 @@ class WeekRecapView(discord.ui.View):
             discord.SelectOption(label="Week 1", value="1")
         ]
 
-    @discord.ui.select(placeholder="Select a week...")
+    @discord.ui.select(placeholder="Select a week...", options=[])
     async def week_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = _build_recap_embed(week=int(select.values[0]))
@@ -3502,7 +3482,7 @@ class HubView(discord.ui.View):
     )
     async def btn_draft(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
-        embed = _build_draft_overview_embed()
+        embed = await _build_draft_overview_embed()
         await interaction.followup.send(embed=embed, view=DraftSeasonView(), ephemeral=True)
 
     # ── Row 2: Deep Dives ─────────────────────────────────────────────────────
@@ -3648,12 +3628,16 @@ class StatsHubCog(commands.Cog):
                     ephemeral=True
                 )
             embed = _build_hotcold_single(data)
+            view = AnalyticsNav(self.bot, interaction.user.id)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
             await interaction.response.defer(ephemeral=True, thinking=True)
             embed, player_names = _build_hotcold_league()
-
-        view = AnalyticsNav(self.bot, interaction.user.id)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            if player_names:
+                await interaction.followup.send(embed=embed, view=PlayerDrillView(player_names), ephemeral=True)
+            else:
+                view = AnalyticsNav(self.bot, interaction.user.id)
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ── /stats clutch ─────────────────────────────────────────────────────────
 
@@ -3682,12 +3666,12 @@ class StatsHubCog(commands.Cog):
                 return
 
             await interaction.response.defer(ephemeral=True, thinking=True)
-            embeds = _build_draft_embed(season)
+            embeds = await _build_draft_embed(season)
             view   = AnalyticsNav(self.bot, interaction.user.id)
             await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
         else:
             await interaction.response.defer(ephemeral=True, thinking=True)
-            embed = _build_draft_comparison_embed()
+            embed = await _build_draft_comparison_embed()
             view  = AnalyticsNav(self.bot, interaction.user.id)
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
@@ -3743,7 +3727,7 @@ class StatsHubCog(commands.Cog):
         )
         embed.set_author(
             name="ATLAS · Autonomous TSL League Administration System",
-            icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
+            icon_url=ATLAS_ICON_URL
         )
         embed.set_footer(text="ATLAS™ Oracle Module · Pick a mode to begin")
         await interaction.response.send_message(

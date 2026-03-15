@@ -46,11 +46,13 @@ def _get_gemini_client():
         return _GEMINI_CLIENT
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
+        log.warning("GEMINI_API_KEY not set — AI market analysis unavailable")
         return None
     try:
         _GEMINI_CLIENT = genai.Client(api_key=api_key)
         return _GEMINI_CLIENT
     except Exception:
+        log.warning("Failed to initialise Gemini client for polymarket", exc_info=True)
         return None
 
 

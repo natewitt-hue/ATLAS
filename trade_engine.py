@@ -39,7 +39,7 @@ SEASON_CONFIG = {
     "green_band_early":  12,    # delta% threshold for GREEN band (season <= 5)
     "green_band_late":    9,    # delta% threshold for GREEN band (season >= 6)
     "yellow_band_early": 20,    # delta% threshold for YELLOW band (season <= 5)
-    "yellow_band_late":  16,    # delta% threshold for YELLOW band (season >= 6)
+    "yellow_band_late":  20,    # delta% threshold for YELLOW band (season >= 6)
     "seasonal_mult_early": 1.15,  # pick EV multiplier (season <= 2)
     "seasonal_mult_late":  0.80,  # pick EV multiplier (season >= 7)
     "early_season_cutoff": 2,
@@ -118,7 +118,7 @@ ABILITY_TIER_POINTS: dict[str, int] = {"S": 350, "A": 200, "B": 125, "C": 0}
 def _meta_cap_bonus(player: dict) -> int:
     ability_pts = sum(ABILITY_TIER_POINTS.get(_ABILITY_TABLE.get(player.get(f"ability{i}", ""), {}).get("tier", "C"), 0) for i in range(1, 7))
     ability_pts = min(ability_pts, 750)
-    ovr = player.get("overallRating", 0)
+    ovr = player.get("overallRating") or player.get("playerBestOvr") or 0
     attr_pts = 400 if ovr >= 97 else (300 if ovr >= 94 else (200 if ovr >= 91 else (100 if ovr >= 88 else 0)))
     return ability_pts + attr_pts
 
@@ -324,8 +324,8 @@ def evaluate_trade(side_a: TradeSide, side_b: TradeSide) -> TradeEvalResult:
 
     band = "GREEN" if delta_pct <= green_threshold else ("YELLOW" if delta_pct <= yellow_threshold else "RED")
 
-    if band == "RED": notes.append("🚨 Trade is outside legal band — commissioner must void or renegotiate.")
-    elif band == "YELLOW": notes.append("⚠️ Trade is in YELLOW band — flag for commissioner review.")
+    if band == "RED": notes.append("🚫 Trade exceeds 20% value gap — automatically declined by ATLAS.")
+    elif band == "YELLOW": notes.append("⚠️ Trade is in YELLOW band — flagged for commissioner review.")
 
     # FIX #4: Read parity_state.json ONCE before the loop, not per player.
     # Also: json and os are now top-level imports.

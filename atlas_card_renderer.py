@@ -216,7 +216,12 @@ def _draw_status_bar(img: Image.Image, y: int, height: int, status: str):
 
 
 def _apply_noise(img: Image.Image, opacity: float = 0.03):
-    """Apply a subtle noise texture overlay."""
+    """Apply a subtle noise texture overlay.
+
+    Uses a pre-baked noise_texture.png if available (tiles it across the
+    image).  Falls back to procedural per-pixel random noise generated with
+    a fixed seed (42) for deterministic output.
+    """
     noise_path = ASSET_DIR / "noise_texture.png"
     if noise_path.exists():
         noise = Image.open(noise_path).convert('RGBA')
@@ -242,7 +247,13 @@ def _apply_noise(img: Image.Image, opacity: float = 0.03):
 
 def _apply_radial_glow(img: Image.Image, center: tuple, radius: int,
                        color: tuple, intensity: float = 0.07):
-    """Apply a subtle radial gold glow."""
+    """Apply a subtle radial gold glow.
+
+    Pre-renders concentric circles with quadratic alpha falloff onto a
+    separate RGBA layer, then composites via Image.alpha_composite for
+    correct blending (equivalent to GaussianBlur-based glow but with
+    explicit radial control).
+    """
     glow = Image.new('RGBA', img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(glow)
     cx, cy = center
@@ -466,7 +477,9 @@ class ATLASCard:
             if s.type == SectionType.HERO_NUMBER:
                 h += 142
             elif s.type == SectionType.SPARKLINE:
-                # Sparkline is drawn inline with hero, no extra height
+                # Sparkline is drawn inline with HERO_NUMBER — it occupies the
+                # same vertical band, so it adds no extra height.  A SPARKLINE
+                # section must immediately follow a HERO_NUMBER section.
                 pass
             elif s.type == SectionType.WIN_LOSS_TICKER:
                 h += 44
@@ -688,8 +701,8 @@ class ATLASCard:
         fill_draw = ImageDraw.Draw(fill_layer)
         fill_draw.polygon(fill_points, fill=(*Colors.GREEN[:3], 25))
         img_comp = Image.alpha_composite(img, fill_layer)
-        # Copy back
-        img.paste(img_comp)
+        # Copy composited result back into the mutable img
+        img.paste(img_comp, (0, 0))
 
         # Draw line
         draw = ImageDraw.Draw(img, 'RGBA')
@@ -941,8 +954,8 @@ class ATLASCard:
 #  CONVENIENCE: Quick card generation for discord.py
 # ═════════════════════════════════════════════════════════════════════════════
 
-def card_to_discord_file(card: ATLASCard, filename: str = "card.png") -> bytes:
-    """Render a card and return bytes suitable for discord.File(io.BytesIO(...))."""
+def card_to_discord_file(card: ATLASCard, filename: str = "card.png") -> "io.BytesIO":
+    """Render a card and return a BytesIO buffer suitable for discord.File(...)."""
     import io
     img = card.render()
     buf = io.BytesIO()

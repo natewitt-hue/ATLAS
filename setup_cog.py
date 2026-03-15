@@ -16,6 +16,7 @@ Register in bot.py setup_hook():
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import traceback
@@ -24,6 +25,8 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -116,6 +119,7 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
                 ).fetchone()
             return row[0] if row else None
     except Exception:
+        log.error("Failed to read channel config for key=%s guild_id=%s", key, guild_id, exc_info=True)
         return None
 
 
@@ -221,10 +225,13 @@ async def _provision_channels(guild: discord.Guild) -> dict:
     }
 
     # Build a name → channel lookup (lowercased for fuzzy matching)
-    existing: dict[str, discord.TextChannel] = {
-        ch.name.lower(): ch
-        for ch in guild.text_channels
-    }
+    existing: dict[str, discord.TextChannel] = {}
+    for ch in guild.text_channels:
+        key = ch.name.lower()
+        if key in existing:
+            log.warning("Channel name collision: '%s' matches both #%s (%s) and #%s (%s)",
+                        key, existing[key].name, existing[key].id, ch.name, ch.id)
+        existing[key] = ch
 
     # Build a category name → category object lookup
     categories: dict[str, discord.CategoryChannel] = {

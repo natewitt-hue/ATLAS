@@ -123,7 +123,8 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     # ── Initial render — all spinning ─────────────────────────────────────
     bal = await get_balance(interaction.user.id)
-    buf = render_slot_result(reels, revealed=0, wager=wager, balance=bal)
+    loop = asyncio.get_running_loop()
+    buf = await loop.run_in_executor(None, lambda: render_slot_result(reels, revealed=0, wager=wager, balance=bal))
     file  = discord.File(buf, filename="slots.png")
     embed = discord.Embed(
         title = f"🎰 TSL Slots  |  {interaction.user.display_name}",
@@ -136,7 +137,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     for revealed in (1, 2, 3):
         await asyncio.sleep(0.9)
-        buf2  = render_slot_result(reels, revealed=revealed, wager=wager, balance=bal)
+        buf2  = await loop.run_in_executor(None, lambda: render_slot_result(reels, revealed=revealed, wager=wager, balance=bal))
         file2 = discord.File(buf2, filename="slots.png")
         embed2 = discord.Embed(
             title = f"🎰 TSL Slots  |  {interaction.user.display_name}",
@@ -150,7 +151,12 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     # ── Calculate result ───────────────────────────────────────────────────
     payout, result_msg, mult = _calculate_payout(reels, wager)
-    outcome = "win" if payout > 0 else "loss"
+    if payout == wager:
+        outcome = "push"
+    elif payout > 0:
+        outcome = "win"
+    else:
+        outcome = "loss"
 
     result = await process_wager(
         discord_id = interaction.user.id,

@@ -94,6 +94,11 @@ class PaginationView(ui.View):
             return False
         return True
 
+    # WARNING: These buttons use auto-generated custom_ids (non-static).
+    # This means the view cannot survive a bot restart — it relies on the
+    # timeout mechanism to clean up.  If persistence across restarts is
+    # needed, assign explicit custom_id values to each button.
+
     @ui.button(label="\u23ee", style=discord.ButtonStyle.secondary, row=0)
     async def first_page(self, interaction: discord.Interaction, button: ui.Button):
         if not await self._author_check(interaction):
@@ -141,6 +146,11 @@ class PaginationView(ui.View):
         """Disable all buttons when the view expires."""
         for item in self.children:
             item.disabled = True
+        if hasattr(self, "message") and self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
 
 
 class LazyPaginationView(ui.View):
@@ -224,3 +234,8 @@ class LazyPaginationView(ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
+        if hasattr(self, "message") and self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
