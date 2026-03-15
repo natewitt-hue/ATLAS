@@ -1,7 +1,7 @@
 """
-genesis_cog.py — ATLAS · Genesis Module v1.0
+genesis_cog.py — ATLAS · Genesis Module v1.1
 ─────────────────────────────────────────────────────────────────────────────
-ATLAS Genesis is the roster management and transaction system.
+ATLAS Genesis is the trade and parity system.
 
 Consolidated from: trade_center_cog, parity_cog
 
@@ -9,15 +9,16 @@ Register in bot.py setup_hook():
     await bot.load_extension("genesis_cog")
 
 Slash commands:
-  /genesis                 — Open the ATLAS Genesis Hub
+  /genesis                 — Open the ATLAS Genesis Trade Hub
   /trade                   — Open the TSL Trade Center (autocomplete team select)
   /tradelist               — [Commissioner] List pending trades
   /runlottery              — [Admin] Run the draft lottery
   /orphanfranchise         — [Admin] Flag/unflag a team as orphaned
 
 Hub-only tools (via /genesis buttons):
-  Trade Lookup, Dev Traits, Ability Audit, Ability Check,
-  Cornerstone Designation, Contract Check, Lottery Standings
+  Trade, Pending Trades, Trade Lookup, Lottery
+
+Note: Dev Traits, Ability Audit/Check/Reassign, Contract Check moved to /boss Roster panel.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -358,10 +359,20 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
         client = _gemini_client
 
         notes_text = "\n".join(result.notes) if result.notes else "No flags."
+        # Determine which team benefits (sends less value = receives more)
+        if result.side_a_value < result.side_b_value:
+            favored_team = team_a_name
+            disadvantaged_team = team_b_name
+        else:
+            favored_team = team_b_name
+            disadvantaged_team = team_a_name
         prompt = (
             f"You are ATLAS Echo, the TSL league intelligence and trade analysis system. "
             f"Give a 2-sentence ruthless, sharp trade analysis. No fluff.\n\n"
-            f"Trade: {team_a_name} ({result.side_a_value:,} pts) vs {team_b_name} ({result.side_b_value:,} pts)\n"
+            f"Trade: {team_a_name} gives {result.side_a_value:,} pts of assets. "
+            f"{team_b_name} gives {result.side_b_value:,} pts of assets.\n"
+            f"The trade favors {favored_team} because they receive more value than they give up. "
+            f"{disadvantaged_team} is overpaying.\n"
             f"Delta: {result.delta_pct:.1f}% | Band: {result.band}\n"
             f"Notes: {notes_text}\n\n"
             f"Side A assets:\n{''.join(result.breakdown_a[:15])}\n"
@@ -470,8 +481,8 @@ def _build_trade_card(
     embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
 
     # ── Valuation summary ─────────────────────────────────────────────────────
-    delta_arrow = "▲" if result.side_a_value > result.side_b_value else "▼"
-    favored     = a_name if result.side_a_value > result.side_b_value else b_name
+    delta_arrow = "▲" if result.side_a_value < result.side_b_value else "▼"
+    favored     = a_name if result.side_a_value < result.side_b_value else b_name
 
     # OVR delta
     a_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_a)
@@ -676,10 +687,87 @@ async def _evaluate_and_post(
     side_b  = te.TradeSide(players=players_b, picks=picks_b, team_id=team_b_id)
     result  = te.evaluate_trade(side_a, side_b)
 
+    warnings = warnings_a + warnings_b
+
+    # ── RED band = auto-decline (no buttons, no save) ────────────────────────
+    if result.band == "RED":
+        trade_id = str(uuid.uuid4())[:8].upper()
+        ai_text = await _get_ai_commentary(result, _team_label(team_a), _team_label(team_b))
+
+        # OVR delta
+        a_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_a)
+        b_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_b)
+        ovr_delta = a_ovr - b_ovr
+
+        # Pick value lines
+        pick_lines = []
+        for pk in picks_a + picks_b:
+            ev = te.pick_ev(pk["round"], pk["year"], pk.get("team_id", 0), pk.get("slot", 16))
+            ordinals = {1: "1st", 2: "2nd", 3: "3rd"}
+            rnd_label = ordinals.get(pk["round"], f"{pk['round']}th")
+            pick_lines.append(f"S{pk['year']} {rnd_label}: {ev['final_ev']:,} pts")
+
+        card_data = {
+            "trade_id":      trade_id,
+            "status":        "declined",
+            "team_a_name":   team_a.get("nickName", _team_label(team_a)),
+            "team_a_owner":  team_a.get("userName", ""),
+            "team_b_name":   team_b.get("nickName", _team_label(team_b)),
+            "team_b_owner":  team_b.get("userName", ""),
+            "players_a":     players_a,
+            "picks_a":       picks_a,
+            "players_b":     players_b,
+            "picks_b":       picks_b,
+            "side_a_value":  result.side_a_value,
+            "side_b_value":  result.side_b_value,
+            "delta_pct":     result.delta_pct,
+            "band":          result.band,
+            "ovr_delta":     ovr_delta,
+            "pick_lines":    pick_lines,
+            "notes":         result.notes or [],
+            "ai_commentary": ai_text,
+            "proposer_id":   proposer_id,
+            "warnings":      warnings,
+        }
+
+        decline_msg = "🚫 **Trade Auto-Declined** — value gap exceeds 20%. Renegotiate with more balanced assets."
+
+        png_bytes = None
+        if _IMAGE_RENDER and cr:
+            png_bytes = await cr.render_trade_card(card_data)
+
+        if png_bytes:
+            import io as _io
+            file = discord.File(_io.BytesIO(png_bytes), filename=f"trade_{trade_id}.png")
+            await interaction.followup.send(content=decline_msg, file=file)
+        else:
+            embed = _build_trade_card(
+                trade_id=trade_id, team_a=team_a, team_b=team_b,
+                players_a=players_a, picks_a=picks_a,
+                players_b=players_b, picks_b=picks_b,
+                result=result, ai_commentary=ai_text,
+                warnings=warnings, proposer_id=proposer_id,
+                status="declined",
+            )
+            await interaction.followup.send(content=decline_msg, embed=embed)
+
+        # Brief log to trade log channel for commissioner visibility
+        if _trades_channel_id() and interaction.guild:
+            log_ch = interaction.guild.get_channel(_trades_channel_id())
+            if log_ch:
+                try:
+                    a_label = _team_label(team_a)
+                    b_label = _team_label(team_b)
+                    await log_ch.send(
+                        f"🚫 Trade {a_label}↔{b_label} auto-declined ({result.delta_pct:.1f}% gap)"
+                    )
+                except Exception:
+                    pass
+
+        return  # Early return — do NOT save to _trades, no buttons
+
     # AI commentary (non-blocking)
     ai_text = await _get_ai_commentary(result, _team_label(team_a), _team_label(team_b))
-
-    warnings = warnings_a + warnings_b
 
     # Build trade record
     trade_id = str(uuid.uuid4())[:8].upper()
@@ -1625,14 +1713,6 @@ LOTTERY_BASELINE   = 100         # ping-pong balls at elimination
 LOTTERY_PER_WIN    = 25          # balls added per post-elimination win
 
 # Ability audit display helpers (mirrors ability_cog.py, inlined for consolidation)
-TIER_EMOJI = {"S": "🔴", "A": "🟠", "B": "🟡", "C": "⚪"}
-DEV_EMOJI  = {
-    "Normal":             "⚪",
-    "Star":               "⭐",
-    "Superstar":          "🌟",
-    "Superstar X-Factor": "⚡",
-}
-
 # ── In-memory state (persisted to JSON between restarts) ─────────────────────
 _STATE_PATH = os.path.join(os.path.dirname(__file__), "parity_state.json")
 
@@ -1667,258 +1747,6 @@ def _save_state():
         os.replace(tmp, _STATE_PATH)
     except Exception as e:
         print(f"[parity_cog] State save error: {e}")
-
-
-# ── Ability audit embed helpers (ported from ability_cog.py) ─────────────────
-
-def _dev_badge(dev: str) -> str:
-    return f"{DEV_EMOJI.get(dev, '')} {dev}"
-
-
-def _build_player_ability_embed(result: "ae.PlayerAuditResult") -> discord.Embed:
-    """Rich embed for a single player ability audit result."""
-    color = discord.Color.green() if result.is_clean else discord.Color.red()
-    embed = discord.Embed(
-        title=f"{'✅' if result.is_clean else '🚨'} {result.name}",
-        color=color,
-    )
-    embed.add_field(name="Team",      value=result.team,            inline=True)
-    embed.add_field(name="Position",  value=result.pos,             inline=True)
-    embed.add_field(name="Dev Trait", value=_dev_badge(result.dev), inline=True)
-    embed.add_field(name="Archetype", value=result.archetype,       inline=True)
-
-    ability_lines = []
-    for ab in result.equipped:
-        entry = ae.ABILITY_TABLE.get(ab) if ae else None
-        tier  = entry["tier"] if entry else "?"
-        emoji = TIER_EMOJI.get(tier, "❓")
-        flag  = " ⚠️" if any(i["ability"] == ab for i in result.illegal_abilities) else ""
-        ability_lines.append(f"{emoji} **{ab}**{flag}")
-
-    embed.add_field(
-        name="Equipped Abilities",
-        value="\n".join(ability_lines) if ability_lines else "_None_",
-        inline=False,
-    )
-
-    if result.illegal_abilities:
-        violation_text = []
-        for item in result.illegal_abilities:
-            reasons = "\n  · ".join(item["reasons"])
-            violation_text.append(f"⚠️ **{item['ability']}**\n  · {reasons}")
-        embed.add_field(
-            name="🚨 Illegal Abilities",
-            value="\n\n".join(violation_text),
-            inline=False,
-        )
-
-    if result.budget_violation:
-        embed.add_field(name="💸 Budget Violation", value=result.budget_violation, inline=False)
-
-    if result.is_clean:
-        embed.set_footer(text="All abilities earned. No action required.")
-    else:
-        embed.add_field(
-            name="📋 Commissioner Actions",
-            value="\n".join(result.action_lines()),
-            inline=False,
-        )
-    return embed
-
-
-def _build_team_ability_embeds(
-    team_results: "list[ae.PlayerAuditResult]", team_name: str
-) -> list[discord.Embed]:
-    """One summary embed + one embed per flagged player."""
-    violations  = [r for r in team_results if not r.is_clean]
-    clean_count = len(team_results) - len(violations)
-
-    summary = discord.Embed(
-        title=f"🏈 {team_name} — Ability Audit",
-        color=discord.Color.red() if violations else discord.Color.green(),
-        description=(
-            f"**{len(team_results)}** players audited  |  "
-            f"**{clean_count}** clean  |  "
-            f"**{len(violations)}** violation{'s' if len(violations) != 1 else ''}"
-        ),
-    )
-
-    if not violations:
-        summary.set_footer(text="✅ All players are within ability rules.")
-        return [summary]
-
-    action_lines = []
-    for r in violations:
-        for a in r.action_lines():
-            action_lines.append(f"**{r.name}** ({r.pos}): {a}")
-
-    # Chunk into fields (Discord 1024 char limit per field)
-    chunk, chunks = [], []
-    for line in action_lines:
-        if sum(len(l) + 1 for l in chunk) + len(line) > 1000:
-            chunks.append(chunk)
-            chunk = []
-        chunk.append(line)
-    if chunk:
-        chunks.append(chunk)
-
-    for i, c in enumerate(chunks):
-        summary.add_field(
-            name=f"📋 Commissioner Actions {'(cont.)' if i else ''}",
-            value="\n".join(c),
-            inline=False,
-        )
-
-    return [summary] + [_build_player_ability_embed(r) for r in violations]
-
-
-def _build_league_ability_embed(
-    summary: dict, top_violations: "list[ae.PlayerAuditResult]"
-) -> discord.Embed:
-    """High-level league-wide ability audit embed."""
-    clean_pct = int(100 * summary["cleanPlayers"] / max(summary["totalPlayersAudited"], 1))
-    color = discord.Color.green() if summary["violations"] == 0 else discord.Color.orange()
-
-    embed = discord.Embed(
-        title="🛡️ TSL Full League Ability Audit",
-        color=color,
-        description=f"**{summary['totalPlayersAudited']}** Star+ players audited across the league",
-    )
-    embed.add_field(name="✅ Clean",           value=str(summary["cleanPlayers"]),          inline=True)
-    embed.add_field(name="🚨 Violations",      value=str(summary["violations"]),            inline=True)
-    embed.add_field(name="📈 Compliance",      value=f"{clean_pct}%",                       inline=True)
-    embed.add_field(name="📉 Stat Violations", value=str(summary["illegalStatViolations"]), inline=True)
-    embed.add_field(name="💸 Budget Only",     value=str(summary["budgetViolationsOnly"]),  inline=True)
-    embed.add_field(name="🏟️ Teams Affected", value=str(summary["teamsAffected"]),         inline=True)
-
-    if top_violations:
-        lines = [
-            f"**{r.name}** ({r.pos}, {r.team}) — "
-            f"{len(r.illegal_abilities) + (1 if r.budget_violation else 0)} issue(s)"
-            for r in top_violations[:10]
-        ]
-        embed.add_field(
-            name="🔎 Top Violations (use 👤 Ability Check for detail)",
-            value="\n".join(lines),
-            inline=False,
-        )
-
-    if summary["violations"] == 0:
-        embed.set_footer(text="✅ League is fully compliant.")
-    return embed
-
-
-# ── Reassignment embed helpers ────────────────────────────────────────────────
-
-def _build_reassignment_summary_embed(summary: dict) -> discord.Embed:
-    """High-level league-wide reassignment summary embed."""
-    has_changes = summary["playersWithSwaps"] > 0 or summary["playersUnresolved"] > 0
-    color = discord.Color.orange() if has_changes else discord.Color.green()
-
-    embed = discord.Embed(
-        title=f"🔄 TSL Ability Reassignment — Season {dm.CURRENT_SEASON}",
-        color=color,
-        description=f"**{summary['totalProcessed']}** SS/XF players audited across the league",
-    )
-    embed.add_field(name="✅ Clean",        value=str(summary["playersClean"]),      inline=True)
-    embed.add_field(name="🔄 Changed",      value=str(summary["playersWithSwaps"]),  inline=True)
-    embed.add_field(name="🏟️ Teams",       value=str(summary["teamsAffected"]),      inline=True)
-    embed.add_field(name="🔀 Replacements", value=str(summary["totalSwaps"]),        inline=True)
-    embed.add_field(name="⚠️ Unresolved",  value=str(summary["totalUnresolved"]),    inline=True)
-
-    if not has_changes:
-        embed.set_footer(text="✅ All SS/XF abilities are earned. No reassignment needed.")
-    else:
-        embed.set_footer(text="Review team breakdowns below. Apply changes in Madden before next advance.")
-
-    embed.set_author(name="ATLAS™ Genesis Module", icon_url=ATLAS_ICON_URL)
-    return embed
-
-
-def _build_reassignment_team_embeds(
-    changed_results: "list[ae.ReassignmentResult]",
-) -> list[discord.Embed]:
-    """Build per-team embeds showing each player's ability changes.
-
-    Splits into multiple embeds per team if the total character count
-    would exceed Discord's 6 000-char embed limit.
-    """
-    EMBED_CHAR_LIMIT = 5_800  # leave headroom below Discord's 6 000
-
-    by_team: dict[str, list] = {}
-    for r in changed_results:
-        by_team.setdefault(r.team, []).append(r)
-
-    embeds: list[discord.Embed] = []
-
-    for team_name in sorted(by_team.keys()):
-        team_players = by_team[team_name]
-
-        # Pre-build field tuples: (name, value)
-        fields: list[tuple[str, str]] = []
-        for r in team_players:
-            lines = []
-
-            if r.kept:
-                lines.append(f"✅ Kept: {', '.join(r.kept)}")
-
-            for s in r.swaps:
-                tier_emoji = TIER_EMOJI.get(s.get("new_tier", "?"), "❓")
-                lines.append(
-                    f"🔄 Slot {s['slot_index']}: "
-                    f"~~{s['old']}~~ → {tier_emoji} **{s['new']}** "
-                    f"(fit: {s['fit_score']})"
-                )
-
-            for u in r.unresolved:
-                lines.append(
-                    f"⚠️ Slot {u['slot_index']}: "
-                    f"~~{u['old']}~~ → **EMPTY** "
-                    f"(no valid replacement)"
-                )
-
-            dev_badge = _dev_badge(r.dev)
-            fields.append((
-                f"{r.name} ({r.pos}, {dev_badge})",
-                "\n".join(lines) if lines else "_No changes_",
-            ))
-
-        # Chunk fields into embeds that stay under the char limit
-        part = 1
-        cur_chars = 0
-        cur_embed: discord.Embed | None = None
-
-        def _make_embed(part_num: int, total_known: bool = False) -> discord.Embed:
-            suffix = f" (pt. {part_num})" if part_num > 1 or not total_known else ""
-            e = discord.Embed(
-                title=f"🏈 {team_name} — Ability Reassignment{suffix}",
-                color=discord.Color.orange(),
-            )
-            return e
-
-        for fname, fval in fields:
-            field_chars = len(fname) + len(fval)
-
-            if cur_embed is None:
-                cur_embed = _make_embed(part)
-                cur_chars = len(cur_embed.title or "")
-
-            if cur_chars + field_chars > EMBED_CHAR_LIMIT and cur_embed.fields:
-                # Finalize current embed and start a new one
-                cur_embed.set_footer(text="ATLAS™ Genesis · Ability Reassignment Engine")
-                embeds.append(cur_embed)
-                part += 1
-                cur_embed = _make_embed(part)
-                cur_chars = len(cur_embed.title or "")
-
-            cur_embed.add_field(name=fname, value=fval, inline=False)
-            cur_chars += field_chars
-
-        if cur_embed is not None:
-            cur_embed.set_footer(text="ATLAS™ Genesis · Ability Reassignment Engine")
-            embeds.append(cur_embed)
-
-    return embeds
 
 
 # ── Lottery helpers ────────────────────────────────────────────────────────────
@@ -2046,10 +1874,10 @@ class ParityCog(commands.Cog):
 def _build_genesis_hub_embed() -> discord.Embed:
     """Landing embed for /genesis — mirrors _build_hub_embed() style."""
     embed = discord.Embed(
-        title="🧬 ATLAS Genesis — Roster Hub",
+        title="🧬 ATLAS Genesis — Trade Hub",
         description=(
             f"Season {dm.CURRENT_SEASON} | Week {dm.CURRENT_WEEK}\n"
-            "Trades, dev traits, and franchise tools — **private to you**.\u200b"
+            "Trade proposals, lookups, and lottery — **private to you**.\u200b"
         ),
         color=discord.Color.from_rgb(201, 150, 42),
         timestamp=datetime.datetime.now(datetime.timezone.utc),
@@ -2058,10 +1886,8 @@ def _build_genesis_hub_embed() -> discord.Embed:
         name="Navigation",
         value=(
             "```\n"
-            "💱 Trade       📜 Trades      🔍 Lookup\n"
-            "📊 Dev Traits  🛡️ Ability Audit  👤 Ability Check\n"
-            "🔒 Cornerstone  📋 Contract  🔄 Reassign\n"
-            "🎰 Lottery  🏈 Rules\n"
+            "💱 Trade  📜 Pending Trades  🔍 Lookup\n"
+            "🎰 Lottery\n"
             "```"
         ),
         inline=False,
@@ -2149,67 +1975,11 @@ class GenesisHubView(discord.ui.View):
     async def btn_tradelookup(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_TradeLookupModal())
 
-    # ── Row 1: Dev / Ability ─────────────────────────────────────────────────
-
-    @discord.ui.button(
-        label="📊 Dev Traits", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:devaudit",
-    )
-    async def btn_devaudit(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(_DevAuditModal())
-
-    @discord.ui.button(
-        label="🛡️ Ability Audit", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:abilityaudit",
-    )
-    async def btn_abilityaudit(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(_AbilityAuditModal())
-
-    @discord.ui.button(
-        label="👤 Ability Check", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:abilitycheck",
-    )
-    async def btn_abilitycheck(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(_AbilityCheckModal())
-
-    @discord.ui.button(
-        label="🔒 Cornerstone", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="genesis:cornerstone",
-    )
-    async def btn_cornerstone(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(_CornerstoneModal())
-
-    @discord.ui.button(
-        label="📋 Contract Check", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="genesis:contract",
-    )
-    async def btn_contract(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(_ContractCheckModal())
-
-    @discord.ui.button(
-        label="🔄 Ability Reassign", style=discord.ButtonStyle.danger,
-        row=2, custom_id="genesis:abilityreassign",
-    )
-    async def btn_abilityreassign(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
-            return await interaction.response.send_message(
-                "❌ Ability Reassignment is a commissioner-only tool.", ephemeral=True
-            )
-        if not _AE_AVAILABLE:
-            return await interaction.response.send_message(
-                "❌ ability_engine.py not found.", ephemeral=True
-            )
-        await interaction.response.send_modal(_AbilityReassignModal())
-
-    # ── Row 3: Franchise Tools ───────────────────────────────────────────────
+    # ── Row 1: Franchise Tools ───────────────────────────────────────────────
 
     @discord.ui.button(
         label="🎰 Lottery", style=discord.ButtonStyle.secondary,
-        row=3, custom_id="genesis:lottery",
+        row=1, custom_id="genesis:lottery",
     )
     async def btn_lottery(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -2241,22 +2011,6 @@ class GenesisHubView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"❌ Lottery data error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(
-        label="🏈 Rules Hub", style=discord.ButtonStyle.secondary,
-        row=3, custom_id="genesis:rulehub",
-    )
-    async def btn_rulehub(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        """Cross-link to Sentinel rules hub — opens inline."""
-        try:
-            from sentinel_cog import SentinelHubView, _build_sentinel_hub_embed
-            embed = _build_sentinel_hub_embed()
-            view = SentinelHubView(self.bot)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        except Exception:
-            await interaction.response.send_message(
-                "Use `/sentinel` to open the ATLAS Sentinel Rules Hub.",
-                ephemeral=True,
-            )
 
 
 # ── Helper modals for hub buttons ─────────────────────────────────────────────
@@ -2289,364 +2043,22 @@ class _TradeLookupModal(discord.ui.Modal, title="🔍 Trade Lookup"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class _DevAuditModal(discord.ui.Modal, title="📊 Dev Traits"):
-    team_name = discord.ui.TextInput(
-        label="Team Name (leave blank for all teams)",
-        placeholder="e.g. Cowboys, Eagles (partial match OK)",
-        required=False,
-        max_length=50,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        team_filter = self.team_name.value.strip()
-        try:
-            players = dm.get_players()
-            if not players:
-                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
-
-            dev_order = {"Superstar X-Factor": 0, "Superstar": 1, "Star": 2, "Normal": 3}
-            dev_emoji = {"Superstar X-Factor": "⚡", "Superstar": "🌟", "Star": "⭐", "Normal": "◦"}
-
-            if team_filter:
-                players = [
-                    p for p in players
-                    if team_filter.lower() in str(p.get("teamName", "")).lower()
-                ]
-
-            if not players:
-                return await interaction.followup.send(f"❌ No players found matching `{team_filter}`.", ephemeral=True)
-
-            by_dev: dict[str, list] = {}
-            for p in players:
-                # Use ae._normalize_dev() to correctly handle both int devTrait
-                # and string dev fields from different API export formats
-                dev = ae._normalize_dev(p) if _AE_AVAILABLE else (p.get("dev", "Normal") or "Normal")
-                if dev == "Normal" and not team_filter:
-                    continue
-                by_dev.setdefault(dev, []).append(p)
-
-            embed = discord.Embed(
-                title=f"📊 Dev Traits — {'League-Wide' if not team_filter else team_filter}",
-                color=discord.Color.gold(),
-                description=f"Season {dm.CURRENT_SEASON}",
-            )
-            for dev in sorted(by_dev.keys(), key=lambda d: dev_order.get(d, 9)):
-                lines = [
-                    f"{dev_emoji.get(dev,'')} **{p.get('firstName','')} {p.get('lastName','')}** "
-                    f"({p.get('pos','?')}, {p.get('teamName','?')}) OVR {p.get('playerBestOvr','?')}"
-                    for p in sorted(by_dev[dev], key=lambda x: int(x.get("playerBestOvr",0) or 0), reverse=True)
-                ]
-                chunk = "\n".join(lines[:20])
-                if chunk:
-                    embed.add_field(name=f"{dev_emoji.get(dev,'')} {dev} ({len(by_dev[dev])})", value=chunk[:1024], inline=False)
-
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Dev traits error: `{e}`", ephemeral=True)
 
 
-class _ContractCheckModal(discord.ui.Modal, title="📋 Contract Check"):
-    player_name = discord.ui.TextInput(
-        label="Player Name",
-        placeholder="Partial name match OK (e.g. Mahomes)",
-        min_length=2,
-        max_length=50,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        try:
-            players = dm.get_players()
-            if not players:
-                return await interaction.followup.send("⚠️ No roster data.", ephemeral=True)
-            query = self.player_name.value.strip().lower()
-            matches = [
-                p for p in players
-                if query in f"{p.get('firstName','')} {p.get('lastName','')}".lower()
-            ]
-            if not matches:
-                return await interaction.followup.send(f"❌ No player found matching `{self.player_name.value}`.", ephemeral=True)
-
-            from discord import Embed
-            embed = Embed(
-                title=f"📋 Contract Check — {len(matches)} result(s)",
-                color=discord.Color.blurple(),
-            )
-            for p in matches[:5]:
-                name   = f"{p.get('firstName','')} {p.get('lastName','')}".strip()
-                team   = p.get("teamName", "?")
-                pos    = p.get("pos", "?")
-                dev    = p.get("dev", "Normal")
-                ovr    = p.get("playerBestOvr", "?")
-                yr_pro = p.get("yearsPro", "?")
-                is_fa  = p.get("isFA", False)
-                is_ir  = p.get("isOnIR", False)
-                flags  = []
-                if is_fa:  flags.append("🟡 Free Agent")
-                if is_ir:  flags.append("🚑 IR")
-                embed.add_field(
-                    name=f"{name} ({pos}, {team})",
-                    value=(
-                        f"OVR: **{ovr}** | Dev: **{dev}** | Yrs Pro: **{yr_pro}**"
-                        + (f"\n{' · '.join(flags)}" if flags else "")
-                    ),
-                    inline=False,
-                )
-            if len(matches) > 5:
-                embed.set_footer(text=f"Showing 5 of {len(matches)} matches — be more specific.")
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
 
-class _AbilityAuditModal(discord.ui.Modal, title="🛡️ Ability Audit"):
-    team_name = discord.ui.TextInput(
-        label="Team Name (leave blank for league-wide)",
-        placeholder="e.g. Cowboys, Eagles (partial match OK)",
-        required=False,
-        max_length=50,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        if not _AE_AVAILABLE:
-            return await interaction.followup.send(
-                "❌ ability_engine.py not found. Place it alongside bot.py.", ephemeral=True
-            )
-
-        team_filter = self.team_name.value.strip() or None
-        try:
-            players   = dm.get_players()
-            abilities = dm.get_player_abilities()
-            if not players:
-                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
-
-            results = ae.audit_roster(players, abilities, team_filter=team_filter)
-
-            if team_filter:
-                if not results:
-                    return await interaction.followup.send(
-                        f"❌ No Star+ players found for `{team_filter}`.", ephemeral=True
-                    )
-                embeds = _build_team_ability_embeds(results, results[0].team)
-                for i in range(0, len(embeds), 10):
-                    await interaction.followup.send(embeds=embeds[i:i+10], ephemeral=True)
-            else:
-                summary    = ae.summarize_audit(results)
-                violations = [r for r in results if not r.is_clean]
-                await interaction.followup.send(
-                    embed=_build_league_ability_embed(summary, violations), ephemeral=True
-                )
-        except Exception as e:
-            await interaction.followup.send(f"❌ Ability audit error: `{e}`", ephemeral=True)
 
 
-class _AbilityCheckModal(discord.ui.Modal, title="👤 Ability Check"):
-    player_name = discord.ui.TextInput(
-        label="Player Name",
-        placeholder="Partial name match OK (e.g. Mahomes, Jefferson)",
-        min_length=2,
-        max_length=50,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        if not _AE_AVAILABLE:
-            return await interaction.followup.send(
-                "❌ ability_engine.py not found. Place it alongside bot.py.", ephemeral=True
-            )
-
-        try:
-            players   = dm.get_players()
-            abilities = dm.get_player_abilities()
-            if not players:
-                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
-
-            query   = self.player_name.value.strip().lower()
-            matches = [
-                p for p in players
-                if query in (p.get("firstName", "") + " " + p.get("lastName", "")).lower()
-                and ae._normalize_dev(p) != "Normal"
-            ]
-
-            if not matches:
-                return await interaction.followup.send(
-                    f"❌ No Star+ player found matching `{self.player_name.value}`. "
-                    f"Use 🛡️ Ability Audit with a team name for a full roster.",
-                    ephemeral=True,
-                )
-
-            if len(matches) > 1:
-                names = ", ".join(
-                    f"{m['firstName']} {m['lastName']} ({m['pos']}, {m.get('teamName','?')})"
-                    for m in matches[:8]
-                )
-                return await interaction.followup.send(
-                    f"⚠️ Multiple matches: {names}\nBe more specific.", ephemeral=True
-                )
-
-            results = ae.audit_roster([matches[0]], abilities)
-            if not results:
-                p = matches[0]
-                return await interaction.followup.send(
-                    f"ℹ️ **{p['firstName']} {p['lastName']}** has no abilities equipped.",
-                    ephemeral=True,
-                )
-
-            await interaction.followup.send(
-                embed=_build_player_ability_embed(results[0]), ephemeral=True
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ Ability check error: `{e}`", ephemeral=True)
 
 
-class _CornerstoneModal(discord.ui.Modal, title="🔒 Cornerstone Designation"):
-    player_name = discord.ui.TextInput(
-        label="Player Name",
-        placeholder="Partial name match OK (e.g. Mahomes)",
-        min_length=2,
-        max_length=50,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        try:
-            players = dm.get_players()
-            if not players:
-                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
-
-            query = self.player_name.value.strip().lower()
-            matches = [
-                p for p in players
-                if query in f"{p.get('firstName', '')} {p.get('lastName', '')}".lower()
-            ]
-
-            if not matches:
-                return await interaction.followup.send(
-                    f"❌ No player found matching `{self.player_name.value}`.", ephemeral=True
-                )
-            if len(matches) > 1:
-                names = ", ".join(
-                    f"{m['firstName']} {m['lastName']} ({m['pos']})" for m in matches[:5]
-                )
-                return await interaction.followup.send(
-                    f"⚠️ Multiple matches: {names}\nBe more specific.", ephemeral=True
-                )
-
-            p = matches[0]
-            rid = p.get("rosterId")
-            name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
-
-            if rid in _state["cornerstones"]:
-                return await interaction.followup.send(
-                    f"⚠️ **{name}** is already designated as a Cornerstone this season.",
-                    ephemeral=True,
-                )
-
-            _state["cornerstones"][rid] = {
-                "name":            name,
-                "team":            p.get("teamName", "?"),
-                "pos":             p.get("pos", "?"),
-                "designated_week": dm.CURRENT_WEEK,
-                "designated_by":   str(interaction.user),
-            }
-            _save_state()
-
-            embed = discord.Embed(
-                title=f"🔒 Cornerstone Designation — {name}",
-                color=discord.Color.gold(),
-                description=(
-                    f"**{name}** ({p.get('pos')}, {p.get('teamName', '?')}) has been designated as a Cornerstone.\n\n"
-                    f"• One-tier dev trait bump applied (commissioner must execute in Madden)\n"
-                    f"• Player is **trade-locked** for the remainder of Season {dm.CURRENT_SEASON}\n"
-                    f"• Designation recorded at Week {dm.CURRENT_WEEK}"
-                ),
-            )
-            embed.set_footer(text="Cornerstone lock enforced by bot in /tradepropose.")
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Cornerstone error: `{e}`", ephemeral=True)
 
 
-class _AbilityReassignModal(discord.ui.Modal, title="🔄 Ability Reassignment"):
-    confirm = discord.ui.TextInput(
-        label="Type REASSIGN to confirm",
-        placeholder="REASSIGN",
-        min_length=8,
-        max_length=8,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if self.confirm.value.strip().upper() != "REASSIGN":
-            return await interaction.response.send_message(
-                "❌ Confirmation failed. Type `REASSIGN` exactly to proceed.", ephemeral=True
-            )
-
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        try:
-            players = dm.get_players()
-            abilities = dm.get_player_abilities()
-            if not players:
-                return await interaction.followup.send(
-                    "⚠️ No roster data. Run `/wittsync` first.", ephemeral=True
-                )
-
-            results = ae.reassign_roster(players, abilities)
-
-            if not results:
-                return await interaction.followup.send(
-                    "⚠️ No SS/XF players found in the roster data.", ephemeral=True
-                )
-
-            summary = ae.summarize_reassignment(results)
-
-            # 1. Summary embed
-            await interaction.followup.send(
-                embed=_build_reassignment_summary_embed(summary), ephemeral=True
-            )
-
-            # 2. Team-by-team breakdown (only teams with changes)
-            changed = [r for r in results if r.has_changes]
-            if changed:
-                team_embeds = _build_reassignment_team_embeds(changed)
-                for i in range(0, len(team_embeds), 10):
-                    await interaction.followup.send(
-                        embeds=team_embeds[i:i+10], ephemeral=True
-                    )
-
-            # 3. JSON file attachment
-            export_data = ae.export_reassignment_json(results)
-            if export_data:
-                import io as _io
-                json_str = json.dumps(export_data, indent=2)
-                file = discord.File(
-                    _io.BytesIO(json_str.encode("utf-8")),
-                    filename=f"reassignment_S{dm.CURRENT_SEASON}.json",
-                )
-                await interaction.followup.send(
-                    content="📎 Full reassignment data attached.",
-                    file=file, ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    "✅ No ability violations found — all SS/XF players are compliant.",
-                    ephemeral=True,
-                )
-
-        except Exception as e:
-            await interaction.followup.send(
-                f"❌ Reassignment error: `{e}`", ephemeral=True
-            )
 
 
 # ── Genesis Hub Cog ────────────────────────────────────────────────────────────
 
 class GenesisHubCog(commands.Cog):
-    """ATLAS Genesis — roster hub navigation command."""
+    """ATLAS Genesis — trade hub navigation command."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -2655,7 +2067,7 @@ class GenesisHubCog(commands.Cog):
 
     @app_commands.command(
         name="genesis",
-        description="Open the ATLAS Genesis Hub — trades, dev traits, abilities, and franchise tools.",
+        description="Open the ATLAS Genesis Trade Hub — trade proposals, lookups, and lottery.",
     )
     async def genesis(self, interaction: discord.Interaction):
         embed = _build_genesis_hub_embed()

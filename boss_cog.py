@@ -5,12 +5,13 @@ Visual hub replacing the 57 /commish slash subcommands with a single /boss
 command that opens an ephemeral button-driven control room.
 
 Architecture:
-    /boss  →  BossHubView (6 panel buttons)
+    /boss  →  BossHubView (7 panel buttons)
                 ├── Sportsbook  →  sub-panels (Lines & Locks, Bets & Props)
                 ├── Casino
                 ├── Treasury    →  sub-panels (Balances, Stipends, Bulk Ops)
+                ├── Roster      →  dev traits, ability audit/check/reassign, contracts, assignments
                 ├── Markets     →  polymarket + real sportsbook
-                ├── League      →  genesis + awards + codex + roster
+                ├── League      →  genesis trades + awards + codex
                 └── Compliance  →  sentinel
 
 Every button/modal delegates to existing _impl methods on target cogs.
@@ -27,6 +28,16 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import data_manager as dm
+
+# Ability engine — optional
+try:
+    import ability_engine as ae
+    _AE_AVAILABLE = True
+except ImportError:
+    ae = None
+    _AE_AVAILABLE = False
+
 log = logging.getLogger("atlas.boss")
 
 COMMISH_COLOR = discord.Color(0x202124)
@@ -42,6 +53,17 @@ VALID_SPORT_KEYS = (
     ("americanfootball_ncaaf", "NCAAF"), ("basketball_ncaab", "NCAAB"),
     ("soccer_epl", "EPL"), ("mma_mixed_martial_arts", "MMA"),
 )
+
+TIER_EMOJI = {"S": "🔴", "A": "🟠", "B": "🟡", "C": "⚪"}
+DEV_EMOJI = {
+    "Normal": "⚪",
+    "Star": "⭐",
+    "Superstar": "🌟",
+    "Superstar X-Factor": "⚡",
+}
+
+def _dev_badge(dev: str) -> str:
+    return f"{DEV_EMOJI.get(dev, '')} {dev}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -168,7 +190,7 @@ def _panel_embed(title: str, desc: str) -> discord.Embed:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class BossHubView(discord.ui.View):
-    """Commissioner Control Room — 6 panel navigation buttons."""
+    """Commissioner Control Room — 7 panel navigation buttons."""
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=300)
@@ -195,6 +217,13 @@ class BossHubView(discord.ui.View):
             view=TreasuryPanelView(self.bot),
         )
 
+    @discord.ui.button(label="Roster", emoji="📋", style=discord.ButtonStyle.primary, row=0)
+    async def roster(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=_panel_embed("📋 Roster Admin", "Dev traits, ability audits, contracts, and team assignments."),
+            view=RosterPanelView(self.bot),
+        )
+
     @discord.ui.button(label="Markets", emoji="\U0001f4c8", style=discord.ButtonStyle.secondary, row=1)
     async def markets(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
@@ -205,7 +234,7 @@ class BossHubView(discord.ui.View):
     @discord.ui.button(label="League", emoji="\U0001f3c8", style=discord.ButtonStyle.secondary, row=1)
     async def league(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=_panel_embed("\U0001f3c8 League Admin", "Trades, lottery, polls, roster assignments, and debug tools."),
+            embed=_panel_embed("\U0001f3c8 League Admin", "Trades, lottery, polls, and debug tools."),
             view=LeaguePanelView(self.bot),
         )
 
@@ -1215,6 +1244,607 @@ class RealSBSyncSelectView(discord.ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ROSTER PANEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RosterPanelView(discord.ui.View):
+    """Roster governance — dev traits, ability audits, contracts, assignments."""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=300)
+        self.bot = bot
+
+    @discord.ui.button(label="Dev Traits", emoji="📊", style=discord.ButtonStyle.primary, row=0)
+    async def dev_traits(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BossDevAuditModal())
+
+    @discord.ui.button(label="Ability Audit", emoji="🛡️", style=discord.ButtonStyle.primary, row=0)
+    async def ability_audit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BossAbilityAuditModal())
+
+    @discord.ui.button(label="Ability Check", emoji="👤", style=discord.ButtonStyle.primary, row=0)
+    async def ability_check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BossAbilityCheckModal())
+
+    @discord.ui.button(label="Contract Check", emoji="📋", style=discord.ButtonStyle.secondary, row=1)
+    async def contract_check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BossContractCheckModal())
+
+    @discord.ui.button(label="Ability Reassign", emoji="🔄", style=discord.ButtonStyle.danger, row=1)
+    async def ability_reassign(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _AE_AVAILABLE:
+            return await interaction.response.send_message(
+                "❌ ability_engine.py not found.", ephemeral=True
+            )
+        await interaction.response.send_modal(BossAbilityReassignModal())
+
+    @discord.ui.button(label="Assign", emoji="✅", style=discord.ButtonStyle.success, row=2)
+    async def assign(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Select a member to assign to a team:", view=AssignMemberSelectView(), ephemeral=True,
+        )
+
+    @discord.ui.button(label="Unassign", emoji="❌", style=discord.ButtonStyle.danger, row=2)
+    async def unassign(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Select a member to unassign:", view=UnassignMemberSelectView(), ephemeral=True,
+        )
+
+    @discord.ui.button(label="View Roster", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
+    async def view_roster(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import roster
+        all_teams = roster.get_all_teams()
+        afc_lines, nfc_lines = [], []
+        unassigned = []
+        for t in all_teams:
+            owner = roster.get_owner(t["abbrName"])
+            line = f"**{t['nickName']}** ({t['abbrName']})"
+            if owner:
+                line += f" — <@{owner.discord_id}>"
+            else:
+                unassigned.append(t["nickName"])
+            if t["conference"] == "AFC":
+                afc_lines.append(line)
+            else:
+                nfc_lines.append(line)
+
+        embed = discord.Embed(title="🏈 TSL Roster", color=GOLD)
+        embed.add_field(
+            name="🏈 AFC", value="\n".join(afc_lines) or "None", inline=True,
+        )
+        embed.add_field(
+            name="🏈 NFC", value="\n".join(nfc_lines) or "None", inline=True,
+        )
+        if unassigned:
+            embed.add_field(
+                name="🟨 Unassigned", value=", ".join(unassigned), inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="← Back", style=discord.ButtonStyle.secondary, row=3)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=_home_embed(interaction), view=BossHubView(self.bot))
+
+
+# ── Roster Modals ─────────────────────────────────────────────────────────────
+
+class BossDevAuditModal(discord.ui.Modal, title="📊 Dev Traits"):
+    team_name = discord.ui.TextInput(
+        label="Team Name (leave blank for all teams)",
+        placeholder="e.g. Cowboys, Eagles (partial match OK)",
+        required=False,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        team_filter = self.team_name.value.strip()
+        try:
+            players = dm.get_players()
+            if not players:
+                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
+
+            dev_order = {"Superstar X-Factor": 0, "Superstar": 1, "Star": 2, "Normal": 3}
+            dev_emoji = {"Superstar X-Factor": "⚡", "Superstar": "🌟", "Star": "⭐", "Normal": "◦"}
+
+            if team_filter:
+                players = [
+                    p for p in players
+                    if team_filter.lower() in str(p.get("teamName", "")).lower()
+                ]
+
+            if not players:
+                return await interaction.followup.send(f"❌ No players found matching `{team_filter}`.", ephemeral=True)
+
+            by_dev: dict[str, list] = {}
+            for p in players:
+                dev = ae._normalize_dev(p) if _AE_AVAILABLE else (p.get("dev", "Normal") or "Normal")
+                if dev == "Normal" and not team_filter:
+                    continue
+                by_dev.setdefault(dev, []).append(p)
+
+            embed = discord.Embed(
+                title=f"📊 Dev Traits — {'League-Wide' if not team_filter else team_filter}",
+                color=discord.Color.gold(),
+                description=f"Season {dm.CURRENT_SEASON}",
+            )
+            for dev in sorted(by_dev.keys(), key=lambda d: dev_order.get(d, 9)):
+                lines = [
+                    f"{dev_emoji.get(dev,'')} **{p.get('firstName','')} {p.get('lastName','')}** "
+                    f"({p.get('pos','?')}, {p.get('teamName','?')}) OVR {p.get('playerBestOvr','?')}"
+                    for p in sorted(by_dev[dev], key=lambda x: int(x.get("playerBestOvr",0) or 0), reverse=True)
+                ]
+                chunk = "\n".join(lines[:20])
+                if chunk:
+                    embed.add_field(name=f"{dev_emoji.get(dev,'')} {dev} ({len(by_dev[dev])})", value=chunk[:1024], inline=False)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Dev traits error: `{e}`", ephemeral=True)
+
+
+class BossContractCheckModal(discord.ui.Modal, title="📋 Contract Check"):
+    player_name = discord.ui.TextInput(
+        label="Player Name",
+        placeholder="Partial name match OK (e.g. Mahomes)",
+        min_length=2,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            players = dm.get_players()
+            if not players:
+                return await interaction.followup.send("⚠️ No roster data.", ephemeral=True)
+            query = self.player_name.value.strip().lower()
+            matches = [
+                p for p in players
+                if query in f"{p.get('firstName','')} {p.get('lastName','')}".lower()
+            ]
+            if not matches:
+                return await interaction.followup.send(f"❌ No player found matching `{self.player_name.value}`.", ephemeral=True)
+
+            embed = discord.Embed(
+                title=f"📋 Contract Check — {len(matches)} result(s)",
+                color=discord.Color.blurple(),
+            )
+            for p in matches[:5]:
+                name   = f"{p.get('firstName','')} {p.get('lastName','')}".strip()
+                team   = p.get("teamName", "?")
+                pos    = p.get("pos", "?")
+                dev    = p.get("dev", "Normal")
+                ovr    = p.get("playerBestOvr", "?")
+                yr_pro = p.get("yearsPro", "?")
+                is_fa  = p.get("isFA", False)
+                is_ir  = p.get("isOnIR", False)
+                flags  = []
+                if is_fa:  flags.append("🟡 Free Agent")
+                if is_ir:  flags.append("🚑 IR")
+                embed.add_field(
+                    name=f"{name} ({pos}, {team})",
+                    value=(
+                        f"OVR: **{ovr}** | Dev: **{dev}** | Yrs Pro: **{yr_pro}**"
+                        + (f"\n{' · '.join(flags)}" if flags else "")
+                    ),
+                    inline=False,
+                )
+            if len(matches) > 5:
+                embed.set_footer(text=f"Showing 5 of {len(matches)} matches — be more specific.")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+
+class BossAbilityAuditModal(discord.ui.Modal, title="🛡️ Ability Audit"):
+    team_name = discord.ui.TextInput(
+        label="Team Name (leave blank for league-wide)",
+        placeholder="e.g. Cowboys, Eagles (partial match OK)",
+        required=False,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        if not _AE_AVAILABLE:
+            return await interaction.followup.send(
+                "❌ ability_engine.py not found. Place it alongside bot.py.", ephemeral=True
+            )
+
+        team_filter = self.team_name.value.strip() or None
+        try:
+            players   = dm.get_players()
+            abilities = dm.get_player_abilities()
+            if not players:
+                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
+
+            results = ae.audit_roster(players, abilities, team_filter=team_filter)
+
+            if team_filter:
+                if not results:
+                    return await interaction.followup.send(
+                        f"❌ No Star+ players found for `{team_filter}`.", ephemeral=True
+                    )
+                embeds = _boss_build_team_ability_embeds(results, results[0].team)
+                for i in range(0, len(embeds), 10):
+                    await interaction.followup.send(embeds=embeds[i:i+10], ephemeral=True)
+            else:
+                summary    = ae.summarize_audit(results)
+                violations = [r for r in results if not r.is_clean]
+                await interaction.followup.send(
+                    embed=_boss_build_league_ability_embed(summary, violations), ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ability audit error: `{e}`", ephemeral=True)
+
+
+class BossAbilityCheckModal(discord.ui.Modal, title="👤 Ability Check"):
+    player_name = discord.ui.TextInput(
+        label="Player Name",
+        placeholder="Partial name match OK (e.g. Mahomes, Jefferson)",
+        min_length=2,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        if not _AE_AVAILABLE:
+            return await interaction.followup.send(
+                "❌ ability_engine.py not found. Place it alongside bot.py.", ephemeral=True
+            )
+
+        try:
+            players   = dm.get_players()
+            abilities = dm.get_player_abilities()
+            if not players:
+                return await interaction.followup.send("⚠️ No roster data. Run `/wittsync` first.", ephemeral=True)
+
+            query   = self.player_name.value.strip().lower()
+            matches = [
+                p for p in players
+                if query in (p.get("firstName", "") + " " + p.get("lastName", "")).lower()
+                and ae._normalize_dev(p) != "Normal"
+            ]
+
+            if not matches:
+                return await interaction.followup.send(
+                    f"❌ No Star+ player found matching `{self.player_name.value}`. "
+                    f"Use 🛡️ Ability Audit with a team name for a full roster.",
+                    ephemeral=True,
+                )
+
+            if len(matches) > 1:
+                names = ", ".join(
+                    f"{m['firstName']} {m['lastName']} ({m['pos']}, {m.get('teamName','?')})"
+                    for m in matches[:8]
+                )
+                return await interaction.followup.send(
+                    f"⚠️ Multiple matches: {names}\nBe more specific.", ephemeral=True
+                )
+
+            results = ae.audit_roster([matches[0]], abilities)
+            if not results:
+                p = matches[0]
+                return await interaction.followup.send(
+                    f"ℹ️ **{p['firstName']} {p['lastName']}** has no abilities equipped.",
+                    ephemeral=True,
+                )
+
+            await interaction.followup.send(
+                embed=_boss_build_player_ability_embed(results[0]), ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ability check error: `{e}`", ephemeral=True)
+
+
+class BossAbilityReassignModal(discord.ui.Modal, title="🔄 Ability Reassignment"):
+    confirm = discord.ui.TextInput(
+        label="Type REASSIGN to confirm",
+        placeholder="REASSIGN",
+        min_length=8,
+        max_length=8,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.confirm.value.strip().upper() != "REASSIGN":
+            return await interaction.response.send_message(
+                "❌ Confirmation failed. Type `REASSIGN` exactly to proceed.", ephemeral=True
+            )
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            players = dm.get_players()
+            abilities = dm.get_player_abilities()
+            if not players:
+                return await interaction.followup.send(
+                    "⚠️ No roster data. Run `/wittsync` first.", ephemeral=True
+                )
+
+            results = ae.reassign_roster(players, abilities)
+
+            if not results:
+                return await interaction.followup.send(
+                    "⚠️ No SS/XF players found in the roster data.", ephemeral=True
+                )
+
+            summary = ae.summarize_reassignment(results)
+
+            # 1. Summary embed
+            await interaction.followup.send(
+                embed=_boss_build_reassignment_summary_embed(summary), ephemeral=True
+            )
+
+            # 2. Team-by-team breakdown (only teams with changes)
+            changed = [r for r in results if r.has_changes]
+            if changed:
+                team_embeds = _boss_build_reassignment_team_embeds(changed)
+                for i in range(0, len(team_embeds), 10):
+                    await interaction.followup.send(
+                        embeds=team_embeds[i:i+10], ephemeral=True
+                    )
+
+            # 3. JSON file attachment
+            import json
+            export_data = ae.export_reassignment_json(results)
+            if export_data:
+                import io as _io
+                json_str = json.dumps(export_data, indent=2)
+                file = discord.File(
+                    _io.BytesIO(json_str.encode("utf-8")),
+                    filename=f"reassignment_S{dm.CURRENT_SEASON}.json",
+                )
+                await interaction.followup.send(
+                    content="📎 Full reassignment data attached.",
+                    file=file, ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "✅ No ability violations found — all SS/XF players are compliant.",
+                    ephemeral=True,
+                )
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Reassignment error: `{e}`", ephemeral=True
+            )
+
+
+# ── Roster Embed Helpers ──────────────────────────────────────────────────────
+
+def _boss_build_player_ability_embed(result) -> discord.Embed:
+    """Rich embed for a single player ability audit result."""
+    color = discord.Color.green() if result.is_clean else discord.Color.red()
+    embed = discord.Embed(
+        title=f"{'✅' if result.is_clean else '🚨'} {result.name}",
+        color=color,
+    )
+    embed.add_field(name="Team",      value=result.team,            inline=True)
+    embed.add_field(name="Position",  value=result.pos,             inline=True)
+    embed.add_field(name="Dev Trait", value=_dev_badge(result.dev), inline=True)
+    embed.add_field(name="Archetype", value=result.archetype,       inline=True)
+
+    ability_lines = []
+    for ab in result.equipped:
+        entry = ae.ABILITY_TABLE.get(ab) if ae else None
+        tier  = entry["tier"] if entry else "?"
+        emoji = TIER_EMOJI.get(tier, "❓")
+        flag  = " ⚠️" if any(i["ability"] == ab for i in result.illegal_abilities) else ""
+        ability_lines.append(f"{emoji} **{ab}**{flag}")
+
+    embed.add_field(
+        name="Equipped Abilities",
+        value="\n".join(ability_lines) if ability_lines else "_None_",
+        inline=False,
+    )
+
+    if result.illegal_abilities:
+        violation_text = []
+        for item in result.illegal_abilities:
+            reasons = "\n  · ".join(item["reasons"])
+            violation_text.append(f"⚠️ **{item['ability']}**\n  · {reasons}")
+        embed.add_field(
+            name="🚨 Illegal Abilities",
+            value="\n\n".join(violation_text),
+            inline=False,
+        )
+
+    if result.budget_violation:
+        embed.add_field(name="💸 Budget Violation", value=result.budget_violation, inline=False)
+
+    if result.is_clean:
+        embed.set_footer(text="All abilities earned. No action required.")
+    else:
+        embed.add_field(
+            name="📋 Commissioner Actions",
+            value="\n".join(result.action_lines()),
+            inline=False,
+        )
+    return embed
+
+
+def _boss_build_team_ability_embeds(team_results, team_name: str) -> list[discord.Embed]:
+    """One summary embed + one embed per flagged player."""
+    violations  = [r for r in team_results if not r.is_clean]
+    clean_count = len(team_results) - len(violations)
+
+    summary = discord.Embed(
+        title=f"🏈 {team_name} — Ability Audit",
+        color=discord.Color.red() if violations else discord.Color.green(),
+        description=(
+            f"**{len(team_results)}** players audited  |  "
+            f"**{clean_count}** clean  |  "
+            f"**{len(violations)}** violation{'s' if len(violations) != 1 else ''}"
+        ),
+    )
+
+    if not violations:
+        summary.set_footer(text="✅ All players are within ability rules.")
+        return [summary]
+
+    action_lines = []
+    for r in violations:
+        for a in r.action_lines():
+            action_lines.append(f"**{r.name}** ({r.pos}): {a}")
+
+    chunk, chunks = [], []
+    for line in action_lines:
+        if sum(len(l) + 1 for l in chunk) + len(line) > 1000:
+            chunks.append(chunk)
+            chunk = []
+        chunk.append(line)
+    if chunk:
+        chunks.append(chunk)
+
+    for i, c in enumerate(chunks):
+        summary.add_field(
+            name=f"📋 Commissioner Actions {'(cont.)' if i else ''}",
+            value="\n".join(c),
+            inline=False,
+        )
+
+    return [summary] + [_boss_build_player_ability_embed(r) for r in violations]
+
+
+def _boss_build_league_ability_embed(summary: dict, top_violations) -> discord.Embed:
+    """High-level league-wide ability audit embed."""
+    clean_pct = int(100 * summary["cleanPlayers"] / max(summary["totalPlayersAudited"], 1))
+    color = discord.Color.green() if summary["violations"] == 0 else discord.Color.orange()
+
+    embed = discord.Embed(
+        title="🛡️ TSL Full League Ability Audit",
+        color=color,
+        description=f"**{summary['totalPlayersAudited']}** Star+ players audited across the league",
+    )
+    embed.add_field(name="✅ Clean",           value=str(summary["cleanPlayers"]),          inline=True)
+    embed.add_field(name="🚨 Violations",      value=str(summary["violations"]),            inline=True)
+    embed.add_field(name="📈 Compliance",      value=f"{clean_pct}%",                       inline=True)
+    embed.add_field(name="📉 Stat Violations", value=str(summary["illegalStatViolations"]), inline=True)
+    embed.add_field(name="💸 Budget Only",     value=str(summary["budgetViolationsOnly"]),  inline=True)
+    embed.add_field(name="🏟️ Teams Affected", value=str(summary["teamsAffected"]),         inline=True)
+
+    if top_violations:
+        lines = [
+            f"**{r.name}** ({r.pos}, {r.team}) — "
+            f"{len(r.illegal_abilities) + (1 if r.budget_violation else 0)} issue(s)"
+            for r in top_violations[:10]
+        ]
+        embed.add_field(
+            name="🔎 Top Violations (use 👤 Ability Check for detail)",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    if summary["violations"] == 0:
+        embed.set_footer(text="✅ League is fully compliant.")
+    return embed
+
+
+def _boss_build_reassignment_summary_embed(summary: dict) -> discord.Embed:
+    """High-level league-wide reassignment summary embed."""
+    has_changes = summary["playersWithSwaps"] > 0 or summary["playersUnresolved"] > 0
+    color = discord.Color.orange() if has_changes else discord.Color.green()
+
+    embed = discord.Embed(
+        title=f"🔄 TSL Ability Reassignment — Season {dm.CURRENT_SEASON}",
+        color=color,
+        description=f"**{summary['totalProcessed']}** SS/XF players audited across the league",
+    )
+    embed.add_field(name="✅ Clean",        value=str(summary["playersClean"]),      inline=True)
+    embed.add_field(name="🔄 Changed",      value=str(summary["playersWithSwaps"]),  inline=True)
+    embed.add_field(name="🏟️ Teams",       value=str(summary["teamsAffected"]),      inline=True)
+    embed.add_field(name="🔀 Replacements", value=str(summary["totalSwaps"]),        inline=True)
+    embed.add_field(name="⚠️ Unresolved",  value=str(summary["totalUnresolved"]),    inline=True)
+
+    if not has_changes:
+        embed.set_footer(text="✅ All SS/XF abilities are earned. No reassignment needed.")
+    else:
+        embed.set_footer(text="Review team breakdowns below. Apply changes in Madden before next advance.")
+
+    embed.set_author(name="ATLAS™ Boss · Roster Admin")
+    return embed
+
+
+def _boss_build_reassignment_team_embeds(changed_results) -> list[discord.Embed]:
+    """Build per-team embeds showing each player's ability changes."""
+    EMBED_CHAR_LIMIT = 5_800
+
+    by_team: dict[str, list] = {}
+    for r in changed_results:
+        by_team.setdefault(r.team, []).append(r)
+
+    embeds: list[discord.Embed] = []
+
+    for team_name in sorted(by_team.keys()):
+        team_players = by_team[team_name]
+
+        fields: list[tuple[str, str]] = []
+        for r in team_players:
+            lines = []
+
+            if r.kept:
+                lines.append(f"✅ Kept: {', '.join(r.kept)}")
+
+            for s in r.swaps:
+                tier_emoji = TIER_EMOJI.get(s.get("new_tier", "?"), "❓")
+                lines.append(
+                    f"🔄 Slot {s['slot_index']}: "
+                    f"~~{s['old']}~~ → {tier_emoji} **{s['new']}** "
+                    f"(fit: {s['fit_score']})"
+                )
+
+            for u in r.unresolved:
+                lines.append(
+                    f"⚠️ Slot {u['slot_index']}: "
+                    f"~~{u['old']}~~ → **EMPTY** "
+                    f"(no valid replacement)"
+                )
+
+            dev_badge = _dev_badge(r.dev)
+            fields.append((
+                f"{r.name} ({r.pos}, {dev_badge})",
+                "\n".join(lines) if lines else "_No changes_",
+            ))
+
+        part = 1
+        cur_chars = 0
+        cur_embed = None
+
+        def _make_embed(part_num: int) -> discord.Embed:
+            suffix = f" (pt. {part_num})" if part_num > 1 else ""
+            e = discord.Embed(
+                title=f"🏈 {team_name} — Ability Reassignment{suffix}",
+                color=discord.Color.orange(),
+            )
+            return e
+
+        for fname, fval in fields:
+            field_chars = len(fname) + len(fval)
+
+            if cur_embed is None:
+                cur_embed = _make_embed(part)
+                cur_chars = len(cur_embed.title or "")
+
+            if cur_chars + field_chars > EMBED_CHAR_LIMIT and cur_embed.fields:
+                cur_embed.set_footer(text="ATLAS™ Boss · Ability Reassignment Engine")
+                embeds.append(cur_embed)
+                part += 1
+                cur_embed = _make_embed(part)
+                cur_chars = len(cur_embed.title or "")
+
+            cur_embed.add_field(name=fname, value=fval, inline=False)
+            cur_chars += field_chars
+
+        if cur_embed is not None:
+            cur_embed.set_footer(text="ATLAS™ Boss · Ability Reassignment Engine")
+            embeds.append(cur_embed)
+
+    return embeds
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # LEAGUE PANEL
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1258,51 +1888,7 @@ class LeaguePanelView(discord.ui.View):
     async def ask_debug(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(BossAskDebugModal())
 
-    # ── Roster ─────────────────────────────────────────────────────────────
-    @discord.ui.button(label="Assign", emoji="\u2705", style=discord.ButtonStyle.success, row=2)
-    async def assign(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Select a member to assign to a team:", view=AssignMemberSelectView(), ephemeral=True,
-        )
-
-    @discord.ui.button(label="Unassign", emoji="\u274c", style=discord.ButtonStyle.danger, row=2)
-    async def unassign(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Select a member to unassign:", view=UnassignMemberSelectView(), ephemeral=True,
-        )
-
-    @discord.ui.button(label="View Roster", emoji="\U0001f4cb", style=discord.ButtonStyle.secondary, row=3)
-    async def view_roster(self, interaction: discord.Interaction, button: discord.ui.Button):
-        import roster
-        all_teams = roster.get_all_teams()
-        afc_lines, nfc_lines = [], []
-        unassigned = []
-        for t in all_teams:
-            owner = roster.get_owner(t["abbrName"])
-            line = f"**{t['nickName']}** ({t['abbrName']})"
-            if owner:
-                line += f" \u2014 <@{owner.discord_id}>"
-            else:
-                unassigned.append(t["nickName"])
-            if t["conference"] == "AFC":
-                afc_lines.append(line)
-            else:
-                nfc_lines.append(line)
-
-        embed = discord.Embed(title="\U0001f3c8 TSL Roster", color=GOLD)
-        embed.add_field(
-            name="\U0001f3c8 AFC", value="\n".join(afc_lines) or "None", inline=True,
-        )
-        embed.add_field(
-            name="\U0001f3c8 NFC", value="\n".join(nfc_lines) or "None", inline=True,
-        )
-        if unassigned:
-            embed.add_field(
-                name="\U0001f7e8 Unassigned", value=", ".join(unassigned), inline=False,
-            )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=_home_embed(interaction), view=BossHubView(self.bot))
 
