@@ -367,16 +367,17 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
             favored_team = team_b_name
             disadvantaged_team = team_a_name
         prompt = (
-            f"You are ATLAS Echo, the TSL league intelligence and trade analysis system. "
-            f"Give a 2-sentence ruthless, sharp trade analysis. No fluff.\n\n"
-            f"Trade: {team_a_name} gives {result.side_a_value:,} pts of assets. "
-            f"{team_b_name} gives {result.side_b_value:,} pts of assets.\n"
-            f"The trade favors {favored_team} because they receive more value than they give up. "
-            f"{disadvantaged_team} is overpaying.\n"
-            f"Delta: {result.delta_pct:.1f}% | Band: {result.band}\n"
-            f"Notes: {notes_text}\n\n"
-            f"Side A assets:\n{''.join(result.breakdown_a[:15])}\n"
-            f"Side B assets:\n{''.join(result.breakdown_b[:15])}"
+            f"You are ATLAS, the foul-mouthed commissioner of TSL. "
+            f"Give a 2-sentence ruthless, sharp trade verdict. No fluff. Refer to yourself as ATLAS in third person.\n\n"
+            f"TRADE DETAILS:\n"
+            f"• {team_a_name} SENDS AWAY these players/picks (valued at {result.side_a_value:,} pts):\n"
+            f"{''.join(result.breakdown_a[:15])}\n"
+            f"• {team_b_name} SENDS AWAY these players/picks (valued at {result.side_b_value:,} pts):\n"
+            f"{''.join(result.breakdown_b[:15])}\n\n"
+            f"VERDICT: {favored_team} wins this trade — they send away less value "
+            f"and receive better assets from {disadvantaged_team}. "
+            f"Gap: {result.delta_pct:.1f}% | Band: {result.band}\n"
+            f"{'Flags: ' + notes_text if result.notes else ''}"
         )
 
         response = await asyncio.get_running_loop().run_in_executor(
