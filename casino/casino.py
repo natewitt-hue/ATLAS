@@ -34,7 +34,6 @@ from casino.games.blackjack import start_blackjack, active_sessions as bj_sessio
 from casino.games.slots     import play_slots, daily_scratch
 from casino.games.crash     import join_crash, active_rounds
 from casino.games.coinflip  import play_coinflip, send_challenge
-from casino.renderer.card_renderer import warm_cache
 ADMIN_ROLE_NAME = "Commissioner"
 
 GAME_CHOICES = typing.Literal["blackjack", "crash", "slots", "coinflip"]
@@ -237,10 +236,9 @@ class CasinoCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        """Called when the cog is loaded — setup DB and warm card cache."""
+        """Called when the cog is loaded — setup DB."""
         await db.setup_casino_db()
-        warm_cache()   # pre-render all 52 cards + back on startup
-        print("[Casino] DB ready. Card cache warmed. TSL Casino online. 🎰")
+        print("[Casino] DB ready. FLOW Casino online. 🎰")
 
     # ═══════════════════════════════════════════════════════════════════════
     #  /casino  — Hub

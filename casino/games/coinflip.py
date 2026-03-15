@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import random
 from datetime import datetime, timezone
 
@@ -28,6 +29,7 @@ from casino.casino_db import (
     create_challenge, get_challenge, resolve_challenge, decline_challenge,
 )
 from casino.play_again import PlayAgainView
+from casino.renderer.casino_html_renderer import render_coinflip_card
 
 GAME_TYPE = "coinflip"
 
@@ -105,27 +107,36 @@ async def play_coinflip(
     )
 
     profit     = payout - wager
-    profit_str = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
-    coin_emoji = "🌕" if result == "heads" else "🌑"
-    pick_emoji = "✅" if won else "❌"
+    profit_str = f"+${profit:,}" if profit >= 0 else f"-${abs(profit):,}"
+
+    # Render coin flip card
+    png = await render_coinflip_card(
+        result=result,
+        player_pick=pick_clean,
+        wager=wager,
+        payout=payout,
+        balance=db_result["new_balance"],
+        player_name=interaction.user.display_name,
+        txn_id=str(db_result.get("txn_id", "")),
+    )
+    file = discord.File(io.BytesIO(png), filename="coinflip.png")
 
     embed = discord.Embed(
-        title = f"🪙 TSL Coin Flip  |  {interaction.user.display_name}",
+        title = f"🪙 FLOW Casino — Coin Flip  |  {interaction.user.display_name}",
         color = discord.Color.green() if won else discord.Color.red(),
     )
-    embed.add_field(name="Your Pick",  value=f"{pick_clean.capitalize()} {pick_emoji}", inline=True)
-    embed.add_field(name="Result",     value=f"{result.capitalize()} {coin_emoji}",     inline=True)
+    embed.add_field(name="Your Pick",  value=f"{pick_clean.capitalize()} {'✅' if won else '❌'}", inline=True)
+    embed.add_field(name="Result",     value=f"{result.capitalize()} {'🌕' if result == 'heads' else '🌑'}",     inline=True)
     embed.add_field(name="Outcome",    value=f"**{'WIN' if won else 'LOSS'}** — {profit_str} Bucks", inline=True)
-    embed.add_field(name="Wager",      value=f"{wager:,} Bucks",                        inline=True)
-    embed.add_field(name="Payout",     value=f"{payout:,} Bucks",                       inline=True)
-    embed.add_field(name="Balance",    value=f"{db_result['new_balance']:,} Bucks",      inline=True)
+    embed.set_image(url="attachment://coinflip.png")
+    embed.set_footer(text=f"Balance: ${db_result['new_balance']:,} TSL Bucks")
 
     replay_view = PlayAgainView(
         user_id=uid,
         wager=wager,
         replay_callback=functools.partial(play_coinflip, pick=pick_clean, wager=wager),
     )
-    await interaction.followup.send(embed=embed, view=replay_view)
+    await interaction.followup.send(embed=embed, file=file, view=replay_view)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -185,8 +196,30 @@ class ChallengeView(discord.ui.View):
         loser_mention  = f"<@{loser_id}>"
         profit         = payout - self.wager
 
+        # Determine names
+        challenger_name = interaction.guild.get_member(self.challenger_id)
+        opponent_member = interaction.guild.get_member(self.opponent_id)
+        challenger_display = challenger_name.display_name if challenger_name else f"User {self.challenger_id}"
+        opponent_display = opponent_member.display_name if opponent_member else f"User {self.opponent_id}"
+        winner_name = challenger_display if winner_id == self.challenger_id else opponent_display
+        loser_name = opponent_display if winner_id == self.challenger_id else challenger_display
+
+        result_raw = "heads" if "Heads" in result_side else "tails"
+        png = await render_coinflip_card(
+            result=result_raw,
+            player_pick="heads",  # Challenger always picks heads
+            wager=self.wager,
+            payout=payout,
+            balance=0,  # PvP doesn't show individual balance
+            player_name=challenger_display,
+            is_pvp=True,
+            opponent_name=opponent_display,
+            opponent_pick="tails",
+        )
+        file = discord.File(io.BytesIO(png), filename="coinflip.png")
+
         embed = discord.Embed(
-            title = "🪙 TSL Coin Flip — PvP Result",
+            title = "🪙 FLOW Casino — PvP Coin Flip",
             color = discord.Color.gold(),
         )
         embed.add_field(
@@ -196,17 +229,18 @@ class ChallengeView(discord.ui.View):
         )
         embed.add_field(
             name  = "🏆 Winner",
-            value = f"{winner_mention} — **+{profit:,} Bucks** (1.9x)",
+            value = f"{winner_mention} — **+${profit:,} Bucks** (1.9x)",
             inline = True
         )
         embed.add_field(
             name  = "❌ Loser",
-            value = f"{loser_mention} — **-{self.wager:,} Bucks**",
+            value = f"{loser_mention} — **-${self.wager:,} Bucks**",
             inline = True
         )
+        embed.set_image(url="attachment://coinflip.png")
 
         self.clear_items()
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
 
         # Post to #ledger (winner + loser)
         from casino.casino import post_to_ledger
@@ -245,7 +279,7 @@ class ChallengeView(discord.ui.View):
         await refund_wager(self.challenger_id, self.wager)
 
         embed = discord.Embed(
-            title       = "🪙 TSL Coin Flip — Challenge Declined",
+            title       = "🪙 FLOW Casino — Coin Flip — Challenge Declined",
             description = (
                 f"<@{self.opponent_id}> declined the challenge.\n"
                 f"<@{self.challenger_id}> refunded **{self.wager:,} Bucks**."
@@ -266,7 +300,7 @@ class ChallengeView(discord.ui.View):
             if self.message:
                 try:
                     embed = discord.Embed(
-                        title       = "🪙 TSL Coin Flip — Challenge Expired",
+                        title       = "🪙 FLOW Casino — Coin Flip — Challenge Expired",
                         description = (
                             f"<@{self.opponent_id}> didn't respond in time.\n"
                             f"<@{self.challenger_id}> refunded **{self.wager:,} Bucks**."
@@ -336,7 +370,7 @@ async def send_challenge(
     active_challenges[challenge_id] = view
 
     embed = discord.Embed(
-        title       = "🪙 TSL Coin Flip — PvP Challenge",
+        title       = "🪙 FLOW Casino — Coin Flip — PvP Challenge",
         description = (
             f"{interaction.user.mention} has challenged {opponent.mention} "
             f"to a **{wager:,} TSL Bucks** coin flip!\n\n"

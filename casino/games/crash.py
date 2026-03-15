@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import io
+
 import discord
 
 from casino.casino_db import (
@@ -30,7 +32,7 @@ from casino.casino_db import (
     is_casino_open, get_channel_id, get_max_bet, get_balance,
     process_wager,
 )
-from casino.renderer.card_renderer import render_crash_chart
+from casino.renderer.casino_html_renderer import render_crash_card
 
 if TYPE_CHECKING:
     pass
@@ -104,13 +106,16 @@ async def _run_lobby(round_obj: CrashRound, channel: discord.TextChannel) -> Non
         if round_obj.status != "lobby":
             return
         embed = _build_lobby_embed(round_obj, remaining)
-        buf   = render_crash_chart(
-            1.00, crashed=False,
+        player_names = [p.display_name for p in round_obj.players.values()]
+        png   = await render_crash_card(
+            current_mult=1.00, crashed=False,
             history=recent_crashes.get(round_obj.channel_id, []),
             players_in=len(round_obj.players),
             total_wagered=round_obj.total_wagered,
+            players=player_names,
+            is_live=True,
         )
-        file = discord.File(buf, filename="crash.png")
+        file = discord.File(io.BytesIO(png), filename="crash.png")
         embed.set_image(url="attachment://crash.png")
         try:
             if round_obj.message is None:
@@ -144,14 +149,17 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 round_obj.current_mult = round_obj.crash_point
                 break
 
-            buf  = render_crash_chart(
-                round_obj.current_mult,
+            player_names = [p.display_name for p in round_obj.players.values()]
+            png  = await render_crash_card(
+                current_mult  = round_obj.current_mult,
                 crashed       = False,
                 history       = recent_crashes.get(round_obj.channel_id, []),
                 players_in    = round_obj.players_in,
                 total_wagered = round_obj.total_wagered,
+                players       = player_names,
+                is_live       = True,
             )
-            file  = discord.File(buf, filename="crash.png")
+            file  = discord.File(io.BytesIO(png), filename="crash.png")
             embed = _build_running_embed(round_obj)
             embed.set_image(url="attachment://crash.png")
             try:
@@ -206,14 +214,16 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
         ch_history.pop(0)
 
     # Final crashed render
-    buf   = render_crash_chart(
-        round_obj.crash_point,
+    player_names = [p.display_name for p in round_obj.players.values()]
+    png   = await render_crash_card(
+        current_mult  = round_obj.crash_point,
         crashed       = True,
         history       = recent_crashes.get(round_obj.channel_id, []),
         players_in    = 0,
         total_wagered = round_obj.total_wagered,
+        players       = player_names,
     )
-    file  = discord.File(buf, filename="crash.png")
+    file  = discord.File(io.BytesIO(png), filename="crash.png")
     embed = _build_crash_embed(round_obj)
     embed.set_image(url="attachment://crash.png")
     try:
@@ -300,7 +310,7 @@ class CrashView(discord.ui.View):
 
 def _build_lobby_embed(round_obj: CrashRound, remaining: int) -> discord.Embed:
     embed = discord.Embed(
-        title       = "🚀 TSL CRASH — Lobby Open",
+        title       = "🚀 FLOW CRASH — Lobby Open",
         description = (
             f"**Round #{round_obj.round_id}** starts in **{remaining}s**\n"
             f"Use `/crash [amount]` to join!\n\n"
@@ -315,7 +325,7 @@ def _build_lobby_embed(round_obj: CrashRound, remaining: int) -> discord.Embed:
 
 def _build_running_embed(round_obj: CrashRound) -> discord.Embed:
     embed = discord.Embed(
-        title       = f"🚀 TSL CRASH — {round_obj.current_mult:.2f}x",
+        title       = f"🚀 FLOW CRASH — {round_obj.current_mult:.2f}x",
         color       = discord.Color.from_rgb(212, 175, 55),
     )
     embed.add_field(name="Multiplier",    value=f"**{round_obj.current_mult:.2f}x**", inline=True)
