@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import random
 
 import discord
@@ -30,9 +31,7 @@ from casino.casino_db import (
     can_claim_scratch, claim_scratch,
 )
 from casino.play_again import PlayAgainView
-from casino.renderer.card_renderer import (
-    render_slot_result, render_scratch_card,
-)
+from casino.renderer.casino_html_renderer import render_slots_card, render_scratch_card_v6
 
 GAME_TYPE = "slots"
 
@@ -125,11 +124,11 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     # ── Initial render — all spinning ─────────────────────────────────────
     bal = await get_balance(interaction.user.id)
-    loop = asyncio.get_running_loop()
-    buf = await loop.run_in_executor(None, lambda: render_slot_result(reels, revealed=0, wager=wager, balance=bal))
-    file  = discord.File(buf, filename="slots.png")
+    player_name = interaction.user.display_name
+    png = await render_slots_card(reels, revealed=0, wager=wager, balance=bal, player_name=player_name)
+    file  = discord.File(io.BytesIO(png), filename="slots.png")
     embed = discord.Embed(
-        title = f"🎰 TSL Slots  |  {interaction.user.display_name}",
+        title = f"🎰 FLOW Casino — Slots  |  {player_name}",
         color = discord.Color.from_rgb(212, 175, 55),
     )
     embed.set_image(url="attachment://slots.png")
@@ -139,10 +138,10 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     for revealed in (1, 2, 3):
         await asyncio.sleep(0.9)
-        buf2  = await loop.run_in_executor(None, lambda: render_slot_result(reels, revealed=revealed, wager=wager, balance=bal))
-        file2 = discord.File(buf2, filename="slots.png")
+        png2  = await render_slots_card(reels, revealed=revealed, wager=wager, balance=bal, player_name=player_name)
+        file2 = discord.File(io.BytesIO(png2), filename="slots.png")
         embed2 = discord.Embed(
-            title = f"🎰 TSL Slots  |  {interaction.user.display_name}",
+            title = f"🎰 FLOW Casino — Slots  |  {player_name}",
             color = discord.Color.from_rgb(212, 175, 55),
         )
         embed2.set_image(url="attachment://slots.png")
@@ -182,24 +181,26 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     # ── Final render with result ───────────────────────────────────────────
     profit = payout - wager
-    profit_str = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
-    buf3  = render_slot_result(
+    profit_str = f"+${profit:,}" if profit >= 0 else f"-${abs(profit):,}"
+    png3  = await render_slots_card(
         reels, revealed=3,
         wager=wager, payout=payout,
         balance=result["new_balance"],
         result_msg=result_msg,
+        player_name=player_name,
+        txn_id=str(result.get("txn_id", "")),
     )
-    file3  = discord.File(buf3, filename="slots.png")
+    file3  = discord.File(io.BytesIO(png3), filename="slots.png")
     embed3 = discord.Embed(
-        title = f"🎰 TSL Slots  |  {interaction.user.display_name}",
+        title = f"🎰 FLOW Casino — Slots  |  {player_name}",
         color = discord.Color.green() if payout > 0 else discord.Color.red(),
     )
     embed3.add_field(name="Result", value=result_msg, inline=False)
-    embed3.add_field(name="Wager",   value=f"{wager:,} Bucks",              inline=True)
-    embed3.add_field(name="Payout",  value=f"{payout:,} Bucks",             inline=True)
+    embed3.add_field(name="Wager",   value=f"${wager:,} Bucks",              inline=True)
+    embed3.add_field(name="Payout",  value=f"${payout:,} Bucks",             inline=True)
     embed3.add_field(name="P&L",     value=f"{profit_str} Bucks",           inline=True)
     embed3.set_image(url="attachment://slots.png")
-    embed3.set_footer(text=f"New Balance: {result['new_balance']:,} TSL Bucks")
+    embed3.set_footer(text=f"New Balance: ${result['new_balance']:,} TSL Bucks")
 
     replay_view = PlayAgainView(
         user_id=interaction.user.id,
@@ -216,10 +217,12 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 class ScratchView(discord.ui.View):
     """Handles sequential tile reveals for the scratch card."""
 
-    def __init__(self, discord_id: int, tiles: list[int]):
+    def __init__(self, discord_id: int, tiles: list[int], total: int = 0, balance: int = 0):
         super().__init__(timeout=120)
         self.discord_id = discord_id
         self.tiles      = tiles
+        self.total      = total
+        self.balance    = balance
         self.revealed   = 0
         self.is_match   = len(set(tiles)) == 1
 
@@ -236,8 +239,15 @@ class ScratchView(discord.ui.View):
             button.disabled = True
             button.label    = "Done!"
 
-        buf   = render_scratch_card(self.tiles, revealed=self.revealed, is_match=self.is_match)
-        file  = discord.File(buf, filename="scratch.png")
+        png = await render_scratch_card_v6(
+            self.tiles,
+            revealed=self.revealed,
+            is_match=self.is_match,
+            player_name=interaction.user.display_name,
+            total=self.total,
+            balance=self.balance,
+        )
+        file = discord.File(io.BytesIO(png), filename="scratch.png")
         embed = _build_scratch_embed(
             interaction.user.display_name,
             self.tiles,
@@ -310,12 +320,18 @@ async def daily_scratch(interaction: discord.Interaction) -> None:
             "⏰ Already claimed today!", ephemeral=True
         )
 
+    balance = await get_balance(uid)
+
     # Render initial card (0 tiles revealed)
-    buf   = render_scratch_card(tiles, revealed=0, is_match=False)
-    file  = discord.File(buf, filename="scratch.png")
+    png = await render_scratch_card_v6(
+        tiles, revealed=0, is_match=is_match,
+        player_name=interaction.user.display_name, total=total,
+        balance=balance,
+    )
+    file  = discord.File(io.BytesIO(png), filename="scratch.png")
     embed = _build_scratch_embed(interaction.user.display_name, tiles, 0, is_match)
     embed.set_image(url="attachment://scratch.png")
     embed.set_footer(text=f"Potential win: {total:,} TSL Bucks credited to your account")
 
-    view = ScratchView(uid, tiles)
+    view = ScratchView(uid, tiles, total=total, balance=balance)
     await interaction.followup.send(embed=embed, file=file, view=view)

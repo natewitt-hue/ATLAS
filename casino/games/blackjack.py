@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,7 +29,8 @@ from casino.casino_db import (
     is_casino_open, get_channel_id, get_max_bet,
 )
 from casino.play_again import PlayAgainView
-from casino.renderer.card_renderer import render_blackjack_table, SUITS, VALUES
+from casino.renderer.card_renderer import SUITS, VALUES
+from casino.renderer.casino_html_renderer import render_blackjack_card
 
 
 # ── Session registry: discord_id → BlackjackSession ──────────────────────────
@@ -353,7 +355,7 @@ async def _update_table_message(
     status:      str  = "",
 ) -> None:
     bal = await get_balance(session.discord_id)
-    buf = render_blackjack_table(
+    png = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
         player_hand  = session.active_hand,
         dealer_score = _display_score(session.dealer_hand, hide=hide_dealer),
@@ -362,15 +364,16 @@ async def _update_table_message(
         status       = status,
         wager        = session.wager,
         balance      = bal,
+        player_name  = interaction.user.display_name if hasattr(interaction, 'user') else "Player",
     )
-    file  = discord.File(buf, filename="blackjack.png")
+    file  = discord.File(io.BytesIO(png), filename="blackjack.png")
     embed = discord.Embed(
-        title       = "🃏 TSL Casino — Blackjack",
+        title       = "🃏 FLOW Casino — Blackjack",
         description = _hand_description(session),
         color       = discord.Color.from_rgb(212, 175, 55),
     )
     embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"Wager: {session.wager:,} TSL Bucks  |  Balance: {bal:,}")
+    embed.set_footer(text=f"Wager: ${session.wager:,}  |  Balance: ${bal:,} TSL Bucks")
     await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
 
 
@@ -470,7 +473,7 @@ async def _finish_hand(
     active_sessions.pop(session.discord_id, None)
 
     bal = result["new_balance"]
-    buf = render_blackjack_table(
+    png = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
         player_hand  = session.active_hand,
         dealer_score = _hand_value(session.dealer_hand),
@@ -478,15 +481,18 @@ async def _finish_hand(
         hide_dealer  = False,
         status       = status_str,
         wager        = total_wager,
+        payout       = total_payout,
         balance      = bal,
+        player_name  = interaction.user.display_name,
+        txn_id       = str(result.get("txn_id", "")),
     )
-    file  = discord.File(buf, filename="blackjack.png")
+    file  = discord.File(io.BytesIO(png), filename="blackjack.png")
 
     color = (discord.Color.green() if log_outcome == "win"
              else discord.Color.red() if log_outcome == "loss"
              else discord.Color.greyple())
 
-    embed = discord.Embed(title="🃏 TSL Casino — Blackjack", color=color)
+    embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
     p_val = _hand_value(session.active_hand)
     d_val = _hand_value(session.dealer_hand)
     embed.add_field(
@@ -609,7 +615,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         profit     = payout - wager
         profit_str = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
 
-        buf = render_blackjack_table(
+        png = await render_blackjack_card(
             dealer_hand  = session.dealer_hand,
             player_hand  = session.player_hand,
             dealer_score = _hand_value(session.dealer_hand),
@@ -617,14 +623,17 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             hide_dealer  = False,
             status       = status_str,
             wager        = wager,
+            payout       = payout,
             balance      = bal,
+            player_name  = interaction.user.display_name,
+            txn_id       = str(result.get("txn_id", "")),
         )
-        file  = discord.File(buf, filename="blackjack.png")
+        file  = discord.File(io.BytesIO(png), filename="blackjack.png")
         color = (discord.Color.green() if outcome == "win"
                  else discord.Color.red() if outcome == "loss"
                  else discord.Color.greyple())
 
-        embed = discord.Embed(title="🃏 TSL Casino — Blackjack", color=color)
+        embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
         embed.add_field(
             name="Your Hand",
             value=f"{_cards_str(session.player_hand)} = **{_hand_value(session.player_hand)}**",
@@ -651,7 +660,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
 
     # ── Normal deal: render and send active table ─────────────────────────
     bal  = await get_balance(uid)
-    buf  = render_blackjack_table(
+    png  = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
         player_hand  = session.player_hand,
         dealer_score = "?",
@@ -659,15 +668,16 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         hide_dealer  = True,
         wager        = wager,
         balance      = bal,
+        player_name  = interaction.user.display_name,
     )
-    file  = discord.File(buf, filename="blackjack.png")
+    file  = discord.File(io.BytesIO(png), filename="blackjack.png")
     embed = discord.Embed(
-        title       = f"🃏 TSL Casino — Blackjack  |  {interaction.user.display_name}",
+        title       = f"🃏 FLOW Casino — Blackjack  |  {interaction.user.display_name}",
         description = _hand_description(session),
         color       = discord.Color.from_rgb(212, 175, 55),
     )
     embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"Wager: {wager:,} TSL Bucks  |  Balance: {bal:,}  |  5-min timeout")
+    embed.set_footer(text=f"Wager: ${wager:,}  |  Balance: ${bal:,} TSL Bucks  |  5-min timeout")
 
     view = BlackjackView(session)
     await interaction.followup.send(embed=embed, file=file, view=view)
