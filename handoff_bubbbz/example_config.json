@@ -1,0 +1,60 @@
+{
+  "patient": {
+    "name": "John D.",
+    "age": 62,
+    "reading_level": "standard",
+    "language": "en"
+  },
+  "condition": "HTN",
+  "bp_current": {
+    "systolic": 148,
+    "diastolic": 92
+  },
+  "bp_history": [
+    { "date": "2026-01-15", "systolic": 152, "diastolic": 96 },
+    { "date": "2026-02-12", "systolic": 148, "diastolic": 92 },
+    { "date": "2026-03-10", "systolic": 145, "diastolic": 90 }
+  ],
+  "stage": "stage2",
+  "medications": [
+    {
+      "generic": "lisinopril",
+      "brand": "Prinivil",
+      "dose": "20mg daily",
+      "class": "ACE Inhibitor",
+      "color": "#4CAF50",
+      "notes": "Take in the morning. Do not use potassium supplements without asking your doctor."
+    },
+    {
+      "generic": "amlodipine",
+      "brand": "Norvasc",
+      "dose": "5mg daily",
+      "class": "Calcium Channel Blocker",
+      "color": "#1565C0",
+      "notes": "May cause ankle swelling. Report dizziness."
+    }
+  ],
+  "components": [
+    "bp_scale",
+    "med_cards",
+    "traffic_pills",
+    "emergency_zones",
+    "lifestyle_tiles"
+  ],
+  "lifestyle_flags": [
+    "high_sodium",
+    "sedentary",
+    "smoker"
+  ],
+  "emergency_symptoms": [
+    "Sudden severe headache",
+    "Vision changes",
+    "Chest pain or shortness of breath",
+    "Difficulty speaking or weakness on one side"
+  ],
+  "follow_up": {
+    "next_visit": "2026-04-10",
+    "bp_check_frequency": "daily",
+    "lab_orders": ["BMP", "lipid panel"]
+  }
+}
