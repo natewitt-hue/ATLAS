@@ -52,7 +52,7 @@ REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
     ("compliance",      "compliance",      "ATLAS — Sentinel", True,  False),
     ("force_request",   "force-request",   "ATLAS — Sentinel", False, False),
     # ── ATLAS — Casino (economy, games, markets) ──
-    ("casino_ledger",      "casino-ledger",      "ATLAS — Casino", True,  False),
+    ("ledger",             "ledger",              "ATLAS — Flow",   True,  False),
     ("blackjack",          "blackjack",           "ATLAS — Casino", False, False),
     ("slots",              "slots",               "ATLAS — Casino", False, False),
     ("crash",              "crash",               "ATLAS — Casino", False, False),
@@ -66,6 +66,8 @@ _CHANNEL_ALIASES: dict[str, str] = {
     "askwittgpt": "ask_atlas",
     "real_sportsbook": "sportsbook",    # merged in v2.1
     "real-sportsbook": "sportsbook",    # display name variant
+    "casino_ledger": "ledger",          # renamed in v2.3
+    "casino-ledger": "ledger",          # display name variant
 }
 
 # Channels where /complaint and /forcerequest are silently routed to DM → admin-chat.
@@ -107,6 +109,13 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
     """
     try:
         with sqlite3.connect(DB_PATH) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS server_config (
+                    config_key  TEXT PRIMARY KEY,
+                    channel_id  INTEGER NOT NULL,
+                    guild_id    INTEGER NOT NULL
+                )
+            """)
             if guild_id:
                 row = con.execute(
                     "SELECT channel_id FROM server_config WHERE config_key=? AND guild_id=?",

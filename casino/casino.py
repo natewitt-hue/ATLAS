@@ -35,15 +35,11 @@ from casino.games.slots     import play_slots, daily_scratch
 from casino.games.crash     import join_crash, active_rounds
 from casino.games.coinflip  import play_coinflip, send_challenge
 from casino.renderer.card_renderer import warm_cache
-from casino.renderer.ledger_renderer import render_ledger_card
-
 ADMIN_ROLE_NAME = "Commissioner"
 
 GAME_CHOICES = typing.Literal["blackjack", "crash", "slots", "coinflip"]
 
 # ── Ledger Feed ───────────────────────────────────────────────────────────────
-
-_OUTCOME_COLOR = {"win": 0x22C55E, "loss": 0xEF4444, "push": 0xF59E0B}
 
 
 async def post_to_ledger(
@@ -56,35 +52,15 @@ async def post_to_ledger(
     payout: int,
     multiplier: float,
     new_balance: int,
+    txn_id: int | None = None,
 ) -> None:
-    """Render and post a premium ledger card to #casino-ledger."""
+    """Post a casino game result slip to #ledger via ledger_poster."""
     try:
-        # Deferred import: setup_cog and casino.py cross-reference each other
-        from setup_cog import get_channel_id
-
-        ledger_ch_id = get_channel_id("casino_ledger", guild_id)
-        if not ledger_ch_id:
-            return
-        channel = bot.get_channel(ledger_ch_id)
-        if not channel:
-            return
-
-        member = channel.guild.get_member(discord_id)
-        display_name = member.display_name if member else f"User {discord_id}"
-
-        buf = render_ledger_card(
-            player_name=display_name,
-            game_type=game_type,
-            wager=wager,
-            outcome=outcome,
-            payout=payout,
-            multiplier=multiplier,
-            new_balance=new_balance,
+        from ledger_poster import post_casino_result
+        await post_casino_result(
+            bot, guild_id, discord_id, game_type,
+            wager, outcome, payout, multiplier, new_balance, txn_id,
         )
-
-        embed = discord.Embed(color=_OUTCOME_COLOR.get(outcome, 0xD4AF37))
-        embed.set_image(url="attachment://ledger.png")
-        await channel.send(embed=embed, file=discord.File(buf, filename="ledger.png"))
     except Exception as e:
         print(f"[LEDGER] Failed to post ledger entry: {e}")
 

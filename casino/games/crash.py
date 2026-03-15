@@ -189,13 +189,14 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 multiplier = round_obj.crash_point,
                 channel_id = round_obj.channel_id,
             )
-            # Post to #casino-ledger
+            # Post to #ledger
             await post_to_ledger(
                 bot=bot, guild_id=channel.guild.id,
                 discord_id=player.discord_id, game_type=GAME_TYPE,
                 wager=player.wager, outcome="loss", payout=0,
                 multiplier=round_obj.crash_point,
                 new_balance=result["new_balance"],
+                txn_id=result.get("txn_id"),
             )
 
     # Store crash point in recent history
@@ -275,13 +276,14 @@ class CrashView(discord.ui.View):
             channel_id = self.round_obj.channel_id,
         )
 
-        # Post to #casino-ledger
+        # Post to #ledger
         from casino.casino import post_to_ledger
         await post_to_ledger(
             bot=interaction.client, guild_id=interaction.guild_id,
             discord_id=uid, game_type=GAME_TYPE,
             wager=player.wager, outcome="win", payout=payout,
             multiplier=mult, new_balance=result["new_balance"],
+            txn_id=result.get("txn_id"),
         )
 
         profit = payout - player.wager

@@ -432,13 +432,14 @@ async def _finish_hand(
         channel_id = session.channel_id,
     )
 
-    # Post to #casino-ledger
+    # Post to #ledger
     from casino.casino import post_to_ledger
     await post_to_ledger(
         bot=interaction.client, guild_id=interaction.guild_id,
         discord_id=session.discord_id, game_type=GAME_TYPE,
         wager=total_wager, outcome=log_outcome, payout=total_payout,
         multiplier=round(avg_mult, 2), new_balance=result["new_balance"],
+        txn_id=result.get("txn_id"),
     )
 
     if len(outcomes) == 1:
@@ -579,13 +580,14 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         )
         bal = result["new_balance"]
 
-        # Post to #casino-ledger
+        # Post to #ledger
         from casino.casino import post_to_ledger
         await post_to_ledger(
             bot=interaction.client, guild_id=interaction.guild_id,
             discord_id=uid, game_type=GAME_TYPE,
             wager=wager, outcome=outcome, payout=payout,
             multiplier=round(mult, 2), new_balance=bal,
+            txn_id=result.get("txn_id"),
         )
 
         if outcome == "win" and _is_blackjack(session.player_hand):

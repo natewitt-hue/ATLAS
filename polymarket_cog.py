@@ -630,6 +630,20 @@ class WagerModal(discord.ui.Modal):
         embed.timestamp = datetime.now(timezone.utc)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        # Post to #ledger
+        try:
+            new_bal = await flow_wallet.get_balance(user_id)
+            txn_id = await flow_wallet.get_last_txn_id(user_id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                interaction.client, interaction.guild_id, user_id,
+                "PREDICTION", -cost_bucks, new_bal,
+                f"Buy {quantity} {self.side} — {self.market_title[:50]}",
+                txn_id,
+            )
+        except Exception:
+            pass
+
 
 class BetButtonView(discord.ui.View):
     """YES / NO buttons on the /bet embed — fetches live odds before modal."""
@@ -1741,6 +1755,33 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             await db.commit()
 
         log.info(f"_resolve({market_id}, {result}, by={resolved_by}): {counts}")
+
+        # Post ledger slips for resolution payouts/refunds
+        try:
+            from ledger_poster import post_transaction
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+            guild_id = guild.id if guild else None
+            if guild_id:
+                for cid, user_id, side, qty, cost, payout in contracts:
+                    if result == "VOID":
+                        bal = await flow_wallet.get_balance(user_id)
+                        txn_id = await flow_wallet.get_last_txn_id(user_id)
+                        await post_transaction(
+                            self.bot, guild_id, user_id,
+                            "PREDICTION", cost, bal,
+                            f"Void refund — {market_id[:30]}", txn_id,
+                        )
+                    elif side == result:
+                        bal = await flow_wallet.get_balance(user_id)
+                        txn_id = await flow_wallet.get_last_txn_id(user_id)
+                        await post_transaction(
+                            self.bot, guild_id, user_id,
+                            "PREDICTION", payout, bal,
+                            f"Won: {side} — {market_id[:30]}", txn_id,
+                        )
+        except Exception:
+            pass
+
         return counts
 
     # ── Slash: /market_status (admin) ─────────
