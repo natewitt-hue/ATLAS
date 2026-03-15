@@ -556,7 +556,7 @@ def load_all() -> None:
 
     # ── Full roster ────────────────────────────────────────────────────────
     print("Fetching full roster...")
-    players_raw = _fetch_csv("/export/players")
+    players_raw = _fetch_csv("/export/players", timeout=120)
     if not players_raw:
         print("     ⚠️  /export/players returned empty — draft history and ability auditing disabled")
     else:
