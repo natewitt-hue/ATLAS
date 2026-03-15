@@ -420,12 +420,12 @@ def _build_data_grid_html(
 
 
 def _build_footer_html(balance: int) -> str:
-    """Build the centered footer: Balance: $X,XXX Bucks."""
+    """Build the centered footer: Balance: $X,XXX."""
     return f"""
     <div class="footer">
       <div class="footer-balance">
         <span class="label">Balance:</span>
-        <span class="amount"> ${balance:,} Bucks</span>
+        <span class="amount"> ${balance:,}</span>
       </div>
     </div>"""
 
@@ -938,7 +938,7 @@ def _build_crash_html(
     profit_pill = ""
     if cashed_out and payout > wager:
         profit = payout - wager
-        profit_pill = f'<div class="profit-pill">+${profit:,} Bucks</div>'
+        profit_pill = f'<div class="profit-pill">+${profit:,}</div>'
 
     # Recent history pills
     history_html = ""
@@ -1455,7 +1455,6 @@ def _build_scratch_html(
             tiles_html += f"""
             <div class="scratch-tile revealed {glow}">
               <div class="tile-value">${value:,}</div>
-              <div class="tile-label">BUCKS</div>
             </div>"""
         else:
             # Unrevealed tile
@@ -1468,12 +1467,12 @@ def _build_scratch_html(
     if all_revealed and is_match:
         result_html = f"""
         <div class="scratch-result match">
-          \U0001f3c6 TRIPLE MATCH — ${tiles[0]:,} × 3 = +${total:,} Bucks!
+          \U0001f3c6 TRIPLE MATCH — ${tiles[0]:,} × 3 = +${total:,}!
         </div>"""
     elif all_revealed:
         result_html = f"""
         <div class="scratch-result normal">
-          \u2705 You won ${total:,} Bucks!
+          \u2705 You won ${total:,}!
         </div>"""
     else:
         remaining = 3 - revealed

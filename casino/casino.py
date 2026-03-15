@@ -86,7 +86,7 @@ class CasinoHubModal(discord.ui.Modal):
         super().__init__(title=f"TSL Casino — {game.capitalize()}")
         self.game = game
         self.wager_input = discord.ui.TextInput(
-            label       = "Wager (Bucks)",
+            label       = "Wager ($)",
             placeholder = "Enter amount (e.g. 50)",
             min_length  = 1,
             max_length  = 6,
@@ -183,7 +183,7 @@ class CasinoHubView(discord.ui.View):
             title = f"🎰 {interaction.user.display_name}'s Casino Stats",
             color = discord.Color.from_rgb(212, 175, 55),
         )
-        embed.add_field(name="Balance", value=f"**{balance:,} Bucks**", inline=False)
+        embed.add_field(name="Balance", value=f"**${balance:,}**", inline=False)
 
         total_wagered = total_returned = total_hands = 0
         for row in rows:
@@ -266,12 +266,12 @@ class CasinoCog(commands.Cog):
                 "🎰 **Slots** — 3-reel TSL-themed machine (up to 50x)\n"
                 "🚀 **Crash** — Shared multiplier — cash out before it crashes\n"
                 "🪙 **Coin Flip** — 50/50, even money\n"
-                "🎟️ **Daily Scratch** — Free daily card (25–150 Bucks)\n"
+                "🎟️ **Daily Scratch** — Free daily card ($25–$150)\n"
             ),
             color = discord.Color.from_rgb(212, 175, 55),
         )
-        embed.add_field(name="Your Balance", value=f"**{balance:,} Bucks**", inline=True)
-        embed.add_field(name="Max Bet",      value=f"{max_bet:,} Bucks",          inline=True)
+        embed.add_field(name="Your Balance", value=f"**${balance:,}**", inline=True)
+        embed.add_field(name="Max Bet",      value=f"${max_bet:,}",          inline=True)
         embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
 
         await interaction.followup.send(embed=embed, view=CasinoHubView(), ephemeral=True)
@@ -288,10 +288,10 @@ class CasinoCog(commands.Cog):
 
         embed = discord.Embed(title="🎰 TSL Casino Status", color=discord.Color.teal())
         embed.add_field(name="Casino Open",    value="✅ Yes" if is_open else "🔴 No", inline=True)
-        embed.add_field(name="Total P&L",      value=f"{report['total_pl']:+,} Bucks",   inline=True)
+        embed.add_field(name="Total P&L",      value=f"${report['total_pl']:+,}",   inline=True)
         embed.add_field(name="Unique Players", value=str(report["unique_players"]),        inline=True)
         embed.add_field(name="Total Hands",    value=str(report["total_hands"]),           inline=True)
-        embed.add_field(name="Total Wagered",  value=f"{report['total_wagered']:,} Bucks", inline=True)
+        embed.add_field(name="Total Wagered",  value=f"${report['total_wagered']:,}", inline=True)
         embed.add_field(name="Active BJ Sessions", value=str(len(bj_sessions)),            inline=True)
         embed.add_field(name="Active Crash Rounds", value=str(len(active_rounds)),         inline=True)
 
@@ -354,10 +354,10 @@ class CasinoCog(commands.Cog):
             title = "📊 TSL Casino — House P&L Report",
             color = discord.Color.teal(),
         )
-        embed.add_field(name="Total P&L",      value=f"**{report['total_pl']:+,} Bucks**", inline=False)
+        embed.add_field(name="Total P&L",      value=f"**${report['total_pl']:+,}**", inline=False)
         embed.add_field(name="Unique Players", value=str(report["unique_players"]),          inline=True)
         embed.add_field(name="Total Hands",    value=str(report["total_hands"]),             inline=True)
-        embed.add_field(name="Total Wagered",  value=f"{report['total_wagered']:,} Bucks",   inline=True)
+        embed.add_field(name="Total Wagered",  value=f"${report['total_wagered']:,}",   inline=True)
 
         for g in report["by_game"]:
             pl_str = f"{g['pl']:+,}"
@@ -379,7 +379,7 @@ class CasinoCog(commands.Cog):
             await db.refund_wager(user.id, session.wager)
             await interaction.response.send_message(
                 f"✅ Cleared {user.mention}'s blackjack session. "
-                f"Refunded **{session.wager:,} Bucks**.",
+                f"Refunded **${session.wager:,}**.",
                 ephemeral=True
             )
         else:

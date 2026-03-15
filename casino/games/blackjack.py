@@ -373,7 +373,7 @@ async def _update_table_message(
         color       = discord.Color.from_rgb(212, 175, 55),
     )
     embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"Wager: ${session.wager:,}  |  Balance: ${bal:,} Bucks")
+    embed.set_footer(text=f"Wager: ${session.wager:,}  |  Balance: ${bal:,}")
     await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
 
 
@@ -507,11 +507,11 @@ async def _finish_hand(
     )
     embed.add_field(
         name  = "Result",
-        value = f"**{status_str}**\n{profit_str} Bucks",
+        value = f"**{status_str}**\n{profit_str}",
         inline = True
     )
     embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"New Balance: {bal:,} Bucks")
+    embed.set_footer(text=f"New Balance: ${bal:,}")
 
     replay_view = PlayAgainView(
         user_id=session.discord_id,
@@ -554,7 +554,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
-            f"❌ Wager must be between **1** and **{max_bet:,} Bucks**.",
+            f"❌ Wager must be between **$1** and **${max_bet:,}**.",
             ephemeral=True
         )
 
@@ -646,11 +646,11 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         )
         embed.add_field(
             name="Result",
-            value=f"**{status_str}**\n{profit_str} Bucks",
+            value=f"**{status_str}**\n{profit_str}",
             inline=True
         )
         embed.set_image(url="attachment://blackjack.png")
-        embed.set_footer(text=f"New Balance: {bal:,} Bucks")
+        embed.set_footer(text=f"New Balance: ${bal:,}")
         replay_view = PlayAgainView(
             user_id=uid,
             wager=wager,
@@ -677,7 +677,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         color       = discord.Color.from_rgb(212, 175, 55),
     )
     embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"Wager: ${wager:,}  |  Balance: ${bal:,} Bucks  |  5-min timeout")
+    embed.set_footer(text=f"Wager: ${wager:,}  |  Balance: ${bal:,}  |  5-min timeout")
 
     view = BlackjackView(session)
     await interaction.followup.send(embed=embed, file=file, view=view)
