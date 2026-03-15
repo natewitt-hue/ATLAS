@@ -20,6 +20,7 @@ import logging
 import os
 import sqlite3
 import traceback
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -509,6 +510,267 @@ class SetupChoiceView(discord.ui.View):
         )
         self.stop()
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  AUTO-DISCOVERY — runs once per guild at startup
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _ensure_discovery_tables() -> None:
+    """Create guild_registry, guild_roles, and guild_emojis tables."""
+    with sqlite3.connect(DB_PATH) as con:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS guild_registry (
+                guild_id      INTEGER PRIMARY KEY,
+                guild_name    TEXT,
+                owner_id      INTEGER,
+                member_count  INTEGER,
+                boost_level   INTEGER,
+                icon_url      TEXT,
+                banner_url    TEXT,
+                discovered_at TEXT,
+                updated_at    TEXT
+            );
+            CREATE TABLE IF NOT EXISTS guild_roles (
+                guild_id  INTEGER,
+                role_id   INTEGER,
+                role_name TEXT,
+                color     INTEGER,
+                position  INTEGER,
+                is_admin  INTEGER,
+                PRIMARY KEY (guild_id, role_id)
+            );
+            CREATE TABLE IF NOT EXISTS guild_emojis (
+                guild_id   INTEGER,
+                emoji_id   INTEGER,
+                emoji_name TEXT,
+                animated   INTEGER,
+                PRIMARY KEY (guild_id, emoji_id)
+            );
+        """)
+
+
+# Module-level cache: guild_id → {role_name_lower → role_id}
+_role_cache: dict[int, dict[str, int]] = {}
+
+
+def get_cached_role_id(guild_id: int, role_name: str) -> Optional[int]:
+    """Fast role lookup from startup cache. Falls back to None."""
+    guild_roles = _role_cache.get(guild_id)
+    if guild_roles:
+        return guild_roles.get(role_name.lower())
+    return None
+
+
+async def auto_discover(guild: discord.Guild) -> None:
+    """
+    Scan a guild at startup and persist structure to DB.
+    Called from on_ready() for each guild. Never overwrites manual /setup config.
+    """
+    _ensure_table()
+    _ensure_discovery_tables()
+    gid = guild.id
+    now = datetime.now(timezone.utc).isoformat()
+
+    print(f"\n🔍 Auto-discovery: {guild.name} (guild {gid})")
+
+    # ── 1. CHANNELS — match by name, skip already-configured keys ────────
+    existing_keys: set[str] = set()
+    with sqlite3.connect(DB_PATH) as con:
+        rows = con.execute(
+            "SELECT config_key FROM server_config WHERE guild_id=?", (gid,)
+        ).fetchall()
+        existing_keys = {r[0] for r in rows}
+
+    # Build name → channel lookup (lowered, stripped)
+    ch_by_name: dict[str, discord.TextChannel] = {}
+    for ch in guild.text_channels:
+        normalized = ch.name.lower().replace(" ", "-")
+        ch_by_name[normalized] = ch
+
+    matched, skipped = 0, 0
+    for config_key, channel_name, _cat, _ro, _ao in REQUIRED_CHANNELS:
+        if config_key in existing_keys:
+            skipped += 1
+            continue
+        target = ch_by_name.get(channel_name.lower())
+        if not target:
+            # Try alias lookup
+            for alias, alias_key in _CHANNEL_ALIASES.items():
+                if alias_key == config_key:
+                    target = ch_by_name.get(alias)
+                    if target:
+                        break
+        if target:
+            _save_channel_id(config_key, target.id, gid)
+            print(f"   ✅ {config_key} → #{target.name} ({target.id})")
+            matched += 1
+        else:
+            print(f"   ⚠️  {config_key} — no match found")
+
+    total = len(REQUIRED_CHANNELS)
+    configured = len(existing_keys) + matched
+    print(f"   Channels: {configured}/{total} configured ({skipped} kept, {matched} auto-matched)")
+
+    # Bridge newly discovered casino channels to casino_db
+    try:
+        from casino.casino_db import set_setting as _casino_set
+        for cfg_key, casino_setting in _CASINO_BRIDGE.items():
+            ch_id = get_channel_id(cfg_key, gid)
+            if ch_id:
+                await _casino_set(casino_setting, str(ch_id))
+    except Exception:
+        pass  # Casino module may not be loaded yet
+
+    # ── 2. PERMISSION AUDIT — check bot perms in configured channels ─────
+    perm_ok, perm_warn = 0, 0
+    with sqlite3.connect(DB_PATH) as con:
+        cfg_rows = con.execute(
+            "SELECT config_key, channel_id FROM server_config WHERE guild_id=?", (gid,)
+        ).fetchall()
+
+    for config_key, channel_id in cfg_rows:
+        ch = guild.get_channel(channel_id)
+        if not ch:
+            continue
+        perms = ch.permissions_for(guild.me)
+        missing = []
+        if not perms.send_messages:
+            missing.append("send_messages")
+        if not perms.embed_links:
+            missing.append("embed_links")
+        if not perms.attach_files:
+            missing.append("attach_files")
+        if not perms.read_messages:
+            missing.append("read_messages")
+        if missing:
+            print(f"   ⚠️  #{ch.name} — missing: {', '.join(missing)}")
+            perm_warn += 1
+        else:
+            perm_ok += 1
+
+    if perm_warn:
+        print(f"   Permissions: {perm_ok} OK, {perm_warn} warnings")
+    else:
+        print(f"   Permissions: {perm_ok} channels OK")
+
+    # ── 3. ROLES — cache all roles, identify key roles ───────────────────
+    key_roles = {"commissioner": None, "tsl owner": None}
+    with sqlite3.connect(DB_PATH) as con:
+        # Clear stale roles for this guild, then insert fresh
+        con.execute("DELETE FROM guild_roles WHERE guild_id=?", (gid,))
+        role_cache_local: dict[str, int] = {}
+        for role in guild.roles:
+            if role.is_default():
+                continue
+            con.execute(
+                "INSERT OR REPLACE INTO guild_roles (guild_id, role_id, role_name, color, position, is_admin) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (gid, role.id, role.name, role.color.value, role.position,
+                 1 if role.permissions.administrator else 0),
+            )
+            role_cache_local[role.name.lower()] = role.id
+            if role.name.lower() in key_roles:
+                key_roles[role.name.lower()] = role
+        con.commit()
+
+    _role_cache[gid] = role_cache_local
+    role_count = len([r for r in guild.roles if not r.is_default()])
+    key_str = ", ".join(
+        f"{name.title()} {'✅' if role else '❌'}"
+        for name, role in key_roles.items()
+    )
+    print(f"   Roles: {role_count} cached ({key_str})")
+
+    # ── 4. GUILD METADATA — persist guild info ───────────────────────────
+    icon_url = str(guild.icon.url) if guild.icon else None
+    banner_url = str(guild.banner.url) if guild.banner else None
+    human_count = sum(1 for m in guild.members if not m.bot)
+
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("""
+            INSERT INTO guild_registry (guild_id, guild_name, owner_id, member_count,
+                                        boost_level, icon_url, banner_url, discovered_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                guild_name=excluded.guild_name, owner_id=excluded.owner_id,
+                member_count=excluded.member_count, boost_level=excluded.boost_level,
+                icon_url=excluded.icon_url, banner_url=excluded.banner_url,
+                updated_at=excluded.updated_at
+        """, (gid, guild.name, guild.owner_id, human_count,
+              guild.premium_tier, icon_url, banner_url, now, now))
+        con.commit()
+
+    upload_limits = {0: "25MB", 1: "25MB", 2: "50MB", 3: "100MB"}
+    print(f"   Boost: Level {guild.premium_tier} ({upload_limits.get(guild.premium_tier, '?')} upload limit)")
+
+    # ── 5. CATEGORIES — log structure ────────────────────────────────────
+    if guild.categories:
+        cat_parts = []
+        for cat in sorted(guild.categories, key=lambda c: c.position):
+            cat_parts.append(f"{cat.name} ({len(cat.channels)}ch)")
+        print(f"   Categories: {', '.join(cat_parts)}")
+
+    # ── 6. MEMBER ROLE ENRICHMENT — update tsl_members status from roles ─
+    enriched = 0
+    try:
+        import build_member_db as mdb
+        commissioner_role = key_roles.get("commissioner")
+        owner_role = key_roles.get("tsl owner")
+        for m in guild.members:
+            if m.bot:
+                continue
+            new_status = None
+            if commissioner_role and commissioner_role in m.roles:
+                new_status = "Admin"
+            elif owner_role and owner_role in m.roles:
+                new_status = "League Owner"
+            if new_status:
+                with sqlite3.connect(DB_PATH) as con:
+                    cur = con.execute(
+                        "UPDATE tsl_members SET status=? WHERE discord_id=? AND status != ?",
+                        (new_status, str(m.id), new_status),
+                    )
+                    if cur.rowcount:
+                        enriched += 1
+                    con.commit()
+    except Exception:
+        pass  # build_member_db may not be available
+
+    if enriched:
+        print(f"   Members: {enriched} status updates from roles")
+
+    # ── 7. EMOJIS — cache custom emojis ──────────────────────────────────
+    emoji_count = 0
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("DELETE FROM guild_emojis WHERE guild_id=?", (gid,))
+        for emoji in guild.emojis:
+            con.execute(
+                "INSERT INTO guild_emojis (guild_id, emoji_id, emoji_name, animated) "
+                "VALUES (?, ?, ?, ?)",
+                (gid, emoji.id, emoji.name, 1 if emoji.animated else 0),
+            )
+            emoji_count += 1
+        con.commit()
+
+    if emoji_count:
+        print(f"   Emojis: {emoji_count} custom emojis cached")
+
+    # ── 8. WEBHOOKS — informational inventory ────────────────────────────
+    webhook_count = 0
+    try:
+        for ch in guild.text_channels:
+            perms = ch.permissions_for(guild.me)
+            if perms.manage_webhooks:
+                hooks = await ch.webhooks()
+                webhook_count += len(hooks)
+    except Exception:
+        pass  # Not critical
+
+    if webhook_count:
+        print(f"   Webhooks: {webhook_count} found across accessible channels")
+
+    print(f"   Discovery complete.")
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────

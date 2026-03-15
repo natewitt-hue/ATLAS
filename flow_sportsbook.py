@@ -1860,7 +1860,8 @@ class SportsbookCog(commands.Cog):
     # ── User-facing _impl methods (called by board buttons) ────────────────
 
     async def _mybets_impl(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True, ephemeral=True)
         uid     = interaction.user.id
         balance = _get_balance(uid)
 

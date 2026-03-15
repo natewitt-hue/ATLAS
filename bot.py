@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.4.0"  # Bump with every push
+ATLAS_VERSION = "2.5.0"  # Bump with every push
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
@@ -451,6 +451,14 @@ async def on_ready():
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, member_db.discover_guild_members, member_list)
         print(f"   Registry: {result['known']} known, {result['new']} new, {result['updated']} display names updated")
+
+    # Auto-discover guild structure (channels, roles, metadata, emojis)
+    try:
+        from setup_cog import auto_discover
+        for guild in bot.guilds:
+            await auto_discover(guild)
+    except Exception as e:
+        print(f"[DISCOVERY] Auto-discovery failed: {e}")
 
     # Restore persistent hub views from ui_state table
     await bot.ui_state.restore_all_views()
