@@ -185,10 +185,12 @@ def _build_derived_tables(conn: sqlite3.Connection):
             SELECT homeTeamName as team, homeUser as user, seasonIndex
             FROM games
             WHERE homeUser NOT IN ('CPU','') AND homeUser IS NOT NULL
+              AND status IN ('2','3')
             UNION ALL
             SELECT awayTeamName, awayUser, seasonIndex
             FROM games
             WHERE awayUser NOT IN ('CPU','') AND awayUser IS NOT NULL
+              AND status IN ('2','3')
         )
         GROUP BY team, user, seasonIndex
     """)
@@ -236,11 +238,11 @@ def _build_derived_tables(conn: sqlite3.Connection):
                       != p.teamName THEN 1 ELSE 0 END AS was_traded
         FROM players p
         LEFT JOIN (
-            SELECT extendedName, teamName, MIN(seasonIndex) AS seasonIndex
+            SELECT extendedName, teamName, MIN(CAST(seasonIndex AS INTEGER)) AS seasonIndex
             FROM offensive_stats GROUP BY extendedName
         ) first_off ON p.firstName || ' ' || p.lastName = first_off.extendedName
         LEFT JOIN (
-            SELECT extendedName, teamName, MIN(seasonIndex) AS seasonIndex
+            SELECT extendedName, teamName, MIN(CAST(seasonIndex AS INTEGER)) AS seasonIndex
             FROM defensive_stats GROUP BY extendedName
         ) first_def ON p.firstName || ' ' || p.lastName = first_def.extendedName
     """)
@@ -335,6 +337,10 @@ def sync_tsl_db(
 
         # ── Add indexes ───────────────────────────────────────────────────────
         _add_indexes(conn)
+
+        # Ensure all data is flushed to disk before the atomic swap
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.commit()
         conn.close()
 
         # ── Atomic swap ───────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 """
-card_renderer.py — TSL Trade Card Image Renderer
-─────────────────────────────────────────────────
-Uses Playwright to render trade_card.html → PNG bytes.
+card_renderer.py — ATLAS · Genesis Trade Card Renderer
+───────────────────────────────────────────────────────
+Uses Playwright to render trade card HTML → PNG bytes.
 Maintains a persistent browser instance to avoid cold-start latency.
+
+ATLAS Design System v2 — matches sportsbook card visual language.
 
 Usage:
     from card_renderer import render_trade_card
@@ -10,7 +12,7 @@ Usage:
 
 trade_data dict keys:
     trade_id        str
-    status          str  ("pending" | "approved" | "rejected" | "countered")
+    status          str  ("pending" | "approved" | "rejected" | "countered" | "declined")
     team_a_name     str
     team_a_owner    str
     team_b_name     str
@@ -33,14 +35,21 @@ trade_data dict keys:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import base64
 from pathlib import Path
-from string import Template
 
-# ── Dev icon loader ───────────────────────────────────────────────────────────
+# ── Genesis icon loader (base64 for inline HTML) ─────────────────────────────
+
+_GENESIS_ICON_B64 = ""
+try:
+    _icon_path = Path(__file__).parent / "icons" / "genesis.png"
+    if _icon_path.exists():
+        _GENESIS_ICON_B64 = base64.b64encode(_icon_path.read_bytes()).decode()
+except Exception:
+    pass
+
+# ── Dev icon loader ──────────────────────────────────────────────────────────
 
 _ICONS_PATH = Path(__file__).parent / "dev_icons.json"
 _DEV_ICONS: dict[str, str] = {}
@@ -65,36 +74,63 @@ def _dev_icon_uri(dev: str) -> str:
     return f"data:image/png;base64,{b64}" if b64 else ""
 
 
-# ── Browser singleton ─────────────────────────────────────────────────────────
+# ── NFL team identity (self-contained — no cross-module import) ──────────────
+
+_NFL_IDENTITY: dict[str, str] = {
+    "Cardinals": "ari", "Falcons": "atl", "Ravens": "bal", "Bills": "buf",
+    "Panthers": "car", "Bears": "chi", "Bengals": "cin", "Browns": "cle",
+    "Cowboys": "dal", "Broncos": "den", "Lions": "det", "Packers": "gb",
+    "Texans": "hou", "Colts": "ind", "Jaguars": "jax", "Chiefs": "kc",
+    "Raiders": "lv", "Chargers": "lac", "Rams": "lar", "Dolphins": "mia",
+    "Vikings": "min", "Patriots": "ne", "Saints": "no", "Giants": "nyg",
+    "Jets": "nyj", "Eagles": "phi", "Steelers": "pit", "49ers": "sf",
+    "Seahawks": "sea", "Buccaneers": "tb", "Titans": "ten",
+    "Commanders": "wsh", "Washington": "wsh",
+}
+
+def _team_abbrev(name: str) -> str:
+    for key, abbrev in _NFL_IDENTITY.items():
+        if key.lower() in name.lower():
+            return abbrev
+    return ""
+
+def _team_logo_url(name: str) -> str:
+    abbrev = _team_abbrev(name)
+    return f"https://a.espncdn.com/i/teamlogos/nfl/500/{abbrev}.png" if abbrev else ""
+
+
+# ── Browser singleton ────────────────────────────────────────────────────────
 
 _browser = None
-_playwright_instance = None
+_pw_context_manager = None  # The async_playwright() context manager
+_pw_instance = None         # The actual playwright instance (returned by __aenter__)
 
 async def _get_browser():
-    global _browser, _playwright_instance
+    global _browser, _pw_context_manager, _pw_instance
     if _browser is None or not _browser.is_connected():
         from playwright.async_api import async_playwright
-        _playwright_instance = async_playwright()
-        pw = await _playwright_instance.__aenter__()
-        _browser = await pw.chromium.launch(headless=True)
+        _pw_context_manager = async_playwright()
+        _pw_instance = await _pw_context_manager.__aenter__()
+        _browser = await _pw_instance.chromium.launch(headless=True)
     return _browser
 
 
 async def close_browser():
     """Call on bot shutdown to clean up."""
-    global _browser, _playwright_instance
+    global _browser, _pw_context_manager, _pw_instance
     if _browser:
         await _browser.close()
         _browser = None
-    if _playwright_instance:
+    if _pw_context_manager:
         try:
-            await _playwright_instance.__aexit__(None, None, None)
+            await _pw_context_manager.__aexit__(None, None, None)
         except Exception:
             pass
-        _playwright_instance = None
+        _pw_context_manager = None
+        _pw_instance = None
 
 
-# ── HTML builders ─────────────────────────────────────────────────────────────
+# ── HTML builders ────────────────────────────────────────────────────────────
 
 def _ordinal(n: int) -> str:
     return {1: "1st", 2: "2nd", 3: "3rd"}.get(n, f"{n}th")
@@ -107,674 +143,694 @@ def _player_card_html(p: dict) -> str:
     pos   = p.get("pos", p.get("position", "?"))
     ovr   = p.get("overallRating") or p.get("playerBestOvr") or "?"
     age   = p.get("age", "?")
-    dev   = str(p.get("dev", "Normal"))
-    icon  = _dev_icon_uri(dev)
 
-    dev_label_map = {
-        "xfactor": "X-FACTOR", "x-factor": "X-FACTOR", "ssx": "X-FACTOR",
-        "superstar": "SUPERSTAR",
-        "star": "STAR",
-        "normal": "NORMAL",
+    # Dev trait resolution
+    dev_raw = p.get("devTrait", p.get("dev", 0))
+    dev_int_map = {0: "normal", 1: "star", 2: "superstar", 3: "xfactor"}
+    if isinstance(dev_raw, int):
+        dev = dev_int_map.get(dev_raw, "normal")
+    else:
+        dev = str(dev_raw).lower().strip()
+
+    dev_display = {
+        "xfactor": ("💎 SUPERSTAR X-FACTOR", "dev-xf"),
+        "x-factor": ("💎 SUPERSTAR X-FACTOR", "dev-xf"),
+        "ssx": ("💎 SUPERSTAR X-FACTOR", "dev-xf"),
+        "superstar": ("⭐ SUPERSTAR", "dev-ss"),
+        "star": ("★ STAR", "dev-star"),
+        "normal": ("", "dev-normal"),
     }
-    dev_label = dev_label_map.get(dev.lower().strip(), dev.upper())
+    dev_label, dev_class = dev_display.get(dev, ("", "dev-normal"))
 
-    dev_class_map = {
-        "X-FACTOR": "dev-xf", "SUPERSTAR": "dev-ss",
-        "STAR": "dev-star", "NORMAL": "dev-normal",
-    }
-    dev_class = dev_class_map.get(dev_label, "dev-normal")
-
-    icon_html = f'<img src="{icon}" class="dev-icon" alt="{dev_label}">' if icon else ""
+    dev_html = ""
+    if dev_label:
+        dev_html = f'<div class="dev-badge {dev_class}">{dev_label}</div>'
 
     return f"""
     <div class="player-card">
-      <div class="player-main">
-        <div class="player-ovr">{ovr}</div>
-        <div class="player-info">
-          <div class="player-name">{name}</div>
-          <div class="player-meta">{pos} &nbsp;·&nbsp; Age {age}</div>
-        </div>
-      </div>
-      <div class="dev-badge {dev_class}">
-        {icon_html}
-        <span>{dev_label}</span>
+      <div class="player-ovr">{ovr}</div>
+      <div class="player-info">
+        <div class="player-name">{name}</div>
+        <div class="player-meta">{pos} · Age {age}</div>
+        {dev_html}
       </div>
     </div>"""
 
 
-def _pick_card_html(pk: dict, value_str: str = "") -> str:
+def _pick_card_html(pk: dict) -> str:
     rnd   = pk.get("round", "?")
     year  = pk.get("year", "?")
-    label = f"{_ordinal(rnd)} Round Pick"
-    # Get team abbr if available
-    team_note = ""
-    team_id = pk.get("team_id")
-    if team_id:
-        try:
-            import data_manager as dm
-            if not dm.df_teams.empty:
-                row = dm.df_teams[dm.df_teams["id"].astype(str) == str(team_id)]
-                if not row.empty:
-                    abbr = row.iloc[0].get("abbrName", "")
-                    if abbr:
-                        team_note = f" ({abbr})"
-        except Exception:
-            pass
+    label = f"S{year} {_ordinal(rnd)} Round Pick"
 
     return f"""
     <div class="pick-card">
       <div class="pick-icon">📋</div>
-      <div class="pick-info">
-        <div class="pick-label">{year} {label}{team_note}</div>
-        {f'<div class="pick-value">{value_str}</div>' if value_str else ""}
-      </div>
-    </div>"""
-
-
-def _fairness_bar_html(side_a_value: int, side_b_value: int, team_a: str, team_b: str) -> str:
-    total = side_a_value + side_b_value
-    if total == 0:
-        pct_a = 50
-    else:
-        pct_a = round(side_a_value / total * 100)
-    pct_b = 100 - pct_a
-    return f"""
-    <div class="fairness-bar-wrap">
-      <div class="fairness-labels">
-        <span class="fl-team">{team_a}</span>
-        <span class="fl-pct">{pct_a}%</span>
-        <span class="fl-spacer"></span>
-        <span class="fl-pct">{pct_b}%</span>
-        <span class="fl-team">{team_b}</span>
-      </div>
-      <div class="fairness-bar">
-        <div class="fb-a" style="width:{pct_a}%"></div>
-        <div class="fb-b" style="width:{pct_b}%"></div>
-      </div>
+      <div><div class="pick-label">{label}</div></div>
     </div>"""
 
 
 def _build_html(data: dict) -> str:
-    # Status config
+    # ── Status config ────────────────────────────────────────────────────────
     status = data.get("status", "pending")
     status_cfg = {
-        "pending":   ("#C9A84C", "⏳", "PENDING REVIEW"),
-        "approved":  ("#22C55E", "✅", "APPROVED"),
-        "rejected":  ("#EF4444", "❌", "REJECTED"),
-        "countered": ("#A855F7", "🔄", "COUNTER OFFERED"),
+        "pending":   ("rgba(234,179,8,0.4)",   "#EAB308", "rgba(234,179,8,0.06)",   "⏳ PENDING REVIEW"),
+        "approved":  ("rgba(74,222,128,0.4)",   "#4ADE80", "rgba(74,222,128,0.06)",  "✅ APPROVED"),
+        "rejected":  ("rgba(248,113,113,0.4)",  "#F87171", "rgba(248,113,113,0.06)", "❌ REJECTED"),
+        "declined":  ("rgba(248,113,113,0.4)",  "#F87171", "rgba(248,113,113,0.06)", "🚫 AUTO-DECLINED"),
+        "countered": ("rgba(88,101,242,0.4)",   "#5865F2", "rgba(88,101,242,0.06)",  "🔄 COUNTER OFFERED"),
     }
-    status_color, status_emoji, status_label = status_cfg.get(status, status_cfg["pending"])
+    border_c, text_c, bg_c, badge_text = status_cfg.get(status, status_cfg["pending"])
 
+    # ── Band config ──────────────────────────────────────────────────────────
     band = data.get("band", "GREEN")
     band_cfg = {
-        "GREEN":  ("#22C55E", "🟢", "FAIR TRADE"),
-        "YELLOW": ("#EAB308", "🟡", "NEEDS REVIEW"),
-        "RED":    ("#EF4444", "🔴", "LOPSIDED"),
+        "GREEN":  ("green",  "#4ADE80", "🟢", "FAIR",      "Within legal range",  "Auto-Eligible"),
+        "YELLOW": ("yellow", "#EAB308", "🟡", "CAUTION",   "Flagged for review",  "Commissioner<br>Required"),
+        "RED":    ("red",    "#F87171", "🔴", "LOPSIDED",  "Outside legal range", "Auto-Declined"),
     }
-    band_color, band_emoji, band_label = band_cfg.get(band, band_cfg["GREEN"])
+    sbar_cls, band_color, band_emoji, band_word, band_sub, decision_text = band_cfg.get(band, band_cfg["GREEN"])
 
     team_a = data.get("team_a_name", "Team A")
     team_b = data.get("team_b_name", "Team B")
     owner_a = data.get("team_a_owner", "")
     owner_b = data.get("team_b_owner", "")
+    logo_a = _team_logo_url(team_a)
+    logo_b = _team_logo_url(team_b)
 
-    # Build asset columns
+    # ── Assets ───────────────────────────────────────────────────────────────
     players_a = data.get("players_a", [])
     players_b = data.get("players_b", [])
     picks_a   = data.get("picks_a", [])
     picks_b   = data.get("picks_b", [])
 
-    assets_a = "".join(_player_card_html(p) for p in players_a[:3])
-    assets_a += "".join(_pick_card_html(pk) for pk in picks_a[:4])
-    if not assets_a:
-        assets_a = '<div class="empty-assets">Nothing</div>'
+    assets_a_html = "".join(_player_card_html(p) for p in players_a[:4])
+    assets_a_html += "".join(_pick_card_html(pk) for pk in picks_a[:4])
+    if not assets_a_html:
+        assets_a_html = '<div style="font-size:12px;color:#555;padding:8px;">No assets</div>'
 
-    assets_b = "".join(_player_card_html(p) for p in players_b[:3])
-    assets_b += "".join(_pick_card_html(pk) for pk in picks_b[:4])
-    if not assets_b:
-        assets_b = '<div class="empty-assets">Nothing</div>'
+    assets_b_html = "".join(_player_card_html(p) for p in players_b[:4])
+    assets_b_html += "".join(_pick_card_html(pk) for pk in picks_b[:4])
+    if not assets_b_html:
+        assets_b_html = '<div style="font-size:12px;color:#555;padding:8px;">No assets</div>'
 
-    # Valuation
+    # ── Valuation (FIXED direction: team sending LESS = beneficiary) ─────────
     val_a = data.get("side_a_value", 0)
     val_b = data.get("side_b_value", 0)
     delta = data.get("delta_pct", 0.0)
     ovr_delta = data.get("ovr_delta", 0)
-    delta_arrow = "▲" if val_a > val_b else "▼"
-    favored = team_a if val_a > val_b else team_b
+    favored = team_a if val_a < val_b else team_b
+    winner_a = "winner" if val_a > val_b else ""
+    winner_b = "winner" if val_b > val_a else ""
 
-    fairness_bar = _fairness_bar_html(val_a, val_b, team_a, team_b)
+    # Fairness bar percentages
+    total_val = val_a + val_b
+    pct_a = round(val_a / total_val * 100) if total_val > 0 else 50
+    pct_b = 100 - pct_a
 
-    # Notes/flags
+    # ── Notes / Flags ────────────────────────────────────────────────────────
     notes = data.get("notes", [])
-    notes_html = ""
+    flags_html = ""
     if notes:
-        items = "".join(f"<li>{n}</li>" for n in notes[:6])
-        notes_html = f'<div class="section-block flags-block"><div class="section-title">⚠️ FLAGS</div><ul class="flags-list">{items}</ul></div>'
+        items = "".join(f'<div class="flag-item">{n}</div>' for n in notes[:6])
+        flags_html = f"""
+    <div class="flags-section">
+      <div class="flags-title">⚠ Flags</div>
+      {items}
+    </div>
+    <div class="sep"></div>"""
 
-    # AI commentary
+    # ── AI Commentary ────────────────────────────────────────────────────────
     ai = data.get("ai_commentary", "")
     ai_html = ""
     if ai and "unavailable" not in ai.lower():
-        ai_clean = ai.strip().strip("*_")
+        ai_clean = ai.strip().strip("*_").strip('"')
         ai_html = f"""
-        <div class="section-block ai-block">
-          <div class="section-title">🤖 ATLAS VERDICT</div>
-          <div class="ai-quote">"{ai_clean}"</div>
-        </div>"""
+    <div class="verdict-section">
+      <div class="verdict-title">🤖 Atlas verdict</div>
+      <div class="verdict-quote">"{ai_clean}"</div>
+    </div>"""
 
-    # Footer
+    # ── Footer ───────────────────────────────────────────────────────────────
     trade_id    = data.get("trade_id", "???")
     proposer_id = data.get("proposer_id", "")
 
-    # TSL medallion SVG (gold ornate circle)
-    medallion = """<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <radialGradient id="mg" cx="50%" cy="40%" r="60%">
-          <stop offset="0%" stop-color="#FFE080"/>
-          <stop offset="60%" stop-color="#C9A84C"/>
-          <stop offset="100%" stop-color="#8B6914"/>
-        </radialGradient>
-      </defs>
-      <circle cx="32" cy="32" r="30" fill="url(#mg)" stroke="#8B6914" stroke-width="2"/>
-      <circle cx="32" cy="32" r="24" fill="none" stroke="#FFE080" stroke-width="1.2" stroke-dasharray="3 2"/>
-      <!-- castle battlements -->
-      <rect x="22" y="20" width="4" height="6" rx="0.5" fill="#1a1a2e"/>
-      <rect x="28" y="20" width="4" height="6" rx="0.5" fill="#1a1a2e"/>
-      <rect x="34" y="20" width="4" height="6" rx="0.5" fill="#1a1a2e"/>
-      <rect x="22" y="26" width="16" height="8" rx="0.5" fill="#1a1a2e"/>
-      <!-- TSL text -->
-      <text x="32" y="42" font-family="Georgia,serif" font-size="9" font-weight="bold"
-            fill="#C9A84C" text-anchor="middle" letter-spacing="1">TSL</text>
-      <!-- stars above -->
-      <text x="32" y="18" font-family="Arial" font-size="6" fill="#FFE080" text-anchor="middle">★ ★ ★</text>
-      <!-- star below -->
-      <text x="32" y="52" font-family="Arial" font-size="7" fill="#FFE080" text-anchor="middle">★</text>
-    </svg>"""
+    # ── Genesis icon ─────────────────────────────────────────────────────────
+    icon_src = f"data:image/png;base64,{_GENESIS_ICON_B64}" if _GENESIS_ICON_B64 else ""
+    icon_html = f'<img src="{icon_src}" style="width:48px;height:48px;object-fit:contain;">' if icon_src else ""
 
+    # ── Build full HTML ──────────────────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;600;700&family=Open+Sans:wght@400;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
+
+  @font-face {{
+    font-family: 'Bank Gothic';
+    src: url('https://db.onlinewebfonts.com/t/d7b2a1a5bab06c8ab09e3fce8e14bfb0.woff2') format('woff2');
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+  }}
 
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 
   body {{
-    width: 600px;
-    background: #0d0d1a;
-    font-family: 'Open Sans', sans-serif;
-    color: #e8e0d0;
+    width: 700px;
+    background: transparent;
+    font-family: 'Outfit', sans-serif;
+    color: #fff;
     padding: 0;
   }}
 
   .card {{
-    width: 600px;
-    background: linear-gradient(160deg, #12122a 0%, #0d0d1a 40%, #12101f 100%);
-    border: 2px solid #C9A84C;
-    border-radius: 12px;
-    overflow: hidden;
     position: relative;
+    width: 700px;
+    border-radius: 20px;
+    overflow: hidden;
+    border: 1.5px solid rgba(212, 175, 55, 0.18);
   }}
-
-  /* Gold corner accents */
-  .card::before, .card::after {{
+  .card::before {{
     content: '';
-    position: absolute;
-    width: 40px; height: 40px;
-    border-color: #C9A84C;
-    border-style: solid;
-    z-index: 10;
+    position: absolute; inset: 0;
+    background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 1;
   }}
-  .card::before {{ top: 8px; left: 8px; border-width: 2px 0 0 2px; border-radius: 4px 0 0 0; }}
-  .card::after  {{ bottom: 8px; right: 8px; border-width: 0 2px 2px 0; border-radius: 0 0 4px 0; }}
+  .inner {{ position: relative; z-index: 2; background: #111; }}
+
+  /* Status bar */
+  .sbar {{ height: 5px; }}
+  .sbar.green  {{ background: linear-gradient(90deg, #4ADE80, #22C55E, #4ADE80); }}
+  .sbar.yellow {{ background: linear-gradient(90deg, #EAB308, #FACC15, #EAB308); }}
+  .sbar.red    {{ background: linear-gradient(90deg, #F87171, #EF4444, #F87171); }}
+
+  .sep      {{ height: 1px; background: rgba(255,255,255,0.04); margin: 0 36px; }}
+  .sep-gold {{ height: 1px; background: linear-gradient(90deg, transparent, rgba(212,175,55,0.2) 15%, rgba(212,175,55,0.2) 85%, transparent); }}
 
   /* ── HEADER ── */
-  .header {{
-    background: linear-gradient(135deg, #1a1a35 0%, #0f0f22 100%);
-    border-bottom: 1px solid #C9A84C44;
-    padding: 16px 20px 12px;
-    display: flex;
-    align-items: center;
-    gap: 14px;
+  .hdr {{
+    display: flex; align-items: center;
+    padding: 24px 36px 20px; gap: 16px;
   }}
-  .medallion {{ flex-shrink: 0; }}
-  .header-text {{ flex: 1; }}
-  .header-title {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 22px;
-    font-weight: 700;
-    color: #C9A84C;
-    letter-spacing: 3px;
-    text-transform: uppercase;
+  .hdr-logo {{
+    width: 56px; height: 56px;
+    border-radius: 14px;
+    overflow: hidden;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #0a0a0a;
+    border: 1px solid rgba(212,175,55,0.15);
   }}
-  .header-sub {{
-    font-size: 11px;
-    color: #888;
-    letter-spacing: 2px;
-    margin-top: 2px;
-    text-transform: uppercase;
+  .hdr-text {{ flex: 1; }}
+  .hdr-title {{
+    font-family: 'Bank Gothic', 'Copperplate', 'Copperplate Gothic Bold', 'Arial Narrow', sans-serif;
+    font-weight: 500; font-size: 30px;
+    letter-spacing: 0.18em;
+    background: linear-gradient(180deg, #FFE8A0 0%, #D4AF37 35%, #B8942D 55%, #D4AF37 75%, #FFE8A0 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+    line-height: 1.1;
   }}
-  .status-badge {{
-    padding: 5px 12px;
-    border-radius: 20px;
-    font-family: 'Oswald', sans-serif;
+  .hdr-sub {{
+    font-weight: 700; font-size: 13px;
+    color: rgba(255, 255, 255, 0.7);
+    letter-spacing: 0.16em; margin-top: 5px;
+  }}
+  .hdr-badge {{
+    padding: 8px 18px;
+    border-radius: 24px;
+    font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    border: 1px solid {status_color};
-    color: {status_color};
-    background: {status_color}18;
+    font-weight: 700;
+    letter-spacing: 0.1em;
     white-space: nowrap;
+    border: 1px solid {border_c};
+    color: {text_c};
+    background: {bg_c};
   }}
 
   /* ── MATCHUP BAR ── */
   .matchup {{
     display: flex;
     align-items: center;
-    background: linear-gradient(90deg, #1e1e3a 0%, #16162e 50%, #1e1e3a 100%);
-    border-bottom: 1px solid #C9A84C33;
-    padding: 10px 20px;
+    padding: 16px 36px;
   }}
-  .team-side {{
-    flex: 1;
-    text-align: center;
-  }}
+  .team-side {{ flex: 1; }}
   .team-side.right {{ text-align: right; }}
-  .team-side.left  {{ text-align: left; }}
   .team-name {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 18px;
-    font-weight: 600;
-    color: #e8e0d0;
-    letter-spacing: 1px;
+    font-weight: 800; font-size: 22px; color: #fff;
+    letter-spacing: 0.04em;
   }}
   .team-owner {{
-    font-size: 11px;
-    color: #C9A84C;
-    margin-top: 1px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; color: #555; font-weight: 600;
+    margin-top: 2px;
   }}
   .vs-divider {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 14px;
-    color: #C9A84C;
-    padding: 0 16px;
-    opacity: 0.7;
+    font-size: 16px; color: rgba(212,175,55,0.3);
+    padding: 0 24px;
+    font-weight: 300;
+  }}
+  .team-logo {{
+    width: 48px; height: 48px;
+    object-fit: contain;
+    flex-shrink: 0;
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.4));
+  }}
+  .team-logo-row {{
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }}
+  .team-logo-row.right {{
+    justify-content: flex-end;
+  }}
+  .assets-logo {{
+    width: 16px; height: 16px;
+    object-fit: contain;
+    vertical-align: middle;
+    margin-right: 4px;
+    opacity: 0.6;
   }}
 
-  /* ── ASSETS ── */
+  /* ── ASSET COLUMNS ── */
   .assets-row {{
     display: flex;
-    gap: 0;
-    border-bottom: 1px solid #C9A84C22;
+    gap: 2px;
+    margin: 0 36px;
   }}
   .assets-col {{
     flex: 1;
-    padding: 12px 14px;
-    border-right: 1px solid #C9A84C22;
+    background: rgba(255,255,255,0.015);
+    padding: 16px 18px;
   }}
-  .assets-col:last-child {{ border-right: none; }}
-  .assets-col-header {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 11px;
-    letter-spacing: 2px;
-    color: #C9A84C;
-    margin-bottom: 8px;
+  .assets-col:first-child {{ border-radius: 16px 0 0 16px; }}
+  .assets-col:last-child  {{ border-radius: 0 16px 16px 0; }}
+  .assets-header {{
+    font-weight: 700; font-size: 11px;
+    color: #D4AF37; opacity: 0.55;
+    letter-spacing: 0.18em;
+    margin-bottom: 12px;
     text-transform: uppercase;
-    border-bottom: 1px solid #C9A84C33;
-    padding-bottom: 4px;
   }}
 
   /* Player card */
   .player-card {{
-    background: #1a1a30;
-    border: 1px solid #C9A84C33;
-    border-radius: 6px;
-    padding: 7px 9px;
-    margin-bottom: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }}
-  .player-main {{
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 10px;
+    margin-bottom: 8px;
   }}
   .player-ovr {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 22px;
-    font-weight: 700;
-    color: #C9A84C;
-    min-width: 34px;
-    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800; font-size: 28px;
+    color: #fff;
+    min-width: 44px; text-align: center;
     line-height: 1;
   }}
   .player-info {{ flex: 1; }}
   .player-name {{
-    font-size: 13px;
-    font-weight: 600;
-    color: #f0e8d8;
-    line-height: 1.2;
+    font-weight: 700; font-size: 14px; color: #fff;
+    line-height: 1.3;
   }}
   .player-meta {{
-    font-size: 11px;
-    color: #888;
-    margin-top: 1px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: #555; font-weight: 500;
+    margin-top: 2px;
   }}
   .dev-badge {{
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    font-size: 9px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 1px;
-    align-self: flex-start;
-    margin-left: 42px;
+    letter-spacing: 0.08em;
+    margin-top: 4px;
   }}
-  .dev-icon {{ width: 14px; height: 14px; object-fit: contain; }}
-  .dev-xf    {{ background: #2d1052; border: 1px solid #A855F7; color: #d8a4ff; }}
-  .dev-ss    {{ background: #2a1f00; border: 1px solid #C9A84C; color: #FFE080; }}
-  .dev-star  {{ background: #1a1a2a; border: 1px solid #9CA3AF; color: #D1D5DB; }}
-  .dev-normal{{ background: #1e1612; border: 1px solid #78503a; color: #a07858; }}
+  .dev-xf     {{ background: rgba(168,85,247,0.1); border: 1px solid rgba(168,85,247,0.25); color: #C084FC; }}
+  .dev-ss     {{ background: rgba(212,175,55,0.08); border: 1px solid rgba(212,175,55,0.2);  color: #D4AF37; }}
+  .dev-star   {{ background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); color: #888; }}
+  .dev-normal {{ display: none; }}
 
   /* Pick card */
   .pick-card {{
-    background: #161628;
-    border: 1px solid #C9A84C22;
-    border-radius: 6px;
-    padding: 6px 9px;
-    margin-bottom: 6px;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.015);
+    border: 1px solid rgba(255,255,255,0.03);
+    border-radius: 8px;
+    margin-bottom: 6px;
   }}
   .pick-icon {{ font-size: 16px; }}
-  .pick-label {{
-    font-size: 12px;
-    font-weight: 600;
-    color: #c8c0b0;
-  }}
-  .pick-value {{ font-size: 10px; color: #888; margin-top: 1px; }}
-  .empty-assets {{ font-size: 12px; color: #555; font-style: italic; padding: 4px; }}
+  .pick-label {{ font-size: 13px; font-weight: 600; color: #888; }}
 
-  /* ── VALUATION ── */
-  .valuation-block {{
-    padding: 12px 20px;
-    border-bottom: 1px solid #C9A84C22;
-    background: #0f0f20;
+  /* ── TRADE HEALTH ── */
+  .health-section {{
+    padding: 20px 36px 16px;
   }}
-  .val-section-title {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 10px;
-    letter-spacing: 2px;
-    color: #C9A84C;
+  .health-title {{
+    font-weight: 700; font-size: 11px;
+    color: #D4AF37; opacity: 0.55;
+    letter-spacing: 0.18em;
+    margin-bottom: 14px;
     text-transform: uppercase;
-    margin-bottom: 8px;
   }}
-  .val-row {{
+  .health-row {{
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 6px;
   }}
-  .val-team {{ font-size: 13px; color: #a09888; }}
-  .val-pts  {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 16px;
+  .health-team {{
+    font-size: 14px; color: #888;
     font-weight: 600;
-    color: #e8e0d0;
   }}
-  .val-highlight {{ color: #C9A84C; }}
+  .health-label {{
+    font-size: 10px; color: #555;
+    letter-spacing: 0.1em; font-weight: 600;
+    text-transform: uppercase;
+    margin-left: 6px;
+  }}
+  .health-pts {{
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800; font-size: 18px;
+    color: #fff;
+  }}
+  .health-pts.winner {{ color: #D4AF37; }}
 
-  .fairness-bar-wrap {{ margin-top: 10px; }}
+  /* Fairness bar */
+  .fairness-bar-wrap {{ margin: 14px 0 8px; }}
   .fairness-labels {{
     display: flex;
     justify-content: space-between;
-    align-items: center;
     margin-bottom: 4px;
-    font-size: 10px;
   }}
-  .fl-team  {{ color: #888; flex: 1; }}
-  .fl-team:last-child {{ text-align: right; }}
-  .fl-pct   {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 13px;
-    color: #C9A84C;
-    padding: 0 6px;
+  .fl-team {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: #555; font-weight: 600;
   }}
-  .fl-spacer {{ flex: 1; }}
   .fairness-bar {{
-    height: 8px;
-    border-radius: 4px;
+    height: 6px;
+    border-radius: 3px;
     overflow: hidden;
-    background: #222;
     display: flex;
+    background: rgba(255,255,255,0.03);
   }}
-  .fb-a {{ background: linear-gradient(90deg, #C9A84C, #FFE080); height: 100%; }}
-  .fb-b {{ background: linear-gradient(90deg, #4a3060, #7B3FBF); height: 100%; }}
+  .fb-a {{
+    background: linear-gradient(90deg, #D4AF37, #F0D060);
+    height: 100%;
+  }}
+  .fb-b {{
+    background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.12));
+    height: 100%;
+  }}
 
-  /* Band + OVR row */
+  /* Favors line */
+  .favors-line {{
+    text-align: center;
+    margin-top: 10px;
+    font-size: 13px;
+    color: #888;
+  }}
+  .favors-line strong {{ color: #D4AF37; font-weight: 700; }}
+  .favors-line .pct {{
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+  }}
+
+  /* ── METRICS ROW ── */
   .metrics-row {{
     display: flex;
-    gap: 0;
-    border-bottom: 1px solid #C9A84C22;
+    gap: 2px;
+    margin: 0 36px;
   }}
   .metric-cell {{
     flex: 1;
-    padding: 10px 16px;
-    border-right: 1px solid #C9A84C22;
+    background: rgba(255,255,255,0.02);
+    padding: 16px 14px;
     text-align: center;
   }}
-  .metric-cell:last-child {{ border-right: none; }}
+  .metric-cell:first-child {{ border-radius: 16px 0 0 16px; }}
+  .metric-cell:last-child  {{ border-radius: 0 16px 16px 0; }}
   .metric-label {{
-    font-size: 9px;
-    letter-spacing: 2px;
-    color: #666;
+    font-weight: 700; font-size: 10px;
+    color: rgba(255,255,255,0.25);
+    letter-spacing: 0.16em;
+    margin-bottom: 6px;
     text-transform: uppercase;
-    margin-bottom: 4px;
   }}
   .metric-value {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 16px;
-    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800; font-size: 18px;
+    line-height: 1.2;
   }}
-  .metric-sub {{ font-size: 10px; color: #666; margin-top: 2px; }}
-  .band-green  {{ color: #22C55E; }}
-  .band-yellow {{ color: #EAB308; }}
-  .band-red    {{ color: #EF4444; }}
+  .metric-sub {{
+    font-size: 10px; color: #444;
+    margin-top: 4px;
+    letter-spacing: 0.04em;
+  }}
+  .mv-green  {{ color: #4ADE80; }}
+  .mv-yellow {{ color: #EAB308; }}
+  .mv-red    {{ color: #F87171; }}
+  .mv-white  {{ color: #fff; }}
 
-  /* ── SECTIONS ── */
-  .section-block {{
-    padding: 10px 20px;
-    border-bottom: 1px solid #C9A84C22;
+  /* ── FLAGS ── */
+  .flags-section {{
+    padding: 14px 36px;
   }}
-  .section-title {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 10px;
-    letter-spacing: 2px;
-    color: #C9A84C;
+  .flags-title {{
+    font-weight: 700; font-size: 11px;
+    color: #D4AF37; opacity: 0.45;
+    letter-spacing: 0.18em;
+    margin-bottom: 8px;
     text-transform: uppercase;
-    margin-bottom: 6px;
   }}
-  .flags-list {{
-    list-style: none;
-    padding: 0;
-  }}
-  .flags-list li {{
-    font-size: 11px;
-    color: #EF4444;
-    padding: 2px 0;
-    padding-left: 12px;
+  .flag-item {{
+    font-size: 12px;
+    color: #F87171;
+    padding: 3px 0 3px 14px;
     position: relative;
+    line-height: 1.5;
   }}
-  .flags-list li::before {{
+  .flag-item::before {{
     content: '›';
     position: absolute;
     left: 0;
-    color: #EF4444;
+    color: #F87171;
+    font-weight: 700;
   }}
 
-  .ai-block {{ background: #0d0d1e; }}
-  .ai-quote {{
-    font-size: 12px;
+  /* ── AI VERDICT ── */
+  .verdict-section {{
+    padding: 16px 36px;
+  }}
+  .verdict-title {{
+    font-weight: 700; font-size: 11px;
+    color: #D4AF37; opacity: 0.45;
+    letter-spacing: 0.18em;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }}
+  .verdict-quote {{
+    font-size: 13px;
     font-style: italic;
-    color: #c0b898;
-    line-height: 1.5;
-    border-left: 3px solid #C9A84C;
-    padding-left: 10px;
+    color: #999;
+    line-height: 1.7;
+    border-left: 2px solid rgba(212,175,55,0.25);
+    padding-left: 16px;
   }}
 
   /* ── FOOTER ── */
-  .card-footer {{
-    padding: 8px 20px;
-    display: flex;
+  .foot {{
+    background: rgba(0,0,0,0.28);
+    padding: 14px 36px;
+    display: flex; align-items: center;
     justify-content: space-between;
-    align-items: center;
-    background: #0a0a16;
+    margin-top: 20px;
   }}
-  .footer-id {{
-    font-family: 'Oswald', sans-serif;
-    font-size: 10px;
-    letter-spacing: 1.5px;
-    color: #444;
-  }}
-  .footer-engine {{
-    font-size: 9px;
-    color: #333;
-    letter-spacing: 1px;
-    text-transform: uppercase;
+  .foot-txt {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: #262626; font-weight: 600;
+    letter-spacing: 0.05em;
   }}
 </style>
 </head>
 <body>
 <div class="card">
+  <div class="sbar {sbar_cls}"></div>
+  <div class="inner">
 
-  <!-- HEADER -->
-  <div class="header">
-    <div class="medallion">{medallion}</div>
-    <div class="header-text">
-      <div class="header-title">Trade Proposal</div>
-      <div class="header-sub">TSL Trade Engine v2.7</div>
-    </div>
-    <div class="status-badge">{status_emoji} {status_label}</div>
-  </div>
-
-  <!-- MATCHUP -->
-  <div class="matchup">
-    <div class="team-side left">
-      <div class="team-name">{team_a}</div>
-      <div class="team-owner">{owner_a}</div>
-    </div>
-    <div class="vs-divider">↔</div>
-    <div class="team-side right">
-      <div class="team-name">{team_b}</div>
-      <div class="team-owner">{owner_b}</div>
-    </div>
-  </div>
-
-  <!-- ASSETS -->
-  <div class="assets-row">
-    <div class="assets-col">
-      <div class="assets-col-header">📤 {team_a} sends</div>
-      {assets_a}
-    </div>
-    <div class="assets-col">
-      <div class="assets-col-header">📥 {team_b} sends</div>
-      {assets_b}
-    </div>
-  </div>
-
-  <!-- VALUATION -->
-  <div class="valuation-block">
-    <div class="val-section-title">Trade Health</div>
-    <div class="val-row">
-      <span class="val-team">{team_a}</span>
-      <span class="val-pts {'val-highlight' if val_a > val_b else ''}">{val_a:,} pts</span>
-    </div>
-    <div class="val-row">
-      <span class="val-team">{team_b}</span>
-      <span class="val-pts {'val-highlight' if val_b >= val_a else ''}">{val_b:,} pts</span>
-    </div>
-    {fairness_bar}
-    <div style="text-align:center; margin-top:6px; font-size:11px; color:#888;">
-      {delta:.1f}% {delta_arrow} favors <strong style="color:#C9A84C">{favored}</strong>
-    </div>
-  </div>
-
-  <!-- BAND + OVR METRICS -->
-  <div class="metrics-row">
-    <div class="metric-cell">
-      <div class="metric-label">Fairness Band</div>
-      <div class="metric-value {f'band-{band.lower()}'}">{band_emoji} {band_label}</div>
-      <div class="metric-sub">{'✓ Legal range' if band != 'RED' else '✗ Outside legal range'}</div>
-    </div>
-    <div class="metric-cell">
-      <div class="metric-label">OVR Delta</div>
-      <div class="metric-value" style="color:#e8e0d0;">
-        {'▲' if ovr_delta > 0 else '▼' if ovr_delta < 0 else '='} {abs(ovr_delta)}
+    <!-- HEADER -->
+    <div class="hdr">
+      <div class="hdr-logo">{icon_html}</div>
+      <div class="hdr-text">
+        <div class="hdr-title">GENESIS</div>
+        <div class="hdr-sub">TRADE ENGINE V2.7</div>
       </div>
-      <div class="metric-sub">Combined OVR difference</div>
+      <div class="hdr-badge">{badge_text}</div>
     </div>
-    <div class="metric-cell">
-      <div class="metric-label">Decision</div>
-      <div class="metric-value" style="color:{band_color}; font-size:13px;">
-        {'Commissioner Required' if band in ('RED','YELLOW') else 'Auto-Eligible'}
+    <div class="sep-gold"></div>
+
+    <!-- MATCHUP -->
+    <div class="matchup">
+      <div class="team-side">
+        <div class="team-logo-row">
+          <img class="team-logo" src="{logo_a}" alt="{team_a}">
+          <div>
+            <div class="team-name">{team_a}</div>
+            <div class="team-owner">{owner_a}</div>
+          </div>
+        </div>
+      </div>
+      <div class="vs-divider">↔</div>
+      <div class="team-side right">
+        <div class="team-logo-row right">
+          <div>
+            <div class="team-name">{team_b}</div>
+            <div class="team-owner">{owner_b}</div>
+          </div>
+          <img class="team-logo" src="{logo_b}" alt="{team_b}">
+        </div>
       </div>
     </div>
+
+    <div style="height: 8px;"></div>
+
+    <!-- ASSETS -->
+    <div class="assets-row">
+      <div class="assets-col">
+        <div class="assets-header"><img class="assets-logo" src="{logo_a}" alt=""> {team_a} gives</div>
+        {assets_a_html}
+      </div>
+      <div class="assets-col">
+        <div class="assets-header"><img class="assets-logo" src="{logo_b}" alt=""> {team_b} gives</div>
+        {assets_b_html}
+      </div>
+    </div>
+
+    <div style="height: 16px;"></div>
+
+    <!-- TRADE HEALTH -->
+    <div class="health-section">
+      <div class="health-title">Trade health</div>
+      <div class="health-row">
+        <div>
+          <span class="health-team">{team_a}</span>
+          <span class="health-label">gives</span>
+        </div>
+        <div class="health-pts {winner_a}">{val_a:,} pts</div>
+      </div>
+      <div class="health-row">
+        <div>
+          <span class="health-team">{team_b}</span>
+          <span class="health-label">gives</span>
+        </div>
+        <div class="health-pts {winner_b}">{val_b:,} pts</div>
+      </div>
+
+      <div class="fairness-bar-wrap">
+        <div class="fairness-labels">
+          <span class="fl-team">{team_a}</span>
+          <span class="fl-team">{team_b}</span>
+        </div>
+        <div class="fairness-bar">
+          <div class="fb-a" style="width: {pct_a}%;"></div>
+          <div class="fb-b" style="width: {pct_b}%;"></div>
+        </div>
+      </div>
+
+      <div class="favors-line">
+        <span class="pct">{delta:.1f}%</span> gap — favors <strong>{favored}</strong>
+      </div>
+    </div>
+
+    <div style="height: 8px;"></div>
+
+    <!-- METRICS ROW -->
+    <div class="metrics-row">
+      <div class="metric-cell">
+        <div class="metric-label">Fairness Band</div>
+        <div class="metric-value mv-{sbar_cls}">{band_emoji} {band_word}</div>
+        <div class="metric-sub">{band_sub}</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label">OVR Delta</div>
+        <div class="metric-value mv-white">{'▲' if ovr_delta > 0 else '▼' if ovr_delta < 0 else '='} {abs(ovr_delta)}</div>
+        <div class="metric-sub">Combined OVR difference</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label">Decision</div>
+        <div class="metric-value mv-{sbar_cls}" style="font-size: 14px;">{decision_text}</div>
+      </div>
+    </div>
+
+    <div style="height: 14px;"></div>
+
+    <!-- FLAGS -->
+    {flags_html}
+
+    <!-- AI VERDICT -->
+    {ai_html}
+
+    <!-- FOOTER -->
+    <div class="foot">
+      <div class="foot-txt">TRADE ID: {trade_id} · PROPOSED BY {proposer_id}</div>
+      <div class="foot-txt">ATLAS™ · GENESIS</div>
+    </div>
   </div>
-
-  <!-- FLAGS -->
-  {notes_html}
-
-  <!-- AI COMMENTARY -->
-  {ai_html}
-
-  <!-- FOOTER -->
-  <div class="card-footer">
-    <span class="footer-id">TRADE ID: {trade_id} · PROPOSED BY {proposer_id}</span>
-    <span class="footer-engine">TSL Trade Engine v2.7</span>
-  </div>
-
 </div>
 </body>
 </html>"""
     return html
 
 
-# ── Main render function ──────────────────────────────────────────────────────
+# ── Main render function ─────────────────────────────────────────────────────
 
 async def render_trade_card(data: dict) -> bytes | None:
     """
     Render a trade card to PNG bytes.
     Returns None on failure (caller should fall back to embed).
     """
+    page = None
     try:
         browser = await _get_browser()
-        page    = await browser.new_page(viewport={"width": 620, "height": 1200})
+        page    = await browser.new_page(viewport={"width": 720, "height": 1200})
 
         html = _build_html(data)
         await page.set_content(html, wait_until="networkidle")
 
-        # Size to content
+        # Size to content — initialise box before conditional to prevent
+        # UnboundLocalError when card element is not found.
+        box = None
         card = await page.query_selector(".card")
         if card:
             box = await card.bounding_box()
             if box:
                 await page.set_viewport_size({
-                    "width": 620,
+                    "width": 720,
                     "height": int(box["height"]) + 20
                 })
 
-        png_bytes = await page.screenshot(
-            clip={"x": 0, "y": 0, "width": 620, "height": int(box["height"]) + 20} if card and box else None,
-            type="png",
-        )
-        await page.close()
+        clip = None
+        if card and box:
+            clip = {"x": 0, "y": 0, "width": 720, "height": int(box["height"]) + 20}
+        png_bytes = await page.screenshot(clip=clip, type="png")
         return png_bytes
 
     except Exception as e:
         print(f"[card_renderer] Render error: {e}")
         return None
+    finally:
+        if page:
+            await page.close()

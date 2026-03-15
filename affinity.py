@@ -15,6 +15,7 @@ Import pattern:
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import aiosqlite
@@ -204,14 +205,19 @@ _NEGATIVE_KEYWORDS = {
 }
 
 
+def _kw_match(keyword: str, text: str) -> bool:
+    """Match keyword using word boundaries to avoid partial matches (e.g. 'w' in 'awesome')."""
+    return bool(re.search(rf"\b{re.escape(keyword)}\b", text))
+
+
 def analyze_sentiment(message: str) -> str:
     """Fast keyword-based sentiment analysis.
 
     Returns 'positive', 'neutral', or 'negative'.
     """
     lower = message.lower()
-    pos_hits = sum(1 for kw in _POSITIVE_KEYWORDS if kw in lower)
-    neg_hits = sum(1 for kw in _NEGATIVE_KEYWORDS if kw in lower)
+    pos_hits = sum(1 for kw in _POSITIVE_KEYWORDS if _kw_match(kw, lower))
+    neg_hits = sum(1 for kw in _NEGATIVE_KEYWORDS if _kw_match(kw, lower))
 
     if neg_hits > pos_hits:
         return "negative"

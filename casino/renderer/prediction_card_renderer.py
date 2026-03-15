@@ -347,8 +347,8 @@ def render_market_page(
             end_date=mkt.get("end_date", ""),
             user_position=mkt.get("user_position"),
         )
-        card_img = Image.open(card_buf)
-        img.paste(card_img, (0, y))
+        with Image.open(card_buf) as card_img:
+            img.paste(card_img, (0, y))
         y += CARD_H + PAGE_GAP
 
     buf = io.BytesIO()

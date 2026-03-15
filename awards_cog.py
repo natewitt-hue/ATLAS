@@ -35,7 +35,11 @@ class VoteSelect(discord.ui.Select):
     def __init__(self, poll_id, options):
         self.poll_id = poll_id
         opts = [discord.SelectOption(label=opt, value=opt) for opt in options[:25]]
-        super().__init__(placeholder="Cast your anonymous vote...", min_values=1, max_values=1, options=opts)
+        super().__init__(
+            placeholder="Cast your anonymous vote...",
+            min_values=1, max_values=1, options=opts,
+            custom_id=f"vote_select:{poll_id}",
+        )
 
     async def callback(self, interaction: discord.Interaction):
         poll = _polls.get(self.poll_id)
@@ -58,6 +62,7 @@ class VoteSelect(discord.ui.Select):
 class VoteView(discord.ui.View):
     def __init__(self, poll_id, options):
         super().__init__(timeout=None)
+        self.poll_id = poll_id
         self.add_item(VoteSelect(poll_id, options))
 
 class AwardsCog(commands.Cog):
@@ -75,6 +80,8 @@ class AwardsCog(commands.Cog):
         view = VoteView(poll_id, options)
 
         await interaction.response.send_message(f"Poll created: {title}", ephemeral=True)
+        if not interaction.channel:
+            return  # guard against DM context where channel may be None
         await interaction.channel.send(embed=embed, view=view)
 
     async def _closepoll_impl(self, interaction: discord.Interaction, poll_id: str):

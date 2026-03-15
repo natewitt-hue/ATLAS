@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ def render_ledger_card(
     draw.line([(PAD, footer_y), (CARD_W - PAD, footer_y)], fill=GOLD_DIM, width=1)
 
     balance_str = f"BALANCE:  {new_balance:,}"
-    time_str = datetime.now().strftime("%I:%M %p")
+    time_str = datetime.now(timezone.utc).strftime("%I:%M %p")
 
     draw.text((PAD + 4, footer_y + 8), balance_str, fill=SILVER, font=font_small)
     # Right-align time

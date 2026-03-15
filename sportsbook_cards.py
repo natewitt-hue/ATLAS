@@ -145,12 +145,16 @@ def _get_open_bets(user_id: int) -> tuple[int, int, int]:
     # Calculate potential payout
     payout = 0
     for wager, odds in rows:
-        if odds > 0:
+        if odds == 0:
+            payout += wager  # push-equivalent: return wager if odds are zero
+        elif odds > 0:
             payout += wager + int(wager * odds / 100)
         else:
             payout += wager + int(wager * 100 / abs(odds))
     for wager, odds in parlay_rows:
-        if odds > 0:
+        if odds == 0:
+            payout += wager  # push-equivalent: return wager if odds are zero
+        elif odds > 0:
             payout += wager + int(wager * odds / 100)
         else:
             payout += wager + int(wager * 100 / abs(odds))
@@ -160,6 +164,8 @@ def _get_open_bets(user_id: int) -> tuple[int, int, int]:
 
 def _get_leaderboard_rank(user_id: int) -> tuple[int, int]:
     """Get (rank, total_users) on the leaderboard."""
+    # NOTE: Could use SQL RANK() window function for O(1) lookup instead of
+    # fetching all rows, but user count is small (~31 owners) so linear scan is fine.
     with sqlite3.connect(DB_PATH) as con:
         rows = con.execute(
             "SELECT discord_id, balance FROM users_table ORDER BY balance DESC"

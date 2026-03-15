@@ -103,7 +103,7 @@ def _team_conference(abbr: str) -> str:
 
 def get_all_teams() -> list[dict]:
     """Return list of all 32 teams as dicts with abbrName, nickName, conference."""
-    if dm is None or dm.df_teams is None:
+    if dm is None or dm.df_teams is None or dm.df_teams.empty:
         return []
     teams = []
     for _, row in dm.df_teams.iterrows():
@@ -127,8 +127,6 @@ def load(db_path: str = DB_PATH) -> int:
     Returns number of assignments loaded.
     """
     global _loaded
-    _by_team.clear()
-    _by_id.clear()
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -138,6 +136,11 @@ def load(db_path: str = DB_PATH) -> int:
         WHERE team IS NOT NULL AND team != '' AND active = 1
     """).fetchall()
     conn.close()
+
+    # Build new dicts first, then swap atomically to avoid
+    # serving partial data during reload.
+    new_by_team: dict[str, OwnerEntry] = {}
+    new_by_id: dict[int, OwnerEntry] = {}
 
     for r in rows:
         did_str = r["discord_id"]
@@ -158,8 +161,14 @@ def load(db_path: str = DB_PATH) -> int:
             team_name=_team_name(abbr),
             conference=_team_conference(abbr),
         )
-        _by_team[abbr] = entry
-        _by_id[did] = entry
+        new_by_team[abbr] = entry
+        new_by_id[did] = entry
+
+    # Atomic swap
+    _by_team.clear()
+    _by_team.update(new_by_team)
+    _by_id.clear()
+    _by_id.update(new_by_id)
 
     _loaded = True
     return len(_by_team)
@@ -328,7 +337,7 @@ def build_team_options(conf: str) -> list[discord.SelectOption]:
             value=abbr,
             description=desc,
         ))
-    return options
+    return options[:25]
 
 
 class _OwnerListSelect(discord.ui.Select):
@@ -351,14 +360,18 @@ class _OwnerListSelect(discord.ui.Select):
 class _OwnerListView(discord.ui.View):
     """Wraps _OwnerListSelect with a back button."""
 
-    def __init__(self, options: list[discord.SelectOption], callback_fn, parent_view):
+    def __init__(self, options: list[discord.SelectOption], callback_fn, parent_view, *, parent_embed: discord.Embed | None = None):
         super().__init__(timeout=180)
         self.add_item(_OwnerListSelect(options, callback_fn))
         self._parent = parent_view
+        self._parent_embed = parent_embed
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=self._parent)
+        kwargs: dict = {"view": self._parent}
+        if self._parent_embed is not None:
+            kwargs["embed"] = self._parent_embed
+        await interaction.response.edit_message(**kwargs)
 
 
 class OwnerSelectView(discord.ui.View):
@@ -460,8 +473,9 @@ class AssignConferenceView(discord.ui.View):
     async def _show_teams(self, interaction: discord.Interaction, conf: str):
         options = build_team_options(conf)
         if not options:
-            return await interaction.response.send_message(
-                f"No {conf} teams found.", ephemeral=True,
-            )
+            msg = f"No {conf} teams found."
+            if dm is None or dm.df_teams is None or dm.df_teams.empty:
+                msg += " Team data hasn't loaded yet — wait a moment and try again."
+            return await interaction.response.send_message(msg, ephemeral=True)
         view = _TeamAssignView(options, self._member, parent_view=self)
         await interaction.response.edit_message(view=view)

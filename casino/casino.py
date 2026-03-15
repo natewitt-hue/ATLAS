@@ -242,6 +242,15 @@ class CasinoHubView(discord.ui.View):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if hasattr(self, "message") and self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  THE COG
@@ -388,6 +397,9 @@ class CasinoCog(commands.Cog):
 
     async def _casino_clear_session_impl(self, interaction: discord.Interaction, user: discord.Member):
         if user.id in bj_sessions:
+            session = bj_sessions[user.id]
+            if hasattr(session, "view") and session.view:
+                session.view.stop()
             session = bj_sessions.pop(user.id)
             # Refund their wager
             await db.refund_wager(user.id, session.wager)

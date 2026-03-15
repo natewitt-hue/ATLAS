@@ -208,7 +208,7 @@ def _fetch_csv(path: str, timeout: int = 60) -> list:
         # FIX #5: io imported at top of file now
         df = pd.read_csv(io.StringIO(text))
         records = df.where(pd.notnull(df), None).to_dict(orient="records")
-        print(f"[CSV] {path} → {len(records)} rows loaded")
+        log.debug(f"[CSV] {path} → {len(records)} rows loaded")
         return records
     except requests.exceptions.Timeout:
         log.warning(f"[CSV] {path} → TIMEOUT")
@@ -269,45 +269,47 @@ def team_abbr(team_id: int | str) -> str:
 
 def _rebuild_rings_cache(abbr_map: dict[int, str], season: int, stage: int) -> dict[int, int]:
     """
-    Fetch ring counts for all teams and return {teamId: ring_count}.
-    Called once during load_all() — eliminates N live API calls per trade eval.
-
-    ⚠️  KNOWN LIMITATIONS:
-    - Uses wins >= 14 as a proxy for championship — this counts great regular
-      season records, NOT actual Super Bowl wins. A 14-win team that lost in
-      the playoffs would incorrectly count as having a ring.
-    - Makes (season-1) × len(abbr_map) sequential HTTP requests (~160 for S6).
-      Consider replacing with a single tsl_history.db query when championship
-      data is tracked there.
+    Build rings cache from tsl_history.db championship records.
+    Falls back to empty cache if DB is unavailable.
     """
-    cache: dict[int, int] = {}
-    if season <= 1:
-        # No prior seasons to check
-        for tid in abbr_map:
-            cache[tid] = 0
-        return cache
+    cache: dict[int, int] = {tid: 0 for tid in abbr_map}
 
-    for tid, abbr in abbr_map.items():
-        if not abbr:
-            cache[tid] = 0
-            continue
-        rings = 0
-        for s in range(1, season):
-            try:
-                data = _get(f"/teams/{abbr}/standings/{s}/{stage}")
-                if not data:
-                    continue
-                records = data if isinstance(data, list) else data.get("data", [data] if isinstance(data, dict) else [])
-                for rec in records:
-                    wins = int(rec.get("totalWins", 0) or 0)
-                    if wins >= 14:
-                        rings += 1
-                        break
-            except Exception as e:
-                log.warning(f"[Rings] Error fetching S{s} for {abbr}: {e}")
-        cache[tid] = rings
+    try:
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsl_history.db")
+        if not os.path.exists(db_path):
+            log.warning("[Rings] tsl_history.db not found, returning empty cache")
+            return cache
 
-    print(f"[Rings] Cache built: {sum(1 for v in cache.values() if v > 0)} teams with rings")
+        conn = sqlite3.connect(db_path, timeout=5)
+        # Champions are determined by winning the final game of stageIndex >= 200
+        rows = conn.execute("""
+            SELECT g.winner_team, COUNT(*) as ring_count
+            FROM games g
+            WHERE CAST(g.stageIndex AS INTEGER) >= 200
+              AND g.status IN ('2', '3')
+              AND g.winner_team IS NOT NULL
+              AND g.winner_team != ''
+            GROUP BY g.winner_team
+        """).fetchall()
+        conn.close()
+
+        # Map team names back to team IDs
+        name_to_id: dict[str, int] = {}
+        for tid, abbr in abbr_map.items():
+            if abbr:
+                name_to_id[abbr.lower()] = tid
+
+        for winner_team, count in rows:
+            if winner_team:
+                tid = name_to_id.get(winner_team.lower())
+                if tid is not None:
+                    cache[tid] = count
+
+        log.info(f"[Rings] Cache built from DB: {sum(cache.values())} total rings across {sum(1 for v in cache.values() if v > 0)} teams")
+    except Exception as e:
+        log.warning(f"[Rings] Error building cache from DB: {e}")
+
     return cache
 
 
@@ -439,7 +441,7 @@ def load_all() -> None:
 
     if len(all_scores_raw) <= 16:
         all_scores_raw = []
-        for w_idx in range(0, _l_week + 1):
+        for w_idx in range(0, _l_week):
             resp = _get(f"/games/scores/{_l_season}/{_l_stage}/{w_idx}")
             chunk = resp.get("data", []) if isinstance(resp, dict) else (resp or [])
             all_scores_raw.extend(chunk)
@@ -513,8 +515,10 @@ def load_all() -> None:
         _l_df_def_full = _df(def_export)
 
         # Filter to current season + regular season, then aggregate per player
-        _l_df_def_full["seasonIndex"] = pd.to_numeric(_l_df_def_full.get("seasonIndex"), errors="coerce")
-        _l_df_def_full["stageIndex"]  = pd.to_numeric(_l_df_def_full.get("stageIndex"),  errors="coerce")
+        if "seasonIndex" in _l_df_def_full.columns:
+            _l_df_def_full["seasonIndex"] = pd.to_numeric(_l_df_def_full["seasonIndex"], errors="coerce")
+        if "stageIndex" in _l_df_def_full.columns:
+            _l_df_def_full["stageIndex"]  = pd.to_numeric(_l_df_def_full["stageIndex"],  errors="coerce")
         cur = _l_df_def_full[
             (_l_df_def_full["seasonIndex"] == _l_season) &
             (_l_df_def_full["stageIndex"] == REGULAR_STAGE)
@@ -690,7 +694,7 @@ def find_trades_by_player(player_name: str) -> list[dict]:
                 "weekIndex":   row.get("weekIndex", ""),
             })
     # Most recent first
-    results.sort(key=lambda t: (str(t["seasonIndex"]), str(t["weekIndex"])), reverse=True)
+    results.sort(key=lambda t: (int(t.get("seasonIndex") or 0), int(t.get("weekIndex") or 0)), reverse=True)
     return results
 
 
@@ -875,7 +879,7 @@ def get_h2h_record(team_a: str, team_b: str) -> dict:
         hs  = int(pd.to_numeric(g.get("homeScore", 0), errors="coerce") or 0)
         aws = int(pd.to_numeric(g.get("awayScore", 0), errors="coerce") or 0)
         status = int(pd.to_numeric(g.get("status", 0), errors="coerce") or 0)
-        if status != 3:  # final only
+        if status not in (2, 3):  # final only
             continue
         if not ({h, aw} == {a_l, b_l}):
             continue

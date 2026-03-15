@@ -166,7 +166,9 @@ def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str
     turns = _conv_cache.setdefault(discord_id, [])
     turns.append(turn)
 
-    # Keep only the last CONV_MAX_TURNS * 2 in memory
+    # Trim when memory exceeds 2x target to avoid unbounded growth.
+    # Trigger at CONV_MAX_TURNS*2, trim down to CONV_MAX_TURNS (hysteresis
+    # prevents trimming on every call while keeping memory bounded).
     if len(turns) > CONV_MAX_TURNS * 2:
         _conv_cache[discord_id] = turns[-CONV_MAX_TURNS:]
 
@@ -334,7 +336,9 @@ OWNER-FILTERED QUERY PATTERN:
 """
 
 # Called at prompt-build time so the season number is always current
-DB_SCHEMA = _build_schema()
+def _get_db_schema():
+    """Rebuild schema each call so CURRENT_SEASON is always fresh."""
+    return _build_schema()
 
 # ── Known users — loaded dynamically from tsl_members DB ─────────────────────
 # Previously hardcoded lists; now populated on first use from build_member_db.
@@ -423,7 +427,8 @@ def resolve_names_in_question(question: str) -> tuple[str, dict[str, str]]:
 # ── Core DB + Gemini pipeline ────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -472,7 +477,7 @@ async def gemini_sql(
     prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden franchise database.
 Your job: convert natural-language questions into a single correct SQLite SELECT query.
 
-{DB_SCHEMA}
+{_get_db_schema()}
 {known_users_block}{alias_block}{conv_block}
 
 RULES:
@@ -638,7 +643,7 @@ class CodexCog(commands.Cog):
                     f"REMINDER: ALL columns are stored as TEXT. Always use CAST(col AS INTEGER) "
                     f"for numeric comparisons.\n"
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{DB_SCHEMA}"
+                    f"Schema:\n{_get_db_schema()}"
                 )
                 def _fix():
                     return self.gemini.models.generate_content(
@@ -774,11 +779,11 @@ class CodexCog(commands.Cog):
             await interaction.followup.send(f"Couldn't find an owner matching `{owner2}`.")
             return
 
-        sql = f"""
+        sql = """
         SELECT
             seasonIndex,
-            SUM(CASE WHEN winner_user = '{u1}' THEN 1 ELSE 0 END) AS u1_wins,
-            SUM(CASE WHEN winner_user = '{u2}' THEN 1 ELSE 0 END) AS u2_wins,
+            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u1_wins,
+            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u2_wins,
             COUNT(*) AS games_played,
             GROUP_CONCAT(
                 'S' || seasonIndex || ' W' || (CAST(weekIndex AS INTEGER)+1) ||
@@ -787,13 +792,13 @@ class CodexCog(commands.Cog):
         FROM games
         WHERE status IN ('2','3')
           AND stageIndex = '1'
-          AND ((homeUser = '{u1}' AND awayUser = '{u2}')
-            OR (homeUser = '{u2}' AND awayUser = '{u1}'))
+          AND ((homeUser = ? AND awayUser = ?)
+            OR (homeUser = ? AND awayUser = ?))
         GROUP BY seasonIndex
         ORDER BY CAST(seasonIndex AS INTEGER)
         """
 
-        rows, error = run_sql(sql)
+        rows, error = run_sql(sql, (u1, u2, u1, u2, u2, u1))
         if error or not rows:
             await interaction.followup.send(
                 f"No completed regular season games found between **{u1}** and **{u2}**."
@@ -853,14 +858,14 @@ note any sweep seasons, and make it entertaining.
             await interaction.followup.send(f"Valid seasons are 1 through {dm.CURRENT_SEASON}.")
             return
 
-        sql = f"""
+        sql = """
         SELECT winner_user, loser_user, winner_team, loser_team,
                homeScore, awayScore, weekIndex
         FROM games
-        WHERE seasonIndex='{season}' AND stageIndex='1' AND status IN ('2','3')
+        WHERE seasonIndex=? AND stageIndex='1' AND status IN ('2','3')
         ORDER BY CAST(weekIndex AS INTEGER)
         """
-        rows, _ = run_sql(sql)
+        rows, _ = run_sql(sql, (str(season),))
 
         wins   = Counter()
         losses = Counter()

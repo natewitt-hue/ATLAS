@@ -23,6 +23,7 @@ Fixes applied (v3):
   - build_owner_map() called via bot.py on_ready() — owner lookups now work.
 """
 
+import asyncio
 import sqlite3
 import os
 import pandas as pd
@@ -146,7 +147,7 @@ def _letter_grade(score: float) -> str:
     return "F"
 
 
-def get_draft_class(season: int) -> dict:
+async def get_draft_class(season: int) -> dict:
     """
     Full draft class breakdown for a given TSL season (2-current).
     Uses player_draft_map from tsl_history.db — resolves drafting_team from
@@ -157,7 +158,7 @@ def get_draft_class(season: int) -> dict:
         return {"error": f"No real draft data for season {season}. TSL drafts started season 2."}
 
     # ── Pull from DB (accurate drafting team) ─────────────────────────────
-    try:
+    def _query():
         conn = sqlite3.connect(DB_PATH)
         rows = conn.execute("""
             SELECT extendedName, drafting_team, draftRound, draftPick,
@@ -166,6 +167,11 @@ def get_draft_class(season: int) -> dict:
             WHERE CAST(drafting_season AS INTEGER) = ?
         """, (season,)).fetchall()
         conn.close()
+        return rows
+
+    try:
+        loop = asyncio.get_running_loop()
+        rows = await loop.run_in_executor(None, _query)
     except Exception as e:
         return {"error": f"DB unavailable: {e}. Run build_tsl_db.py first."}
 
@@ -300,8 +306,8 @@ def get_team_draft_class(team_abbr: str, season: int) -> dict:
     # Sort by round then pick
     players.sort(key=lambda p: (p["draftRound"], p["draftPick"]))
 
-    avg_grade = sum(grade_scores) / len(grade_scores) if grade_scores else 0
-    avg_ovr = sum(p["playerBestOvr"] for p in players) / len(players) if players else 0
+    avg_grade = float(np.mean(grade_scores)) if grade_scores else 0
+    avg_ovr = float(np.mean([p["playerBestOvr"] for p in players])) if players else 0
 
     return {
         "type": "team_draft_class",
@@ -316,11 +322,11 @@ def get_team_draft_class(team_abbr: str, season: int) -> dict:
     }
 
 
-def compare_draft_classes() -> dict:
+async def compare_draft_classes() -> dict:
     """Compare all TSL draft classes (seasons 2-current) side by side."""
     classes = []
     for season in range(2, dm.CURRENT_SEASON + 1):
-        dc = get_draft_class(season)
+        dc = await get_draft_class(season)
         if "error" not in dc:
             classes.append({
                 "season":      dc["season"],
@@ -838,6 +844,7 @@ def register_pagination(message_id: int, pages: list, title: str = "") -> Pagina
 
 
 def get_pagination(message_id: int) -> PaginatedResult | None:
+    _prune_stale_pages()
     entry = _paginated_messages.get(message_id)
     if entry is None:
         return None

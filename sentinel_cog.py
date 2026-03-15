@@ -46,7 +46,7 @@ import uuid
 
 import discord
 import httpx
-import requests
+import requests  # TODO: Unify on async httpx — requests is only used in _fetch_image_bytes()
 from discord import app_commands
 from discord.ext import commands
 from google import genai
@@ -618,8 +618,17 @@ def _results_channel_id() -> int | None:
     """Public results channel — where approved rulings are posted."""
     return _get_channel_id("force_request")
 
-# ── Gemini client ─────────────────────────────────────────────────────────────
-_gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# ── Gemini client (lazy — avoids crash if GEMINI_API_KEY unset at import) ─────
+_sentinel_gemini = None
+
+def _get_sentinel_gemini():
+    global _sentinel_gemini
+    if _sentinel_gemini is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
+        _sentinel_gemini = genai.Client(api_key=api_key)
+    return _sentinel_gemini
 
 
 # ── Ruling constants ──────────────────────────────────────────────────────────
@@ -643,8 +652,10 @@ RULING_LABELS = {
 }
 
 # ── Gemini system prompt ──────────────────────────────────────────────────────
-_SYSTEM_PROMPT = """
-You are ATLAS Echo, the enforcement voice of the TSL league administration system.
+from echo_loader import get_persona
+
+_SYSTEM_PROMPT = get_persona("official") + """
+
 A league owner is submitting a force request because they could not complete
 their game — their opponent was unresponsive or unavailable.
 
@@ -723,7 +734,7 @@ async def _analyze_screenshots(
     loop = asyncio.get_running_loop()
 
     def _call():
-        return _gemini.models.generate_content(
+        return _get_sentinel_gemini().models.generate_content(
             model="gemini-2.0-flash",
             config=types.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,
@@ -1060,6 +1071,8 @@ class ForceRequestCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot              = bot
+        # NOTE: _request_counter resets on every bot restart. IDs are session-scoped
+        # and not globally unique. For persistence, move to SQLite or a JSON file.
         self._request_counter = 0
 
     def _next_id(self) -> str:
@@ -1296,6 +1309,9 @@ class GameplayCog(commands.Cog):
 
 # ── Try importing parity state helpers ────────────────────────────────────────
 # We share parity_state.json with parity_cog so we don't scatter state files.
+# TODO: Extract parity state into a standalone module (e.g. parity_state.py)
+#       to break the genesis_cog ↔ sentinel_cog coupling and avoid potential
+#       circular import issues if genesis_cog ever imports from sentinel_cog.
 try:
     from genesis_cog import _state, _save_state, _STATE_PATH
     _PARITY_STATE_AVAILABLE = True

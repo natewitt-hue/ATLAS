@@ -173,6 +173,8 @@ class CortexEngine:
         ai_clause, ai_params = self._ai_filter_clause()
 
         # -- Full message fetch (ordered by time for chain detection) ----------
+        # TRUST BOUNDARY: ai_clause is generated internally by _build_ai_clause(),
+        # never from user input. Safe for f-string interpolation.
         base_sql = f"""
             SELECT message_id, author_nickname, timestamp_unix, content
             FROM messages

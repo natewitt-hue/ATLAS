@@ -134,39 +134,42 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
     # Build cash out view
     view = CrashView(round_obj)
 
-    while True:
-        elapsed           = time.time() - round_obj.started_at
-        round_obj.current_mult = _current_multiplier(elapsed)
+    try:
+        while True:
+            elapsed           = time.time() - round_obj.started_at
+            round_obj.current_mult = _current_multiplier(elapsed)
 
-        if round_obj.current_mult >= round_obj.crash_point:
-            # CRASH
-            round_obj.current_mult = round_obj.crash_point
-            break
+            if round_obj.current_mult >= round_obj.crash_point:
+                # CRASH
+                round_obj.current_mult = round_obj.crash_point
+                break
 
-        buf  = render_crash_chart(
-            round_obj.current_mult,
-            crashed       = False,
-            history       = recent_crashes.get(round_obj.channel_id, []),
-            players_in    = round_obj.players_in,
-            total_wagered = round_obj.total_wagered,
-        )
-        file  = discord.File(buf, filename="crash.png")
-        embed = _build_running_embed(round_obj)
-        embed.set_image(url="attachment://crash.png")
-        try:
-            if round_obj.message:
-                await round_obj.message.edit(embed=embed, attachments=[file], view=view)
-            else:
-                round_obj.message = await channel.send(embed=embed, file=file, view=view)
-        except discord.HTTPException:
-            pass
+            buf  = render_crash_chart(
+                round_obj.current_mult,
+                crashed       = False,
+                history       = recent_crashes.get(round_obj.channel_id, []),
+                players_in    = round_obj.players_in,
+                total_wagered = round_obj.total_wagered,
+            )
+            file  = discord.File(buf, filename="crash.png")
+            embed = _build_running_embed(round_obj)
+            embed.set_image(url="attachment://crash.png")
+            try:
+                if round_obj.message:
+                    await round_obj.message.edit(embed=embed, attachments=[file], view=view)
+                else:
+                    round_obj.message = await channel.send(embed=embed, file=file, view=view)
+            except discord.HTTPException:
+                pass
 
-        await asyncio.sleep(TICK_SECS)
+            await asyncio.sleep(TICK_SECS)
+    finally:
+        # Ensure the view is always stopped, even on unexpected errors
+        view.stop()
+        view.clear_items()
 
     # ── Crash ──────────────────────────────────────────────────────────────
     round_obj.status = "crashed"
-    view.stop()
-    view.clear_items()
 
     # Resolve all remaining active bets
     await resolve_crash_round(round_obj.round_id)
@@ -254,10 +257,12 @@ class CrashView(discord.ui.View):
             )
 
         mult   = self.round_obj.current_mult
-        payout = await cashout_crash_bet(player.bet_id, uid, mult)
 
-        player.cashed_out  = True
+        # Set cashed_out BEFORE await to prevent TOCTOU double-cashout
+        player.cashed_out   = True
         player.cashout_mult = mult
+
+        payout = await cashout_crash_bet(player.bet_id, uid, mult)
 
         # Log win session
         result = await process_wager(
@@ -422,6 +427,9 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
 
     # ── Create new round if none in lobby ─────────────────────────────────
     if existing is None:
+        # Set sentinel BEFORE any await to prevent TOCTOU double-round creation
+        active_rounds[ch_id] = "PENDING"
+
         round_id = await create_crash_round(ch_id)
         round_data = await get_crash_round(round_id)
 

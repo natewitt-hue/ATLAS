@@ -25,8 +25,6 @@ class EchoCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        from permissions import ADMIN_USER_IDS
-        self._admin_ids = ADMIN_USER_IDS
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -119,7 +117,10 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(EchoCog(bot))
 
     # Register echo commands on the /atlas group from bot.py
-    from bot import atlas_group
+    # Lazy import to avoid circular import (bot imports cogs, cog imports bot)
+    import importlib
+    bot_module = importlib.import_module("bot")
+    atlas_group = bot_module.atlas_group
 
     @atlas_group.command(name="echorebuild", description="Regenerate Echo voice personas from message archive.")
     async def atlas_echorebuild(interaction: discord.Interaction):

@@ -31,6 +31,8 @@ import aiosqlite
 import discord
 from discord.ext import commands
 
+# UI state shares the flow_economy.db database with the wallet/economy system.
+# This avoids creating yet another .db file; ui_state only adds its own table.
 from flow_wallet import DB_PATH
 
 log = logging.getLogger("atlas.ui_state")
@@ -162,7 +164,7 @@ class UIStateManager:
             return
 
         restored = 0
-        cleaned = 0
+        stale_modules: list[str] = []
 
         for row in rows:
             module_name = row["module_name"]
@@ -185,8 +187,7 @@ class UIStateManager:
                     f"[UIState] Channel {channel_id} not found for "
                     f"'{module_name}' -- cleaning up stale record."
                 )
-                await self.unregister(module_name)
-                cleaned += 1
+                stale_modules.append(module_name)
                 continue
 
             try:
@@ -196,8 +197,7 @@ class UIStateManager:
                     f"[UIState] Message {message_id} not found in "
                     f"#{channel.name} for '{module_name}' -- cleaning up."
                 )
-                await self.unregister(module_name)
-                cleaned += 1
+                stale_modules.append(module_name)
                 continue
 
             # Reconstruct the View and bind it to the message
@@ -209,6 +209,16 @@ class UIStateManager:
                 f"#{channel.name} (msg={message_id})"
             )
 
+        # Batch-delete all stale records in a single DB connection
+        if stale_modules:
+            async with aiosqlite.connect(self.db_path, timeout=_DB_TIMEOUT) as db:
+                await db.executemany(
+                    "DELETE FROM ui_state WHERE module_name = ?",
+                    [(m,) for m in stale_modules],
+                )
+                await db.commit()
+
+        cleaned = len(stale_modules)
         log.info(
             f"[UIState] Restore complete: {restored} restored, "
             f"{cleaned} cleaned up, {len(rows) - restored - cleaned} skipped."

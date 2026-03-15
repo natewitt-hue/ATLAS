@@ -147,7 +147,7 @@ def atlas_button(
         @functools.wraps(func)
         async def wrapper(self, interaction: discord.Interaction, button_ref: ui.Button):
             try:
-                if defer:
+                if defer and not interaction.response.is_done():
                     await interaction.response.defer(ephemeral=ephemeral)
                 await func(self, interaction, button_ref)
             except Exception as e:

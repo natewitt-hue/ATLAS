@@ -88,7 +88,9 @@ def parse_report_into_sections(report_text: str) -> list:
             elements.append(("heading2", stripped[4:].strip()))
         elif stripped == "---":
             elements.append(("divider", ""))
-        elif stripped.startswith("*") and stripped.endswith("*") and not stripped.startswith("**"):
+        elif re.match(r'^\*[^*]+\*$', stripped) and not stripped.startswith("**"):
+            # Single-star italic line (e.g. *subtitle*) — anchored to avoid
+            # matching lines that merely contain asterisks mid-text.
             elements.append(("meta", stripped.strip("*").strip()))
         elif stripped.startswith("**") and stripped.endswith("**"):
             elements.append(("bold_body", stripped.strip("*").strip()))

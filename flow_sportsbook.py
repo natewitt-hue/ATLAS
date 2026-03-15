@@ -58,6 +58,9 @@ from odds_api_client import SUPPORTED_SPORTS as REAL_SPORTS
 from real_sportsbook_cog import EventListView, SPORT_EMOJI
 from sportsbook_cards import build_sportsbook_card, build_stats_card, card_to_file
 from db_migration_snapshots import setup_snapshots_table, take_daily_snapshot, backfill_from_bets
+import logging
+
+log = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 _DIR              = os.path.dirname(os.path.abspath(__file__))
@@ -92,7 +95,7 @@ ELO_TEAM_WEIGHT   = 0.20      # team quality weight in combined power
 SPREAD_SCALING    = 4.0       # divisor: Elo-based power diff → spread points
 
 SPORTSBOOK_VERSION = "v5.0"
-print(f"[SPORTSBOOK] Loading {SPORTSBOOK_VERSION}")
+log.info(f"[SPORTSBOOK] Loading {SPORTSBOOK_VERSION}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -227,7 +230,7 @@ def setup_db():
                     (gid, ou)
                 )
             if old_rows:
-                print(f"[SB] Migrated {len(old_rows)} ou_line entries → line_overrides")
+                log.info(f"[SB] Migrated {len(old_rows)} ou_line entries → line_overrides")
         except Exception:
             pass
 
@@ -277,6 +280,9 @@ def _get_line_override(game_id: str) -> dict | None:
     }
 
 
+_ALLOWED_LINE_COLS = {"home_spread", "away_spread", "home_ml", "away_ml", "ou_line"}
+
+
 def _set_line_override(game_id: str, set_by: str, **kwargs):
     """
     Upsert line override fields. Pass only the fields you want to change.
@@ -293,6 +299,9 @@ def _set_line_override(game_id: str, set_by: str, **kwargs):
             (game_id, set_by)
         )
         for col, val in updates.items():
+            if col not in _ALLOWED_LINE_COLS:
+                continue
+            # col is now guaranteed to be one of the 5 allowed literals
             con.execute(
                 f"UPDATE line_overrides SET {col}=?, set_by=?, set_at=CURRENT_TIMESTAMP "
                 f"WHERE game_id=?",
@@ -301,11 +310,45 @@ def _set_line_override(game_id: str, set_by: str, **kwargs):
 
 
 def _clear_line_overrides_for_week(week: int):
-    """Remove all line overrides for games in the given week (uses game_id prefix match)."""
-    # game_ids are stored as strings matching game API IDs; we clear by scanning games_state
+    """Remove line overrides for games in the given week."""
+    # Resolve game_ids for this week from the live DataFrame (games_state has no week column).
+    # weekIndex in the API is 0-based; `week` here matches the bet_week convention (1-based).
+    src = dm.df_all_games if not dm.df_all_games.empty else dm.df_games
+    if src.empty:
+        log.warning("[SB] No game data loaded — cannot scope override clear to week %d", week)
+        return
+
+    df = src.copy()
+    if "weekIndex" in df.columns:
+        df["weekIndex"] = df["weekIndex"].apply(
+            lambda x: int(float(x)) if x not in (None, "", "nan") else -1
+        )
+        week_games = df[df["weekIndex"] == (week - 1)]
+    elif "week" in df.columns:
+        week_games = df[df["week"].apply(
+            lambda x: int(float(x)) if x not in (None, "") else -1
+        ) == week]
+    else:
+        log.warning("[SB] No week column found — cannot scope override clear to week %d", week)
+        return
+
+    game_ids = [
+        str(row.get("gameId", row.get("id", row.get("matchup_key", ""))))
+        for row in week_games.to_dict("records")
+        if row.get("gameId") or row.get("id") or row.get("matchup_key")
+    ]
+
+    if not game_ids:
+        log.debug("[SB] No game_ids found for week %d — nothing to clear", week)
+        return
+
     with _db_con() as con:
-        con.execute("DELETE FROM line_overrides")
-    print(f"[SB] Cleared all line overrides")
+        placeholders = ",".join("?" * len(game_ids))
+        con.execute(
+            f"DELETE FROM line_overrides WHERE game_id IN ({placeholders})",
+            game_ids,
+        )
+    log.debug("[SB] Cleared line overrides for week %d (%d games)", week, len(game_ids))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -432,13 +475,13 @@ def _compute_elo_ratings() -> dict:
         # Calibrate league average from actual data
         if total_games >= 10:
             _LEAGUE_AVG_SCORE = round((total_pts / total_games) / 2, 2)
-            print(f"[ELO] League avg pts/team: {_LEAGUE_AVG_SCORE:.1f} ({total_games} games)")
+            log.debug(f"[ELO] League avg pts/team: {_LEAGUE_AVG_SCORE:.1f} ({total_games} games)")
         else:
             _LEAGUE_AVG_SCORE = 30.0
-            print(f"[ELO] Not enough history — using fallback {_LEAGUE_AVG_SCORE}")
+            log.debug(f"[ELO] Not enough history — using fallback {_LEAGUE_AVG_SCORE}")
 
     except Exception as e:
-        print(f"[ELO] History query failed: {e}")
+        log.warning(f"[ELO] History query failed: {e}")
         _LEAGUE_AVG_SCORE = 30.0
 
     # Compute per-owner derived scoring stats
@@ -452,13 +495,13 @@ def _compute_elo_ratings() -> dict:
 
     # Log top/bottom Elo ratings
     sorted_elo = sorted(elo.items(), key=lambda x: x[1], reverse=True)
-    print(f"[ELO] Ratings computed for {len(elo)} owners")
+    log.debug(f"[ELO] Ratings computed for {len(elo)} owners")
     for user, rating in sorted_elo[:5]:
         gp = games_played.get(user, 0)
-        print(f"  TOP  {user}: {rating:.0f} ({gp} games)")
+        log.debug(f"  TOP  {user}: {rating:.0f} ({gp} games)")
     for user, rating in sorted_elo[-3:]:
         gp = games_played.get(user, 0)
-        print(f"  BOT  {user}: {rating:.0f} ({gp} games)")
+        log.debug(f"  BOT  {user}: {rating:.0f} ({gp} games)")
 
     return elo
 
@@ -674,7 +717,11 @@ def _combine_parlay_odds(odds_list: list[int]) -> int:
     decimal = 1.0
     for o in odds_list:
         o = int(o)
+        if o == 0:
+            continue  # skip legs with zero odds to avoid ZeroDivisionError
         decimal *= (1 + o / 100) if o > 0 else (1 + 100 / abs(o))
+    if decimal <= 1.0:
+        return 100  # fallback: even odds if all legs were zero/cancelled
     return int((decimal - 1) * 100) if decimal >= 2.0 else int(-100 / (decimal - 1))
 
 
@@ -745,7 +792,7 @@ def _build_game_lines(games_raw: list) -> list[dict]:
         away_ml     = ov.get("away_ml")     if ov.get("away_ml")     is not None else engine_away_ml
         ou_line     = ov.get("ou_line")     if ov.get("ou_line")     is not None else engine_ou
 
-        print(
+        log.debug(
             f"[ELO] {away}({away_user} Elo={away_elo:.0f} P={away_power:.1f}) "
             f"@ {home}({home_user} Elo={home_elo:.0f} P={home_power:.1f}) "
             f"→ spread {fmt_spread(home_spread)}  O/U {ou_line}"
@@ -894,6 +941,7 @@ async def _run_autograde(bot) -> None:
                 total_paid = 0
 
                 with _db_con() as con:
+                    con.execute("BEGIN IMMEDIATE")
                     pending = con.execute(
                         "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
                         "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
@@ -995,14 +1043,14 @@ async def _run_autograde(bot) -> None:
                         "total_paid": total_paid,
                     })
         except Exception as e:
-            print(f"[AUTO-GRADE] Error: {e}")
+            log.warning(f"[AUTO-GRADE] Error: {e}")
         return results
 
     loop = asyncio.get_running_loop()
     results = await loop.run_in_executor(None, _grade_sync)
 
     for r in results:
-        print(
+        log.info(
             f"[AUTO-GRADE] Week {r['week']} — Settled {r['settled']} | "
             f"W{r['wins']} L{r['losses']} P{r['pushes']} | Paid ${r['total_paid']:,}"
         )
@@ -1063,27 +1111,32 @@ class BetSlipModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
 
-        balance = _get_balance(interaction.user.id)
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Minimum bet is **${MIN_BET}**.", ephemeral=True)
-        if amt > balance:
+
+        # Atomic balance check + debit inside single transaction
+        try:
+            with _db_con() as con:
+                con.execute("BEGIN IMMEDIATE")
+                new_bal = flow_wallet.update_balance_sync(
+                    interaction.user.id, -amt, source="TSL_BET", con=con,
+                )
+                safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
+                con.execute(
+                    "INSERT INTO bets_table "
+                    "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (int(interaction.user.id), int(self.bet_week), self.matchup_key,
+                     self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
+                )
+                con.commit()
+        except flow_wallet.InsufficientFundsError:
+            balance = _get_balance(interaction.user.id)
             return await interaction.response.send_message(
                 f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True
             )
 
-        with _db_con() as con:
-            _update_balance(interaction.user.id, -amt, con)
-            safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
-            con.execute(
-                "INSERT INTO bets_table "
-                "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (int(interaction.user.id), int(self.bet_week), self.matchup_key,
-                 self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
-            )
-
         profit  = _payout_calc(amt, self.odds) - amt
-        new_bal = balance - amt
 
         embed = discord.Embed(title="✅ Bet Confirmed", color=TSL_GOLD)
         embed.add_field(name="Pick",    value=f"**{self.team}**",          inline=True)
@@ -1117,23 +1170,29 @@ class ParlayWagerModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
 
-        balance = _get_balance(interaction.user.id)
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
-        if amt > balance:
+
+        # Atomic balance check + debit inside single transaction
+        parlay_id = str(uuid.uuid4())[:8].upper()
+        try:
+            with _db_con() as con:
+                con.execute("BEGIN IMMEDIATE")
+                flow_wallet.update_balance_sync(
+                    interaction.user.id, -amt, source="TSL_BET", con=con,
+                )
+                con.execute(
+                    "INSERT INTO parlays_table "
+                    "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
+                    (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
+                     json.dumps(self.legs), int(self.combined_odds), int(amt))
+                )
+                con.commit()
+        except flow_wallet.InsufficientFundsError:
+            balance = _get_balance(interaction.user.id)
             return await interaction.response.send_message(
                 f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
-            )
-
-        parlay_id = str(uuid.uuid4())[:8].upper()
-        with _db_con() as con:
-            _update_balance(interaction.user.id, -amt, con)
-            con.execute(
-                "INSERT INTO parlays_table "
-                "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
-                (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
-                 json.dumps(self.legs), int(self.combined_odds), int(amt))
             )
 
         potential = _payout_calc(amt, self.combined_odds) - amt
@@ -1175,28 +1234,34 @@ class PropBetModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
 
-        balance = _get_balance(interaction.user.id)
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
-        if amt > balance:
+
+        # Atomic: verify prop open + balance check + debit in single transaction
+        try:
+            with _db_con() as con:
+                con.execute("BEGIN IMMEDIATE")
+                prop = con.execute(
+                    "SELECT status FROM prop_bets WHERE prop_id=?", (self.prop_id,)
+                ).fetchone()
+                if not prop or prop[0] != 'Open':
+                    con.rollback()
+                    return await interaction.response.send_message(
+                        "❌ This prop bet is no longer open.", ephemeral=True
+                    )
+                new_bal = flow_wallet.update_balance_sync(
+                    interaction.user.id, -amt, source="TSL_BET", con=con,
+                )
+                con.execute(
+                    "INSERT INTO prop_wagers (prop_id, discord_id, pick, wager_amount, odds) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (self.prop_id, int(interaction.user.id), self.pick, int(amt), int(self.odds))
+                )
+                con.commit()
+        except flow_wallet.InsufficientFundsError:
+            balance = _get_balance(interaction.user.id)
             return await interaction.response.send_message(
                 f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
-            )
-
-        # Verify prop is still open
-        with _db_con() as con:
-            prop = con.execute(
-                "SELECT status FROM prop_bets WHERE prop_id=?", (self.prop_id,)
-            ).fetchone()
-            if not prop or prop[0] != 'Open':
-                return await interaction.response.send_message(
-                    "❌ This prop bet is no longer open.", ephemeral=True
-                )
-            _update_balance(interaction.user.id, -amt, con)
-            con.execute(
-                "INSERT INTO prop_wagers (prop_id, discord_id, pick, wager_amount, odds) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (self.prop_id, int(interaction.user.id), self.pick, int(amt), int(self.odds))
             )
 
         profit = _payout_calc(amt, self.odds) - amt
@@ -1206,7 +1271,7 @@ class PropBetModal(discord.ui.Modal):
         embed.add_field(name="Odds",    value=_american_to_str(self.odds), inline=True)
         embed.add_field(name="Risk",    value=f"**${amt:,}**",       inline=True)
         embed.add_field(name="To Win",  value=f"**${profit:,}**",    inline=True)
-        embed.add_field(name="Balance", value=f"${balance - amt:,}", inline=True)
+        embed.add_field(name="Balance", value=f"${new_bal:,}",       inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1946,7 +2011,7 @@ class SportsbookCog(commands.Cog):
                 "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
                 (week,)
             ).fetchall()
-            print(f"[GRADE] {len(pending)} ungraded bets for week {week}")
+            log.debug(f"[GRADE] {len(pending)} ungraded bets for week {week}")
 
             for b in pending:
                 bid, uid, matchup, btype, amt, odds, pick, line = b
@@ -1961,7 +2026,7 @@ class SportsbookCog(commands.Cog):
                 res = _grade_single_bet(btype, pick, line_val,
                                         gd["home"], gd["away"],
                                         gd["home_score"], gd["away_score"])
-                print(f"[GRADE] bid={bid} {btype} pick='{pick}' → {res}")
+                log.debug(f"[GRADE] bid={bid} {btype} pick='{pick}' → {res}")
                 if res == "Pending":
                     continue
                 if res == "Won":

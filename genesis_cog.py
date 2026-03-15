@@ -366,14 +366,14 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
         else:
             favored_team = team_b_name
             disadvantaged_team = team_a_name
+        from echo_loader import get_persona
         prompt = (
-            f"You are ATLAS, the foul-mouthed commissioner of TSL. "
             f"Give a 2-sentence ruthless, sharp trade verdict. No fluff. Refer to yourself as ATLAS in third person.\n\n"
             f"TRADE DETAILS:\n"
             f"• {team_a_name} SENDS AWAY these players/picks (valued at {result.side_a_value:,} pts):\n"
-            f"{''.join(result.breakdown_a[:15])}\n"
+            f"{chr(10).join(result.breakdown_a[:15])}\n"
             f"• {team_b_name} SENDS AWAY these players/picks (valued at {result.side_b_value:,} pts):\n"
-            f"{''.join(result.breakdown_b[:15])}\n\n"
+            f"{chr(10).join(result.breakdown_b[:15])}\n\n"
             f"VERDICT: {favored_team} wins this trade — they send away less value "
             f"and receive better assets from {disadvantaged_team}. "
             f"Gap: {result.delta_pct:.1f}% | Band: {result.band}\n"
@@ -384,7 +384,11 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
             None,
             lambda: client.models.generate_content(
                 model="gemini-2.0-flash",
-                config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=120),
+                config=types.GenerateContentConfig(
+                    system_instruction=get_persona("analytical"),
+                    temperature=0.7,
+                    max_output_tokens=120,
+                ),
                 contents=prompt,
             )
         )
@@ -1418,6 +1422,12 @@ class TradeActionView(discord.ui.View):
         if not trade:
             return await interaction.response.send_message("❌ Trade not found.", ephemeral=True)
 
+        # Guard against double-approve/reject (status already resolved)
+        if trade.get("status") in ("approved", "rejected"):
+            return await interaction.response.send_message(
+                f"⚠️ This trade has already been **{trade['status']}**.", ephemeral=True
+            )
+
         # ── FIX: Defer immediately — buys 15 min instead of 3-second timeout.
         # Without this, the trade eval + image render below exceeds Discord's
         # 3-second interaction deadline → 404 Unknown Interaction on every
@@ -1608,8 +1618,15 @@ class TradeActionView(discord.ui.View):
         team_a_id = trade["team_a_id"]
         team_b_id = trade["team_b_id"]
 
-        players_a, picks_a, _, _ = _resolve_assets(trade["players_a_raw"], trade["picks_a_raw"], team_a_id)
-        players_b, picks_b, _, _ = _resolve_assets(trade["players_b_raw"], trade["picks_b_raw"], team_b_id)
+        # Prefer stored asset data; fall back to re-resolving from raw strings
+        players_a = trade.get("players_a_data") or []
+        picks_a   = trade.get("picks_a_data") or []
+        players_b = trade.get("players_b_data") or []
+        picks_b   = trade.get("picks_b_data") or []
+        if not players_a and not picks_a:
+            players_a, picks_a, _, _ = _resolve_assets(trade.get("players_a_raw", ""), trade.get("picks_a_raw", ""), team_a_id)
+        if not players_b and not picks_b:
+            players_b, picks_b, _, _ = _resolve_assets(trade.get("players_b_raw", ""), trade.get("picks_b_raw", ""), team_b_id)
 
         side_a = te.TradeSide(players=players_a, picks=picks_a, team_id=team_a_id)
         side_b = te.TradeSide(players=players_b, picks=picks_b, team_id=team_b_id)

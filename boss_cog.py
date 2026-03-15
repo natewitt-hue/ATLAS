@@ -21,6 +21,7 @@ No logic is duplicated — boss_cog is a pure UI layer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -29,6 +30,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import data_manager as dm
+import roster
 
 # Ability engine — optional
 try:
@@ -97,7 +99,6 @@ async def _resolve_member(
 
     # 2. Roster lookup (nickname, db_username, discord_username)
     try:
-        import roster
         text_lower = text.lower()
         for entry in roster.get_all():
             if (
@@ -170,7 +171,6 @@ def _home_embed(interaction: discord.Interaction) -> discord.Embed:
     except Exception:
         pass
     try:
-        import roster
         count = len(roster.get_all())
         embed.add_field(name="Owners", value=str(count), inline=True)
     except Exception:
@@ -244,6 +244,15 @@ class BossHubView(discord.ui.View):
             embed=_panel_embed("\u2696\ufe0f Compliance Admin", "Cases, force requests, and position changes."),
             view=CompliancePanelView(self.bot),
         )
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if hasattr(self, "message") and self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1292,7 +1301,6 @@ class RosterPanelView(discord.ui.View):
 
     @discord.ui.button(label="View Roster", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
     async def view_roster(self, interaction: discord.Interaction, button: discord.ui.Button):
-        import roster
         all_teams = roster.get_all_teams()
         afc_lines, nfc_lines = [], []
         unassigned = []
@@ -1899,7 +1907,6 @@ class OrphanTeamSelectView(discord.ui.View):
     """Pick a team (AFC/NFC selects), then set orphan status via buttons."""
     def __init__(self):
         super().__init__(timeout=120)
-        import roster
         teams = roster.get_all_teams()
         afc = [t for t in teams if t["conference"] == "AFC"]
         nfc = [t for t in teams if t["conference"] == "NFC"]
@@ -1999,7 +2006,6 @@ class AssignMemberSelectView(discord.ui.View):
 
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member to assign...")
     async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        import roster
         member = select.values[0]
         embed = discord.Embed(
             title="Team Assignment",
@@ -2016,14 +2022,13 @@ class UnassignMemberSelectView(discord.ui.View):
 
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a member to unassign...")
     async def member_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        import roster
         member = select.values[0]
         entry = roster.get_entry_by_id(member.id)
         if not entry:
             return await interaction.response.send_message(
                 f"❌ **{member.display_name}** has no team assignment.", ephemeral=True,
             )
-        success = roster.unassign(member.id)
+        success = await asyncio.get_running_loop().run_in_executor(None, roster.unassign, member.id)
         if success:
             embed = discord.Embed(
                 title="Team Assignment Removed",

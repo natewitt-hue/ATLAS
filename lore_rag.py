@@ -3,6 +3,7 @@ import os
 import json
 import argparse
 import pickle
+import threading
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -19,6 +20,7 @@ MUST_INDEX_KEYWORDS = ["trade", "beef", "drama", "witt", "diddy", "cheese", "com
 _model = None
 _index = None
 _metadata = None
+_index_lock = threading.Lock()
 
 
 def _load_model():
@@ -179,31 +181,32 @@ def add_single_message(author, content):
     if not os.path.exists(INDEX_FILE) or not os.path.exists(META_FILE):
         return
 
-    from datetime import datetime
-    timestamp      = datetime.now().strftime("%Y-%m-%d")
-    formatted_text = f"[{timestamp}] {author}: {content}"
+    with _index_lock:
+        from datetime import datetime
+        timestamp      = datetime.now().strftime("%Y-%m-%d")
+        formatted_text = f"[{timestamp}] {author}: {content}"
 
-    # 1. Load existing data
-    model = _load_model()
-    index = faiss.read_index(INDEX_FILE)
-    with open(META_FILE, "rb") as f:
-        metadata = pickle.load(f)
+        # 1. Load existing data
+        model = _load_model()
+        index = faiss.read_index(INDEX_FILE)
+        with open(META_FILE, "rb") as f:
+            metadata = pickle.load(f)
 
-    # 2. Embed the new message
-    new_vector = model.encode([formatted_text], convert_to_numpy=True)
+        # 2. Embed the new message
+        new_vector = model.encode([formatted_text], convert_to_numpy=True)
 
-    # 3. Update index and metadata
-    index.add(new_vector)
-    metadata.append({
-        "author":         author,
-        "timestamp":      timestamp,
-        "formatted_text": formatted_text,
-    })
+        # 3. Update index and metadata
+        index.add(new_vector)
+        metadata.append({
+            "author":         author,
+            "timestamp":      timestamp,
+            "formatted_text": formatted_text,
+        })
 
-    # 4. Save back to disk
-    faiss.write_index(index, INDEX_FILE)
-    with open(META_FILE, "wb") as f:
-        pickle.dump(metadata, f)
+        # 4. Save back to disk
+        faiss.write_index(index, INDEX_FILE)
+        with open(META_FILE, "wb") as f:
+            pickle.dump(metadata, f)
 
     # 5. Clear global cache so next query reloads fresh data
     global _index, _metadata

@@ -112,6 +112,7 @@ import asyncio
 import glob
 import os
 import re
+import time
 import traceback
 import discord
 from discord import app_commands
@@ -162,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.1.0"  # Bump with every push
+ATLAS_VERSION = "2.2.0"  # Bump with every push
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
@@ -269,8 +270,10 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.followup.send(
                 "ATLAS encountered an error processing this command.", ephemeral=True
             )
-    except Exception:
+    except discord.NotFound:
         pass  # interaction fully expired — nothing we can do
+    except discord.HTTPException as exc:
+        print(f"[CommandError] Failed to send error response for /{cmd_name}: {exc}")
 
 # ── ATLAS Persona Call ──────────────────────────────────────────────────────
 
@@ -418,7 +421,6 @@ async def on_ready():
         return
     _startup_done = True  # Set BEFORE async work to prevent concurrent on_ready races
 
-    import time
     _bot_start_time = time.time()
 
     # Set presence immediately so the bot shows online during data load
@@ -446,7 +448,8 @@ async def on_ready():
             {"discord_id": m.id, "username": m.name, "display_name": m.display_name}
             for m in human_members
         ]
-        result = member_db.discover_guild_members(member_list)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, member_db.discover_guild_members, member_list)
         print(f"   Registry: {result['known']} known, {result['new']} new, {result['updated']} display names updated")
 
     # Restore persistent hub views from ui_state table
@@ -539,8 +542,6 @@ async def atlas_clearsync(interaction: discord.Interaction):
 
 @atlas_group.command(name="status", description="Show ATLAS system status, uptime, and data freshness.")
 async def atlas_status(interaction: discord.Interaction):
-    import time
-
     uptime_sec = int(time.time() - _bot_start_time) if _bot_start_time else 0
     hours, remainder = divmod(uptime_sec, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -663,7 +664,7 @@ async def _rebuilddb_impl(interaction: discord.Interaction):
     loop = asyncio.get_running_loop()
     players = dm.get_players() if hasattr(dm, 'get_players') else None
     abilities = dm.get_player_abilities() if hasattr(dm, 'get_player_abilities') else None
-    if players and abilities:
+    if players is not None and abilities is not None:
         db_result = await loop.run_in_executor(
             None,
             lambda: db_builder.sync_tsl_db(players=players, abilities=abilities)

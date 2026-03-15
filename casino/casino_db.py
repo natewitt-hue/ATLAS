@@ -14,6 +14,7 @@ import aiosqlite
 import hashlib
 import os
 import random
+import secrets
 import string
 from datetime import datetime, timezone, date
 
@@ -379,6 +380,16 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> int | Non
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            # Re-check inside transaction to prevent TOCTOU double-claim
+            async with db.execute(
+                "SELECT last_claim FROM daily_scratches WHERE discord_id=?",
+                (discord_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            if row and row[0] == today:
+                await db.rollback()
+                return None
+
             # Mark claimed
             await db.execute("""
                 INSERT INTO daily_scratches (discord_id, last_claim) VALUES (?,?)
@@ -427,7 +438,7 @@ def _generate_crash_point() -> tuple[float, str]:
     Uses a seeded hash so the crash point can be revealed after the round
     as proof it wasn't manipulated.
     """
-    seed = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+    seed = secrets.token_urlsafe(16)
     h    = int(hashlib.sha256(seed.encode()).hexdigest(), 16)
     # Map hash to 0.0–1.0
     p    = (h % 10_000_000) / 10_000_000
@@ -585,6 +596,12 @@ async def resolve_challenge(challenge_id: int, winner_id: int, loser_id: int, wa
     Resolve a PvP challenge. Winner gets 1.9x (slight house edge).
     Loser's wager was already deducted. Returns winner payout.
     """
+    # Verify the challenge wager matches the passed wager (symmetric check)
+    challenge = await get_challenge(challenge_id)
+    if challenge and challenge["wager"] != wager:
+        raise ValueError(
+            f"Wager mismatch: challenge has {challenge['wager']} but resolve called with {wager}"
+        )
     payout = int(wager * 1.9)
     now    = datetime.now(timezone.utc).isoformat()
 

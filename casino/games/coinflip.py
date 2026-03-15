@@ -146,20 +146,24 @@ class ChallengeView(discord.ui.View):
                 "❌ This challenge has already been resolved.", ephemeral=True
             )
 
+        # Set resolved BEFORE any await to prevent TOCTOU double-accept
+        self.resolved = True
+        self.stop()
+
         # Deduct opponent's wager
         try:
             await deduct_wager(self.opponent_id, self.wager)
         except Exception as e:
+            self.resolved = False
             return await interaction.response.send_message(
                 f"❌ Insufficient funds: {e}", ephemeral=True
             )
-
-        self.resolved = True
-        self.stop()
         active_challenges.pop(self.challenge_id, None)
 
-        # Flip the coin
-        winner_id = random.choice([self.challenger_id, self.opponent_id])
+        # Flip the coin — derive winner from the flip result
+        result_side = random.choice(["Heads 🌕", "Tails 🌑"])
+        # Challenger is always "Heads", opponent is always "Tails"
+        winner_id = self.challenger_id if "Heads" in result_side else self.opponent_id
         loser_id  = self.opponent_id if winner_id == self.challenger_id else self.challenger_id
 
         payout = await resolve_challenge(
@@ -171,7 +175,6 @@ class ChallengeView(discord.ui.View):
 
         winner_mention = f"<@{winner_id}>"
         loser_mention  = f"<@{loser_id}>"
-        result_side    = random.choice(["Heads 🌕", "Tails 🌑"])
         profit         = payout - self.wager
 
         embed = discord.Embed(
