@@ -2109,6 +2109,16 @@ Extract every piece of game state from the Madden HUD:
     "CAR 21• x 24 GB" → dot by CAR's 21 → CAR = OFFENSE
 
   Both signals should agree. If they conflict, trust Signal A (field position) over Signal B (dot).
+
+  SIGNAL C — QB Name Identification (strongest signal):
+    Look for the QUARTERBACK's last name displayed on the field near the line of scrimmage.
+    The QB name is usually shown below/near the player behind the offensive line.
+    Cross-reference with the QB ROSTER TABLE appended at the end of this prompt to confirm
+    which team is on OFFENSE. The QB's team = OFFENSE.
+    If you can read a QB name, state: "QB identified: [NAME] → [TEAM] = OFFENSE"
+    If Signal C conflicts with A or B, TRUST SIGNAL C — it is the most reliable.
+    If the QB name is not visible or unreadable, fall back to Signals A and B.
+
   State explicitly which team is offense and which is defense, and why.
 
   Then state:
@@ -2235,6 +2245,7 @@ USE THIS EXACT FORMAT — copy the structure precisely:
 Quarter: [X] | Clock: [X:XX]
 Score: [AWAY TEAM] [X] – [HOME TEAM] [X]
 Possession: [TEAM] on offense | [TEAM] on defense
+QB Identified: [NAME] → [TEAM] (or "not visible" if unreadable)
 Ball on: [field position] | 4th & [distance] (effectively 4th & [X] yards if 4th & Goal)
 Offense is [TRAILING by X / LEADING by X / TIED]
 
@@ -2267,6 +2278,53 @@ Basis: [Rules-based / Strategic Override / Both]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _build_qb_lookup() -> str:
+    """Build a QB last-name → team abbreviation lookup table from live roster data."""
+    players = dm.get_players()
+    if not players:
+        return ""
+
+    # Build teamName → abbrName map from df_teams
+    abbr_map = {}
+    if not dm.df_teams.empty:
+        for _, row in dm.df_teams.iterrows():
+            nick = row.get("nickName") or row.get("displayName") or ""
+            abbr = row.get("abbrName") or ""
+            if nick and abbr:
+                abbr_map[nick.strip().lower()] = abbr.strip()
+
+    # Collect all QBs (not free agents)
+    qbs = []
+    for p in players:
+        if (p.get("pos") or "").upper() != "QB":
+            continue
+        team = (p.get("teamName") or "").strip()
+        if not team or team.lower() == "free agent":
+            continue
+        last = (p.get("lastName") or "").strip().upper()
+        first = (p.get("firstName") or "").strip()
+        if not last:
+            continue
+        abbr = abbr_map.get(team.lower(), "")
+        qbs.append({"last": last, "first": first, "abbr": abbr, "team": team})
+
+    if not qbs:
+        return ""
+
+    # Handle duplicate last names — add first initial
+    from collections import Counter
+    last_counts = Counter(q["last"] for q in qbs)
+    lines = []
+    for q in sorted(qbs, key=lambda x: x["last"]):
+        if last_counts[q["last"]] > 1 and q["first"]:
+            label = f"{q['first'][0]}. {q['last']}"
+        else:
+            label = q["last"]
+        lines.append(f"    {label} → {q['abbr']} ({q['team']})")
+
+    return "\n".join(lines)
+
+
 def _fetch_image_bytes(url: str) -> bytes:
     """Download an image from a Discord CDN URL."""
     resp = requests.get(url, timeout=15)
@@ -2288,11 +2346,22 @@ def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
     mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
     mime_type = mime_map.get(ext, "image/jpeg")
 
+    # Build dynamic prompt with QB roster table for team identification
+    prompt = SYSTEM_PROMPT
+    qb_table = _build_qb_lookup()
+    if qb_table:
+        prompt += (
+            "\n\n══════════════════════════════════════════════════════\n"
+            "QB ROSTER TABLE — use for Signal C team identification\n"
+            "══════════════════════════════════════════════════════\n"
+            f"{qb_table}"
+        )
+
     response = client.models.generate_content(
         model="gemini-2.0-flash",
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            types.Part.from_text(text=SYSTEM_PROMPT),
+            types.Part.from_text(text=prompt),
         ],
     )
     return response.text
