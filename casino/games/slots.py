@@ -111,7 +111,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
-            f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
+            f"❌ Wager must be between **$1** and **${max_bet:,}**.",
             ephemeral=True
         )
 
@@ -196,11 +196,11 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         color = discord.Color.green() if payout > 0 else discord.Color.red(),
     )
     embed3.add_field(name="Result", value=result_msg, inline=False)
-    embed3.add_field(name="Wager",   value=f"${wager:,} Bucks",              inline=True)
-    embed3.add_field(name="Payout",  value=f"${payout:,} Bucks",             inline=True)
-    embed3.add_field(name="P&L",     value=f"{profit_str} Bucks",           inline=True)
+    embed3.add_field(name="Wager",   value=f"${wager:,}",              inline=True)
+    embed3.add_field(name="Payout",  value=f"${payout:,}",             inline=True)
+    embed3.add_field(name="P&L",     value=f"{profit_str}",           inline=True)
     embed3.set_image(url="attachment://slots.png")
-    embed3.set_footer(text=f"New Balance: ${result['new_balance']:,} TSL Bucks")
+    embed3.set_footer(text=f"New Balance: ${result['new_balance']:,}")
 
     replay_view = PlayAgainView(
         user_id=interaction.user.id,
@@ -270,11 +270,11 @@ def _build_scratch_embed(
     elif is_match:
         total = tiles[0] * 3
         color = discord.Color.gold()
-        desc  = f"🏆 **TRIPLE MATCH!** All tiles: **{tiles[0]:,}** × 3 = **+{total:,} TSL Bucks!**"
+        desc  = f"🏆 **TRIPLE MATCH!** All tiles: **{tiles[0]:,}** × 3 = **+{total:,}!**"
     else:
         total = sum(tiles)
         color = discord.Color.green()
-        desc  = f"✅ You won **{total:,} TSL Bucks!**"
+        desc  = f"✅ You won **{total:,}!**"
 
     embed = discord.Embed(
         title       = f"🎟️ TSL Daily Scratch  |  {display_name}",
@@ -331,7 +331,7 @@ async def daily_scratch(interaction: discord.Interaction) -> None:
     file  = discord.File(io.BytesIO(png), filename="scratch.png")
     embed = _build_scratch_embed(interaction.user.display_name, tiles, 0, is_match)
     embed.set_image(url="attachment://scratch.png")
-    embed.set_footer(text=f"Potential win: {total:,} TSL Bucks credited to your account")
+    embed.set_footer(text=f"Potential win: {total:,} credited to your account")
 
     view = ScratchView(uid, tiles, total=total, balance=balance)
     await interaction.followup.send(embed=embed, file=file, view=view)

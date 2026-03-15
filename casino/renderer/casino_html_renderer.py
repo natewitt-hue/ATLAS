@@ -246,15 +246,15 @@ body {
   justify-content: center;
   flex: 1;
 }
-.username-bracket {
+.username-badge {
   font-family: 'JetBrains Mono', monospace;
   font-weight: 800;
-  font-size: 16px;
+  font-size: 15px;
   color: var(--text-primary);
   white-space: nowrap;
-}
-.username-bracket .pipe {
-  color: var(--gold-dim);
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+  padding: 4px 12px;
 }
 
 /* Right badge */
@@ -358,14 +358,13 @@ def _build_header_html(
     """Build the shared card header: icon+title (left), username(s) (center), badge (right)."""
     txn_html = f'<div class="txn-id">TXN #{_esc(txn_id)}</div>' if txn_id else ""
 
-    # Build bracketed player list: | Player1 | Player2 |
+    # Build badge-style player list
     if players:
-        player_parts = "".join(
-            f'<span class="pipe"> | </span>{_esc(p)}'
+        player_badges = " ".join(
+            f'<span class="username-badge">{_esc(p)}</span>'
             for p in players
         )
-        player_parts += '<span class="pipe"> |</span>'
-        players_html = f'<span class="username-bracket">{player_parts}</span>'
+        players_html = player_badges
     else:
         players_html = ""
 
@@ -421,12 +420,12 @@ def _build_data_grid_html(
 
 
 def _build_footer_html(balance: int) -> str:
-    """Build the centered footer: Balance: $X,XXX TSL Bucks."""
+    """Build the centered footer: Balance: $X,XXX."""
     return f"""
     <div class="footer">
       <div class="footer-balance">
         <span class="label">Balance:</span>
-        <span class="amount"> ${balance:,} TSL Bucks</span>
+        <span class="amount"> ${balance:,}</span>
       </div>
     </div>"""
 
@@ -939,7 +938,7 @@ def _build_crash_html(
     profit_pill = ""
     if cashed_out and payout > wager:
         profit = payout - wager
-        profit_pill = f'<div class="profit-pill">+${profit:,} TSL Bucks</div>'
+        profit_pill = f'<div class="profit-pill">+${profit:,}</div>'
 
     # Recent history pills
     history_html = ""
@@ -1456,7 +1455,6 @@ def _build_scratch_html(
             tiles_html += f"""
             <div class="scratch-tile revealed {glow}">
               <div class="tile-value">${value:,}</div>
-              <div class="tile-label">BUCKS</div>
             </div>"""
         else:
             # Unrevealed tile
@@ -1469,12 +1467,12 @@ def _build_scratch_html(
     if all_revealed and is_match:
         result_html = f"""
         <div class="scratch-result match">
-          \U0001f3c6 TRIPLE MATCH — ${tiles[0]:,} × 3 = +${total:,} TSL Bucks!
+          \U0001f3c6 TRIPLE MATCH — ${tiles[0]:,} × 3 = +${total:,}!
         </div>"""
     elif all_revealed:
         result_html = f"""
         <div class="scratch-result normal">
-          \u2705 You won ${total:,} TSL Bucks!
+          \u2705 You won ${total:,}!
         </div>"""
     else:
         remaining = 3 - revealed

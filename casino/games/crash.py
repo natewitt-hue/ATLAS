@@ -299,7 +299,7 @@ class CrashView(discord.ui.View):
         profit = payout - player.wager
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** cashed out at **{mult:.2f}x** "
-            f"— **+{profit:,} TSL Bucks!**",
+            f"— **+${profit:,}!**",
             ephemeral=False,
         )
 
@@ -319,7 +319,7 @@ def _build_lobby_embed(round_obj: CrashRound, remaining: int) -> discord.Embed:
         color = discord.Color.from_rgb(212, 175, 55),
     )
     embed.add_field(name="Players", value=str(len(round_obj.players)), inline=True)
-    embed.add_field(name="Total Wagered", value=f"{round_obj.total_wagered:,} Bucks", inline=True)
+    embed.add_field(name="Total Wagered", value=f"${round_obj.total_wagered:,}", inline=True)
     return embed
 
 
@@ -330,7 +330,7 @@ def _build_running_embed(round_obj: CrashRound) -> discord.Embed:
     )
     embed.add_field(name="Multiplier",    value=f"**{round_obj.current_mult:.2f}x**", inline=True)
     embed.add_field(name="Still In",      value=str(round_obj.players_in),            inline=True)
-    embed.add_field(name="Total Wagered", value=f"{round_obj.total_wagered:,} Bucks", inline=True)
+    embed.add_field(name="Total Wagered", value=f"${round_obj.total_wagered:,}", inline=True)
     embed.add_field(name="Players",       value=_players_list(round_obj),             inline=False)
     return embed
 
@@ -356,7 +356,7 @@ def _build_crash_embed(round_obj: CrashRound) -> discord.Embed:
 
     if busted:
         bust_lines = "\n".join(
-            f"❌ **{p.display_name}** — -{p.wager:,} Bucks"
+            f"❌ **{p.display_name}** — -${p.wager:,}"
             for p in busted
         )
         embed.add_field(name="💥 Busted", value=bust_lines[:1020], inline=False)
@@ -372,7 +372,7 @@ def _players_list(round_obj: CrashRound) -> str:
         if p.cashed_out:
             lines.append(f"✅ {p.display_name} ({p.cashout_mult:.2f}x)")
         else:
-            lines.append(f"🎲 {p.display_name} ({p.wager:,} Bucks)")
+            lines.append(f"🎲 {p.display_name} (${p.wager:,})")
     return "\n".join(lines[:15])   # cap at 15 to avoid embed overflow
 
 
@@ -402,7 +402,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
     max_bet = await get_max_bet()
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
-            f"❌ Wager must be between **1** and **{max_bet:,} TSL Bucks**.",
+            f"❌ Wager must be between **$1** and **${max_bet:,}**.",
             ephemeral=True
         )
 
@@ -433,7 +433,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
     await interaction.followup.send(
-        f"✅ You're in for **{wager:,} TSL Bucks**. Good luck! 🚀",
+        f"✅ You're in for **${wager:,}**. Good luck! 🚀",
         ephemeral=True
     )
 
