@@ -47,7 +47,6 @@ _CSV_EXPORTS = [
     ("/export/games",            "games_raw"),
     ("/export/offensive",        "offensive_stats"),
     ("/export/defensive",        "defensive_stats"),
-    ("/export/teamStats",        "team_stats"),
     ("/export/standings",        "standings"),
     ("/export/teams",            "teams"),
     ("/export/trades",           "trades"),
@@ -88,6 +87,9 @@ def _load_rows_into_table(conn: sqlite3.Connection, table_name: str,
                           rows: list[dict], transform=None) -> int:
     """Drop + recreate a table from a list of row dicts. Returns row count."""
     if not rows:
+        # Create an empty table so downstream queries don't crash with
+        # "no such table" when an API fetch times out / returns nothing.
+        conn.execute(f"CREATE TABLE IF NOT EXISTS [{table_name}] (placeholder TEXT)")
         return 0
     if transform:
         rows = [transform(r) for r in rows if r is not None]
@@ -303,10 +305,10 @@ def sync_tsl_db(
         all_data: dict[str, list[dict]] = {}
         for endpoint, table_name in _CSV_EXPORTS:
             # Use pre-loaded data if caller provided it — skip the API call
-            if endpoint == "/export/players" and players is not None:
+            if endpoint == "/export/players" and players:
                 all_data[table_name] = players
                 continue
-            if endpoint == "/export/playerAbilities" and abilities is not None:
+            if endpoint == "/export/playerAbilities" and abilities:
                 all_data[table_name] = abilities
                 continue
 
@@ -321,7 +323,7 @@ def sync_tsl_db(
         result["tables"]["games"] = n_games
 
         # ── Load all other tables straight ────────────────────────────────────
-        for table_name in ["offensive_stats", "defensive_stats", "team_stats",
+        for table_name in ["offensive_stats", "defensive_stats",
                            "standings", "teams", "trades", "players", "player_abilities"]:
             rows = all_data.get(table_name, [])
             n = _load_rows_into_table(conn, table_name, rows)

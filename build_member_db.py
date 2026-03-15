@@ -1103,6 +1103,16 @@ def build_member_table(db_path: str = DB_PATH):
             )
         """)
 
+        # Clear stale rows where a discord_id moved to a new username.
+        # Without this, ON CONFLICT(discord_username) can try to set a discord_id
+        # that another row already owns, violating the UNIQUE constraint.
+        for m in MEMBERS:
+            if m.get("discord_id") and m.get("discord_username"):
+                cur.execute(
+                    "DELETE FROM tsl_members WHERE discord_id = ? AND discord_username != ?",
+                    (m["discord_id"], m["discord_username"]),
+                )
+
         # Upsert each member: insert new rows, update existing ones.
         # Key: team uses COALESCE(tsl_members.team, excluded.team) so runtime
         # assignments (set via /commish assign) are never overwritten by seed data.
@@ -1366,37 +1376,39 @@ def discover_guild_members(members: list[dict], db_path: str = DB_PATH) -> dict:
     Returns:
         {"known": int, "new": int, "updated": int, "new_members": list[dict]}
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
 
-    known_ids = {
-        row["discord_id"]
-        for row in conn.execute("SELECT discord_id FROM tsl_members WHERE discord_id IS NOT NULL").fetchall()
-    }
+    try:
+        known_ids = {
+            row["discord_id"]
+            for row in conn.execute("SELECT discord_id FROM tsl_members WHERE discord_id IS NOT NULL").fetchall()
+        }
 
-    new_members = []
-    updated = 0
-    known = 0
+        new_members = []
+        updated = 0
+        known = 0
 
-    for m in members:
-        did = str(m["discord_id"])
-        if did in known_ids:
-            known += 1
-            # Update display_name and discord_username to stay current
-            cur = conn.execute("""
-                UPDATE tsl_members
-                SET display_name = ?, discord_username = ?
-                WHERE discord_id = ?
-                  AND (display_name IS NOT ? OR discord_username IS NOT ?)
-            """, (m["display_name"], m["username"], did,
-                  m["display_name"], m["username"]))
-            if cur.rowcount > 0:
-                updated += 1
-        else:
-            new_members.append(m)
+        for m in members:
+            did = str(m["discord_id"])
+            if did in known_ids:
+                known += 1
+                # Update display_name and discord_username to stay current
+                cur = conn.execute("""
+                    UPDATE tsl_members
+                    SET display_name = ?, discord_username = ?
+                    WHERE discord_id = ?
+                      AND (display_name IS NOT ? OR discord_username IS NOT ?)
+                """, (m["display_name"], m["username"], did,
+                      m["display_name"], m["username"]))
+                if cur.rowcount > 0:
+                    updated += 1
+            else:
+                new_members.append(m)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
 
     if new_members:
         print(f"\n⚠️  {len(new_members)} guild member(s) NOT in tsl_members registry:")
