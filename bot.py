@@ -446,7 +446,7 @@ async def on_ready():
             {"discord_id": m.id, "username": m.name, "display_name": m.display_name}
             for m in human_members
         ]
-        result = build_member_db.discover_guild_members(member_list)
+        result = member_db.discover_guild_members(member_list)
         print(f"   Registry: {result['known']} known, {result['new']} new, {result['updated']} display names updated")
 
     # Restore persistent hub views from ui_state table
@@ -713,5 +713,17 @@ if __name__ == "__main__":
         print("⚠️  WARNING: GEMINI_API_KEY is not set — /ask and ATLAS AI responses will fail.")
 
     export_code_snapshot()
+
+    # Clean up Playwright browser on shutdown to avoid pipe errors
+    _orig_close = bot.close
+    async def _graceful_close():
+        try:
+            from card_renderer import close_browser
+            await close_browser()
+        except Exception:
+            pass
+        await _orig_close()
+    bot.close = _graceful_close
+
     bot.run(DISCORD_TOKEN)
 
