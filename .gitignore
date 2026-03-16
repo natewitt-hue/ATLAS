@@ -17,3 +17,4 @@ node_modules/
 SCAFFOLD_README_bak.md
 faiss_lore_db/
 assets/
+.worktrees/
