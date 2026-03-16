@@ -2059,9 +2059,18 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         """
         now = datetime.now(timezone.utc).isoformat()
         counts = {"won": 0, "lost": 0, "voided": 0}
+        total_payout = 0
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
+
+            # Fetch market title for event emission
+            async with db.execute(
+                "SELECT question FROM prediction_markets WHERE market_id = ?",
+                (market_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                market_title = row[0] if row else market_id
 
             async with db.execute(
                 "SELECT id, user_id, side, quantity, cost_bucks, potential_payout "
@@ -2096,6 +2105,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         (now, cid)
                     )
                     counts["won"] += 1
+                    total_payout += payout
                 else:
                     await db.execute(
                         "UPDATE prediction_contracts "
@@ -2114,11 +2124,12 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         log.info(f"_resolve({market_id}, {result}, by={resolved_by}): {counts}")
 
+        guild = self.bot.guilds[0] if self.bot.guilds else None
+        guild_id = guild.id if guild else None
+
         # Post ledger slips for resolution payouts/refunds
         try:
             from ledger_poster import post_transaction
-            guild = self.bot.guilds[0] if self.bot.guilds else None
-            guild_id = guild.id if guild else None
             if guild_id:
                 for cid, user_id, side, qty, cost, payout in contracts:
                     if result == "VOID":
@@ -2139,6 +2150,20 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         )
         except Exception:
             pass
+
+        # Emit FLOW event for live engagement system
+        try:
+            from flow_events import PredictionEvent, flow_bus
+            pred_event = PredictionEvent(
+                guild_id=guild_id,
+                market_title=market_title,
+                resolution=result,
+                total_payout=total_payout,
+                winners=counts["won"],
+            )
+            await flow_bus.emit("prediction_result", pred_event)
+        except Exception:
+            log.exception("Failed to emit prediction FLOW event")
 
         return counts
 
