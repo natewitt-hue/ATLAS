@@ -134,8 +134,18 @@ class OddsAPIClient:
                             return None
                         if resp.status == 429:
                             if attempt < self._MAX_RETRIES:
-                                retry_after = resp.headers.get("Retry-After")
-                                wait = int(retry_after) if retry_after else 3 * (2 ** attempt)
+                                # Retry-After may be seconds or a large epoch timestamp
+                                raw_retry = resp.headers.get("Retry-After")
+                                wait = 3 * (2 ** attempt)  # default backoff
+                                if raw_retry:
+                                    try:
+                                        val = int(raw_retry)
+                                        # If > 1000 it's likely an epoch timestamp, not seconds
+                                        wait = max(1, val - int(loop.time())) if val > 1000 else max(1, val)
+                                    except ValueError:
+                                        pass
+                                # Cap retry wait to 30s — don't block the event loop forever
+                                wait = min(wait, 30)
                                 log.warning(f"TheRundown API: rate limited (429). Retrying in {wait}s...")
                                 await asyncio.sleep(wait)
                                 continue
