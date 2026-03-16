@@ -245,6 +245,13 @@ class BossHubView(discord.ui.View):
             view=CompliancePanelView(self.bot),
         )
 
+    @discord.ui.button(label="FLOW Live", emoji="📡", style=discord.ButtonStyle.secondary, row=1)
+    async def flow_live(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=_panel_embed("📡 FLOW Live Admin", "Pulse dashboard, highlights, and session management."),
+            view=FlowLivePanelView(self.bot),
+        )
+
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
@@ -2109,6 +2116,55 @@ class BossPositionDenyModal(discord.ui.Modal, title="Deny Position Change"):
             return await _send_cog_error(interaction, "Sentinel")
         reason = self.reason.value or "No reason provided."
         await cog.positionchangedeny_impl(interaction, self.log_id.value, reason)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FLOW LIVE PANEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class FlowLivePanelView(discord.ui.View):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=300)
+        self.bot = bot
+
+    @discord.ui.button(label="Force Pulse Refresh", emoji="🔄", style=discord.ButtonStyle.success, row=0)
+    async def force_pulse_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        cog = interaction.client.get_cog("FlowLiveCog")
+        if not cog:
+            return await _send_cog_error(interaction, "FLOW Live")
+        await cog._update_pulse_impl(interaction.guild)
+        await interaction.followup.send("✅ Pulse dashboard refreshed.", ephemeral=True)
+
+    @discord.ui.button(label="Test Highlight", emoji="🧪", style=discord.ButtonStyle.primary, row=0)
+    async def test_highlight(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        cog = interaction.client.get_cog("FlowLiveCog")
+        if not cog:
+            return await _send_cog_error(interaction, "FLOW Live")
+        try:
+            from setup_cog import get_channel_id
+            ch_id = get_channel_id("flow_live")
+            channel = interaction.guild.get_channel(ch_id) if ch_id else None
+        except ImportError:
+            channel = None
+        if not channel:
+            return await interaction.followup.send("❌ #flow-live channel not configured.", ephemeral=True)
+        await cog._test_highlight_impl(interaction.guild, channel)
+        await interaction.followup.send("✅ Test highlight sent.", ephemeral=True)
+
+    @discord.ui.button(label="Session Dump", emoji="📋", style=discord.ButtonStyle.secondary, row=0)
+    async def session_dump(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        cog = interaction.client.get_cog("FlowLiveCog")
+        if not cog:
+            return await _send_cog_error(interaction, "FLOW Live")
+        result = await cog._session_dump_impl(interaction.guild)
+        await interaction.followup.send(result, ephemeral=True)
+
+    @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=_home_embed(interaction), view=BossHubView(self.bot))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

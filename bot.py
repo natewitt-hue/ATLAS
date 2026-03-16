@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.8.2"  # Bump with every push
+ATLAS_VERSION = "2.9.0"  # Bump with every push
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
@@ -203,6 +203,7 @@ async def setup_hook():
         "codex_cog",          # ATLAS Codex — historical AI (/ask, /h2h)
         "polymarket_cog",     # ATLAS Flow — Polymarket prediction markets
         "economy_cog",        # ATLAS Economy — money management & stipends
+        "flow_live_cog",      # ATLAS Flow — live engagement system
         "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
         # "commish_cog",      # RETIRED — replaced by boss_cog visual hub
         "boss_cog",           # ATLAS Boss — visual commissioner control room
