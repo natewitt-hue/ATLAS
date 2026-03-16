@@ -31,6 +31,40 @@ log = logging.getLogger(__name__)
 
 SESSION_IDLE_TIMEOUT = 300  # 5 minutes
 
+EVENTS_CAP = 20  # Max events stored per session
+
+def _event_to_dict(event) -> dict:
+    """Serialize a GameResultEvent to a JSON-safe dict."""
+    safe_extra = {k: v for k, v in event.extra.items()
+                  if isinstance(v, (str, int, float, bool, type(None)))}
+    return {
+        "discord_id": event.discord_id,
+        "guild_id": event.guild_id,
+        "game_type": event.game_type,
+        "wager": event.wager,
+        "outcome": event.outcome,
+        "payout": event.payout,
+        "multiplier": event.multiplier,
+        "new_balance": event.new_balance,
+        "txn_id": event.txn_id,
+        "extra": safe_extra,
+    }
+
+def _dict_to_event(d: dict):
+    """Deserialize a dict back to GameResultEvent (defensive)."""
+    return GameResultEvent(
+        discord_id=d.get("discord_id", 0),
+        guild_id=d.get("guild_id", 0),
+        game_type=d.get("game_type", "unknown"),
+        wager=d.get("wager", 0),
+        outcome=d.get("outcome", "unknown"),
+        payout=d.get("payout", 0),
+        multiplier=d.get("multiplier", 1.0),
+        new_balance=d.get("new_balance", 0),
+        txn_id=d.get("txn_id"),
+        extra=d.get("extra", {}),
+    )
+
 
 @dataclass
 class PlayerSession:
@@ -55,6 +89,8 @@ class PlayerSession:
         self.total_games += 1
         self.games_by_type[event.game_type] += 1
         self.events.append(event)
+        if len(self.events) > EVENTS_CAP:
+            self.events = self.events[-EVENTS_CAP:]
 
         profit = event.net_profit
         self.net_profit += profit
@@ -74,6 +110,46 @@ class PlayerSession:
 
         if self.current_streak > self.best_streak:
             self.best_streak = self.current_streak
+
+    def to_dict(self) -> dict:
+        return {
+            "discord_id": self.discord_id,
+            "guild_id": self.guild_id,
+            "started_at": self.started_at,
+            "last_activity": self.last_activity,
+            "total_games": self.total_games,
+            "wins": self.wins,
+            "losses": self.losses,
+            "pushes": self.pushes,
+            "net_profit": self.net_profit,
+            "biggest_win": self.biggest_win,
+            "biggest_loss": self.biggest_loss,
+            "current_streak": self.current_streak,
+            "best_streak": self.best_streak,
+            "games_by_type": dict(self.games_by_type),
+            "events": [_event_to_dict(e) for e in self.events[-EVENTS_CAP:]],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlayerSession":
+        session = cls(
+            discord_id=d["discord_id"],
+            guild_id=d["guild_id"],
+        )
+        session.started_at = d.get("started_at", session.started_at)
+        session.last_activity = d.get("last_activity", session.last_activity)
+        session.total_games = d.get("total_games", 0)
+        session.wins = d.get("wins", 0)
+        session.losses = d.get("losses", 0)
+        session.pushes = d.get("pushes", 0)
+        session.net_profit = d.get("net_profit", 0)
+        session.biggest_win = d.get("biggest_win", 0)
+        session.biggest_loss = d.get("biggest_loss", 0)
+        session.current_streak = d.get("current_streak", 0)
+        session.best_streak = d.get("best_streak", 0)
+        session.games_by_type = defaultdict(int, d.get("games_by_type", {}))
+        session.events = [_dict_to_event(e) for e in d.get("events", [])]
+        return session
 
 
 class SessionTracker:
