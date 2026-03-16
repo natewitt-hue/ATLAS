@@ -1,7 +1,7 @@
 # Flow Live Session Persistence
 
 **Date:** 2026-03-16
-**Status:** Draft
+**Status:** Reviewed
 **Problem:** Bot restarts (multiple times daily) wipe all player session data — streaks, win/loss tallies, and profit tracking reset to zero. Players get false recap cards and the pulse dashboard goes blank.
 
 ---
@@ -49,13 +49,21 @@ CREATE TABLE IF NOT EXISTS flow_live_sessions (
 
 Every scalar field from `PlayerSession` maps 1:1 to a column. `games_by_type` (dict) and `events` (list of event dicts) are JSON-serialized. The composite primary key matches the existing `SessionTracker._active` dictionary key of `(discord_id, guild_id)`.
 
+**Table creation:** An `_ensure_sessions_table()` method (following the existing `_ensure_state_table()` pattern) runs the DDL. Called at the top of `load_persisted()`.
+
+**WAL mode:** All new `sqlite3.connect("flow_economy.db")` calls include `PRAGMA journal_mode=WAL` for defensive correctness, matching `casino_db.py` and `economy_cog.py`.
+
+**Events list cap:** The `events` list is capped at 20 entries (FIFO). The pulse dashboard only uses the last 3 per session for highlights, so no data loss. This keeps the JSON blob small (~6KB worst case) and write latency constant.
+
 ### Changes to SessionTracker
 
 **New method: `_persist(session: PlayerSession)`**
 - Called at the end of every `record()` call
 - Upserts the session row using `INSERT OR REPLACE`
 - Serializes `games_by_type` with `json.dumps()`
-- Serializes `events` list — each event dataclass converted to dict via a `_event_to_dict()` helper
+- Serializes `events` list (capped at 20) — each event dataclass converted to dict via a `_event_to_dict()` helper
+- Uses `sqlite3.connect("flow_economy.db", timeout=10)` to handle lock contention with casino writes
+- Wrapped in try/except `sqlite3.OperationalError` — if DB is locked, the in-memory session is still valid and the next `record()` call will retry the persist. Never crashes the event handler.
 
 **New method: `_delete_persisted(discord_id, guild_id)`**
 - Called when `collect_expired()` removes a session
@@ -64,8 +72,9 @@ Every scalar field from `PlayerSession` maps 1:1 to a column. `games_by_type` (d
 **New method: `load_persisted() -> int`**
 - Called once during `cog_load` (before background tasks start)
 - Reads all rows from `flow_live_sessions`
-- Reconstructs `PlayerSession` objects from each row
-- Deserializes JSON fields back into dicts/lists
+- Reconstructs `PlayerSession` objects from each row via `PlayerSession.from_dict()`
+- Deserializes `games_by_type` as `defaultdict(int, json.loads(...))` to preserve the auto-defaulting behavior
+- Deserializes `events` list via defensive `_dict_to_event()` with `.get()` defaults (tolerates schema drift)
 - Populates `_active` dictionary
 - Returns count of restored sessions (for logging)
 
@@ -88,10 +97,10 @@ Every scalar field from `PlayerSession` maps 1:1 to a column. `games_by_type` (d
 - Looks up or creates session by `(event.discord_id, event.guild_id)`
 - Updates `last_activity`
 - Increments `total_games` by 1
-- Increments `wins` or `losses` based on `event.amount` sign
+- Increments `wins`, `losses`, or `pushes` based on `event.amount` sign (positive=win, negative=loss, zero=push/void)
 - Updates `net_profit += event.amount`
 - Updates `biggest_win` / `biggest_loss`
-- Updates streak counters
+- Updates streak counters (sportsbook and casino results share one streak counter — a "hot streak" is a hot streak regardless of source)
 - Increments `games_by_type["sportsbook"]`
 - Does NOT append to `events` list (sportsbook events have a different shape — keep events list for casino `GameResultEvent` only)
 - Calls `self._persist(session)`
@@ -122,6 +131,9 @@ No special shutdown hook needed. Sessions are persisted on every `record()` call
 
 ```python
 def _event_to_dict(event: GameResultEvent) -> dict:
+    # Filter extra to only JSON-safe primitive values
+    safe_extra = {k: v for k, v in event.extra.items()
+                  if isinstance(v, (str, int, float, bool, type(None)))}
     return {
         "discord_id": event.discord_id,
         "guild_id": event.guild_id,
@@ -132,12 +144,27 @@ def _event_to_dict(event: GameResultEvent) -> dict:
         "multiplier": event.multiplier,
         "new_balance": event.new_balance,
         "txn_id": event.txn_id,
-        "extra": event.extra,
+        "extra": safe_extra,
     }
 
 def _dict_to_event(d: dict) -> GameResultEvent:
-    return GameResultEvent(**d)
+    return GameResultEvent(
+        discord_id=d.get("discord_id", 0),
+        guild_id=d.get("guild_id", 0),
+        game_type=d.get("game_type", "unknown"),
+        wager=d.get("wager", 0),
+        outcome=d.get("outcome", "unknown"),
+        payout=d.get("payout", 0),
+        multiplier=d.get("multiplier", 1.0),
+        new_balance=d.get("new_balance", 0),
+        txn_id=d.get("txn_id"),
+        extra=d.get("extra", {}),
+    )
 ```
+
+### Blocking Considerations
+
+`_persist()` uses sync `sqlite3` from an async event handler, matching the existing pattern in `flow_live_cog.py` (lines 230, 246, 257, 358). Each write is <1ms in WAL mode. If latency becomes an issue, the path forward is wrapping in `run_in_executor()` or migrating to `aiosqlite`, but this is not needed at current scale.
 
 ### Write Volume Analysis
 
@@ -146,6 +173,7 @@ def _dict_to_event(d: dict) -> GameResultEvent:
 - = ~30 SQLite writes/sec peak
 - SQLite WAL mode handles 1000+ writes/sec easily
 - `flow_economy.db` already uses WAL mode for the casino
+- Events list capped at 20 entries keeps JSON blob ~6KB max
 
 ### Files Modified
 
