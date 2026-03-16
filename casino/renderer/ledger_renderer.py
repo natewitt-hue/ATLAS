@@ -13,6 +13,8 @@ import html as html_mod
 from datetime import datetime, timezone
 from typing import Optional
 
+from casino.renderer.casino_html_renderer import _font_face_css
+
 # ── Game metadata ─────────────────────────────────────────────────────────────
 GAME_INFO = {
     "blackjack":    {"label": "BLACKJACK",   "icon": "\u2663"},
@@ -37,10 +39,12 @@ BIG_THRESHOLD = 500
 
 # ── Shared CSS ────────────────────────────────────────────────────────────────
 
-_CSS = """\
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700;800&display=swap');
+def _css() -> str:
+    return _font_face_css() + """
+* { margin: 0; padding: 0; box-sizing: border-box; }"""
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+
+_CSS_BODY = """\
 body {
   background: transparent;
   font-family: 'Outfit', sans-serif;
@@ -251,7 +255,7 @@ def _build_casino_html(
 
     return f"""\
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>{_CSS}</style></head>
+<html><head><meta charset="UTF-8"><style>{_css()}{_CSS_BODY}</style></head>
 <body>
 <div class="card">
   <div class="status-bar {outcome}"></div>
@@ -322,7 +326,7 @@ def _build_transaction_html(
 
     return f"""\
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>{_CSS}</style></head>
+<html><head><meta charset="UTF-8"><style>{_css()}{_CSS_BODY}</style></head>
 <body>
 <div class="card">
   <div class="status-bar {status_class}"></div>
@@ -370,7 +374,7 @@ async def _render_html_to_png(html_content: str) -> bytes:
     browser = await _get_browser()
     page = await browser.new_page(viewport={"width": 720, "height": 400})
     try:
-        await page.set_content(html_content, wait_until="networkidle")
+        await page.set_content(html_content, wait_until="load", timeout=10000)
 
         card = await page.query_selector(".card")
         clip = None

@@ -236,8 +236,12 @@ class CasinoCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        """Called when the cog is loaded — setup DB."""
+        """Called when the cog is loaded — setup DB and reconcile orphaned wagers."""
         await db.setup_casino_db()
+        # Refund any wagers orphaned by a previous crash
+        refunded = await db.reconcile_orphaned_wagers()
+        if refunded:
+            print(f"[Casino] Reconciled {len(refunded)} orphaned wagers")
         print("[Casino] DB ready. FLOW Casino online. 🎰")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -295,6 +299,10 @@ class CasinoCog(commands.Cog):
         embed.add_field(name="Max Bet",      value=f"${max_bet:,} ({tier['name']})", inline=True)
         embed.add_field(name="💎 Jackpots",  value=jp_display, inline=False)
         embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
+
+        view = CasinoHubView()
+        msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = msg
 
     # ═══════════════════════════════════════════════════════════════════════
     #  COMMISSIONER COMMANDS

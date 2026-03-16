@@ -35,6 +35,7 @@ class PlayAgainView(discord.ui.View):
         super().__init__(timeout=TIMEOUT_SECS)
         self.user_id = user_id
         self.wager = wager
+        self._used = False   # Prevent double-click race condition
         self.replay_callback = replay_callback
         self.double_callback = double_callback
         self.streak_info = streak_info or {}
@@ -77,6 +78,12 @@ class PlayAgainView(discord.ui.View):
                 "This isn't your game!", ephemeral=True
             )
 
+        if self._used:
+            return await interaction.response.send_message(
+                "Already processing...", ephemeral=True
+            )
+        self._used = True
+
         bal = await get_balance(self.user_id)
         if bal < self.wager:
             return await interaction.response.send_message(
@@ -93,6 +100,12 @@ class PlayAgainView(discord.ui.View):
             return await interaction.response.send_message(
                 "This isn't your game!", ephemeral=True
             )
+
+        if self._used:
+            return await interaction.response.send_message(
+                "Already processing...", ephemeral=True
+            )
+        self._used = True
 
         # Cap at player's max bet tier
         max_bet = await get_max_bet(self.user_id)
@@ -121,3 +134,8 @@ class PlayAgainView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         self._disable_all()
+        try:
+            if hasattr(self, "message") and self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass

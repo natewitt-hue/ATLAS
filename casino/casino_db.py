@@ -248,6 +248,75 @@ async def setup_casino_db() -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  ORPHAN WAGER RECONCILIATION
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def reconcile_orphaned_wagers(max_age_minutes: int = 30) -> list[dict]:
+    """
+    Find casino wager debits with no matching casino_sessions entry and refund them.
+    Called at startup to recover from bot crashes mid-game.
+
+    An orphan is a transaction where:
+    - source='CASINO', description='casino wager', amount < 0
+    - created_at is older than max_age_minutes ago
+    - discord_id + abs(amount) has no matching casino_sessions entry after the txn time
+
+    Returns list of refunded wagers for logging.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+    refunded = []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Find all casino wager debits older than cutoff
+        async with db.execute("""
+            SELECT t.txn_id, t.discord_id, ABS(t.amount) as wager, t.created_at
+            FROM transactions t
+            WHERE t.source = 'CASINO'
+              AND t.description = 'casino wager'
+              AND t.amount < 0
+              AND t.created_at < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM casino_sessions s
+                  WHERE s.discord_id = t.discord_id
+                    AND s.wager = ABS(t.amount)
+                    AND s.played_at >= t.created_at
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM transactions t2
+                  WHERE t2.discord_id = t.discord_id
+                    AND t2.source = 'CASINO'
+                    AND t2.description = 'orphan refund'
+                    AND t2.reference_key = 'ORPHAN_' || t.txn_id
+              )
+        """, (cutoff,)) as cur:
+            orphans = await cur.fetchall()
+
+    for txn_id, discord_id, wager, created_at in orphans:
+        try:
+            await flow_wallet.credit(
+                discord_id, wager, "CASINO",
+                description="orphan refund",
+                reference_key=f"ORPHAN_{txn_id}",
+            )
+            refunded.append({
+                "txn_id": txn_id,
+                "discord_id": discord_id,
+                "wager": wager,
+                "created_at": created_at,
+            })
+            log.warning(
+                f"Refunded orphaned wager: ${wager} to user {discord_id} "
+                f"(txn {txn_id} from {created_at})"
+            )
+        except Exception as e:
+            log.error(f"Failed to refund orphan txn {txn_id}: {e}")
+
+    if refunded:
+        log.info(f"Reconciliation complete: refunded {len(refunded)} orphaned wagers")
+    return refunded
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  SETTINGS HELPERS  (async versions for casino use)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -771,8 +840,8 @@ async def process_wager(
             else:
                 new_balance = await flow_wallet.get_balance(discord_id, con=db)
 
-            # 5. Cold streak free credit (at 8 losses)
-            if outcome == "loss" and streak_info["type"] == "loss" and streak_info["len"] == 8:
+            # 5. Cold streak free credit (at 8+ losses, once per streak)
+            if outcome == "loss" and streak_info["type"] == "loss" and streak_info["len"] >= 8:
                 mercy = get_cold_streak_mercy(streak_info)
                 if mercy and mercy["type"] == "free_credit":
                     credit_amt = int(mercy["value"])

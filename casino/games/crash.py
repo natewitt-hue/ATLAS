@@ -212,10 +212,15 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
         lms_player = max(cashed_players, key=lambda p: p.cashout_mult)
         lms_bonus = int(lms_player.wager * lms_player.cashout_mult * 0.10)
         if lms_bonus > 0:
-            import flow_wallet
-            await flow_wallet.credit(
-                lms_player.discord_id, lms_bonus, "CASINO",
-                description=f"crash Last Man Standing +10%",
+            # Route through process_wager for audit trail and house bank tracking
+            await process_wager(
+                discord_id = lms_player.discord_id,
+                wager      = 0,
+                game_type  = "crash_lms",
+                outcome    = "win",
+                payout     = lms_bonus,
+                multiplier = 0.10,
+                channel_id = round_obj.channel_id,
             )
 
     # Log losses for players who didn't cash out
@@ -539,15 +544,19 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
 
 async def _lobby_then_run(round_obj: CrashRound, bot: discord.Client) -> None:
     """Background task: run lobby countdown, then run the crash round."""
-    channel = bot.get_channel(round_obj.channel_id)
-    if channel is None:
-        return
+    try:
+        channel = bot.get_channel(round_obj.channel_id)
+        if channel is None:
+            return
 
-    await _run_lobby(round_obj, channel)
+        await _run_lobby(round_obj, channel)
 
-    if not round_obj.players:
-        # Nobody bet — shouldn't happen but guard
+        if not round_obj.players:
+            # Nobody bet — shouldn't happen but guard
+            return
+
+        await _run_round(round_obj, bot)
+    except Exception as exc:
+        print(f"[Casino] Crash round error in channel {round_obj.channel_id}: {exc}")
+    finally:
         active_rounds.pop(round_obj.channel_id, None)
-        return
-
-    await _run_round(round_obj, bot)

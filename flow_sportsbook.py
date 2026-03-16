@@ -2707,4 +2707,7 @@ class SportsbookCog(commands.Cog):
             pass
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(SportsbookCog(bot))
+    cog = SportsbookCog(bot)
+    await bot.add_cog(cog)
+    # Register persistent view so hub buttons survive bot restarts
+    bot.add_view(SportsbookHubView(cog))

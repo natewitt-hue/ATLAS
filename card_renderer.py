@@ -35,9 +35,15 @@ trade_data dict keys:
 
 from __future__ import annotations
 
+import html as _html_mod
 import json
 import base64
 from pathlib import Path
+
+
+def _esc(text) -> str:
+    """Escape user-controlled text for safe HTML embedding."""
+    return _html_mod.escape(str(text))
 
 # ── Genesis icon loader (base64 for inline HTML) ─────────────────────────────
 
@@ -137,12 +143,12 @@ def _ordinal(n: int) -> str:
 
 
 def _player_card_html(p: dict) -> str:
-    first = p.get("firstName", "")
-    last  = p.get("lastName", "")
+    first = _esc(p.get("firstName", ""))
+    last  = _esc(p.get("lastName", ""))
     name  = f"{first} {last}".strip() or "Unknown"
-    pos   = p.get("pos", p.get("position", "?"))
-    ovr   = p.get("overallRating") or p.get("playerBestOvr") or "?"
-    age   = p.get("age", "?")
+    pos   = _esc(p.get("pos", p.get("position", "?")))
+    ovr   = _esc(p.get("overallRating") or p.get("playerBestOvr") or "?")
+    age   = _esc(p.get("age", "?"))
 
     # Dev trait resolution
     dev_raw = p.get("devTrait", p.get("dev", 0))
@@ -210,10 +216,10 @@ def _build_html(data: dict) -> str:
     }
     sbar_cls, band_color, band_emoji, band_word, band_sub, decision_text = band_cfg.get(band, band_cfg["GREEN"])
 
-    team_a = data.get("team_a_name", "Team A")
-    team_b = data.get("team_b_name", "Team B")
-    owner_a = data.get("team_a_owner", "")
-    owner_b = data.get("team_b_owner", "")
+    team_a = _esc(data.get("team_a_name", "Team A"))
+    team_b = _esc(data.get("team_b_name", "Team B"))
+    owner_a = _esc(data.get("team_a_owner", ""))
+    owner_b = _esc(data.get("team_b_owner", ""))
     logo_a = _team_logo_url(team_a)
     logo_b = _team_logo_url(team_b)
 
@@ -251,7 +257,7 @@ def _build_html(data: dict) -> str:
     notes = data.get("notes", [])
     flags_html = ""
     if notes:
-        items = "".join(f'<div class="flag-item">{n}</div>' for n in notes[:6])
+        items = "".join(f'<div class="flag-item">{_esc(n)}</div>' for n in notes[:6])
         flags_html = f"""
     <div class="flags-section">
       <div class="flags-title">⚠ Flags</div>
@@ -263,7 +269,7 @@ def _build_html(data: dict) -> str:
     ai = data.get("ai_commentary", "")
     ai_html = ""
     if ai and "unavailable" not in ai.lower():
-        ai_clean = ai.strip().strip("*_").strip('"')
+        ai_clean = _esc(ai.strip().strip("*_").strip('"'))
         ai_html = f"""
     <div class="verdict-section">
       <div class="verdict-title">🤖 Atlas verdict</div>
@@ -271,8 +277,8 @@ def _build_html(data: dict) -> str:
     </div>"""
 
     # ── Footer ───────────────────────────────────────────────────────────────
-    trade_id    = data.get("trade_id", "???")
-    proposer_id = data.get("proposer_id", "")
+    trade_id    = _esc(data.get("trade_id", "???"))
+    proposer_id = _esc(data.get("proposer_id", ""))
 
     # ── Genesis icon ─────────────────────────────────────────────────────────
     icon_src = f"data:image/png;base64,{_GENESIS_ICON_B64}" if _GENESIS_ICON_B64 else ""

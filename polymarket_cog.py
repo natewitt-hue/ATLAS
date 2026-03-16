@@ -320,7 +320,9 @@ class PolymarketClient:
 
     async def _session_get(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
         return self._session
 
     async def close(self):
@@ -657,40 +659,47 @@ class WagerModal(discord.ui.Modal):
         payout      = PAYOUT_SCALE * quantity
         user_id     = interaction.user.id
 
-        # Balance check
+        # Atomic debit + contract creation in single transaction
+        now = datetime.now(timezone.utc).isoformat()
         try:
-            balance = await get_balance(user_id)
-        except Exception:
-            balance = 0
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
 
-        if balance < cost_bucks:
-            await interaction.response.send_message(
-                f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
-                ephemeral=True,
-            )
-            return
+                # Check balance and debit atomically
+                balance = await flow_wallet.get_balance(user_id, con=db)
+                if balance < cost_bucks:
+                    await interaction.response.send_message(
+                        f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
+                        ephemeral=True,
+                    )
+                    return
 
-        # Debit
-        try:
-            await update_balance(user_id, -cost_bucks)
-        except ValueError as e:
+                await flow_wallet.debit(
+                    user_id, cost_bucks, "PREDICTION",
+                    description="prediction market bet",
+                    con=db,
+                )
+
+                # Write contract in same transaction
+                await db.execute("""
+                    INSERT INTO prediction_contracts
+                        (user_id, market_id, slug, side, buy_price,
+                         quantity, cost_bucks, potential_payout, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                """, (
+                    user_id, self.market_id, self.slug,
+                    self.side, self.price,
+                    quantity, cost_bucks, payout, now,
+                ))
+                await db.commit()
+        except flow_wallet.InsufficientFundsError as e:
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
             return
-
-        # Write contract to DB
-        now = datetime.now(timezone.utc).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO prediction_contracts
-                    (user_id, market_id, slug, side, buy_price,
-                     quantity, cost_bucks, potential_payout, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-            """, (
-                user_id, self.market_id, self.slug,
-                self.side, self.price,
-                quantity, cost_bucks, payout, now,
-            ))
-            await db.commit()
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Failed to place bet: {e}", ephemeral=True
+            )
+            return
 
         new_bal = balance - cost_bucks
         color = 0x2ECC71 if self.side == "YES" else 0xE74C3C
@@ -1961,6 +1970,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         counts = {"won": 0, "lost": 0, "voided": 0}
 
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+
             async with db.execute(
                 "SELECT id, user_id, side, quantity, cost_bucks, potential_payout "
                 "FROM prediction_contracts "
@@ -1971,7 +1982,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
             for cid, user_id, side, qty, cost, payout in contracts:
                 if result == "VOID":
-                    await update_balance(user_id, cost)
+                    await flow_wallet.credit(
+                        int(user_id), cost, "PREDICTION",
+                        description=f"prediction market voided",
+                        con=db,
+                    )
                     await db.execute(
                         "UPDATE prediction_contracts "
                         "SET status='voided', resolved_at=? WHERE id=?",
@@ -1979,7 +1994,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     )
                     counts["voided"] += 1
                 elif side == result:
-                    await update_balance(user_id, payout)
+                    await flow_wallet.credit(
+                        int(user_id), payout, "PREDICTION",
+                        description=f"prediction market won",
+                        con=db,
+                    )
                     await db.execute(
                         "UPDATE prediction_contracts "
                         "SET status='won', resolved_at=? WHERE id=?",

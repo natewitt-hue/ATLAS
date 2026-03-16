@@ -262,6 +262,12 @@ class BlackjackView(discord.ui.View):
                 )
             except Exception as e:
                 print(f"[blackjack] Timeout wager resolution error for {s.discord_id}: {e}")
+                # Refund the wager so the player doesn't lose money silently
+                try:
+                    await refund_wager(s.discord_id, total_wager)
+                    print(f"[blackjack] Refunded ${total_wager} to {s.discord_id} after timeout error")
+                except Exception as refund_err:
+                    print(f"[blackjack] CRITICAL: refund also failed for {s.discord_id}: {refund_err}")
 
             active_sessions.pop(s.discord_id, None)
 

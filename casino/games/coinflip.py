@@ -69,7 +69,7 @@ async def play_coinflip(
             "❌ Pick must be **heads** or **tails**.", ephemeral=True
         )
 
-    max_bet = await get_max_bet()
+    max_bet = await get_max_bet(uid)
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
             f"❌ Wager must be between **$1** and **${max_bet:,}**.",
@@ -396,7 +396,7 @@ async def send_challenge(
             "❌ You can't challenge a bot!", ephemeral=True
         )
 
-    max_bet = await get_max_bet()
+    max_bet = await get_max_bet(uid)
     if wager < 1 or wager > max_bet:
         return await interaction.response.send_message(
             f"❌ Wager must be between **$1** and **${max_bet:,}**.",
