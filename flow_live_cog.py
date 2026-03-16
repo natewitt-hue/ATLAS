@@ -10,6 +10,8 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from dataclasses import dataclass as dc
+from enum import Enum, auto
 from typing import Optional
 
 try:
@@ -21,7 +23,7 @@ except ImportError:
     tasks = None  # type: ignore
 
 try:
-    from flow_events import GameResultEvent, flow_bus
+    from flow_events import GameResultEvent, SportsbookEvent, PredictionEvent, flow_bus
 except ImportError:
     flow_bus = None  # Soft fallback — cog degrades gracefully if flow_events missing
 
@@ -109,3 +111,84 @@ class SessionTracker:
 
     def get_all_active(self, guild_id: int) -> list[PlayerSession]:
         return [s for (_, gid), s in self._active.items() if gid == guild_id]
+
+
+# ── Highlight Detection ──────────────────────────────────────────────────────
+
+class HighlightType(Enum):
+    INSTANT = auto()    # Post immediately as individual card
+    SESSION = auto()    # Batch into session recap
+
+
+@dc
+class Highlight:
+    highlight_type: HighlightType
+    reason: str
+    event: object       # GameResultEvent, SportsbookEvent, or PredictionEvent
+
+
+# ── Thresholds (aggressive) ──
+INSTANT_THRESHOLDS = {
+    "jackpot": True,                # any jackpot hit
+    "pvp_flip": True,               # any PvP coinflip result
+    "last_man_standing": True,      # crash LMS
+    "parlay": True,                 # any parlay hit (sportsbook)
+    "prediction_resolution": True,  # any market resolution
+}
+SESSION_THRESHOLDS = {
+    "min_multiplier": 2.0,         # win 2x+ → session highlight
+    "min_loss": 300,               # loss $300+ → session highlight
+    "min_streak": 3,               # 3+ win streak → session highlight
+    "crash_min_cashout": 3.0,      # crash cashout 3x+ → session highlight
+}
+
+
+class HighlightDetector:
+    def check(self, event: "GameResultEvent",
+              session: Optional["PlayerSession"]) -> Optional[Highlight]:
+        # ── Instant: jackpot ──
+        if event.extra.get("jackpot"):
+            return Highlight(HighlightType.INSTANT, "Jackpot hit!", event)
+
+        # ── Instant: PvP flip ──
+        if event.game_type == "coinflip_pvp":
+            return Highlight(HighlightType.INSTANT, "PvP flip result", event)
+
+        # ── Instant: crash last man standing ──
+        if event.extra.get("last_man_standing"):
+            return Highlight(HighlightType.INSTANT, "Last Man Standing", event)
+
+        # ── Session: crash cashout (MUST come before generic multiplier — both match crash 3.5x) ──
+        if (event.game_type == "crash" and event.outcome == "win"
+                and event.multiplier >= SESSION_THRESHOLDS["crash_min_cashout"]):
+            return Highlight(HighlightType.SESSION, f"Crash {event.multiplier}x cashout", event)
+
+        # ── Session: big multiplier win (generic, all games) ──
+        if event.outcome == "win" and event.multiplier >= SESSION_THRESHOLDS["min_multiplier"]:
+            return Highlight(HighlightType.SESSION, f"{event.multiplier}x win", event)
+
+        # ── Session: big loss ──
+        if event.outcome == "loss" and event.wager >= SESSION_THRESHOLDS["min_loss"]:
+            return Highlight(HighlightType.SESSION, f"Lost ${event.wager}", event)
+
+        # ── Session: streak milestone ──
+        if session and session.current_streak >= SESSION_THRESHOLDS["min_streak"]:
+            return Highlight(HighlightType.SESSION, f"{session.current_streak}-win streak", event)
+
+        return None
+
+    def check_sportsbook(self, event: "SportsbookEvent") -> Optional[Highlight]:
+        # Instant: any parlay
+        if event.bet_type == "parlay":
+            return Highlight(HighlightType.INSTANT, "Parlay hit!", event)
+        # Session: big sportsbook loss
+        if event.amount <= -SESSION_THRESHOLDS["min_loss"]:
+            return Highlight(HighlightType.SESSION, f"Lost ${abs(event.amount)} on {event.bet_type}", event)
+        # Session: big sportsbook win
+        if event.amount >= SESSION_THRESHOLDS["min_loss"]:
+            return Highlight(HighlightType.SESSION, f"Won ${event.amount} on {event.bet_type}", event)
+        return None
+
+    def check_prediction(self, event: "PredictionEvent") -> Optional[Highlight]:
+        return Highlight(HighlightType.INSTANT,
+                         f'"{event.market_title}" resolved {event.resolution}', event)
