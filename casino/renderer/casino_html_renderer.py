@@ -5,7 +5,7 @@ Playwright HTML → PNG renderer for all casino game cards.
 V6 design language: dark bg, gold accents, Outfit + JetBrains Mono,
 noise texture, glass-morphism cells.
 
-Reuses the browser singleton from card_renderer.py (_get_browser).
+Uses the unified render engine from atlas_html_engine.py.
 
 Usage:
     from casino.renderer.casino_html_renderer import render_blackjack_card
@@ -15,576 +15,24 @@ Usage:
 
 from __future__ import annotations
 
-import base64
-import html as html_mod
 import math
-from pathlib import Path
 from typing import Optional
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
-
-_DIR = Path(__file__).parent
-_CARDS_DIR = _DIR / "cards"
-_SLOT_ICONS_DIR = _DIR / "slot_icons"
-_FONTS_DIR = Path(__file__).parent.parent.parent / "fonts"
-
-# ── Base64 font loader ────────────────────────────────────────────────────────
-
-_FONT_CACHE: dict[str, str] = {}
-
-
-def _load_font_b64(name: str) -> str:
-    if name not in _FONT_CACHE:
-        path = _FONTS_DIR / name
-        if path.exists():
-            _FONT_CACHE[name] = base64.b64encode(path.read_bytes()).decode()
-        else:
-            _FONT_CACHE[name] = ""
-    return _FONT_CACHE[name]
-
-
-def _font_face_css() -> str:
-    fonts = [
-        ("Outfit", "Outfit-Regular.ttf", 400),
-        ("Outfit", "Outfit-SemiBold.ttf", 600),
-        ("Outfit", "Outfit-Bold.ttf", 700),
-        ("Outfit", "Outfit-ExtraBold.ttf", 800),
-        ("JetBrains Mono", "JetBrainsMono-Regular.ttf", 400),
-        ("JetBrains Mono", "JetBrainsMono-Bold.ttf", 700),
-        ("JetBrains Mono", "JetBrainsMono-ExtraBold.ttf", 800),
-    ]
-    css = ""
-    for family, filename, weight in fonts:
-        b64 = _load_font_b64(filename)
-        if b64:
-            css += f"""
-@font-face {{
-  font-family: '{family}';
-  src: url('data:font/ttf;base64,{b64}') format('truetype');
-  font-weight: {weight};
-  font-style: normal;
-  font-display: block;
-}}"""
-    return css
-
-
-# ── Base64 card asset loader ─────────────────────────────────────────────────
-
-_CARD_B64_CACHE: dict[str, str] = {}
-
-
-def _card_b64(filename: str) -> str:
-    if filename not in _CARD_B64_CACHE:
-        path = _CARDS_DIR / filename
-        if path.exists():
-            _CARD_B64_CACHE[filename] = base64.b64encode(path.read_bytes()).decode()
-        else:
-            _CARD_B64_CACHE[filename] = ""
-    return _CARD_B64_CACHE[filename]
-
-
-def card_img_src(suit_code: str, value: str) -> str:
-    """Return base64 data URI for a card face. suit_code: S/H/D/C, value: A/2-10/J/Q/K"""
-    b64 = _card_b64(f"{suit_code}{value}.png")
-    return f"data:image/png;base64,{b64}" if b64 else ""
-
-
-def card_back_src() -> str:
-    b64 = _card_b64("back.png")
-    return f"data:image/png;base64,{b64}" if b64 else ""
-
-
-# ── Base64 slot icon loader ──────────────────────────────────────────────────
-
-_SLOT_ICON_B64_CACHE: dict[str, str] = {}
-
-SLOT_ICON_CONFIG = {
-    "shield":   {"file": "shield.png",   "label": "TSL Shield",  "mult": 50, "tier": "jackpot", "weight": 2},
-    "crown":    {"file": "crown.png",    "label": "Crown",       "mult": 20, "tier": "legend",  "weight": 5},
-    "trophy":   {"file": "trophy.png",   "label": "Trophy",      "mult": 10, "tier": "epic",    "weight": 8},
-    "football": {"file": "football.png", "label": "Football",    "mult": 5,  "tier": "rare",    "weight": 15},
-    "star":     {"file": "star.png",     "label": "Star",        "mult": 3,  "tier": "common",  "weight": 20},
-    "coin":     {"file": "coin.png",     "label": "Coin",        "mult": 2,  "tier": "base",    "weight": 30},
-}
-
-
-def _slot_icon_b64(symbol: str) -> str:
-    if symbol not in _SLOT_ICON_B64_CACHE:
-        cfg = SLOT_ICON_CONFIG.get(symbol)
-        if cfg:
-            path = _SLOT_ICONS_DIR / cfg["file"]
-            if path.exists():
-                _SLOT_ICON_B64_CACHE[symbol] = base64.b64encode(path.read_bytes()).decode()
-            else:
-                _SLOT_ICON_B64_CACHE[symbol] = ""
-        else:
-            _SLOT_ICON_B64_CACHE[symbol] = ""
-    return _SLOT_ICON_B64_CACHE[symbol]
-
-
-def slot_icon_src(symbol: str) -> str:
-    b64 = _slot_icon_b64(symbol)
-    return f"data:image/png;base64,{b64}" if b64 else ""
-
-
-# ── HTML escape helper ───────────────────────────────────────────────────────
-
-def _esc(text) -> str:
-    return html_mod.escape(str(text))
-
-
-# ── Shared V6 CSS ────────────────────────────────────────────────────────────
-
-def _base_css() -> str:
-    return _font_face_css() + """
-
-:root {
-  --bg: #111111;
-  --gold: #D4AF37;
-  --gold-light: #FFDA50;
-  --gold-dim: #8C7324;
-  --win: #4ADE80;
-  --loss: #F87171;
-  --push: #FBBF24;
-  --text-primary: #e8e0d0;
-  --text-sub: #aaa;
-  --text-muted: #888;
-  --text-dim: #555;
-}
-
-* { margin: 0; padding: 0; box-sizing: border-box; }
-
-body {
-  background: transparent;
-  font-family: 'Outfit', sans-serif;
-  color: #fff;
-  padding: 0;
-}
-
-.card {
-  width: 700px;
-  border-radius: 14px;
-  overflow: hidden;
-  position: relative;
-  background: var(--bg);
-  border: 1px solid rgba(212,175,55,0.18);
-}
-
-/* Noise texture overlay */
-.card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  pointer-events: none;
-  z-index: 1;
-}
-
-.card > * { position: relative; z-index: 2; }
-
-/* ── Status bar (5px top edge) ── */
-.status-bar { height: 5px; width: 100%; }
-.status-bar.win      { background: linear-gradient(90deg, #4ADE80, #22C55E, #4ADE80); }
-.status-bar.loss     { background: linear-gradient(90deg, #F87171, #EF4444, #F87171); }
-.status-bar.push     { background: linear-gradient(90deg, #FBBF24, #D97706, #FBBF24); }
-.status-bar.jackpot  { background: linear-gradient(90deg, #D4AF37, #FFDA50, #D4AF37); }
-.status-bar.blackjack{ background: linear-gradient(90deg, #D4AF37, #FFDA50, #D4AF37); }
-.status-bar.near_miss{ background: linear-gradient(90deg, #F59E0B, #FBBF24, #F59E0B); }
-
-/* ── Header ── */
-.header {
-  display: flex;
-  align-items: center;
-  padding: 14px 20px 10px;
-}
-.header-left {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  flex: 1;
-}
-.game-icon-pill {
-  width: 32px; height: 32px;
-  border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px;
-  background: rgba(212,175,55,0.15);
-  color: var(--gold);
-  flex-shrink: 0;
-}
-.game-title-group {
-  display: flex;
-  flex-direction: column;
-}
-.game-title {
-  font-family: 'Outfit', sans-serif;
-  font-weight: 800;
-  font-size: 20px;
-  color: var(--text-primary);
-  letter-spacing: 1.5px;
-  line-height: 1.2;
-}
-.game-subtitle {
-  font-family: 'Outfit', sans-serif;
-  font-weight: 600;
-  font-size: 11px;
-  color: var(--text-sub);
-  letter-spacing: 0.5px;
-}
-.txn-id {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 600;
-  font-size: 9px;
-  color: var(--text-dim);
-  margin-top: 2px;
-}
-
-/* Center username */
-.header-center {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 1;
-}
-.username-badge {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 15px;
-  color: var(--text-primary);
-  white-space: nowrap;
-  background: rgba(255,255,255,0.05);
-  border-radius: 8px;
-  padding: 4px 12px;
-}
-
-/* Right badge */
-.header-right {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex: 1;
-}
-.result-badge {
-  padding: 5px 14px;
-  border-radius: 8px;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 700;
-  font-size: 13px;
-  letter-spacing: 0.5px;
-  white-space: nowrap;
-}
-.result-badge.win     { background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.35); color: #4ADE80; }
-.result-badge.loss    { background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.35); color: #F87171; }
-.result-badge.push    { background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.35); color: #FBBF24; }
-.result-badge.jackpot { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
-.result-badge.blackjack { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
-.result-badge.active  { background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.3); color: #D4AF37; }
-.result-badge.near_miss { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #FBBF24; }
-
-/* ── Streak badge (momentum indicator) ── */
-.streak-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 10px;
-  border-radius: 12px;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 700;
-  font-size: 11px;
-  letter-spacing: 0.5px;
-  margin-left: 6px;
-}
-.streak-badge.hot {
-  background: rgba(251,146,60,0.15);
-  border: 1px solid rgba(251,146,60,0.35);
-  color: #FB923C;
-}
-.streak-badge.fire {
-  background: rgba(239,68,68,0.15);
-  border: 1px solid rgba(239,68,68,0.35);
-  color: #F87171;
-}
-.streak-badge.legendary {
-  background: rgba(212,175,55,0.15);
-  border: 1px solid rgba(212,175,55,0.4);
-  color: #FFDA50;
-}
-.streak-badge.cold {
-  background: rgba(96,165,250,0.12);
-  border: 1px solid rgba(96,165,250,0.3);
-  color: #60A5FA;
-}
-
-/* ── Near-miss banner ── */
-.near-miss-banner {
-  text-align: center;
-  padding: 6px 20px;
-  font-family: 'Outfit', sans-serif;
-  font-weight: 700;
-  font-size: 14px;
-  color: #FBBF24;
-  background: rgba(245,158,11,0.08);
-  letter-spacing: 0.5px;
-}
-
-/* ── Jackpot footer ── */
-.jackpot-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 6px 20px 10px;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 600;
-  font-size: 10px;
-  color: var(--text-dim);
-  letter-spacing: 0.5px;
-}
-.jackpot-footer .jp-tier {
-  color: var(--gold-dim);
-}
-
-/* ── Gold divider ── */
-.gold-divider {
-  height: 1px;
-  margin: 0 20px;
-  background: linear-gradient(90deg, transparent, rgba(212,175,55,0.3) 15%, rgba(212,175,55,0.3) 85%, transparent);
-}
-
-/* ── Data grid (4 cells) ── */
-.data-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-  padding: 12px 20px;
-}
-.data-cell {
-  background: rgba(255,255,255,0.03);
-  border-radius: 8px;
-  padding: 10px 12px;
-  text-align: center;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  border-left: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(0,0,0,0.3);
-  border-right: 1px solid rgba(0,0,0,0.2);
-}
-.data-label {
-  font-family: 'Outfit', sans-serif;
-  font-weight: 700;
-  font-size: 12px;
-  color: var(--gold-dim);
-  letter-spacing: 1.5px;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-}
-.data-value {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  color: var(--text-primary);
-}
-.data-value.green { color: var(--win); }
-.data-value.red   { color: var(--loss); }
-.data-value.amber { color: var(--push); }
-.data-value.gold  { color: var(--gold); }
-
-/* ── Footer ── */
-.footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 10px 20px 14px;
-}
-.footer-balance {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 20px;
-}
-.footer-balance .label {
-  color: var(--gold);
-}
-.footer-balance .amount {
-  color: var(--text-primary);
-}
-"""
-
-
-# ── Shared HTML builders ─────────────────────────────────────────────────────
-
-def _build_header_html(
-    icon: str,
-    title: str,
-    players: list[str],
-    outcome: str,
-    badge_text: str,
-    txn_id: Optional[str] = None,
-    subtitle: str = "FLOW Casino",
-) -> str:
-    """Build the shared card header: icon+title (left), username(s) (center), badge (right)."""
-    txn_html = f'<div class="txn-id">TXN #{_esc(txn_id)}</div>' if txn_id else ""
-
-    # Build badge-style player list
-    if players:
-        player_badges = " ".join(
-            f'<span class="username-badge">{_esc(p)}</span>'
-            for p in players
-        )
-        players_html = player_badges
-    else:
-        players_html = ""
-
-    return f"""
-    <div class="header">
-      <div class="header-left">
-        <div class="game-icon-pill">{icon}</div>
-        <div class="game-title-group">
-          <div class="game-title">{_esc(title)}</div>
-          <div class="game-subtitle">{_esc(subtitle)}</div>
-          {txn_html}
-        </div>
-      </div>
-      <div class="header-center">
-        {players_html}
-      </div>
-      <div class="header-right">
-        <div class="result-badge {_esc(outcome)}">{_esc(badge_text)}</div>
-      </div>
-    </div>"""
-
-
-def _build_data_grid_html(
-    wager: int,
-    payout: int,
-    balance: int,
-) -> str:
-    """Build the 4-cell data grid: Wager, Payout, P&L, Balance."""
-    pl = payout - wager
-    pl_color = "green" if pl > 0 else "red" if pl < 0 else "amber"
-    pl_str = f"+${pl:,}" if pl > 0 else f"-${abs(pl):,}" if pl < 0 else "$0"
-    payout_color = "green" if payout > wager else "red" if payout < wager else ""
-
-    return f"""
-    <div class="data-grid">
-      <div class="data-cell">
-        <div class="data-label">Wager</div>
-        <div class="data-value">${wager:,}</div>
-      </div>
-      <div class="data-cell">
-        <div class="data-label">Payout</div>
-        <div class="data-value {payout_color}">${payout:,}</div>
-      </div>
-      <div class="data-cell">
-        <div class="data-label">P&amp;L</div>
-        <div class="data-value {pl_color}">{pl_str}</div>
-      </div>
-      <div class="data-cell">
-        <div class="data-label">Balance</div>
-        <div class="data-value">${balance:,}</div>
-      </div>
-    </div>"""
-
-
-def _build_footer_html(balance: int) -> str:
-    """Build the centered footer: Balance: $X,XXX."""
-    return f"""
-    <div class="footer">
-      <div class="footer-balance">
-        <span class="label">Balance:</span>
-        <span class="amount"> ${balance:,}</span>
-      </div>
-    </div>"""
-
-
-def _build_streak_badge_html(streak_info: dict | None) -> str:
-    """Build a small streak badge for the header area. Returns empty string if no active streak."""
-    if not streak_info:
-        return ""
-    s_type = streak_info.get("type", "")
-    s_len = streak_info.get("len", 0)
-    if s_type == "win" and s_len >= 3:
-        if s_len >= 10:
-            css_class, icon, label = "legendary", "\U0001f525", f"W{s_len}"
-        elif s_len >= 7:
-            css_class, icon, label = "fire", "\U0001f525\U0001f525", f"W{s_len}"
-        elif s_len >= 5:
-            css_class, icon, label = "fire", "\U0001f525", f"W{s_len}"
-        else:
-            css_class, icon, label = "hot", "\U0001f525", f"W{s_len}"
-        return f'<span class="streak-badge {css_class}">{icon} {label}</span>'
-    elif s_type == "loss" and s_len >= 5:
-        return f'<span class="streak-badge cold">\u2744\ufe0f L{s_len}</span>'
-    return ""
-
-
-def _build_near_miss_html(near_miss_msg: str | None) -> str:
-    """Build a near-miss amber banner. Returns empty string if no near-miss."""
-    if not near_miss_msg:
-        return ""
-    return f'<div class="near-miss-banner">{_esc(near_miss_msg)}</div>'
-
-
-def _build_jackpot_footer_html(jackpot_info: dict | None) -> str:
-    """Build a jackpot pools footer bar. Returns empty string if no info."""
-    if not jackpot_info:
-        return ""
-    parts = []
-    for tier in ("mini", "major", "grand"):
-        if tier in jackpot_info:
-            pool = jackpot_info[tier].get("pool", 0)
-            parts.append(f'<span class="jp-tier">{tier.upper()}</span> ${pool:,}')
-    if not parts:
-        return ""
-    return f'<div class="jackpot-footer">\U0001f48e {" &middot; ".join(parts)}</div>'
-
-
-def _wrap_card(status_class: str, content: str) -> str:
-    """Wrap game content in the full card HTML with CSS."""
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>{_base_css()}</style>
-</head>
-<body>
-<div class="card">
-  <div class="status-bar {_esc(status_class)}"></div>
-  {content}
-</div>
-</body>
-</html>"""
-
-
-# ── Render helper (Playwright HTML → PNG) ────────────────────────────────────
-
-async def _render_card_html(html: str, width: int = 720) -> bytes:
-    """Render an HTML string to PNG bytes using the shared Playwright browser."""
-    from card_renderer import _get_browser
-
-    browser = await _get_browser()
-    page = await browser.new_page(viewport={"width": width, "height": 1200})
-    try:
-        await page.set_content(html, wait_until="networkidle")
-
-        card = await page.query_selector(".card")
-        clip = None
-        if card:
-            box = await card.bounding_box()
-            if box:
-                await page.set_viewport_size({
-                    "width": width,
-                    "height": int(box["height"]) + 4,
-                })
-                clip = {
-                    "x": box["x"],
-                    "y": box["y"],
-                    "width": box["width"],
-                    "height": box["height"],
-                }
-
-        return await page.screenshot(clip=clip, type="png")
-    finally:
-        await page.close()
+from atlas_html_engine import (
+    render_card,
+    wrap_card,
+    esc,
+    card_img_src,
+    card_back_src,
+    slot_icon_src,
+    SLOT_ICON_CONFIG,
+    build_header_html,
+    build_data_grid_html,
+    build_footer_html,
+    build_streak_badge_html,
+    build_near_miss_html,
+    build_jackpot_footer_html,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -648,7 +96,7 @@ def _build_blackjack_html(
 
             cards_html += f"""
             <div class="playing-card" style="transform: rotate({angle}deg);">
-              <img src="{src}" alt="{_esc(value)}{_esc(suit)}">
+              <img src="{src}" alt="{esc(value)}{esc(suit)}">
             </div>"""
         return cards_html
 
@@ -669,7 +117,7 @@ def _build_blackjack_html(
         }.get(outcome, "var(--text-primary)")
         result_banner = f"""
         <div class="result-banner" style="color: {banner_color};">
-          {_esc(status)}
+          {esc(status)}
         </div>"""
 
     # Near-miss overrides loss outcome to amber
@@ -678,12 +126,12 @@ def _build_blackjack_html(
         status_class = "near_miss"
         badge_text = "SO CLOSE"
 
-    header = _build_header_html("♠", "BLACKJACK", [player_name], status_class, badge_text, txn_id)
-    streak_badge = _build_streak_badge_html(streak_info)
-    near_miss_banner = _build_near_miss_html(near_miss_msg)
-    data_grid = _build_data_grid_html(wager, payout, balance) if status else ""
-    footer = _build_footer_html(balance)
-    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
+    header = build_header_html("♠", "BLACKJACK", [player_name], status_class, badge_text, txn_id)
+    streak_badge = build_streak_badge_html(streak_info)
+    near_miss_banner = build_near_miss_html(near_miss_msg)
+    data_grid = build_data_grid_html(wager, payout, balance) if status else ""
+    footer = build_footer_html(balance)
+    jackpot_footer = build_jackpot_footer_html(jackpot_info)
 
     game_css = """
     <style>
@@ -750,7 +198,7 @@ def _build_blackjack_html(
     <!-- Dealer -->
     <div class="bj-section">
       <span class="bj-label">DEALER</span>
-      <span class="bj-score">{_esc(dealer_score_display)}</span>
+      <span class="bj-score">{esc(dealer_score_display)}</span>
     </div>
     <div class="bj-cards">{dealer_cards}</div>
 
@@ -760,7 +208,7 @@ def _build_blackjack_html(
     <!-- Player -->
     <div class="bj-section">
       <span class="bj-label">PLAYER</span>
-      <span class="bj-score">{_esc(str(player_score))}</span>
+      <span class="bj-score">{esc(str(player_score))}</span>
     </div>
     <div class="bj-cards">{player_cards}</div>
 
@@ -770,7 +218,7 @@ def _build_blackjack_html(
     {footer}
     {jackpot_footer}"""
 
-    return _wrap_card(status_class, content)
+    return wrap_card(content, status_class)
 
 
 async def render_blackjack_card(
@@ -795,7 +243,7 @@ async def render_blackjack_card(
         hide_dealer, status, wager, payout, balance, player_name, txn_id,
         streak_info, near_miss_msg, jackpot_info,
     )
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -855,9 +303,9 @@ def _build_slots_html(
         status_class = "near_miss"
         badge_text = "SO CLOSE"
 
-    header = _build_header_html("🎰", "SLOTS", [player_name], status_class, badge_text, txn_id)
-    streak_badge = _build_streak_badge_html(streak_info)
-    near_miss_banner = _build_near_miss_html(near_miss_msg)
+    header = build_header_html("🎰", "SLOTS", [player_name], status_class, badge_text, txn_id)
+    streak_badge = build_streak_badge_html(streak_info)
+    near_miss_banner = build_near_miss_html(near_miss_msg)
 
     # Build reel windows
     reels_html = ""
@@ -896,11 +344,11 @@ def _build_slots_html(
     result_html = ""
     if result_msg and revealed == 3:
         result_color = "#FFDA50" if is_triple else "var(--win)" if is_win else "var(--text-muted)"
-        result_html = f'<div class="slots-result" style="color: {result_color};">{_esc(result_msg)}</div>'
+        result_html = f'<div class="slots-result" style="color: {result_color};">{esc(result_msg)}</div>'
 
-    data_grid = _build_data_grid_html(wager, payout, balance) if revealed == 3 else ""
-    footer = _build_footer_html(balance)
-    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
+    data_grid = build_data_grid_html(wager, payout, balance) if revealed == 3 else ""
+    footer = build_footer_html(balance)
+    jackpot_footer = build_jackpot_footer_html(jackpot_info)
 
     game_css = """
     <style>
@@ -974,7 +422,7 @@ def _build_slots_html(
     {footer}
     {jackpot_footer}"""
 
-    return _wrap_card(status_class, content)
+    return wrap_card(content, status_class)
 
 
 async def render_slots_card(
@@ -995,7 +443,7 @@ async def render_slots_card(
         reels, revealed, wager, payout, balance, result_msg, player_name, txn_id,
         streak_info, near_miss_msg, jackpot_info,
     )
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1039,9 +487,9 @@ def _build_crash_html(
         status_class = "near_miss"
 
     display_players = players or [player_name]
-    header = _build_header_html("🚀", "CRASH", display_players, status_class, badge_text, txn_id)
-    streak_badge = _build_streak_badge_html(streak_info)
-    near_miss_banner = _build_near_miss_html(near_miss_msg)
+    header = build_header_html("🚀", "CRASH", display_players, status_class, badge_text, txn_id)
+    streak_badge = build_streak_badge_html(streak_info)
+    near_miss_banner = build_near_miss_html(near_miss_msg)
 
     # Altitude gauge
     gauge_mult = cashout_mult if (cashed_out and cashout_mult is not None) else current_mult
@@ -1120,10 +568,10 @@ def _build_crash_html(
           <span class="live-stat">💰 ${total_wagered:,} Wagered</span>
         </div>"""
     else:
-        data_section = _build_data_grid_html(wager, payout, balance)
+        data_section = build_data_grid_html(wager, payout, balance)
 
-    footer = _build_footer_html(balance)
-    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
+    footer = build_footer_html(balance)
+    jackpot_footer = build_jackpot_footer_html(jackpot_info)
 
     game_css = """
     <style>
@@ -1339,7 +787,7 @@ def _build_crash_html(
     {footer}
     {jackpot_footer}"""
 
-    return _wrap_card(status_class, content)
+    return wrap_card(content, status_class)
 
 
 async def render_crash_card(
@@ -1368,7 +816,7 @@ async def render_crash_card(
         player_name, players, txn_id, is_live,
         streak_info, near_miss_msg, jackpot_info,
     )
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1418,9 +866,9 @@ def _build_coinflip_html(
     if near_miss_msg and outcome == "loss":
         status_class = "near_miss"
 
-    header = _build_header_html("🪙", "COIN FLIP", display_players, status_class, badge_text, txn_id)
-    streak_badge = _build_streak_badge_html(streak_info)
-    near_miss_banner = _build_near_miss_html(near_miss_msg)
+    header = build_header_html("🪙", "COIN FLIP", display_players, status_class, badge_text, txn_id)
+    streak_badge = build_streak_badge_html(streak_info)
+    near_miss_banner = build_near_miss_html(near_miss_msg)
 
     # Coin visual
     is_heads = result == "heads"
@@ -1444,25 +892,25 @@ def _build_coinflip_html(
         pvp_html = f"""
         <div class="pvp-row">
           <div class="pvp-player" style="color: {p1_color}; opacity: {p1_opacity};">
-            <div class="pvp-name">{_esc(player_name)}</div>
-            <div class="pvp-pick">{_esc(player_pick.upper())}</div>
+            <div class="pvp-name">{esc(player_name)}</div>
+            <div class="pvp-pick">{esc(player_pick.upper())}</div>
           </div>
           <div class="pvp-vs">VS</div>
           <div class="pvp-player" style="color: {p2_color}; opacity: {p2_opacity};">
-            <div class="pvp-name">{_esc(opponent_name or 'Opponent')}</div>
-            <div class="pvp-pick">{_esc((opponent_pick or '').upper())}</div>
+            <div class="pvp-name">{esc(opponent_name or 'Opponent')}</div>
+            <div class="pvp-pick">{esc((opponent_pick or '').upper())}</div>
           </div>
         </div>"""
     else:
         pvp_html = f"""
         <div class="pick-display">
           <span style="color: {pick_color}; font-size: 20px;">{pick_icon}</span>
-          <span class="pick-text">You picked <strong>{_esc(player_pick.upper())}</strong></span>
+          <span class="pick-text">You picked <strong>{esc(player_pick.upper())}</strong></span>
         </div>"""
 
-    data_grid = _build_data_grid_html(wager, payout, balance)
-    footer = _build_footer_html(balance)
-    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
+    data_grid = build_data_grid_html(wager, payout, balance)
+    footer = build_footer_html(balance)
+    jackpot_footer = build_jackpot_footer_html(jackpot_info)
 
     game_css = f"""
     <style>
@@ -1565,7 +1013,7 @@ def _build_coinflip_html(
     {footer}
     {jackpot_footer}"""
 
-    return _wrap_card(status_class, content)
+    return wrap_card(content, status_class)
 
 
 async def render_coinflip_card(
@@ -1589,7 +1037,7 @@ async def render_coinflip_card(
         is_pvp, opponent_name, opponent_pick,
         streak_info, near_miss_msg, jackpot_info,
     )
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1621,7 +1069,7 @@ def _build_scratch_html(
         outcome = "active"
         badge_text = f"{3 - revealed} LEFT"
 
-    header = _build_header_html(
+    header = build_header_html(
         icon="\U0001f3ab",  # 🎫
         title="DAILY SCRATCH",
         players=[player_name],
@@ -1665,7 +1113,7 @@ def _build_scratch_html(
           Tap Scratch! to reveal ({remaining} tile{"s" if remaining > 1 else ""} left)
         </div>"""
 
-    footer = _build_footer_html(balance)
+    footer = build_footer_html(balance)
 
     game_css = """<style>
     .scratch-area {
@@ -1784,7 +1232,7 @@ def _build_scratch_html(
     <div class="gold-divider"></div>
     {footer}"""
 
-    return _wrap_card(status_class, content)
+    return wrap_card(content, status_class)
 
 
 async def render_scratch_card_v6(
@@ -1797,4 +1245,4 @@ async def render_scratch_card_v6(
 ) -> bytes:
     """Render a scratch card to PNG bytes using V6 Playwright renderer."""
     html = _build_scratch_html(tiles, revealed, is_match, player_name, total, balance)
-    return await _render_card_html(html)
+    return await render_card(html)
