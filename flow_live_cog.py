@@ -264,6 +264,40 @@ class SessionTracker:
         self._persist(session)
         return session
 
+    def record_sportsbook(self, event: "SportsbookEvent") -> PlayerSession:
+        key = (event.discord_id, event.guild_id)
+        session = self._active.get(key)
+        if session is None:
+            session = PlayerSession(
+                discord_id=event.discord_id,
+                guild_id=event.guild_id,
+            )
+            self._active[key] = session
+
+        session.last_activity = time.time()
+        session.total_games += 1
+        session.games_by_type["sportsbook"] += 1
+        session.net_profit += event.amount
+
+        if event.amount > 0:
+            session.wins += 1
+            if event.amount > session.biggest_win:
+                session.biggest_win = event.amount
+            session.current_streak = max(session.current_streak, 0) + 1
+        elif event.amount < 0:
+            session.losses += 1
+            if event.amount < session.biggest_loss:
+                session.biggest_loss = event.amount
+            session.current_streak = min(session.current_streak, 0) - 1
+        else:
+            session.pushes += 1
+
+        if session.current_streak > session.best_streak:
+            session.best_streak = session.current_streak
+
+        self._persist(session)
+        return session
+
     def get_active(self, discord_id: int, guild_id: int) -> Optional[PlayerSession]:
         return self._active.get((discord_id, guild_id))
 
@@ -473,7 +507,8 @@ class FlowLiveCog(commands.Cog):
             await self._post_instant_highlight(highlight, event.guild_id)
 
     async def _on_sportsbook_result(self, event):
-        """Handle sportsbook result: detect highlights."""
+        """Handle sportsbook result: track session + detect highlights."""
+        self.sessions.record_sportsbook(event)
         highlight = self.detector.check_sportsbook(event)
         if highlight and highlight.highlight_type == HighlightType.INSTANT:
             await self._post_instant_highlight(highlight, event.guild_id)
