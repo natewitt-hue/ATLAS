@@ -1,28 +1,44 @@
 """
 ledger_poster.py — ATLAS Universal Ledger Poster
 ─────────────────────────────────────────────────────────────────────────────
-Centralized utility for posting transaction slips to the #ledger channel.
-Supports both casino game results and general economy transactions.
+Centralized utility for posting transaction audit lines to the #ledger channel.
+#ledger is a text-only audit trail; visual highlights go to #flow-live.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
-
-import io
 
 import discord
 from discord.ext import commands
 
-from casino.renderer.ledger_renderer import (
-    render_ledger_card,
-    render_transaction_slip,
-)
 
-# ── Outcome → embed color mapping ────────────────────────────────────────────
-_OUTCOME_COLOR = {"win": 0x22C55E, "loss": 0xEF4444, "push": 0xF59E0B}
-_AMOUNT_COLOR  = {"credit": 0x22C55E, "debit": 0xEF4444, "neutral": 0xD4AF37}
+# ── Outcome → emoji mapping ───────────────────────────────────────────────
+_OUTCOME_EMOJI = {"win": "✅", "loss": "❌", "push": "➖"}
+
+# ── Game type → display label mapping ────────────────────────────────────
+_GAME_LABEL = {
+    "blackjack": "Blackjack",
+    "slots":     "Slots",
+    "crash":     "Crash",
+    "coinflip":  "Coinflip",
+    "scratch":   "Scratch",
+    "roulette":  "Roulette",
+}
+
+# ── Transaction source → display label mapping ───────────────────────────
+_SOURCE_LABEL = {
+    "admin":      "Admin Adjustment",
+    "stipend":    "Weekly Stipend",
+    "bet_win":    "Sportsbook Win",
+    "bet_loss":   "Sportsbook Loss",
+    "bet_refund": "Sportsbook Refund",
+    "transfer":   "Transfer",
+    "reward":     "Reward",
+    "penalty":    "Penalty",
+}
 
 
 def _resolve_channel(bot: commands.Bot, guild_id: int):
@@ -46,6 +62,11 @@ def _get_display_name(channel, discord_id: int) -> str:
     return f"User {discord_id}"
 
 
+def _timestamp() -> str:
+    """Return a short datetime string, e.g. 'Mar 16 14:32'."""
+    return datetime.utcnow().strftime("%b %d %H:%M")
+
+
 async def post_casino_result(
     bot: commands.Bot,
     guild_id: int,
@@ -58,31 +79,27 @@ async def post_casino_result(
     new_balance: int,
     txn_id: Optional[int] = None,
 ) -> None:
-    """Post a casino game result slip to #ledger."""
+    """Post a casino game result audit line to #ledger."""
     try:
         channel = _resolve_channel(bot, guild_id)
         if not channel:
             return
 
         display_name = _get_display_name(channel, discord_id)
+        ts = _timestamp()
+        game_label = _GAME_LABEL.get(game_type.lower(), game_type.title())
+        outcome_emoji = _OUTCOME_EMOJI.get(outcome.lower(), "❓")
+        outcome_label = outcome.title()
 
-        png_bytes = await render_ledger_card(
-            player_name=display_name,
-            game_type=game_type,
-            wager=wager,
-            outcome=outcome,
-            payout=payout,
-            multiplier=multiplier,
-            new_balance=new_balance,
-            txn_id=txn_id,
+        line = (
+            f"`{ts}` | **{display_name}** | {game_label} | "
+            f"{outcome_emoji} {outcome_label} | "
+            f"Wager: ${wager:,} | Payout: ${payout:,} | Balance: ${new_balance:,}"
         )
+        if txn_id is not None:
+            line += f" | `#{txn_id}`"
 
-        embed = discord.Embed(color=_OUTCOME_COLOR.get(outcome, 0xD4AF37))
-        embed.set_image(url="attachment://ledger.png")
-        await channel.send(
-            embed=embed,
-            file=discord.File(io.BytesIO(png_bytes), filename="ledger.png"),
-        )
+        await channel.send(line)
     except Exception as e:
         print(f"[LEDGER] Failed to post casino result: {e}")
 
@@ -97,33 +114,26 @@ async def post_transaction(
     description: str = "",
     txn_id: Optional[int] = None,
 ) -> None:
-    """Post a general transaction slip to #ledger."""
+    """Post a general transaction audit line to #ledger."""
     try:
         channel = _resolve_channel(bot, guild_id)
         if not channel:
             return
 
         display_name = _get_display_name(channel, discord_id)
+        ts = _timestamp()
+        source_label = _SOURCE_LABEL.get(source.lower(), source.replace("_", " ").title())
+        amount_sign = f"+${amount:,}" if amount >= 0 else f"-${abs(amount):,}"
 
-        png_bytes = await render_transaction_slip(
-            source=source,
-            player_name=display_name,
-            amount=amount,
-            balance_after=balance_after,
-            description=description,
-            txn_id=txn_id,
+        line = (
+            f"`{ts}` | **{display_name}** | {source_label} | "
+            f"{amount_sign} | Balance: ${balance_after:,}"
         )
+        if description:
+            line += f" | {description}"
+        if txn_id is not None:
+            line += f" | `#{txn_id}`"
 
-        color = (
-            _AMOUNT_COLOR["credit"] if amount > 0
-            else _AMOUNT_COLOR["debit"] if amount < 0
-            else _AMOUNT_COLOR["neutral"]
-        )
-        embed = discord.Embed(color=color)
-        embed.set_image(url="attachment://ledger.png")
-        await channel.send(
-            embed=embed,
-            file=discord.File(io.BytesIO(png_bytes), filename="ledger.png"),
-        )
+        await channel.send(line)
     except Exception as e:
         print(f"[LEDGER] Failed to post transaction: {e}")
