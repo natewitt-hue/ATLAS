@@ -184,9 +184,9 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # BACKGROUND TASKS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    @tasks.loop(hours=4)
+    @tasks.loop(hours=1)
     async def sync_scores_task(self):
-        """Fetch scores every 4 hours, auto-grade completed bets."""
+        """Fetch scores every hour, auto-grade completed bets."""
         await asyncio.sleep(random.uniform(5, 15))
         await self._sync_scores()
 
@@ -213,13 +213,13 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     async def _before_lock(self):
         await self.bot.wait_until_ready()
 
-    @tasks.loop(hours=12)
+    @tasks.loop(hours=2)
     async def sync_odds_task(self):
-        """Sync odds for all in-season sports on their scheduled days."""
+        """Sync odds for all in-season sports every 2 hours."""
         await asyncio.sleep(random.uniform(5, 15))
         now = datetime.now(timezone.utc)
         for sport_key, cfg in SPORT_SEASONS.items():
-            if now.month in cfg["months"] and now.weekday() in cfg["sync_days"]:
+            if now.month in cfg["months"]:
                 await self._sync_odds(sport_key)
 
     @sync_odds_task.before_loop
