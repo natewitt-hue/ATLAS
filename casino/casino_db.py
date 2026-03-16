@@ -12,13 +12,16 @@ All casino tables are created here on first startup via setup_casino_db().
 
 import aiosqlite
 import hashlib
+import logging
 import os
 import random
 import secrets
 import string
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 
 import flow_wallet
+
+log = logging.getLogger("casino.db")
 
 # -- Shared DB path (unified economy DB) --------------------------------------
 DB_PATH = flow_wallet.DB_PATH
@@ -27,6 +30,34 @@ CASINO_MAX_BET    = 100
 CASINO_DAILY_MIN  = 25
 CASINO_DAILY_MAX  = 150
 STARTING_BALANCE  = flow_wallet.STARTING_BALANCE
+
+# -- Jackpot configuration ----------------------------------------------------
+JACKPOT_CONTRIBUTION_RATE = 0.01       # 1% of every wager
+JACKPOT_SPLIT = {"mini": 0.50, "major": 0.30, "grand": 0.20}
+JACKPOT_SEEDS = {"mini": 100, "major": 500, "grand": 2000}
+# Base trigger odds per $100 wagered
+JACKPOT_BASE_ODDS = {"mini": 500, "major": 5_000, "grand": 50_000}
+
+# -- Streak configuration -----------------------------------------------------
+STREAK_BONUSES = {
+    3:  {"pct": 0.05, "label": "Hot Hand",     "jackpot_mult": 1},
+    5:  {"pct": 0.10, "label": "On Fire",      "jackpot_mult": 1},
+    7:  {"pct": 0.15, "label": "Untouchable",  "jackpot_mult": 2},
+    10: {"pct": 0.20, "label": "LEGENDARY",    "jackpot_mult": 3},
+}
+COLD_STREAK_THRESHOLDS = {
+    5:  {"type": "next_win_boost", "value": 1.25},
+    8:  {"type": "free_credit",    "value": 50},
+    10: {"type": "loss_refund_pct","value": 0.25},
+}
+
+# -- Progressive bet tiers -----------------------------------------------------
+BET_TIERS = [
+    (100_000, 1000, "Diamond"),
+    (25_000,   500, "Gold"),
+    (5_000,    250, "Silver"),
+    (0,        100, "Bronze"),
+]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -121,9 +152,73 @@ async def setup_casino_db() -> None:
             )
         """)
 
+        # ── Progressive jackpot pools ────────────────────────────────────
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_jackpot (
+                tier        TEXT    PRIMARY KEY,
+                pool        INTEGER NOT NULL DEFAULT 0,
+                seed        INTEGER NOT NULL DEFAULT 0,
+                last_winner INTEGER DEFAULT NULL,
+                last_amount INTEGER DEFAULT NULL,
+                last_won_at TEXT    DEFAULT NULL,
+                total_paid  INTEGER NOT NULL DEFAULT 0,
+                total_hits  INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        for tier, seed_val in JACKPOT_SEEDS.items():
+            await db.execute(
+                "INSERT OR IGNORE INTO casino_jackpot (tier, pool, seed) VALUES (?,?,?)",
+                (tier, seed_val, seed_val),
+            )
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_jackpot_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                tier       TEXT    NOT NULL,
+                discord_id INTEGER NOT NULL,
+                amount     INTEGER NOT NULL,
+                game_type  TEXT    NOT NULL,
+                won_at     TEXT    NOT NULL
+            )
+        """)
+
+        # ── Player streaks ───────────────────────────────────────────────
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_streaks (
+                discord_id  INTEGER PRIMARY KEY,
+                streak_type TEXT    NOT NULL DEFAULT 'none',
+                streak_len  INTEGER NOT NULL DEFAULT 0,
+                max_streak  INTEGER NOT NULL DEFAULT 0,
+                streak_date TEXT    NOT NULL DEFAULT '',
+                updated_at  TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+
+        # ── Achievements ─────────────────────────────────────────────────
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_achievements (
+                discord_id  INTEGER NOT NULL,
+                achievement TEXT    NOT NULL,
+                unlocked_at TEXT    NOT NULL,
+                PRIMARY KEY (discord_id, achievement)
+            )
+        """)
+
+        # ── Daily scratch streak columns (add via ALTER if missing) ──────
+        try:
+            await db.execute(
+                "ALTER TABLE daily_scratches ADD COLUMN login_streak INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # column already exists
+        try:
+            await db.execute(
+                "ALTER TABLE daily_scratches ADD COLUMN last_streak_date TEXT DEFAULT ''"
+            )
+        except Exception:
+            pass
+
         # -- Casino settings (max bet overrides, channel IDs, etc.) --------
-        # Ensure sportsbook_settings table exists (may not if casino loads
-        # before the sportsbook on a fresh DB)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sportsbook_settings (
                 key   TEXT PRIMARY KEY,
@@ -145,7 +240,8 @@ async def setup_casino_db() -> None:
                 ('casino_blackjack_channel',''),
                 ('casino_crash_channel',    ''),
                 ('casino_slots_channel',    ''),
-                ('casino_coinflip_channel', '')
+                ('casino_coinflip_channel', ''),
+                ('casino_daily_cap',        '5000')
         """)
 
         await db.commit()
@@ -191,12 +287,37 @@ async def get_channel_id(game: str) -> int | None:
         return None
 
 
-async def get_max_bet() -> int:
+async def get_max_bet(discord_id: int | None = None) -> int:
+    """
+    Return max bet.  If discord_id is given, apply progressive tier limits.
+    """
+    base = CASINO_MAX_BET
     val = await get_setting("casino_max_bet", "100")
     try:
-        return int(val)
+        base = int(val)
     except ValueError:
-        return CASINO_MAX_BET
+        pass
+
+    if discord_id is None:
+        return base
+
+    tier = await get_player_tier(discord_id)
+    return tier["max_bet"]
+
+
+async def get_player_tier(discord_id: int) -> dict:
+    """Return player's bet tier based on lifetime wagered volume."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(wager),0) FROM casino_sessions WHERE discord_id=?",
+            (discord_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    lifetime = row[0] if row else 0
+    for threshold, max_bet, name in BET_TIERS:
+        if lifetime >= threshold:
+            return {"name": name, "max_bet": max_bet, "lifetime": lifetime, "threshold": threshold}
+    return {"name": "Bronze", "max_bet": 100, "lifetime": lifetime, "threshold": 0}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -205,6 +326,360 @@ async def get_max_bet() -> int:
 
 async def get_balance(discord_id: int) -> int:
     return await flow_wallet.get_balance(discord_id)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  JACKPOT SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def get_jackpot_pools() -> dict[str, dict]:
+    """Return current pool amounts for all tiers."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT * FROM casino_jackpot ORDER BY tier") as cur:
+            rows = await cur.fetchall()
+    cols = ["tier", "pool", "seed", "last_winner", "last_amount", "last_won_at", "total_paid", "total_hits"]
+    return {r[0]: dict(zip(cols, r)) for r in rows}
+
+
+async def _contribute_and_check_jackpot(
+    discord_id: int, wager: int, game_type: str, streak_len: int, con
+) -> dict | None:
+    """
+    Contribute wager % to jackpot pools and roll for jackpot win.
+    Must be called inside an existing BEGIN IMMEDIATE transaction (con).
+    Returns jackpot info dict if won, else None.
+    """
+    total_contrib = max(1, int(wager * JACKPOT_CONTRIBUTION_RATE))
+
+    for tier, split_pct in JACKPOT_SPLIT.items():
+        contrib = max(1, int(total_contrib * split_pct))
+        await con.execute(
+            "UPDATE casino_jackpot SET pool = pool + ? WHERE tier = ?",
+            (contrib, tier),
+        )
+
+    # Roll for jackpot — higher wager = proportionally higher chance
+    wager_factor = wager / 100.0
+
+    # Streak multiplier for jackpot odds
+    jp_mult = 1
+    for threshold in sorted(STREAK_BONUSES.keys(), reverse=True):
+        if streak_len >= threshold:
+            jp_mult = STREAK_BONUSES[threshold]["jackpot_mult"]
+            break
+
+    # Check jackpot boost event
+    boost = 1.0
+    async with con.execute(
+        "SELECT value FROM sportsbook_settings WHERE key='casino_jackpot_boost'"
+    ) as cur:
+        row = await cur.fetchone()
+    if row:
+        try:
+            parts = row[0].split(",")  # "multiplier,expires_iso"
+            if len(parts) == 2 and datetime.fromisoformat(parts[1]) > datetime.now(timezone.utc):
+                boost = float(parts[0])
+        except (ValueError, IndexError):
+            pass
+
+    roll = random.random()
+
+    # Check tiers from rarest to most common
+    for tier in ("grand", "major", "mini"):
+        base_odds = JACKPOT_BASE_ODDS[tier]
+        threshold = (wager_factor * jp_mult * boost) / base_odds
+        if roll < threshold:
+            return await _award_jackpot(tier, discord_id, game_type, con)
+
+    return None
+
+
+async def _award_jackpot(tier: str, discord_id: int, game_type: str, con) -> dict:
+    """Award jackpot pool to the winner. Returns info dict."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with con.execute(
+        "SELECT pool, seed FROM casino_jackpot WHERE tier=?", (tier,)
+    ) as cur:
+        row = await cur.fetchone()
+
+    amount = row[0] if row else 0
+    seed_val = row[1] if row else JACKPOT_SEEDS.get(tier, 100)
+
+    if amount < 1:
+        return None
+
+    # Credit winner
+    ref_key = f"JACKPOT_{tier}_{discord_id}_{now}"
+    await flow_wallet.credit(
+        discord_id, amount, "CASINO",
+        description=f"JACKPOT {tier.upper()} win!",
+        reference_key=ref_key,
+        con=con,
+    )
+
+    # Reset pool to seed, update stats
+    await con.execute("""
+        UPDATE casino_jackpot
+        SET pool = ?, last_winner = ?, last_amount = ?, last_won_at = ?,
+            total_paid = total_paid + ?, total_hits = total_hits + 1
+        WHERE tier = ?
+    """, (seed_val, discord_id, amount, now, amount, tier))
+
+    # Log
+    await con.execute("""
+        INSERT INTO casino_jackpot_log (tier, discord_id, amount, game_type, won_at)
+        VALUES (?,?,?,?,?)
+    """, (tier, discord_id, amount, game_type, now))
+
+    log.info("JACKPOT %s won by %s: $%d (%s)", tier.upper(), discord_id, amount, game_type)
+    return {"tier": tier, "amount": amount, "discord_id": discord_id, "game_type": game_type}
+
+
+async def seed_jackpot(tier: str, amount: int) -> None:
+    """Admin: add funds to a jackpot pool."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE casino_jackpot SET pool = pool + ? WHERE tier = ?",
+            (amount, tier),
+        )
+        await db.commit()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  STREAK SYSTEM ("Momentum")
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def get_streak(discord_id: int) -> dict:
+    """Return current streak info for a player."""
+    today = date.today().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT streak_type, streak_len, max_streak, streak_date FROM casino_streaks WHERE discord_id=?",
+            (discord_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or row[3] != today:
+        return {"type": "none", "len": 0, "max": row[2] if row else 0, "date": today}
+    return {"type": row[0], "len": row[1], "max": row[2], "date": row[3]}
+
+
+async def _update_streak(discord_id: int, outcome: str, con) -> dict:
+    """
+    Update streak state within an existing transaction.
+    Returns updated streak info dict.
+    """
+    today = date.today().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with con.execute(
+        "SELECT streak_type, streak_len, max_streak, streak_date FROM casino_streaks WHERE discord_id=?",
+        (discord_id,),
+    ) as cur:
+        row = await cur.fetchone()
+
+    if outcome == "push":
+        if not row:
+            return {"type": "none", "len": 0, "max": 0, "date": today}
+        return {"type": row[0], "len": row[1], "max": row[2], "date": row[3]}
+
+    # Reset streak if from a different day
+    prev_type = row[0] if row and row[3] == today else "none"
+    prev_len  = row[1] if row and row[3] == today else 0
+    prev_max  = row[2] if row else 0
+
+    if outcome == "win":
+        new_type = "win"
+        new_len  = (prev_len + 1) if prev_type == "win" else 1
+    else:
+        new_type = "loss"
+        new_len  = (prev_len + 1) if prev_type == "loss" else 1
+
+    new_max = max(prev_max, new_len) if new_type == "win" else prev_max
+
+    await con.execute("""
+        INSERT INTO casino_streaks (discord_id, streak_type, streak_len, max_streak, streak_date, updated_at)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(discord_id) DO UPDATE SET
+            streak_type=excluded.streak_type,
+            streak_len=excluded.streak_len,
+            max_streak=MAX(casino_streaks.max_streak, excluded.max_streak),
+            streak_date=excluded.streak_date,
+            updated_at=excluded.updated_at
+    """, (discord_id, new_type, new_len, new_max, today, now))
+
+    return {"type": new_type, "len": new_len, "max": new_max, "date": today}
+
+
+def get_streak_bonus(streak_info: dict) -> dict | None:
+    """Return the active streak bonus for a given streak, or None."""
+    if streak_info["type"] != "win":
+        return None
+    for threshold in sorted(STREAK_BONUSES.keys(), reverse=True):
+        if streak_info["len"] >= threshold:
+            return {**STREAK_BONUSES[threshold], "threshold": threshold}
+    return None
+
+
+def get_cold_streak_mercy(streak_info: dict) -> dict | None:
+    """Return the active cold streak mercy mechanic, or None."""
+    if streak_info["type"] != "loss":
+        return None
+    for threshold in sorted(COLD_STREAK_THRESHOLDS.keys(), reverse=True):
+        if streak_info["len"] >= threshold:
+            return {**COLD_STREAK_THRESHOLDS[threshold], "threshold": threshold}
+    return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  ACHIEVEMENTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Achievement definitions: {id: {name, description, check_fn_name}}
+ACHIEVEMENTS = {
+    "first_timer":    {"name": "First Timer",    "desc": "Play 1 casino game",          "icon": "bronze_chip"},
+    "regular":        {"name": "Regular",        "desc": "Play 50 games",               "icon": "silver_chip"},
+    "high_roller":    {"name": "High Roller",    "desc": "Play 500 games",              "icon": "gold_chip"},
+    "whale":          {"name": "Whale",          "desc": "Play 1,000 games",            "icon": "plat_chip"},
+    "lucky_7":        {"name": "Lucky 7",        "desc": "7 win streak",                "icon": "seven_stars"},
+    "perfect_hand":   {"name": "Perfect Hand",   "desc": "Blackjack with A+K suited",   "icon": "royal_crown"},
+    "rocketman":      {"name": "Rocketman",      "desc": "Cash out at 10x+ in crash",   "icon": "rocket"},
+    "moon_shot":      {"name": "Moon Shot",      "desc": "Cash out at 50x+ in crash",   "icon": "moon"},
+    "nerves_of_steel":{"name": "Nerves of Steel","desc": "Last Man Standing 3 times",   "icon": "shield"},
+    "all_rounder":    {"name": "All-Rounder",    "desc": "Play all 4 game types",       "icon": "four_leaf"},
+    "jackpot_club":   {"name": "Jackpot Club",   "desc": "Hit any jackpot tier",        "icon": "diamond"},
+    "grand_slam":     {"name": "Grand Slam",     "desc": "Hit all 3 jackpot tiers",     "icon": "triple_diamond"},
+    "comeback_king":  {"name": "Comeback King",  "desc": "Win after 8+ loss streak",    "icon": "phoenix"},
+    "dedicated":      {"name": "Dedicated",      "desc": "14-day daily scratch streak", "icon": "calendar_star"},
+    "iron_will":      {"name": "Iron Will",      "desc": "30-day daily scratch streak", "icon": "iron_cross"},
+    "big_spender":    {"name": "Big Spender",    "desc": "$10K lifetime wagered",       "icon": "money_bag"},
+    "high_society":   {"name": "High Society",   "desc": "$50K lifetime wagered",       "icon": "crown"},
+    "legend":         {"name": "Legend",          "desc": "$100K lifetime wagered",      "icon": "trophy"},
+    "challenger":     {"name": "Challenger",      "desc": "Win 10 PvP coin flips",      "icon": "crossed_swords"},
+    "crowd_player":   {"name": "Crowd Player",   "desc": "Play 20 crash rounds (3+ players)", "icon": "stadium"},
+}
+
+
+async def get_player_achievements(discord_id: int) -> set[str]:
+    """Return set of unlocked achievement IDs for a player."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT achievement FROM casino_achievements WHERE discord_id=?",
+            (discord_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {r[0] for r in rows}
+
+
+async def check_achievements(
+    discord_id: int,
+    game_type: str,
+    outcome: str,
+    multiplier: float,
+    streak_info: dict,
+    jackpot_result: dict | None = None,
+) -> list[dict]:
+    """
+    Check and award any newly unlocked achievements.
+    Returns list of newly unlocked achievement dicts.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await get_player_achievements(discord_id)
+    newly_unlocked = []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Milestone checks
+        async with db.execute(
+            "SELECT COUNT(*) FROM casino_sessions WHERE discord_id=?", (discord_id,)
+        ) as cur:
+            total_games = (await cur.fetchone())[0]
+
+        milestones = [("first_timer", 1), ("regular", 50), ("high_roller", 500), ("whale", 1000)]
+        for ach_id, threshold in milestones:
+            if ach_id not in existing and total_games >= threshold:
+                newly_unlocked.append(ach_id)
+
+        # Economy checks
+        async with db.execute(
+            "SELECT COALESCE(SUM(wager),0) FROM casino_sessions WHERE discord_id=?", (discord_id,)
+        ) as cur:
+            lifetime_wagered = (await cur.fetchone())[0]
+
+        econ = [("big_spender", 10_000), ("high_society", 50_000), ("legend", 100_000)]
+        for ach_id, threshold in econ:
+            if ach_id not in existing and lifetime_wagered >= threshold:
+                newly_unlocked.append(ach_id)
+
+        # All-Rounder (played all 4 game types)
+        if "all_rounder" not in existing:
+            async with db.execute(
+                "SELECT DISTINCT game_type FROM casino_sessions WHERE discord_id=? AND game_type IN ('blackjack','slots','crash','coinflip')",
+                (discord_id,),
+            ) as cur:
+                types = await cur.fetchall()
+            if len(types) >= 4:
+                newly_unlocked.append("all_rounder")
+
+        # Lucky 7 (7 win streak)
+        if "lucky_7" not in existing and streak_info["type"] == "win" and streak_info["len"] >= 7:
+            newly_unlocked.append("lucky_7")
+
+        # Comeback King (win after 8+ loss streak)
+        if "comeback_king" not in existing and outcome == "win":
+            # Check if previous streak was 8+ losses (streak just reset to win 1)
+            if streak_info["type"] == "win" and streak_info["len"] == 1:
+                async with db.execute(
+                    "SELECT streak_len FROM casino_streaks WHERE discord_id=?", (discord_id,)
+                ) as cur:
+                    pass  # We can't check previous streak after reset
+                # Alternative: check last 9 sessions (8 losses + this win)
+                async with db.execute(
+                    "SELECT outcome FROM casino_sessions WHERE discord_id=? ORDER BY session_id DESC LIMIT 9",
+                    (discord_id,),
+                ) as cur:
+                    recent = [r[0] for r in await cur.fetchall()]
+                if len(recent) >= 9 and recent[0] == "win" and all(o == "loss" for o in recent[1:9]):
+                    newly_unlocked.append("comeback_king")
+
+        # Crash achievements
+        if "rocketman" not in existing and game_type == "crash" and outcome == "win" and multiplier >= 10.0:
+            newly_unlocked.append("rocketman")
+        if "moon_shot" not in existing and game_type == "crash" and outcome == "win" and multiplier >= 50.0:
+            newly_unlocked.append("moon_shot")
+
+        # PvP coinflip challenger
+        if "challenger" not in existing:
+            async with db.execute(
+                "SELECT COUNT(*) FROM casino_sessions WHERE discord_id=? AND game_type='coinflip_pvp' AND outcome='win'",
+                (discord_id,),
+            ) as cur:
+                pvp_wins = (await cur.fetchone())[0]
+            if pvp_wins >= 10:
+                newly_unlocked.append("challenger")
+
+        # Jackpot achievements
+        if jackpot_result:
+            if "jackpot_club" not in existing:
+                newly_unlocked.append("jackpot_club")
+            if "grand_slam" not in existing:
+                async with db.execute(
+                    "SELECT DISTINCT tier FROM casino_jackpot_log WHERE discord_id=?",
+                    (discord_id,),
+                ) as cur:
+                    tiers_hit = {r[0] for r in await cur.fetchall()}
+                tiers_hit.add(jackpot_result["tier"])
+                if tiers_hit >= {"mini", "major", "grand"}:
+                    newly_unlocked.append("grand_slam")
+
+        # Persist new achievements
+        for ach_id in newly_unlocked:
+            await db.execute(
+                "INSERT OR IGNORE INTO casino_achievements (discord_id, achievement, unlocked_at) VALUES (?,?,?)",
+                (discord_id, ach_id, now),
+            )
+        if newly_unlocked:
+            await db.commit()
+
+    return [{"id": a, **ACHIEVEMENTS[a]} for a in newly_unlocked if a in ACHIEVEMENTS]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -230,27 +705,61 @@ async def process_wager(
     Atomically process a casino wager result.
 
     Flow:
-      1. BEGIN IMMEDIATE — acquires write lock, blocks concurrent writers
-      2. Read current balance (within the lock, so it's fresh)
-      3. Validate balance >= wager (should already be debited at bet time,
-         but this is a safety net for edge cases)
-      4. Credit payout to balance
-      5. Log session row
-      6. Log house bank delta
-      7. COMMIT
+      1. BEGIN IMMEDIATE — acquires write lock
+      2. Update streak, apply hot/cold streak bonuses to payout
+      3. Credit payout to balance
+      4. Log session + house bank delta
+      5. Contribute to jackpot pools + roll for jackpot
+      6. COMMIT
 
-    Returns a dict with session_id and new_balance.
-
-    Raises InsufficientFundsError if balance check fails (should not happen
-    in normal flow since we debit at bet placement, but guards against bugs).
+    Returns dict with session_id, new_balance, txn_id, streak_info,
+    streak_bonus, jackpot_result, cold_mercy.
     """
     now = datetime.now(timezone.utc).isoformat()
+    streak_info = {"type": "none", "len": 0, "max": 0, "date": ""}
+    streak_bonus_info = None
+    jackpot_result = None
+    cold_mercy = None
+    bonus_amount = 0
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
 
         try:
-            # 1. Credit payout via flow_wallet (passes con -- no commit)
+            # 1. Update streak
+            streak_info = await _update_streak(discord_id, outcome, db)
+
+            # 2. Apply streak bonuses
+            if outcome == "win" and payout > 0:
+                bonus = get_streak_bonus(streak_info)
+                if bonus and bonus["pct"] > 0:
+                    bonus_amount = int(payout * bonus["pct"])
+                    # Fund bonus from mini jackpot pool
+                    async with db.execute(
+                        "SELECT pool FROM casino_jackpot WHERE tier='mini'"
+                    ) as cur:
+                        jp_row = await cur.fetchone()
+                    if jp_row and jp_row[0] >= bonus_amount:
+                        payout += bonus_amount
+                        await db.execute(
+                            "UPDATE casino_jackpot SET pool = pool - ? WHERE tier='mini'",
+                            (bonus_amount,),
+                        )
+                        streak_bonus_info = {"amount": bonus_amount, **bonus}
+                    else:
+                        bonus_amount = 0
+
+            # 3. Cold streak mercy
+            if outcome == "loss":
+                mercy = get_cold_streak_mercy(streak_info)
+                if mercy:
+                    if mercy["type"] == "loss_refund_pct" and streak_info["len"] >= 10:
+                        refund = int(wager * mercy["value"])
+                        if refund > 0:
+                            payout += refund
+                            cold_mercy = {"type": "loss_refund", "amount": refund}
+
+            # 4. Credit payout via flow_wallet
             if payout > 0:
                 ref_key = f"CASINO_{game_type}_{discord_id}_{now}"
                 new_balance = await flow_wallet.credit(
@@ -262,7 +771,21 @@ async def process_wager(
             else:
                 new_balance = await flow_wallet.get_balance(discord_id, con=db)
 
-            # 2. Log session
+            # 5. Cold streak free credit (at 8 losses)
+            if outcome == "loss" and streak_info["type"] == "loss" and streak_info["len"] == 8:
+                mercy = get_cold_streak_mercy(streak_info)
+                if mercy and mercy["type"] == "free_credit":
+                    credit_amt = int(mercy["value"])
+                    ref_key2 = f"MERCY_{discord_id}_{now}"
+                    new_balance = await flow_wallet.credit(
+                        discord_id, credit_amt, "CASINO",
+                        description="cold streak mercy credit",
+                        reference_key=ref_key2,
+                        con=db,
+                    )
+                    cold_mercy = {"type": "free_credit", "amount": credit_amt}
+
+            # 6. Log session
             async with db.execute("""
                 INSERT INTO casino_sessions
                     (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, played_at)
@@ -270,7 +793,7 @@ async def process_wager(
             """, (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, now)) as cur:
                 session_id = cur.lastrowid
 
-            # 3. Get txn_id from the credit we just inserted
+            # 7. Get txn_id
             txn_id = None
             async with db.execute(
                 "SELECT txn_id FROM transactions "
@@ -281,12 +804,20 @@ async def process_wager(
                 if row:
                     txn_id = row[0]
 
-            # 4. Log house bank
+            # 8. Log house bank (delta uses original wager vs final payout)
             house_delta = wager - payout
             await db.execute("""
                 INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at)
                 VALUES (?,?,?,?)
             """, (game_type, house_delta, session_id, now))
+
+            # 9. Jackpot contribution + roll
+            if wager > 0:
+                jackpot_result = await _contribute_and_check_jackpot(
+                    discord_id, wager, game_type, streak_info.get("len", 0), db
+                )
+                if jackpot_result:
+                    new_balance = await flow_wallet.get_balance(discord_id, con=db)
 
             await db.commit()
 
@@ -294,7 +825,15 @@ async def process_wager(
             await db.rollback()
             raise
 
-    return {"session_id": session_id, "new_balance": new_balance, "txn_id": txn_id}
+    return {
+        "session_id":     session_id,
+        "new_balance":    new_balance,
+        "txn_id":         txn_id,
+        "streak_info":    streak_info,
+        "streak_bonus":   streak_bonus_info,
+        "jackpot_result": jackpot_result,
+        "cold_mercy":     cold_mercy,
+    }
 
 
 async def deduct_wager(discord_id: int, wager: int) -> int:
@@ -322,7 +861,7 @@ async def refund_wager(discord_id: int, amount: int) -> int:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def get_house_report() -> dict:
-    """Return P&L breakdown by game type plus totals."""
+    """Return P&L breakdown by game type plus totals and rolling edge stats."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
             SELECT game_type, SUM(delta) as pl, COUNT(*) as hands
@@ -338,12 +877,32 @@ async def get_house_report() -> dict:
         """) as cur:
             totals = await cur.fetchone()
 
+        # Rolling 7-day edge per game
+        async with db.execute("""
+            SELECT cs.game_type,
+                   SUM(cs.wager) as wagered,
+                   SUM(cs.payout) as paid,
+                   COUNT(*) as hands
+            FROM casino_sessions cs
+            WHERE cs.played_at >= date('now', '-7 days')
+            GROUP BY cs.game_type
+        """) as cur:
+            rolling_rows = await cur.fetchall()
+
+    rolling_7d = {}
+    for r in rolling_rows:
+        wagered = r[1] or 0
+        paid = r[2] or 0
+        edge = ((wagered - paid) / wagered * 100) if wagered > 0 else 0
+        rolling_7d[r[0]] = {"wagered": wagered, "paid": paid, "edge_pct": round(edge, 2), "hands": r[3]}
+
     return {
         "by_game": [{"game": r[0], "pl": r[1], "hands": r[2]} for r in rows],
         "total_pl": sum(r[1] for r in rows),
         "unique_players": totals[0] if totals else 0,
         "total_hands":    totals[1] if totals else 0,
         "total_wagered":  totals[2] if totals else 0,
+        "rolling_7d":     rolling_7d,
     }
 
 
@@ -361,18 +920,36 @@ async def can_claim_scratch(discord_id: int) -> bool:
     return row is None or row[0] != today
 
 
-async def claim_scratch(discord_id: int, reward: int | None = None) -> int | None:
+async def get_scratch_streak(discord_id: int) -> int:
+    """Return current daily scratch login streak."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT login_streak, last_streak_date FROM daily_scratches WHERE discord_id=?",
+            (discord_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return 0
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today = date.today().isoformat()
+    if row[1] in (yesterday, today):
+        return row[0]
+    return 0  # streak broken
+
+
+async def claim_scratch(discord_id: int, reward: int | None = None) -> dict | None:
     """
     Credit a scratch card reward to the user's balance.
     Pass the pre-computed reward from the UI tiles so what the player
     sees matches what they receive.  Falls back to a random roll if
     reward is not provided (backwards compat).
-    Returns the amount won, or None if already claimed today.
+    Returns dict with amount, streak, bonus_pct — or None if already claimed.
     """
     if not await can_claim_scratch(discord_id):
         return None
 
     today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
 
     # Fallback: roll if caller didn't pass a pre-computed reward
     if reward is None:
@@ -393,7 +970,7 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> int | Non
         try:
             # Re-check inside transaction to prevent TOCTOU double-claim
             async with db.execute(
-                "SELECT last_claim FROM daily_scratches WHERE discord_id=?",
+                "SELECT last_claim, login_streak, last_streak_date FROM daily_scratches WHERE discord_id=?",
                 (discord_id,),
             ) as cur:
                 row = await cur.fetchone()
@@ -401,17 +978,32 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> int | Non
                 await db.rollback()
                 return None
 
-            # Mark claimed
-            await db.execute("""
-                INSERT INTO daily_scratches (discord_id, last_claim) VALUES (?,?)
-                ON CONFLICT(discord_id) DO UPDATE SET last_claim=excluded.last_claim
-            """, (discord_id, today))
+            # Calculate streak
+            if row and row[2] == yesterday:
+                new_streak = (row[1] or 0) + 1
+            else:
+                new_streak = 1
 
-            # Credit balance via flow_wallet (passes con -- no commit)
+            # Apply streak bonus (+10% per day, capped at +100%)
+            bonus_pct = min(new_streak, 10) * 0.10
+            bonus_amount = int(reward * bonus_pct)
+            total_reward = reward + bonus_amount
+
+            # Mark claimed with streak
+            await db.execute("""
+                INSERT INTO daily_scratches (discord_id, last_claim, login_streak, last_streak_date)
+                VALUES (?,?,?,?)
+                ON CONFLICT(discord_id) DO UPDATE SET
+                    last_claim=excluded.last_claim,
+                    login_streak=excluded.login_streak,
+                    last_streak_date=excluded.last_streak_date
+            """, (discord_id, today, new_streak, today))
+
+            # Credit balance
             ref_key = f"SCRATCH_{discord_id}_{today}"
             await flow_wallet.credit(
-                discord_id, reward, "CASINO",
-                description="daily scratch",
+                discord_id, total_reward, "CASINO",
+                description=f"daily scratch (day {new_streak} streak)",
                 reference_key=ref_key,
                 con=db,
             )
@@ -421,14 +1013,14 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> int | Non
                 INSERT INTO casino_sessions
                     (discord_id, game_type, wager, outcome, payout, multiplier, played_at)
                 VALUES (?,?,?,?,?,?,?)
-            """, (discord_id, "scratch", 0, "win", reward, 1.0, now))
+            """, (discord_id, "scratch", 0, "win", total_reward, 1.0, now))
 
             await db.commit()
         except Exception:
             await db.rollback()
             raise
 
-    return reward
+    return {"amount": total_reward, "base": reward, "streak": new_streak, "bonus_pct": bonus_pct}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
