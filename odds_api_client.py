@@ -133,20 +133,29 @@ class OddsAPIClient:
                             log.warning(f"TheRundown API 404: {url}")
                             return None
                         if resp.status == 429:
+                            # Check body to distinguish burst throttle vs daily/monthly cap
+                            try:
+                                err_body = await resp.json()
+                            except Exception:
+                                err_body = {}
+                            err_msg = err_body.get("error", "")
+
+                            if "limit reached" in err_msg.lower():
+                                # Daily or monthly cap — retrying won't help
+                                log.warning(f"TheRundown API: {err_msg}. No retries.")
+                                return None
+
                             if attempt < self._MAX_RETRIES:
-                                # Retry-After may be seconds or a large epoch timestamp
                                 raw_retry = resp.headers.get("Retry-After")
-                                wait = 3 * (2 ** attempt)  # default backoff
+                                wait = 3 * (2 ** attempt)  # default: 3s, 6s, 12s
                                 if raw_retry:
                                     try:
                                         val = int(raw_retry)
-                                        # If > 1000 it's likely an epoch timestamp, not seconds
-                                        wait = max(1, val - int(loop.time())) if val > 1000 else max(1, val)
+                                        wait = max(1, val) if val <= 300 else wait
                                     except ValueError:
                                         pass
-                                # Cap retry wait to 30s — don't block the event loop forever
                                 wait = min(wait, 30)
-                                log.warning(f"TheRundown API: rate limited (429). Retrying in {wait}s...")
+                                log.warning(f"TheRundown API: burst rate limited. Retrying in {wait}s...")
                                 await asyncio.sleep(wait)
                                 continue
                             log.warning("TheRundown API: rate limited (429). Max retries reached.")
