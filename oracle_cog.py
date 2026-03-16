@@ -77,6 +77,35 @@ def _truncate_for_embed(text: str, limit: int = _EMBED_DESC_LIMIT) -> str:
 # immediately overwritten by the second definition below.
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  HELPERS — Stale Data Footer + Share Button
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _apply_stale_footer(embed: discord.Embed, module: str = "Oracle") -> None:
+    """Append a stale-data warning to the embed footer if data is >30min old."""
+    stale = dm.get_sync_age_text()
+    base = f"ATLAS\u2122 {module}"
+    if stale:
+        embed.set_footer(text=f"{base} \u00b7 \u26a0\ufe0f {stale}")
+    else:
+        embed.set_footer(text=base)
+
+
+class ShareToChannelView(discord.ui.View):
+    """Wraps an embed with a 'Share to Channel' button that re-posts it publicly."""
+
+    def __init__(self, embed: discord.Embed):
+        super().__init__(timeout=120)
+        self._embed = embed
+
+    @discord.ui.button(label="Share to Channel", style=discord.ButtonStyle.secondary, emoji="\U0001f4e4")
+    async def share(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await interaction.channel.send(embed=self._embed)
+        self.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  COG
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -92,7 +121,8 @@ class AnalyticsNav(discord.ui.View):
     async def btn_hotcold(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed, _ = _build_hotcold_league()
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        _apply_stale_footer(embed)
+        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="⚡ Clutch", style=discord.ButtonStyle.secondary, row=0)
     async def btn_clutch(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -103,13 +133,15 @@ class AnalyticsNav(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = _build_clutch_embed()
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        _apply_stale_footer(embed)
+        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="📊 Power", style=discord.ButtonStyle.secondary, row=0)
     async def btn_power(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = _build_power_embed()
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        _apply_stale_footer(embed)
+        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="📋 Draft History", style=discord.ButtonStyle.secondary, row=1)
     async def btn_draft(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -130,13 +162,15 @@ class AnalyticsNav(discord.ui.View):
     async def btn_recap(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = _build_recap_embed()
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        _apply_stale_footer(embed)
+        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="👤 My Profile", style=discord.ButtonStyle.primary, row=1)
     async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = await _build_owner_embed(interaction.user, interaction.guild)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        _apply_stale_footer(embed)
+        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

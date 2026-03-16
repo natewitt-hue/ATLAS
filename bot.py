@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.10.0"  # Bump with every push
+ATLAS_VERSION = "2.12.0"  # Bump with every push
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
@@ -306,7 +306,9 @@ async def call_atlas(user_input: str, context: str, persona_type: str = "casual"
         response = await loop.run_in_executor(None, _generate)
         return response.text.strip()
     except Exception as e:
-        return f"ATLAS Brain Error: {str(e)}"
+        print(f"[Gemini] call_atlas failed: {e}")
+        traceback.print_exc()
+        return "ATLAS is having trouble thinking right now. Try again in a moment."
 
 # ── Startup & Event Loops ────────────────────────────────────────────────────
 

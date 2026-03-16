@@ -654,8 +654,11 @@ class CodexCog(commands.Cog):
                 rows, error = run_sql(sql)
                 if error:
                     await interaction.followup.send(
-                        f"⚠️ Query failed after auto-correction. "
-                        f"Try `/ask_debug` for details, or rephrase using exact usernames."
+                        "⚠️ ATLAS couldn't find an answer for that query. Try rephrasing:\n"
+                        "• Use full player names ('Patrick Mahomes' not 'Mahomes')\n"
+                        "• Specify the season ('in season 95' not 'this year')\n"
+                        "• Ask about one thing at a time\n"
+                        "• Use `/ask_debug` for technical details"
                     )
                     return
 

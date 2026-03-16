@@ -108,6 +108,9 @@ CURRENT_WEEK   = 4
 CURRENT_STAGE  = 1
 REGULAR_STAGE  = 1     # stageIndex for regular season in this league
 
+# ── Sync timestamp ──────────────────────────────────────────────────────────
+last_sync_ts: float = 0.0   # time.time() of last successful load_all()
+
 # ── DataFrames ────────────────────────────────────────────────────────────────
 df_standings  = pd.DataFrame()
 df_teams      = pd.DataFrame()
@@ -638,6 +641,9 @@ def load_all() -> None:
     _rebuild_roster_index()
     print(f"     {len(_roster_by_id)} players indexed by rosterId")
 
+    global last_sync_ts
+    last_sync_ts = time.time()
+
     print(
         f"✅ Load complete — "
         f"{len(df_players)} players | "
@@ -660,6 +666,20 @@ def load_all() -> None:
 
 def get_league_status() -> str:
     return f"Season {CURRENT_SEASON} | Week {CURRENT_WEEK}"
+
+
+def get_sync_age_text() -> str | None:
+    """Return a stale-data warning string if last sync was >30 minutes ago, else None."""
+    if last_sync_ts == 0.0:
+        return "Data not yet loaded"
+    age_min = (time.time() - last_sync_ts) / 60
+    if age_min > 30:
+        hours = int(age_min // 60)
+        mins = int(age_min % 60)
+        if hours > 0:
+            return f"Data as of {hours}h {mins}m ago"
+        return f"Data as of {mins}m ago"
+    return None
 
 
 def get_players() -> list:

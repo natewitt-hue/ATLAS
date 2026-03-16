@@ -98,23 +98,46 @@ def _is_admin(interaction: discord.Interaction) -> bool:
 class CasinoHubModal(discord.ui.Modal):
     """Wager input modal — used by hub buttons to collect bet amount."""
 
-    def __init__(self, game: str):
+    def __init__(self, game: str, max_bet: int = 100):
         super().__init__(title=f"TSL Casino — {game.capitalize()}")
         self.game = game
         self.wager_input = discord.ui.TextInput(
             label       = "Wager ($)",
-            placeholder = "Enter amount (e.g. 50)",
+            placeholder = f"Enter amount (max: ${max_bet:,})",
             min_length  = 1,
             max_length  = 6,
         )
         self.add_item(self.wager_input)
+
+        # For coinflip: add side picker directly in modal
+        if game == "coinflip":
+            self.side_input = discord.ui.TextInput(
+                label       = "Pick a side",
+                placeholder = "heads or tails",
+                min_length  = 1,
+                max_length  = 5,
+            )
+            self.add_item(self.side_input)
+        else:
+            self.side_input = None
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             wager = int(self.wager_input.value.strip().replace(",", ""))
         except ValueError:
             return await interaction.response.send_message(
-                "❌ Invalid amount. Please enter a whole number.", ephemeral=True
+                "❌ Enter a whole number (e.g. 50).", ephemeral=True
+            )
+
+        if wager < 1:
+            return await interaction.response.send_message(
+                "❌ Wager must be at least **$1**.", ephemeral=True
+            )
+        max_bet = await db.get_max_bet(interaction.user.id)
+        if wager > max_bet:
+            return await interaction.response.send_message(
+                f"❌ Your max bet is **${max_bet:,}**. Enter a lower amount.",
+                ephemeral=True,
             )
 
         if self.game == "blackjack":
@@ -124,10 +147,17 @@ class CasinoHubModal(discord.ui.Modal):
         elif self.game == "crash":
             await join_crash(interaction, wager, interaction.client)
         elif self.game == "coinflip":
-            # Solo coinflip — pick heads or tails via followup
-            await interaction.response.send_message(
-                "Pick your side:", view=CoinPickView(wager), ephemeral=True
-            )
+            # Solo coinflip — side picked in modal (2-step flow)
+            raw = (self.side_input.value or "").strip().lower()
+            if raw.startswith("h"):
+                pick = "heads"
+            elif raw.startswith("t"):
+                pick = "tails"
+            else:
+                return await interaction.response.send_message(
+                    "❌ Pick **heads** or **tails**.", ephemeral=True
+                )
+            await play_coinflip(interaction, pick, wager)
 
 
 class CoinPickView(discord.ui.View):
@@ -156,19 +186,23 @@ class CasinoHubView(discord.ui.View):
 
     @discord.ui.button(label="🃏 Blackjack", style=discord.ButtonStyle.success, row=0)
     async def blackjack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CasinoHubModal("blackjack"))
+        max_bet = await db.get_max_bet(interaction.user.id)
+        await interaction.response.send_modal(CasinoHubModal("blackjack", max_bet=max_bet))
 
     @discord.ui.button(label="🎰 Slots", style=discord.ButtonStyle.primary, row=0)
     async def slots(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CasinoHubModal("slots"))
+        max_bet = await db.get_max_bet(interaction.user.id)
+        await interaction.response.send_modal(CasinoHubModal("slots", max_bet=max_bet))
 
     @discord.ui.button(label="🚀 Crash", style=discord.ButtonStyle.danger, row=0)
     async def crash(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CasinoHubModal("crash"))
+        max_bet = await db.get_max_bet(interaction.user.id)
+        await interaction.response.send_modal(CasinoHubModal("crash", max_bet=max_bet))
 
     @discord.ui.button(label="🪙 Coin Flip", style=discord.ButtonStyle.secondary, row=1)
     async def coinflip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CasinoHubModal("coinflip"))
+        max_bet = await db.get_max_bet(interaction.user.id)
+        await interaction.response.send_modal(CasinoHubModal("coinflip", max_bet=max_bet))
 
     @discord.ui.button(label="🎟️ Daily Scratch", style=discord.ButtonStyle.secondary, row=1)
     async def scratch(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -319,6 +353,50 @@ class CasinoCog(commands.Cog):
         view = CasinoHubView()
         msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.message = msg
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  INDIVIDUAL GAME COMMANDS (channel-restricted)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @app_commands.command(name="blackjack", description="Start a blackjack hand")
+    async def blackjack_cmd(self, interaction: discord.Interaction):
+        bj_ch = await db.get_channel_id("blackjack")
+        if bj_ch and interaction.channel_id != bj_ch:
+            return await interaction.response.send_message(
+                f"🃏 Play blackjack in <#{bj_ch}>!", ephemeral=True)
+        max_bet = await db.get_max_bet(interaction.user.id)
+        await interaction.response.send_modal(CasinoHubModal("blackjack", max_bet=max_bet))
+
+    @app_commands.command(name="slots", description="Spin the slot machine")
+    async def slots_cmd(self, interaction: discord.Interaction):
+        sl_ch = await db.get_channel_id("slots")
+        if sl_ch and interaction.channel_id != sl_ch:
+            return await interaction.response.send_message(
+                f"🎰 Play slots in <#{sl_ch}>!", ephemeral=True)
+        max_bet = await db.get_max_bet(interaction.user.id)
+        await interaction.response.send_modal(CasinoHubModal("slots", max_bet=max_bet))
+
+    @app_commands.command(name="crash", description="Join a crash round")
+    @app_commands.describe(wager="Amount to wager")
+    async def crash_cmd(self, interaction: discord.Interaction, wager: int):
+        cr_ch = await db.get_channel_id("crash")
+        if cr_ch and interaction.channel_id != cr_ch:
+            return await interaction.response.send_message(
+                f"🚀 Play crash in <#{cr_ch}>!", ephemeral=True)
+        await join_crash(interaction, wager, self.bot)
+
+    @app_commands.command(name="coinflip", description="Flip a coin — heads or tails")
+    @app_commands.describe(side="heads or tails", wager="Amount to wager")
+    @app_commands.choices(side=[
+        app_commands.Choice(name="Heads 🌕", value="heads"),
+        app_commands.Choice(name="Tails 🌑", value="tails"),
+    ])
+    async def coinflip_cmd(self, interaction: discord.Interaction, side: str, wager: int):
+        cf_ch = await db.get_channel_id("coinflip")
+        if cf_ch and interaction.channel_id != cf_ch:
+            return await interaction.response.send_message(
+                f"🪙 Play coinflip in <#{cf_ch}>!", ephemeral=True)
+        await play_coinflip(interaction, side, wager)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  COMMISSIONER COMMANDS

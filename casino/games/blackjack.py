@@ -31,6 +31,7 @@ from casino.casino_db import (
 from casino.play_again import PlayAgainView
 from casino.renderer.card_renderer import SUITS, VALUES
 from casino.renderer.casino_html_renderer import render_blackjack_card
+from embed_helpers import casino_result_footer
 
 
 # ── Session registry: discord_id → BlackjackSession ──────────────────────────
@@ -570,7 +571,7 @@ async def _finish_hand(
         embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
 
     embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"New Balance: ${bal:,}")
+    embed.set_footer(text=casino_result_footer(bal, result.get("txn_id"), streak_info))
 
     max_bet = await get_max_bet(session.discord_id)
     replay_view = PlayAgainView(
@@ -733,7 +734,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
 
         embed.set_image(url="attachment://blackjack.png")
-        embed.set_footer(text=f"New Balance: ${bal:,}")
+        embed.set_footer(text=casino_result_footer(bal, result.get("txn_id"), streak_info))
         replay_view = PlayAgainView(
             user_id=uid,
             wager=wager,

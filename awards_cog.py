@@ -24,8 +24,10 @@ def _load_polls() -> dict:
 
 def _save_polls() -> None:
     try:
-        with open(_POLLS_PATH, "w") as f:
+        tmp = _POLLS_PATH + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(_polls, f, indent=2)
+        os.replace(tmp, _POLLS_PATH)
     except Exception as e:
         print(f"[awards_cog] Poll save error: {e}")
 

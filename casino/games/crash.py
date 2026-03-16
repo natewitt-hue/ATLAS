@@ -22,8 +22,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import io
+import logging
 
 import discord
+
+log = logging.getLogger(__name__)
 
 from casino.casino_db import (
     deduct_wager, refund_wager,
@@ -115,7 +118,7 @@ def _current_multiplier(elapsed: float) -> float:
     1.00x at t=0, doubles roughly every 5 seconds at low values,
     accelerates as it climbs.
     """
-    return round(1.0 * (1.06 ** elapsed), 2)
+    return min(round(1.0 * (1.06 ** elapsed), 2), 100.0)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -144,8 +147,14 @@ async def _run_lobby(round_obj: CrashRound, channel: discord.TextChannel) -> Non
                 round_obj.message = await channel.send(embed=embed, file=file)
             else:
                 await round_obj.message.edit(embed=embed, attachments=[file])
-        except discord.HTTPException:
-            pass
+        except discord.HTTPException as exc:
+            log.warning("Crash lobby render failed: %s", exc)
+            try:
+                await channel.send(
+                    f"**CRASH** — Lobby open, {len(round_obj.players)} player(s) (render failed)"
+                )
+            except discord.HTTPException:
+                pass
         await asyncio.sleep(5)
 
 
@@ -189,8 +198,15 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                     await round_obj.message.edit(embed=embed, attachments=[file], view=view)
                 else:
                     round_obj.message = await channel.send(embed=embed, file=file, view=view)
-            except discord.HTTPException:
-                pass
+            except discord.HTTPException as exc:
+                log.warning("Crash round render failed at %.2fx: %s", round_obj.current_mult, exc)
+                try:
+                    await channel.send(
+                        f"**CRASH** — {round_obj.current_mult:.2f}x · "
+                        f"{round_obj.players_in} player(s) in (render failed)"
+                    )
+                except discord.HTTPException:
+                    pass
 
             await asyncio.sleep(TICK_SECS)
     finally:
@@ -290,8 +306,17 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
             await round_obj.message.edit(embed=embed, attachments=[file], view=view)
         else:
             await channel.send(embed=embed, file=file)
-    except discord.HTTPException:
-        pass
+    except discord.HTTPException as exc:
+        log.warning("Crash final result render failed: %s", exc)
+        try:
+            cashed = sum(1 for p in round_obj.players.values() if p.cashed_out)
+            busted = len(round_obj.players) - cashed
+            await channel.send(
+                f"**CRASHED @ {round_obj.crash_point:.2f}x** — "
+                f"{cashed} cashed out, {busted} busted (render failed)"
+            )
+        except discord.HTTPException:
+            pass
 
     # ── Cooldown ───────────────────────────────────────────────────────────
     round_obj.status = "cooldown"
@@ -484,6 +509,11 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
 
     # ── Check if a round is running (can't join mid-flight) ───────────────
     existing = active_rounds.get(ch_id)
+    if existing and not isinstance(existing, CrashRound):
+        # PENDING sentinel — round is being created
+        return await interaction.followup.send(
+            "⏳ A round is starting up — try again in a moment!", ephemeral=True
+        )
     if existing and existing.status == "running":
         return await interaction.followup.send(
             f"🚀 A round is already in progress at **{existing.current_mult:.2f}x**.\n"

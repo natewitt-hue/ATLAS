@@ -30,6 +30,7 @@ from casino.casino_db import (
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_coinflip_card
+from embed_helpers import casino_result_footer
 
 GAME_TYPE          = "coinflip"
 SOLO_PAYOUT_MULT   = 1.95     # 2.5% house edge (was 2.0 = 0% edge)
@@ -176,7 +177,9 @@ async def play_coinflip(
         embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
 
     embed.set_image(url="attachment://coinflip.png")
-    embed.set_footer(text=f"Balance: ${db_result['new_balance']:,}")
+    embed.set_footer(text=casino_result_footer(
+        db_result["new_balance"], db_result.get("txn_id"), streak_info,
+    ))
 
     max_bet = await get_max_bet(uid)
     replay_view = PlayAgainView(
@@ -218,7 +221,6 @@ class ChallengeView(discord.ui.View):
 
         # Set resolved BEFORE any await to prevent TOCTOU double-accept
         self.resolved = True
-        self.stop()
 
         # Deduct opponent's wager
         try:
@@ -228,6 +230,8 @@ class ChallengeView(discord.ui.View):
             return await interaction.response.send_message(
                 f"❌ Insufficient funds: {e}", ephemeral=True
             )
+        # Only stop view after confirmed deduct — keeps buttons alive for retry on failure
+        self.stop()
         active_challenges.pop(self.challenge_id, None)
 
         # Flip the coin — derive winner from the flip result

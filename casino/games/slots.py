@@ -34,6 +34,7 @@ from casino.casino_db import (
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_slots_card, render_scratch_card_v6
+from embed_helpers import casino_result_footer
 
 GAME_TYPE = "slots"
 
@@ -328,7 +329,9 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         )
 
     embed3.set_image(url="attachment://slots.png")
-    embed3.set_footer(text=f"New Balance: ${result['new_balance']:,}")
+    embed3.set_footer(text=casino_result_footer(
+        result["new_balance"], result.get("txn_id"), streak_info,
+    ))
 
     replay_view = PlayAgainView(
         user_id=interaction.user.id,
