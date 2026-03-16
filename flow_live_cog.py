@@ -415,6 +415,9 @@ class FlowLiveCog(commands.Cog):
 
     async def cog_load(self):
         self._load_pulse_message_ids()
+        restored = self.sessions.load_persisted()
+        if restored:
+            log.info("Restored %d persisted session(s)", restored)
         self.pulse_loop.start()
         self.session_reaper.start()
 
