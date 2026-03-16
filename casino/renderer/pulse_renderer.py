@@ -1,11 +1,12 @@
 """
 pulse_renderer.py — ATLAS FLOW · Pulse Dashboard Renderer
 ──────────────────────────────────────────────────────────────────────────────
-Renders the live Flow Pulse dashboard card — a 700px wide summary of all
-active casino/sportsbook/prediction-market activity in the server.
+Renders the live Flow Pulse dashboard card — a 480px wide, mobile-optimized
+summary of all active casino/sportsbook/prediction-market activity.
 
-V6 design language: dark bg, gold accents, Outfit + JetBrains Mono,
-noise texture, glass-morphism section cells.
+V7 design: narrower single-column layout so Discord mobile doesn't shrink
+text to unreadable sizes. (Discord renders images at chat width ~375px;
+a 480px source image scales to ~78% vs the old 700px scaling to ~54%.)
 
 Usage:
     from casino.renderer.pulse_renderer import build_pulse_data, render_pulse_card
@@ -250,14 +251,14 @@ body {{
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 16px;
+  padding: 12px;
   font-family: 'Outfit', system-ui, sans-serif;
 }}
 </style>
 </head>
 <body>
 <div class="card" style="
-    width:700px;
+    width:480px;
     border-radius:14px;
     overflow:hidden;
     position:relative;
@@ -277,18 +278,18 @@ body {{
       background:linear-gradient(90deg,#D4AF37,#FFDA50,#D4AF37);
       position:relative;z-index:2;"></div>
 
-  <div style="position:relative;z-index:2;padding:18px 22px;">
+  <div style="position:relative;z-index:2;padding:16px 18px;">
 
     <!-- ── Header ─────────────────────────────────────────────────── -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
       <div style="display:flex;align-items:center;gap:10px;">
         <!-- Zap icon pill -->
-        <div style="width:32px;height:32px;border-radius:8px;
+        <div style="width:30px;height:30px;border-radius:8px;
             background:linear-gradient(135deg,#D4AF37,#FFDA50);
             display:flex;align-items:center;justify-content:center;
-            font-size:16px;">&#9889;</div>
+            font-size:15px;">&#9889;</div>
         <div>
-          <div style="font-size:18px;font-weight:800;letter-spacing:1px;color:#e8e0d0;">FLOW PULSE</div>
+          <div style="font-size:17px;font-weight:800;letter-spacing:1px;color:#e8e0d0;">FLOW PULSE</div>
           <div style="font-size:10px;color:#9a9280;font-family:'JetBrains Mono',monospace;letter-spacing:1px;">LIVE ACTIVITY DASHBOARD</div>
         </div>
       </div>
@@ -304,8 +305,8 @@ body {{
     <!-- ── Progressive Jackpot Hero ───────────────────────────────── -->
     <div style="
         border-radius:10px;
-        padding:18px 20px;
-        margin-bottom:12px;
+        padding:14px 16px;
+        margin-bottom:10px;
         background:linear-gradient(135deg,rgba(212,175,55,0.12),rgba(212,175,55,0.05));
         border:1px solid rgba(212,175,55,0.25);
         text-align:center;
@@ -318,11 +319,11 @@ body {{
       <div style="position:absolute;bottom:0;left:0;right:0;height:1px;
           background:linear-gradient(90deg,transparent,rgba(212,175,55,0.2),transparent);"></div>
 
-      <div style="font-size:13px;font-weight:700;color:#D4AF37;letter-spacing:4px;
-          text-transform:uppercase;margin-bottom:6px;">Progressive Jackpot</div>
+      <div style="font-size:12px;font-weight:700;color:#D4AF37;letter-spacing:3px;
+          text-transform:uppercase;margin-bottom:4px;">Progressive Jackpot</div>
       <div style="
           font-family:'Outfit',sans-serif;
-          font-size:48px;
+          font-size:40px;
           font-weight:800;
           background:linear-gradient(180deg,#FFDA50,#D4AF37);
           -webkit-background-clip:text;
@@ -330,15 +331,15 @@ body {{
           background-clip:text;
           filter:drop-shadow(0 2px 8px rgba(212,175,55,0.4));
           line-height:1.1;
-          margin-bottom:8px;
+          margin-bottom:6px;
       ">{jackpot_str}</div>
-      <div style="font-size:13px;color:#b0a890;">{last_hit_line}</div>
+      <div style="font-size:12px;color:#b0a890;">{last_hit_line}</div>
       <div style="font-size:11px;color:#9a9280;margin-top:2px;
           font-family:'JetBrains Mono',monospace;">{jackpot_ago}</div>
     </div>
 
-    <!-- ── 2×2 Game Grid ──────────────────────────────────────────── -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+    <!-- ── 2×2 Game Grid (stacked pairs for mobile readability) ──── -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
 
       <!-- Blackjack -->
       <div style="
@@ -346,17 +347,17 @@ body {{
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #4ADE80;
-          padding:12px 14px;
+          padding:10px 12px;
       ">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-          <div style="width:24px;height:24px;border-radius:6px;background:#4ADE80;
-              display:flex;align-items:center;justify-content:center;font-size:13px;">&#127137;</div>
-          <span style="font-size:15px;font-weight:700;color:#e8e0d0;">BLACKJACK</span>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+          <div style="width:22px;height:22px;border-radius:6px;background:#4ADE80;
+              display:flex;align-items:center;justify-content:center;font-size:12px;">&#127137;</div>
+          <span style="font-size:14px;font-weight:700;color:#e8e0d0;">BLACKJACK</span>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;
-            color:#D4AF37;margin-bottom:5px;">{data.active_bj} active</div>
-        <div style="font-size:12px;color:#c0b8a8;margin-bottom:3px;">{bj_streak_line}</div>
-        <div style="font-size:11px;color:#9a9280;">{bj_players_line}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;
+            color:#D4AF37;margin-bottom:4px;">{data.active_bj} active</div>
+        <div style="font-size:11px;color:#c0b8a8;margin-bottom:2px;">{bj_streak_line}</div>
+        <div style="font-size:10px;color:#9a9280;">{bj_players_line}</div>
       </div>
 
       <!-- Slots -->
@@ -365,16 +366,16 @@ body {{
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #60A5FA;
-          padding:12px 14px;
+          padding:10px 12px;
       ">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-          <div style="width:24px;height:24px;border-radius:6px;background:#60A5FA;
-              display:flex;align-items:center;justify-content:center;font-size:13px;">&#127922;</div>
-          <span style="font-size:15px;font-weight:700;color:#e8e0d0;">SLOTS</span>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+          <div style="width:22px;height:22px;border-radius:6px;background:#60A5FA;
+              display:flex;align-items:center;justify-content:center;font-size:12px;">&#127922;</div>
+          <span style="font-size:14px;font-weight:700;color:#e8e0d0;">SLOTS</span>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;
-            color:#D4AF37;margin-bottom:5px;">{data.slots_spins_today:,} spins today</div>
-        <div style="font-size:12px;color:#c0b8a8;">{slots_sub}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;
+            color:#D4AF37;margin-bottom:4px;">{data.slots_spins_today:,} spins today</div>
+        <div style="font-size:11px;color:#c0b8a8;">{slots_sub}</div>
       </div>
 
       <!-- Sportsbook -->
@@ -383,20 +384,20 @@ body {{
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #D4AF37;
-          padding:12px 14px;
+          padding:10px 12px;
       ">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <div style="width:24px;height:24px;border-radius:6px;background:#D4AF37;
-                display:flex;align-items:center;justify-content:center;font-size:13px;">&#127936;</div>
-            <span style="font-size:15px;font-weight:700;color:#e8e0d0;">SPORTSBOOK</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <div style="width:22px;height:22px;border-radius:6px;background:#D4AF37;
+                display:flex;align-items:center;justify-content:center;font-size:12px;">&#127936;</div>
+            <span style="font-size:14px;font-weight:700;color:#e8e0d0;">SPORTSBOOK</span>
           </div>
-          <div style="font-size:10px;font-weight:700;color:#111;background:#D4AF37;
-              padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;">WK {data.sb_week}</div>
+          <div style="font-size:9px;font-weight:700;color:#111;background:#D4AF37;
+              padding:2px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;">WK {data.sb_week}</div>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;
-            color:#D4AF37;margin-bottom:5px;">{data.sb_bets} bets &middot; ${data.sb_volume:,} vol</div>
-        <div style="font-size:12px;color:#c0b8a8;">{sb_sub}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:700;
+            color:#D4AF37;margin-bottom:4px;">{data.sb_bets} bets &middot; ${data.sb_volume:,} vol</div>
+        <div style="font-size:11px;color:#c0b8a8;">{sb_sub}</div>
       </div>
 
       <!-- Predictions -->
@@ -405,42 +406,42 @@ body {{
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #F472B6;
-          padding:12px 14px;
+          padding:10px 12px;
       ">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <div style="width:24px;height:24px;border-radius:6px;background:#F472B6;
-                display:flex;align-items:center;justify-content:center;font-size:13px;">&#128202;</div>
-            <span style="font-size:15px;font-weight:700;color:#e8e0d0;">PREDICTIONS</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <div style="width:22px;height:22px;border-radius:6px;background:#F472B6;
+                display:flex;align-items:center;justify-content:center;font-size:12px;">&#128202;</div>
+            <span style="font-size:14px;font-weight:700;color:#e8e0d0;">PREDICTIONS</span>
           </div>
-          <div style="font-size:10px;font-weight:700;color:#111;background:#F472B6;
-              padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;">{data.pred_open} OPEN</div>
+          <div style="font-size:9px;font-weight:700;color:#111;background:#F472B6;
+              padding:2px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;">{data.pred_open} OPEN</div>
         </div>
         {pred_title_html}
-        <div style="font-size:11px;color:#9a9280;font-family:'JetBrains Mono',monospace;">{pred_sub}</div>
+        <div style="font-size:10px;color:#9a9280;font-family:'JetBrains Mono',monospace;">{pred_sub}</div>
       </div>
 
     </div><!-- /game grid -->
 
     <!-- ── Divider ─────────────────────────────────────────────────── -->
     <div style="height:1px;background:linear-gradient(90deg,transparent,rgba(212,175,55,0.3),transparent);
-        margin:4px 0 12px;"></div>
+        margin:4px 0 10px;"></div>
 
     <!-- ── Recent Highlights ───────────────────────────────────────── -->
-    <div style="margin-bottom:12px;">
+    <div style="margin-bottom:10px;">
       <div style="font-size:11px;font-weight:600;color:#D4AF37;letter-spacing:1px;
-          text-transform:uppercase;margin-bottom:8px;">Recent Highlights</div>
+          text-transform:uppercase;margin-bottom:6px;">Recent Highlights</div>
       {highlights_html}
     </div>
 
     <!-- ── Footer ─────────────────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;
-        padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
-      <div style="font-size:11px;color:#a8a090;font-family:'JetBrains Mono',monospace;">
-        FLOW PULSE v1.0 &middot; Updates every 60s
+        padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">
+      <div style="font-size:10px;color:#a8a090;font-family:'JetBrains Mono',monospace;">
+        FLOW PULSE v1.1 &middot; Updates every 60s
       </div>
       <div style="display:flex;gap:12px;">
-        <span style="font-size:11px;color:#4ADE80;font-family:'JetBrains Mono',monospace;">
+        <span style="font-size:10px;color:#4ADE80;font-family:'JetBrains Mono',monospace;">
           Today: {footer_won} vol
         </span>
       </div>
@@ -459,4 +460,4 @@ async def render_pulse_card(data: PulseData) -> bytes:
     from casino.renderer.casino_html_renderer import _render_card_html
 
     html = _build_pulse_html(data)
-    return await _render_card_html(html, width=732)  # 700px card + 16px padding each side
+    return await _render_card_html(html, width=504)  # 480px card + 12px padding each side
