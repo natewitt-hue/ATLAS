@@ -11,6 +11,7 @@ Docs: https://therundown.io/api/v2
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -75,8 +76,15 @@ class OddsAPIClient:
         """TheRundown has no quota system — never in emergency mode."""
         return False
 
+    # Minimum seconds between consecutive API requests
+    _REQUEST_INTERVAL = 1.5
+    _MAX_RETRIES = 2
+
     async def _get(self, path: str) -> dict | list | None:
-        """Make a GET request to TheRundown. Returns parsed JSON or None."""
+        """Make a GET request to TheRundown. Returns parsed JSON or None.
+
+        Enforces a minimum interval between requests and retries on 429.
+        """
         if not API_KEY:
             log.error("THERUNDOWN_API_KEY not set — cannot fetch odds.")
             return None
@@ -84,28 +92,44 @@ class OddsAPIClient:
         session = await self._get_session()
         url = f"{BASE_URL}{path}"
 
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 401:
-                    log.error("TheRundown API: invalid API key (401).")
-                    return None
-                if resp.status == 404:
-                    log.warning(f"TheRundown API 404: {url}")
-                    return None
-                if resp.status == 429:
-                    log.warning("TheRundown API: rate limited (429).")
-                    return None
-                if resp.status != 200:
-                    body = await resp.text()
-                    log.warning(f"TheRundown API {resp.status}: {body[:200]}")
-                    return None
-                return await resp.json()
-        except aiohttp.ClientError as e:
-            log.error(f"TheRundown API request failed: {e}")
-            return None
-        except Exception as e:
-            log.error(f"TheRundown API unexpected error: {e}")
-            return None
+        # Throttle: wait if we called too recently
+        now = asyncio.get_event_loop().time()
+        if hasattr(self, "_last_request_time"):
+            elapsed = now - self._last_request_time
+            if elapsed < self._REQUEST_INTERVAL:
+                await asyncio.sleep(self._REQUEST_INTERVAL - elapsed)
+        self._last_request_time = asyncio.get_event_loop().time()
+
+        for attempt in range(1 + self._MAX_RETRIES):
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 401:
+                        log.error("TheRundown API: invalid API key (401).")
+                        return None
+                    if resp.status == 404:
+                        log.warning(f"TheRundown API 404: {url}")
+                        return None
+                    if resp.status == 429:
+                        if attempt < self._MAX_RETRIES:
+                            wait = 2 ** (attempt + 1)
+                            log.warning(f"TheRundown API: rate limited (429). Retrying in {wait}s...")
+                            await asyncio.sleep(wait)
+                            self._last_request_time = asyncio.get_event_loop().time()
+                            continue
+                        log.warning("TheRundown API: rate limited (429). Max retries reached.")
+                        return None
+                    if resp.status != 200:
+                        body = await resp.text()
+                        log.warning(f"TheRundown API {resp.status}: {body[:200]}")
+                        return None
+                    return await resp.json()
+            except aiohttp.ClientError as e:
+                log.error(f"TheRundown API request failed: {e}")
+                return None
+            except Exception as e:
+                log.error(f"TheRundown API unexpected error: {e}")
+                return None
+        return None
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
