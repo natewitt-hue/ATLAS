@@ -76,9 +76,9 @@ class OddsAPIClient:
         """TheRundown has no quota system — never in emergency mode."""
         return False
 
-    # Minimum seconds between consecutive API requests
-    _REQUEST_INTERVAL = 1.5
-    _MAX_RETRIES = 2
+    # Free plan: 1 req/sec. Use 1.1s to stay safely under.
+    _REQUEST_INTERVAL = 1.1
+    _MAX_RETRIES = 3
 
     async def _get(self, path: str) -> dict | list | None:
         """Make a GET request to TheRundown. Returns parsed JSON or None.
@@ -111,7 +111,7 @@ class OddsAPIClient:
                         return None
                     if resp.status == 429:
                         if attempt < self._MAX_RETRIES:
-                            wait = 2 ** (attempt + 1)
+                            wait = 3 * (2 ** attempt)  # 3s, 6s, 12s
                             log.warning(f"TheRundown API: rate limited (429). Retrying in {wait}s...")
                             await asyncio.sleep(wait)
                             self._last_request_time = asyncio.get_event_loop().time()
