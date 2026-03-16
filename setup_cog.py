@@ -54,6 +54,8 @@ REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
     ("force_request",   "force-request",   "ATLAS — Sentinel", False, False),
     # ── ATLAS — Casino (economy, games, markets) ──
     ("ledger",             "ledger",              "ATLAS — Flow",   True,  False),
+    # ── ATLAS — Flow (live engagement feed) ──
+    ("flow_live",          "flow-live",           "ATLAS — Flow",   True,  False),
     ("blackjack",          "blackjack",           "ATLAS — Casino", False, False),
     ("slots",              "slots",               "ATLAS — Casino", False, False),
     ("crash",              "crash",               "ATLAS — Casino", False, False),
