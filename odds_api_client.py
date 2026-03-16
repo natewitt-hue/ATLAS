@@ -40,8 +40,8 @@ SPORT_ID_MAP = {
     "icehockey_nhl":        6,
 }
 
-# FanDuel affiliate ID on TheRundown
-FANDUEL_ID = "23"
+# DraftKings affiliate ID on TheRundown
+BOOKMAKER_ID = "19"
 
 # TheRundown market name → old API market key
 MARKET_NAME_MAP = {
@@ -196,7 +196,7 @@ class OddsAPIClient:
         """
         candidates = []
         for line in lines:
-            fd = line.get("prices", {}).get(FANDUEL_ID)
+            fd = line.get("prices", {}).get(BOOKMAKER_ID)
             if not fd:
                 continue
             price = fd.get("price")
@@ -266,7 +266,7 @@ class OddsAPIClient:
         for p in participants:
             p_name = p.get("name", "")
             for line in p.get("lines", []):
-                fd = line.get("prices", {}).get(FANDUEL_ID)
+                fd = line.get("prices", {}).get(BOOKMAKER_ID)
                 if not fd:
                     continue
                 price = fd.get("price")
@@ -327,7 +327,7 @@ class OddsAPIClient:
         self,
         sport_key: str,
         markets: str = "h2h,spreads,totals",
-        bookmakers: str = "fanduel",
+        bookmakers: str = "draftkings",
     ) -> list[dict]:
         """Fetch upcoming events with odds for a sport.
 
@@ -377,8 +377,8 @@ class OddsAPIClient:
                     "away_team": away,
                     "commence_time": event.get("event_date", ""),
                     "bookmakers": [{
-                        "key": "fanduel",
-                        "title": "FanDuel",
+                        "key": "draftkings",
+                        "title": "DraftKings",
                         "markets": transformed_markets,
                     }],
                 })
@@ -450,7 +450,7 @@ class OddsAPIClient:
     async def fetch_all_odds(
         self,
         markets: str = "h2h,spreads,totals",
-        bookmakers: str = "fanduel",
+        bookmakers: str = "draftkings",
     ) -> dict[str, list[dict]]:
         """Fetch odds for all supported sports. Returns {sport_key: [events]}."""
         results = {}
