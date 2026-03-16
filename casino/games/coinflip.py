@@ -3,7 +3,7 @@ coinflip.py — TSL Casino Coin Flip
 ─────────────────────────────────────────────────────────────────────────────
 Solo coin flip and PvP challenge system.
 
-Solo:    /coinflip [heads/tails] [amount] — instant result, even money
+Solo:    /coinflip [heads/tails] [amount] — 1.95x payout (2.5% house edge)
 PvP:     /challenge @user [amount]
            • Tagged user has 5 minutes to Accept/Decline via buttons
            • Winner gets 1.9x (slight house edge)
@@ -25,13 +25,14 @@ import discord
 
 from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
-    is_casino_open, get_channel_id, get_max_bet,
+    is_casino_open, get_channel_id, get_max_bet, check_achievements,
     create_challenge, get_challenge, resolve_challenge, decline_challenge,
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_coinflip_card
 
-GAME_TYPE = "coinflip"
+GAME_TYPE          = "coinflip"
+SOLO_PAYOUT_MULT   = 1.95     # 2.5% house edge (was 2.0 = 0% edge)
 
 # ── Active PvP challenge registry: challenge_id → ChallengeView ───────────────
 active_challenges: dict[int, "ChallengeView"] = {}
@@ -82,8 +83,12 @@ async def play_coinflip(
 
     result  = random.choice(["heads", "tails"])
     won     = result == pick_clean
-    payout  = wager * 2 if won else 0
+    payout  = int(wager * SOLO_PAYOUT_MULT) if won else 0
     outcome = "win" if won else "loss"
+    mult    = SOLO_PAYOUT_MULT if won else 0.0
+
+    # Near-miss: ~30% of losses get a "wobble" flavor
+    edge_tease = (not won) and random.random() < 0.30
 
     db_result = await process_wager(
         discord_id = uid,
@@ -91,8 +96,14 @@ async def play_coinflip(
         game_type  = GAME_TYPE,
         outcome    = outcome,
         payout     = payout,
-        multiplier = 2.0 if won else 0.0,
+        multiplier = mult,
         channel_id = interaction.channel_id,
+    )
+
+    # Check achievements
+    await check_achievements(
+        uid, GAME_TYPE, outcome, mult,
+        db_result.get("streak_info", {}), db_result.get("jackpot_result"),
     )
 
     # Post to #ledger
@@ -101,13 +112,19 @@ async def play_coinflip(
         bot=interaction.client, guild_id=interaction.guild_id,
         discord_id=uid, game_type=GAME_TYPE,
         wager=wager, outcome=outcome, payout=payout,
-        multiplier=2.0 if won else 0.0,
+        multiplier=mult,
         new_balance=db_result["new_balance"],
         txn_id=db_result.get("txn_id"),
     )
 
+    streak_info = db_result.get("streak_info")
     profit     = payout - wager
     profit_str = f"+${profit:,}" if profit >= 0 else f"-${abs(profit):,}"
+
+    # Edge tease flavor text for near-misses
+    near_miss_text = None
+    if edge_tease:
+        near_miss_text = "The coin teetered on edge before falling..."
 
     # Render coin flip card
     png = await render_coinflip_card(
@@ -121,20 +138,54 @@ async def play_coinflip(
     )
     file = discord.File(io.BytesIO(png), filename="coinflip.png")
 
+    # Amber color for near-miss, green for win, red for loss
+    if edge_tease:
+        embed_color = discord.Color.from_rgb(255, 191, 0)
+    elif won:
+        embed_color = discord.Color.green()
+    else:
+        embed_color = discord.Color.red()
+
     embed = discord.Embed(
         title = f"🪙 FLOW Casino — Coin Flip  |  {interaction.user.display_name}",
-        color = discord.Color.green() if won else discord.Color.red(),
+        color = embed_color,
     )
     embed.add_field(name="Your Pick",  value=f"{pick_clean.capitalize()} {'✅' if won else '❌'}", inline=True)
     embed.add_field(name="Result",     value=f"{result.capitalize()} {'🌕' if result == 'heads' else '🌑'}",     inline=True)
     embed.add_field(name="Outcome",    value=f"**{'WIN' if won else 'LOSS'}** — {profit_str}", inline=True)
+    if near_miss_text:
+        embed.add_field(name="😬 Close Call", value=near_miss_text, inline=False)
+
+    # Streak info
+    if streak_info and streak_info.get("len", 0) >= 3:
+        from casino.casino_db import get_streak_bonus
+        bonus = get_streak_bonus(streak_info)
+        if bonus:
+            embed.add_field(name="Momentum", value=f"🔥 {bonus['label']} (W{streak_info['len']})", inline=True)
+    if streak_info and streak_info.get("type") == "loss" and streak_info.get("len", 0) >= 5:
+        embed.add_field(name="Streak", value=f"❄️ L{streak_info['len']}", inline=True)
+
+    # Streak bonus display
+    if db_result.get("streak_bonus"):
+        sb = db_result["streak_bonus"]
+        embed.add_field(name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True)
+
+    # Jackpot hit
+    if db_result.get("jackpot_result"):
+        jp = db_result["jackpot_result"]
+        embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
+
     embed.set_image(url="attachment://coinflip.png")
     embed.set_footer(text=f"Balance: ${db_result['new_balance']:,}")
 
+    max_bet = await get_max_bet(uid)
     replay_view = PlayAgainView(
         user_id=uid,
         wager=wager,
         replay_callback=functools.partial(play_coinflip, pick=pick_clean, wager=wager),
+        double_callback=functools.partial(play_coinflip, pick=pick_clean, wager=min(wager * 2, max_bet)),
+        streak_info=streak_info,
+        near_miss_msg=near_miss_text,
     )
     await interaction.followup.send(embed=embed, file=file, view=replay_view)
 

@@ -6,7 +6,7 @@ Standard 6-deck blackjack with TSL Royal card visuals.
 Rules:
   • 6-deck shoe, reshuffled at < 30% remaining
   • Dealer hits soft 17
-  • Blackjack pays 3:2
+  • Blackjack pays 6:5 (house edge ~3%)
   • Double Down: double wager, exactly one more card
   • Split: pairs only, one split allowed, no re-split
   • 5-minute session timeout → auto-stand
@@ -26,7 +26,7 @@ import discord
 
 from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
-    is_casino_open, get_channel_id, get_max_bet,
+    is_casino_open, get_channel_id, get_max_bet, check_achievements,
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.card_renderer import SUITS, VALUES
@@ -36,8 +36,9 @@ from casino.renderer.casino_html_renderer import render_blackjack_card
 # ── Session registry: discord_id → BlackjackSession ──────────────────────────
 active_sessions: dict[int, "BlackjackSession"] = {}
 
-GAME_TYPE    = "blackjack"
-TIMEOUT_SECS = 300   # 5 minutes
+GAME_TYPE      = "blackjack"
+TIMEOUT_SECS   = 300          # 5 minutes
+BJ_PAYOUT_MULT = 1.2          # 6:5 blackjack payout (was 1.5 for 3:2)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -76,6 +77,23 @@ def _is_blackjack(hand: list[tuple[str, str]]) -> bool:
 
 def _is_pair(hand: list[tuple[str, str]]) -> bool:
     return len(hand) == 2 and hand[0][0] == hand[1][0]
+
+
+def _detect_near_miss(player_hand, dealer_hand, outcome: str) -> str | None:
+    """Detect close-call scenarios for engagement. Returns message or None."""
+    if outcome != "loss":
+        return None
+    p_score = _hand_value(player_hand)
+    d_score = _hand_value(dealer_hand)
+    if p_score == 22:
+        return "Busted by ONE! So close..."
+    if d_score <= 21 and p_score <= 21 and d_score - p_score == 1:
+        return f"Dealer edges you by ONE ({d_score} vs {p_score})"
+    if p_score == 20 and d_score == 21 and not _is_blackjack(dealer_hand):
+        return "Dealer drew to 21 against your 20!"
+    if len(dealer_hand) >= 5 and d_score == 21:
+        return f"Dealer hit 21 in {len(dealer_hand)} cards!"
+    return None
 
 
 def _display_score(hand: list[tuple[str, str]], hide: bool = False) -> str | int:
@@ -156,8 +174,8 @@ class BlackjackSession:
         if p_bj and d_bj:
             return "push", wager, 1.0
         if p_bj:
-            payout = wager + int(wager * 1.5)   # 3:2
-            return "win", payout, 2.5
+            payout = wager + int(wager * BJ_PAYOUT_MULT)   # 6:5
+            return "win", payout, round(1 + BJ_PAYOUT_MULT, 1)
         if d_bj:
             return "loss", 0, 0.0
         if p_score > 21:
@@ -438,6 +456,13 @@ async def _finish_hand(
         channel_id = session.channel_id,
     )
 
+    # Check achievements
+    await check_achievements(
+        session.discord_id, GAME_TYPE, log_outcome,
+        round(avg_mult, 2), result.get("streak_info", {}),
+        result.get("jackpot_result"),
+    )
+
     # Post to #ledger
     from casino.casino import post_to_ledger
     await post_to_ledger(
@@ -472,6 +497,10 @@ async def _finish_hand(
 
     active_sessions.pop(session.discord_id, None)
 
+    # Near-miss detection
+    near_miss_msg = _detect_near_miss(session.active_hand, session.dealer_hand, log_outcome)
+    streak_info = result.get("streak_info")
+
     bal = result["new_balance"]
     png = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
@@ -488,9 +517,15 @@ async def _finish_hand(
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
 
-    color = (discord.Color.green() if log_outcome == "win"
-             else discord.Color.red() if log_outcome == "loss"
-             else discord.Color.greyple())
+    # Amber for near-miss, otherwise normal colors
+    if near_miss_msg:
+        color = discord.Color.from_rgb(255, 191, 0)
+    elif log_outcome == "win":
+        color = discord.Color.green()
+    elif log_outcome == "loss":
+        color = discord.Color.red()
+    else:
+        color = discord.Color.greyple()
 
     embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
     p_val = _hand_value(session.active_hand)
@@ -510,13 +545,35 @@ async def _finish_hand(
         value = f"**{status_str}**\n{profit_str}",
         inline = True
     )
+    if near_miss_msg:
+        embed.add_field(name="😬 Close Call", value=near_miss_msg, inline=False)
+
+    # Streak info
+    if streak_info and streak_info.get("type") == "win" and streak_info.get("len", 0) >= 3:
+        from casino.casino_db import get_streak_bonus
+        bonus = get_streak_bonus(streak_info)
+        if bonus:
+            embed.add_field(name="Momentum", value=f"🔥 {bonus['label']} (W{streak_info['len']})", inline=True)
+    if streak_info and streak_info.get("type") == "loss" and streak_info.get("len", 0) >= 5:
+        embed.add_field(name="Streak", value=f"❄️ L{streak_info['len']}", inline=True)
+    if result.get("streak_bonus"):
+        sb = result["streak_bonus"]
+        embed.add_field(name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True)
+    if result.get("jackpot_result"):
+        jp = result["jackpot_result"]
+        embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
+
     embed.set_image(url="attachment://blackjack.png")
     embed.set_footer(text=f"New Balance: ${bal:,}")
 
+    max_bet = await get_max_bet(session.discord_id)
     replay_view = PlayAgainView(
         user_id=session.discord_id,
         wager=session.original_wager,
         replay_callback=functools.partial(start_blackjack, wager=session.original_wager),
+        double_callback=functools.partial(start_blackjack, wager=min(session.original_wager * 2, max_bet)),
+        streak_info=streak_info,
+        near_miss_msg=near_miss_msg,
     )
     await interaction.response.edit_message(embed=embed, attachments=[file], view=replay_view)
 
@@ -551,7 +608,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             f"🃏 Blackjack is played in <#{bj_channel_id}>!", ephemeral=True
         )
 
-    max_bet = await get_max_bet()
+    max_bet = await get_max_bet(uid)
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
             f"❌ Wager must be between **$1** and **${max_bet:,}**.",
@@ -594,6 +651,12 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             channel_id = interaction.channel_id,
         )
         bal = result["new_balance"]
+
+        # Check achievements
+        await check_achievements(
+            uid, GAME_TYPE, outcome, round(mult, 2),
+            result.get("streak_info", {}), result.get("jackpot_result"),
+        )
 
         # Post to #ledger
         from casino.casino import post_to_ledger
@@ -649,12 +712,28 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             value=f"**{status_str}**\n{profit_str}",
             inline=True
         )
+        # Streak + jackpot info
+        streak_info = result.get("streak_info")
+        if streak_info and streak_info.get("type") == "win" and streak_info.get("len", 0) >= 3:
+            from casino.casino_db import get_streak_bonus
+            bonus = get_streak_bonus(streak_info)
+            if bonus:
+                embed.add_field(name="Momentum", value=f"🔥 {bonus['label']} (W{streak_info['len']})", inline=True)
+        if result.get("streak_bonus"):
+            sb = result["streak_bonus"]
+            embed.add_field(name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True)
+        if result.get("jackpot_result"):
+            jp = result["jackpot_result"]
+            embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
+
         embed.set_image(url="attachment://blackjack.png")
         embed.set_footer(text=f"New Balance: ${bal:,}")
         replay_view = PlayAgainView(
             user_id=uid,
             wager=wager,
             replay_callback=functools.partial(start_blackjack, wager=wager),
+            double_callback=functools.partial(start_blackjack, wager=min(wager * 2, max_bet)),
+            streak_info=streak_info,
         )
         return await interaction.followup.send(embed=embed, file=file, view=replay_view)
 

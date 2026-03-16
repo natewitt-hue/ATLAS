@@ -190,6 +190,7 @@ body {
 .status-bar.push     { background: linear-gradient(90deg, #FBBF24, #D97706, #FBBF24); }
 .status-bar.jackpot  { background: linear-gradient(90deg, #D4AF37, #FFDA50, #D4AF37); }
 .status-bar.blackjack{ background: linear-gradient(90deg, #D4AF37, #FFDA50, #D4AF37); }
+.status-bar.near_miss{ background: linear-gradient(90deg, #F59E0B, #FBBF24, #F59E0B); }
 
 /* ── Header ── */
 .header {
@@ -279,6 +280,70 @@ body {
 .result-badge.jackpot { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
 .result-badge.blackjack { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
 .result-badge.active  { background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.3); color: #D4AF37; }
+.result-badge.near_miss { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #FBBF24; }
+
+/* ── Streak badge (momentum indicator) ── */
+.streak-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  margin-left: 6px;
+}
+.streak-badge.hot {
+  background: rgba(251,146,60,0.15);
+  border: 1px solid rgba(251,146,60,0.35);
+  color: #FB923C;
+}
+.streak-badge.fire {
+  background: rgba(239,68,68,0.15);
+  border: 1px solid rgba(239,68,68,0.35);
+  color: #F87171;
+}
+.streak-badge.legendary {
+  background: rgba(212,175,55,0.15);
+  border: 1px solid rgba(212,175,55,0.4);
+  color: #FFDA50;
+}
+.streak-badge.cold {
+  background: rgba(96,165,250,0.12);
+  border: 1px solid rgba(96,165,250,0.3);
+  color: #60A5FA;
+}
+
+/* ── Near-miss banner ── */
+.near-miss-banner {
+  text-align: center;
+  padding: 6px 20px;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+  color: #FBBF24;
+  background: rgba(245,158,11,0.08);
+  letter-spacing: 0.5px;
+}
+
+/* ── Jackpot footer ── */
+.jackpot-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 6px 20px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+}
+.jackpot-footer .jp-tier {
+  color: var(--gold-dim);
+}
 
 /* ── Gold divider ── */
 .gold-divider {
@@ -431,6 +496,48 @@ def _build_footer_html(balance: int) -> str:
     </div>"""
 
 
+def _build_streak_badge_html(streak_info: dict | None) -> str:
+    """Build a small streak badge for the header area. Returns empty string if no active streak."""
+    if not streak_info:
+        return ""
+    s_type = streak_info.get("type", "")
+    s_len = streak_info.get("len", 0)
+    if s_type == "win" and s_len >= 3:
+        if s_len >= 10:
+            css_class, icon, label = "legendary", "\U0001f525", f"W{s_len}"
+        elif s_len >= 7:
+            css_class, icon, label = "fire", "\U0001f525\U0001f525", f"W{s_len}"
+        elif s_len >= 5:
+            css_class, icon, label = "fire", "\U0001f525", f"W{s_len}"
+        else:
+            css_class, icon, label = "hot", "\U0001f525", f"W{s_len}"
+        return f'<span class="streak-badge {css_class}">{icon} {label}</span>'
+    elif s_type == "loss" and s_len >= 5:
+        return f'<span class="streak-badge cold">\u2744\ufe0f L{s_len}</span>'
+    return ""
+
+
+def _build_near_miss_html(near_miss_msg: str | None) -> str:
+    """Build a near-miss amber banner. Returns empty string if no near-miss."""
+    if not near_miss_msg:
+        return ""
+    return f'<div class="near-miss-banner">{_esc(near_miss_msg)}</div>'
+
+
+def _build_jackpot_footer_html(jackpot_info: dict | None) -> str:
+    """Build a jackpot pools footer bar. Returns empty string if no info."""
+    if not jackpot_info:
+        return ""
+    parts = []
+    for tier in ("mini", "major", "grand"):
+        if tier in jackpot_info:
+            pool = jackpot_info[tier].get("pool", 0)
+            parts.append(f'<span class="jp-tier">{tier.upper()}</span> ${pool:,}')
+    if not parts:
+        return ""
+    return f'<div class="jackpot-footer">\U0001f48e {" &middot; ".join(parts)}</div>'
+
+
 def _wrap_card(status_class: str, content: str) -> str:
     """Wrap game content in the full card HTML with CSS."""
     return f"""<!DOCTYPE html>
@@ -500,6 +607,9 @@ def _build_blackjack_html(
     balance: int = 0,
     player_name: str = "Player",
     txn_id: Optional[str] = None,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> str:
     """Build the full blackjack card HTML."""
 
@@ -562,9 +672,18 @@ def _build_blackjack_html(
           {_esc(status)}
         </div>"""
 
-    header = _build_header_html("♠", "BLACKJACK", [player_name], outcome, badge_text, txn_id)
+    # Near-miss overrides loss outcome to amber
+    status_class = outcome
+    if near_miss_msg and outcome == "loss":
+        status_class = "near_miss"
+        badge_text = "SO CLOSE"
+
+    header = _build_header_html("♠", "BLACKJACK", [player_name], status_class, badge_text, txn_id)
+    streak_badge = _build_streak_badge_html(streak_info)
+    near_miss_banner = _build_near_miss_html(near_miss_msg)
     data_grid = _build_data_grid_html(wager, payout, balance) if status else ""
     footer = _build_footer_html(balance)
+    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
 
     game_css = """
     <style>
@@ -625,6 +744,7 @@ def _build_blackjack_html(
     content = f"""
     {game_css}
     {header}
+    {streak_badge}
     <div class="gold-divider"></div>
 
     <!-- Dealer -->
@@ -635,6 +755,7 @@ def _build_blackjack_html(
     <div class="bj-cards">{dealer_cards}</div>
 
     {result_banner}
+    {near_miss_banner}
 
     <!-- Player -->
     <div class="bj-section">
@@ -646,9 +767,10 @@ def _build_blackjack_html(
     <div class="gold-divider"></div>
     {data_grid}
     <div class="gold-divider"></div>
-    {footer}"""
+    {footer}
+    {jackpot_footer}"""
 
-    return _wrap_card(outcome, content)
+    return _wrap_card(status_class, content)
 
 
 async def render_blackjack_card(
@@ -663,11 +785,15 @@ async def render_blackjack_card(
     balance: int = 0,
     player_name: str = "Player",
     txn_id: Optional[str] = None,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> bytes:
     """Render a blackjack card to PNG bytes."""
     html = _build_blackjack_html(
         dealer_hand, player_hand, dealer_score, player_score,
         hide_dealer, status, wager, payout, balance, player_name, txn_id,
+        streak_info, near_miss_msg, jackpot_info,
     )
     return await _render_card_html(html)
 
@@ -701,6 +827,9 @@ def _build_slots_html(
     result_msg: str = "",
     player_name: str = "Player",
     txn_id: Optional[str] = None,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> str:
     """Build the full slots card HTML."""
 
@@ -720,7 +849,15 @@ def _build_slots_html(
         outcome = "active"
         badge_text = "SPINNING..."
 
-    header = _build_header_html("🎰", "SLOTS", [player_name], outcome, badge_text, txn_id)
+    # Near-miss overrides loss to amber
+    status_class = outcome
+    if near_miss_msg and outcome == "loss":
+        status_class = "near_miss"
+        badge_text = "SO CLOSE"
+
+    header = _build_header_html("🎰", "SLOTS", [player_name], status_class, badge_text, txn_id)
+    streak_badge = _build_streak_badge_html(streak_info)
+    near_miss_banner = _build_near_miss_html(near_miss_msg)
 
     # Build reel windows
     reels_html = ""
@@ -763,6 +900,7 @@ def _build_slots_html(
 
     data_grid = _build_data_grid_html(wager, payout, balance) if revealed == 3 else ""
     footer = _build_footer_html(balance)
+    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
 
     game_css = """
     <style>
@@ -819,6 +957,7 @@ def _build_slots_html(
     content = f"""
     {game_css}
     {header}
+    {streak_badge}
     <div class="gold-divider"></div>
 
     <div class="reels-container">
@@ -827,13 +966,15 @@ def _build_slots_html(
     </div>
 
     {result_html}
+    {near_miss_banner}
 
     <div class="gold-divider"></div>
     {data_grid}
     {"<div class='gold-divider'></div>" if data_grid else ""}
-    {footer}"""
+    {footer}
+    {jackpot_footer}"""
 
-    return _wrap_card(outcome, content)
+    return _wrap_card(status_class, content)
 
 
 async def render_slots_card(
@@ -845,10 +986,14 @@ async def render_slots_card(
     result_msg: str = "",
     player_name: str = "Player",
     txn_id: Optional[str] = None,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> bytes:
     """Render a slots card to PNG bytes."""
     html = _build_slots_html(
         reels, revealed, wager, payout, balance, result_msg, player_name, txn_id,
+        streak_info, near_miss_msg, jackpot_info,
     )
     return await _render_card_html(html)
 
@@ -872,6 +1017,9 @@ def _build_crash_html(
     players: Optional[list[str]] = None,
     txn_id: Optional[str] = None,
     is_live: bool = False,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> str:
     """Build the full crash card HTML with rocket launch theme."""
 
@@ -885,8 +1033,15 @@ def _build_crash_html(
         outcome = "active"
         badge_text = "CLIMBING..."
 
+    # Near-miss overrides loss to amber
+    status_class = outcome
+    if near_miss_msg and outcome == "loss":
+        status_class = "near_miss"
+
     display_players = players or [player_name]
-    header = _build_header_html("🚀", "CRASH", display_players, outcome, badge_text, txn_id)
+    header = _build_header_html("🚀", "CRASH", display_players, status_class, badge_text, txn_id)
+    streak_badge = _build_streak_badge_html(streak_info)
+    near_miss_banner = _build_near_miss_html(near_miss_msg)
 
     # Altitude gauge
     gauge_mult = cashout_mult if (cashed_out and cashout_mult is not None) else current_mult
@@ -968,6 +1123,7 @@ def _build_crash_html(
         data_section = _build_data_grid_html(wager, payout, balance)
 
     footer = _build_footer_html(balance)
+    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
 
     game_css = """
     <style>
@@ -1148,6 +1304,7 @@ def _build_crash_html(
     content = f"""
     {game_css}
     {header}
+    {streak_badge}
     <div class="gold-divider"></div>
 
     <div class="crash-content">
@@ -1174,13 +1331,15 @@ def _build_crash_html(
     </div>
 
     {history_html}
+    {near_miss_banner}
 
     <div class="gold-divider"></div>
     {data_section}
     <div class="gold-divider"></div>
-    {footer}"""
+    {footer}
+    {jackpot_footer}"""
 
-    return _wrap_card(outcome, content)
+    return _wrap_card(status_class, content)
 
 
 async def render_crash_card(
@@ -1198,12 +1357,16 @@ async def render_crash_card(
     players: Optional[list[str]] = None,
     txn_id: Optional[str] = None,
     is_live: bool = False,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> bytes:
     """Render a crash card to PNG bytes."""
     html = _build_crash_html(
         current_mult, crashed, cashed_out, cashout_mult, history,
         players_in, total_wagered, wager, payout, balance,
         player_name, players, txn_id, is_live,
+        streak_info, near_miss_msg, jackpot_info,
     )
     return await _render_card_html(html)
 
@@ -1224,6 +1387,10 @@ def _build_coinflip_html(
     is_pvp: bool = False,
     opponent_name: Optional[str] = None,
     opponent_pick: Optional[str] = None,
+    # Momentum fields
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> str:
     """Build the full coin flip card HTML."""
 
@@ -1246,7 +1413,14 @@ def _build_coinflip_html(
             badge_text = "LOSS"
         display_players = [player_name]
 
-    header = _build_header_html("🪙", "COIN FLIP", display_players, outcome, badge_text, txn_id)
+    # Near-miss overrides loss to amber (edge tease)
+    status_class = outcome
+    if near_miss_msg and outcome == "loss":
+        status_class = "near_miss"
+
+    header = _build_header_html("🪙", "COIN FLIP", display_players, status_class, badge_text, txn_id)
+    streak_badge = _build_streak_badge_html(streak_info)
+    near_miss_banner = _build_near_miss_html(near_miss_msg)
 
     # Coin visual
     is_heads = result == "heads"
@@ -1288,6 +1462,7 @@ def _build_coinflip_html(
 
     data_grid = _build_data_grid_html(wager, payout, balance)
     footer = _build_footer_html(balance)
+    jackpot_footer = _build_jackpot_footer_html(jackpot_info)
 
     game_css = f"""
     <style>
@@ -1373,6 +1548,7 @@ def _build_coinflip_html(
     content = f"""
     {game_css}
     {header}
+    {streak_badge}
     <div class="gold-divider"></div>
 
     <div class="coin-area">
@@ -1381,12 +1557,15 @@ def _build_coinflip_html(
       {pvp_html}
     </div>
 
+    {near_miss_banner}
+
     <div class="gold-divider"></div>
     {data_grid}
     <div class="gold-divider"></div>
-    {footer}"""
+    {footer}
+    {jackpot_footer}"""
 
-    return _wrap_card(outcome, content)
+    return _wrap_card(status_class, content)
 
 
 async def render_coinflip_card(
@@ -1400,11 +1579,15 @@ async def render_coinflip_card(
     is_pvp: bool = False,
     opponent_name: Optional[str] = None,
     opponent_pick: Optional[str] = None,
+    streak_info: dict | None = None,
+    near_miss_msg: str | None = None,
+    jackpot_info: dict | None = None,
 ) -> bytes:
     """Render a coin flip card to PNG bytes."""
     html = _build_coinflip_html(
         result, player_pick, wager, payout, balance, player_name, txn_id,
         is_pvp, opponent_name, opponent_pick,
+        streak_info, near_miss_msg, jackpot_info,
     )
     return await _render_card_html(html)
 

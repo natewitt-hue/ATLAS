@@ -30,7 +30,7 @@ from casino.casino_db import (
     create_crash_round, get_crash_round,
     add_crash_bet, cashout_crash_bet, resolve_crash_round,
     is_casino_open, get_channel_id, get_max_bet, get_balance,
-    process_wager,
+    process_wager, check_achievements,
 )
 from casino.renderer.casino_html_renderer import render_crash_card
 
@@ -41,10 +41,32 @@ GAME_TYPE     = "crash"
 LOBBY_SECS    = 60     # seconds to wait for more players after first bet
 COOLDOWN_SECS = 30     # seconds between rounds
 TICK_SECS     = 2.0    # embed update interval during round
+LMS_BONUS_PCT = 0.10   # Last Man Standing bonus (10%)
 
 # ── Active round registry: channel_id → CrashRound ───────────────────────────
 active_rounds:     dict[int, "CrashRound"] = {}
 recent_crashes:    dict[int, list[float]]  = {}   # channel_id → last 10 crash points
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  NEAR-MISS DETECTION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _detect_crash_near_miss(player: "PlayerBet", crash_point: float) -> str | None:
+    """Detect close-call scenarios in crash."""
+    if player.cashed_out:
+        margin = crash_point - player.cashout_mult
+        if 0 < margin <= 0.5:
+            return f"Barely escaped! Cashed out {margin:.2f}x before crash"
+    else:
+        if 1.5 <= crash_point < 2.0:
+            would_have = int(player.wager * crash_point)
+            return f"Almost doubled! Crashed at {crash_point:.2f}x (would've been ${would_have:,})"
+        if crash_point >= 2.0:
+            # Ghost line — show what they missed
+            would_have = int(player.wager * crash_point)
+            return f"If you'd cashed at {crash_point:.2f}x → ${would_have:,}"
+    return None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -182,11 +204,28 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
     # Resolve all remaining active bets
     await resolve_crash_round(round_obj.round_id)
 
+    # ── Last Man Standing bonus ──────────────────────────────────────────
+    # If 3+ players, the last person to cash out gets +10%
+    cashed_players = [p for p in round_obj.players.values() if p.cashed_out]
+    lms_player = None
+    if len(round_obj.players) >= 3 and cashed_players:
+        lms_player = max(cashed_players, key=lambda p: p.cashout_mult)
+        lms_bonus = int(lms_player.wager * lms_player.cashout_mult * 0.10)
+        if lms_bonus > 0:
+            import flow_wallet
+            await flow_wallet.credit(
+                lms_player.discord_id, lms_bonus, "CASINO",
+                description=f"crash Last Man Standing +10%",
+            )
+
     # Log losses for players who didn't cash out
     from casino.casino import post_to_ledger
     now = datetime.now(timezone.utc).isoformat()
     for player in round_obj.players.values():
         if not player.cashed_out:
+            # Near-miss detection for busted players
+            near_miss_msg = _detect_crash_near_miss(player, round_obj.crash_point)
+
             # Wager already deducted; just log the session
             result = await process_wager(
                 discord_id = player.discord_id,
@@ -196,6 +235,11 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 payout     = 0,
                 multiplier = round_obj.crash_point,
                 channel_id = round_obj.channel_id,
+            )
+            # Check achievements
+            await check_achievements(
+                player.discord_id, GAME_TYPE, "loss", round_obj.crash_point,
+                result.get("streak_info", {}), result.get("jackpot_result"),
             )
             # Post to #ledger
             await post_to_ledger(
@@ -224,7 +268,7 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
         players       = player_names,
     )
     file  = discord.File(io.BytesIO(png), filename="crash.png")
-    embed = _build_crash_embed(round_obj)
+    embed = _build_crash_embed(round_obj, lms_player=lms_player)
     embed.set_image(url="attachment://crash.png")
     try:
         if round_obj.message:
@@ -286,6 +330,12 @@ class CrashView(discord.ui.View):
             channel_id = self.round_obj.channel_id,
         )
 
+        # Check achievements
+        await check_achievements(
+            uid, GAME_TYPE, "win", mult,
+            result.get("streak_info", {}), result.get("jackpot_result"),
+        )
+
         # Post to #ledger
         from casino.casino import post_to_ledger
         await post_to_ledger(
@@ -335,7 +385,7 @@ def _build_running_embed(round_obj: CrashRound) -> discord.Embed:
     return embed
 
 
-def _build_crash_embed(round_obj: CrashRound) -> discord.Embed:
+def _build_crash_embed(round_obj: CrashRound, lms_player: "PlayerBet | None" = None) -> discord.Embed:
     embed = discord.Embed(
         title       = f"💥 CRASHED @ {round_obj.crash_point:.2f}x",
         color       = discord.Color.red(),
@@ -348,18 +398,29 @@ def _build_crash_embed(round_obj: CrashRound) -> discord.Embed:
     busted = [p for p in round_obj.players.values() if not p.cashed_out]
 
     if cashed:
-        cashout_lines = "\n".join(
-            f"✅ **{p.display_name}** — {m:.2f}x (+{int(p.wager * m) - p.wager:,})"
-            for p, m in sorted(cashed, key=lambda x: x[1], reverse=True)
-        )
-        embed.add_field(name="💰 Cashed Out", value=cashout_lines[:1020], inline=False)
+        cashout_lines = []
+        for p, m in sorted(cashed, key=lambda x: x[1], reverse=True):
+            profit = int(p.wager * m) - p.wager
+            line = f"✅ **{p.display_name}** — {m:.2f}x (+{profit:,})"
+            if lms_player and p.discord_id == lms_player.discord_id:
+                lms_bonus = int(p.wager * m * LMS_BONUS_PCT)
+                line += f" 🏆 **LAST MAN STANDING** +${lms_bonus:,}"
+            # Near-miss for close escapes
+            near_miss = _detect_crash_near_miss(p, round_obj.crash_point)
+            if near_miss:
+                line += f"\n  ⚡ *{near_miss}*"
+            cashout_lines.append(line)
+        embed.add_field(name="💰 Cashed Out", value="\n".join(cashout_lines)[:1020], inline=False)
 
     if busted:
-        bust_lines = "\n".join(
-            f"❌ **{p.display_name}** — -${p.wager:,}"
-            for p in busted
-        )
-        embed.add_field(name="💥 Busted", value=bust_lines[:1020], inline=False)
+        bust_lines = []
+        for p in busted:
+            line = f"❌ **{p.display_name}** — -${p.wager:,}"
+            near_miss = _detect_crash_near_miss(p, round_obj.crash_point)
+            if near_miss:
+                line += f"\n  😬 *{near_miss}*"
+            bust_lines.append(line)
+        embed.add_field(name="💥 Busted", value="\n".join(bust_lines)[:1020], inline=False)
 
     return embed
 
@@ -399,7 +460,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
             f"🚀 Crash is played in <#{crash_channel_id}>!", ephemeral=True
         )
 
-    max_bet = await get_max_bet()
+    max_bet = await get_max_bet(uid)
     if wager < 1 or wager > max_bet:
         return await interaction.followup.send(
             f"❌ Wager must be between **$1** and **${max_bet:,}**.",

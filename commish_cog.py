@@ -277,6 +277,29 @@ class CommishCog(commands.Cog):
             return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
         await cog._casino_give_scratch_impl(interaction, user)
 
+    @casino_admin.command(name="jackpot", description="View current jackpot pools.")
+    async def casino_jackpot(self, interaction: discord.Interaction):
+        cog = self._get("CasinoCog")
+        if not cog:
+            return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
+        await cog._casino_jackpot_impl(interaction)
+
+    @casino_admin.command(name="jackpotseed", description="Add funds to a jackpot pool.")
+    @app_commands.describe(tier="Jackpot tier (mini, major, grand)", amount="Amount to add")
+    async def casino_jackpotseed(self, interaction: discord.Interaction, tier: str, amount: int):
+        cog = self._get("CasinoCog")
+        if not cog:
+            return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
+        await cog._casino_jackpot_seed_impl(interaction, tier, amount)
+
+    @casino_admin.command(name="jackpotboost", description="Temporarily boost jackpot odds.")
+    @app_commands.describe(multiplier="Odds multiplier (e.g. 2.0)", minutes="Duration in minutes")
+    async def casino_jackpotboost(self, interaction: discord.Interaction, multiplier: float, minutes: int):
+        cog = self._get("CasinoCog")
+        if not cog:
+            return await interaction.response.send_message("Casino not loaded.", ephemeral=True)
+        await cog._casino_jackpot_boost_impl(interaction, multiplier, minutes)
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # /commish eco — Economy Admin (10 commands)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

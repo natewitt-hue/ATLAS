@@ -254,27 +254,47 @@ class CasinoCog(commands.Cog):
                 ephemeral=True
             )
 
-        balance = await db.get_balance(interaction.user.id)
-        max_bet = await db.get_max_bet()
+        uid = interaction.user.id
+        balance = await db.get_balance(uid)
+        tier = await db.get_player_tier(uid)
+        max_bet = tier["max_bet"]
+        streak = await db.get_streak(uid)
+        jackpots = await db.get_jackpot_pools()
+
+        # Jackpot display
+        jp_lines = []
+        for t in ("mini", "major", "grand"):
+            if t in jackpots:
+                jp_lines.append(f"**{t.capitalize()}**: ${jackpots[t]['pool']:,}")
+        jp_display = " | ".join(jp_lines) if jp_lines else "Pools loading..."
+
+        # Streak display
+        streak_display = ""
+        if streak["type"] == "win" and streak["len"] >= 3:
+            bonus = db.get_streak_bonus(streak)
+            label = bonus["label"] if bonus else "Hot"
+            streak_display = f"\n🔥 **{label}** — {streak['len']} win streak (+{int(bonus['pct']*100)}% payout boost)" if bonus else ""
+        elif streak["type"] == "loss" and streak["len"] >= 5:
+            streak_display = f"\n❄️ Cold streak — {streak['len']} losses (mercy active)"
 
         embed = discord.Embed(
             title       = "🎰 Welcome to the TSL Casino",
             description = (
                 "**The Sim League — Gold Standard Gaming**\n\n"
                 "Pick a game below to get started.\n\n"
-                "🃏 **Blackjack** — Beat the dealer (3:2 BJ payout)\n"
-                "🎰 **Slots** — 3-reel TSL-themed machine (up to 50x)\n"
+                "🃏 **Blackjack** — Beat the dealer (6:5 BJ payout)\n"
+                "🎰 **Slots** — Controlled-RTP TSL machine (up to 25x + free spins)\n"
                 "🚀 **Crash** — Shared multiplier — cash out before it crashes\n"
-                "🪙 **Coin Flip** — 50/50, even money\n"
-                "🎟️ **Daily Scratch** — Free daily card ($25–$150)\n"
+                "🪙 **Coin Flip** — 1.95x payout\n"
+                "🎟️ **Daily Scratch** — Free daily card (streak bonus!)\n"
+                + streak_display
             ),
             color = discord.Color.from_rgb(212, 175, 55),
         )
         embed.add_field(name="Your Balance", value=f"**${balance:,}**", inline=True)
-        embed.add_field(name="Max Bet",      value=f"${max_bet:,}",          inline=True)
+        embed.add_field(name="Max Bet",      value=f"${max_bet:,} ({tier['name']})", inline=True)
+        embed.add_field(name="💎 Jackpots",  value=jp_display, inline=False)
         embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
-
-        await interaction.followup.send(embed=embed, view=CasinoHubView(), ephemeral=True)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  COMMISSIONER COMMANDS
@@ -285,6 +305,7 @@ class CasinoCog(commands.Cog):
 
         report  = await db.get_house_report()
         is_open = await db.is_casino_open()
+        jackpots = await db.get_jackpot_pools()
 
         embed = discord.Embed(title="🎰 TSL Casino Status", color=discord.Color.teal())
         embed.add_field(name="Casino Open",    value="✅ Yes" if is_open else "🔴 No", inline=True)
@@ -301,6 +322,14 @@ class CasinoCog(commands.Cog):
                 value = f"P&L: {g['pl']:+,} | Hands: {g['hands']}",
                 inline = True,
             )
+
+        # Jackpot pools
+        jp_parts = []
+        for t in ("mini", "major", "grand"):
+            if t in jackpots:
+                jp_parts.append(f"{t.capitalize()}: ${jackpots[t]['pool']:,}")
+        if jp_parts:
+            embed.add_field(name="💎 Jackpots", value=" | ".join(jp_parts), inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -350,6 +379,8 @@ class CasinoCog(commands.Cog):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         report = await db.get_house_report()
+        jackpots = await db.get_jackpot_pools()
+
         embed  = discord.Embed(
             title = "📊 TSL Casino — House P&L Report",
             color = discord.Color.teal(),
@@ -361,11 +392,23 @@ class CasinoCog(commands.Cog):
 
         for g in report["by_game"]:
             pl_str = f"{g['pl']:+,}"
+            # Include 7-day rolling edge
+            rolling = report.get("rolling_7d", {}).get(g["game"])
+            edge_str = f" | 7d Edge: {rolling['edge_pct']}%" if rolling else ""
             embed.add_field(
                 name  = g["game"].replace("_"," ").title(),
-                value = f"P&L: **{pl_str}** | Hands: {g['hands']}",
+                value = f"P&L: **{pl_str}** | Hands: {g['hands']}{edge_str}",
                 inline = True,
             )
+
+        # Jackpot pools
+        jp_lines = []
+        for t in ("mini", "major", "grand"):
+            if t in jackpots:
+                jp = jackpots[t]
+                jp_lines.append(f"**{t.capitalize()}**: ${jp['pool']:,} (paid: ${jp['total_paid']:,}, hits: {jp['total_hits']})")
+        if jp_lines:
+            embed.add_field(name="💎 Jackpot Pools", value="\n".join(jp_lines), inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -400,6 +443,41 @@ class CasinoCog(commands.Cog):
             f"🎟️ Bonus scratch card granted to {user.mention}! "
             f"They can claim it from the `/casino` hub.",
             ephemeral=True
+        )
+
+    async def _casino_jackpot_impl(self, interaction: discord.Interaction):
+        """View current jackpot pools."""
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        jackpots = await db.get_jackpot_pools()
+        embed = discord.Embed(title="💎 Jackpot Pools", color=discord.Color.gold())
+        for t in ("mini", "major", "grand"):
+            if t in jackpots:
+                jp = jackpots[t]
+                last = f"Last: <@{jp['last_winner']}> won ${jp['last_amount']:,}" if jp['last_winner'] else "No winner yet"
+                embed.add_field(
+                    name=f"{t.upper()} Jackpot",
+                    value=f"Pool: **${jp['pool']:,}**\nSeed: ${jp['seed']:,}\n{last}\nTotal paid: ${jp['total_paid']:,} ({jp['total_hits']} hits)",
+                    inline=True,
+                )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _casino_jackpot_seed_impl(self, interaction: discord.Interaction, tier: str, amount: int):
+        """Add funds to a jackpot pool."""
+        tier = tier.lower()
+        if tier not in ("mini", "major", "grand"):
+            return await interaction.response.send_message("❌ Tier must be mini, major, or grand.", ephemeral=True)
+        await db.seed_jackpot(tier, amount)
+        await interaction.response.send_message(f"✅ Added **${amount:,}** to **{tier.upper()}** jackpot pool.", ephemeral=True)
+
+    async def _casino_jackpot_boost_impl(self, interaction: discord.Interaction, multiplier: float, minutes: int):
+        """Temporarily boost jackpot odds for all players."""
+        from datetime import datetime, timezone, timedelta
+        expires = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        value = f"{multiplier},{expires.isoformat()}"
+        await db.set_setting("casino_jackpot_boost", value)
+        await interaction.response.send_message(
+            f"🚀 **JACKPOT BOOST ACTIVE!** {multiplier}x odds for {minutes} minutes!\n"
+            f"Expires: <t:{int(expires.timestamp())}:R>",
         )
 
 
