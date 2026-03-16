@@ -21,6 +21,7 @@ Commissioner commands:
 
 from __future__ import annotations
 
+import logging
 import typing
 
 import discord
@@ -34,6 +35,8 @@ from casino.games.blackjack import start_blackjack, active_sessions as bj_sessio
 from casino.games.slots     import play_slots, daily_scratch
 from casino.games.crash     import join_crash, active_rounds
 from casino.games.coinflip  import play_coinflip, send_challenge
+log = logging.getLogger(__name__)
+
 ADMIN_ROLE_NAME = "Commissioner"
 
 GAME_CHOICES = typing.Literal["blackjack", "crash", "slots", "coinflip"]
@@ -52,6 +55,7 @@ async def post_to_ledger(
     multiplier: float,
     new_balance: int,
     txn_id: int | None = None,
+    extra: dict | None = None,        # NEW: game-specific metadata
 ) -> None:
     """Post a casino game result slip to #ledger via ledger_poster."""
     try:
@@ -60,8 +64,20 @@ async def post_to_ledger(
             bot, guild_id, discord_id, game_type,
             wager, outcome, payout, multiplier, new_balance, txn_id,
         )
-    except Exception as e:
-        print(f"[LEDGER] Failed to post ledger entry: {e}")
+    except Exception:
+        log.exception("Failed to post to ledger")
+
+    # Emit FLOW event for live engagement system
+    try:
+        from flow_events import GameResultEvent, flow_bus
+        event = GameResultEvent(
+            discord_id=discord_id, guild_id=guild_id, game_type=game_type,
+            wager=wager, outcome=outcome, payout=payout, multiplier=multiplier,
+            new_balance=new_balance, txn_id=txn_id, extra=extra or {}
+        )
+        await flow_bus.emit("game_result", event)
+    except Exception:
+        log.exception("Failed to emit FLOW event")
 
 # ──────────────────────────────────────────────────────────────────────────────
 

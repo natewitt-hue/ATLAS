@@ -213,7 +213,7 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
         lms_bonus = int(lms_player.wager * lms_player.cashout_mult * 0.10)
         if lms_bonus > 0:
             # Route through process_wager for audit trail and house bank tracking
-            await process_wager(
+            lms_result = await process_wager(
                 discord_id = lms_player.discord_id,
                 wager      = 0,
                 game_type  = "crash_lms",
@@ -221,6 +221,16 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 payout     = lms_bonus,
                 multiplier = 0.10,
                 channel_id = round_obj.channel_id,
+            )
+            # Emit LMS FLOW event
+            from casino.casino import post_to_ledger
+            await post_to_ledger(
+                bot=bot, guild_id=channel.guild.id,
+                discord_id=lms_player.discord_id, game_type="crash_lms",
+                wager=0, outcome="win", payout=lms_bonus,
+                multiplier=0.10, new_balance=lms_result["new_balance"],
+                txn_id=lms_result.get("txn_id"),
+                extra={"last_man_standing": True},
             )
 
     # Log losses for players who didn't cash out

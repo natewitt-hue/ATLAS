@@ -254,12 +254,14 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     # Post to #ledger
     from casino.casino import post_to_ledger
+    _slots_extra = {"jackpot": True} if result.get("jackpot_result") or vtype in ("3match_jackpot", "3match_mega") else None
     await post_to_ledger(
         bot=interaction.client, guild_id=interaction.guild_id,
         discord_id=interaction.user.id, game_type=GAME_TYPE,
         wager=wager, outcome=outcome, payout=payout,
         multiplier=mult, new_balance=result["new_balance"],
         txn_id=result.get("txn_id"),
+        extra=_slots_extra,
     )
 
     # ── Final render with result ───────────────────────────────────────────
