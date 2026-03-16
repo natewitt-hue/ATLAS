@@ -921,6 +921,7 @@ def _grade_single_bet(bet_type: str, pick: str, line: float,
 async def _run_autograde(bot) -> None:
     def _grade_sync():
         results = []
+        pending_events = []
         try:
             with _db_con() as con:
                 ungraded = con.execute(
@@ -929,7 +930,7 @@ async def _run_autograde(bot) -> None:
                     (dm.CURRENT_WEEK,)
                 ).fetchall()
             if not ungraded:
-                return results
+                return results, pending_events
 
             for (week,) in ungraded:
                 scores     = _build_score_lookup(week)
@@ -974,6 +975,17 @@ async def _run_autograde(bot) -> None:
                             losses += 1
                         con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
                         settled += 1
+                        _ev_profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (-amt if res == "Lost" else 0)
+                        pending_events.append({
+                            "discord_id": uid,
+                            "guild_id": None,
+                            "source": "TSL_BET",
+                            "bet_type": btype,
+                            "amount": _ev_profit,
+                            "balance_after": _get_balance(uid),
+                            "description": f"{res}: {pick} ({btype}) on {matchup}",
+                            "bet_id": bid,
+                        })
 
                     # ── Parlays ───────────────────────────────────────────
                     parlays = con.execute(
@@ -1027,14 +1039,44 @@ async def _run_autograde(bot) -> None:
                             total_paid += payout - amt
                             con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
                             wins += 1
+                            pending_events.append({
+                                "discord_id": uid,
+                                "guild_id": None,
+                                "source": "TSL_BET",
+                                "bet_type": "parlay",
+                                "amount": payout - amt,
+                                "balance_after": _get_balance(uid),
+                                "description": f"Won parlay (parlay_id={pid})",
+                                "bet_id": pid,
+                            })
                         elif any_lost:
                             con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
                             losses += 1
+                            pending_events.append({
+                                "discord_id": uid,
+                                "guild_id": None,
+                                "source": "TSL_BET",
+                                "bet_type": "parlay",
+                                "amount": -amt,
+                                "balance_after": _get_balance(uid),
+                                "description": f"Lost parlay (parlay_id={pid})",
+                                "bet_id": pid,
+                            })
                         elif any_pushed:
                             # One leg pushed, rest won → return wager (standard parlay push rule)
                             _update_balance(uid, amt, con)
                             con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
                             pushes += 1
+                            pending_events.append({
+                                "discord_id": uid,
+                                "guild_id": None,
+                                "source": "TSL_BET",
+                                "bet_type": "parlay",
+                                "amount": 0,
+                                "balance_after": _get_balance(uid),
+                                "description": f"Push parlay (parlay_id={pid})",
+                                "bet_id": pid,
+                            })
 
                 if settled > 0 or wins + losses + pushes > 0:
                     results.append({
@@ -1044,10 +1086,18 @@ async def _run_autograde(bot) -> None:
                     })
         except Exception as e:
             log.warning(f"[AUTO-GRADE] Error: {e}")
-        return results
+        return results, pending_events
 
     loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(None, _grade_sync)
+    results, pending_events = await loop.run_in_executor(None, _grade_sync)
+
+    try:
+        from flow_events import SportsbookEvent, flow_bus
+        for ev_data in pending_events:
+            sb_event = SportsbookEvent(**ev_data)
+            await flow_bus.emit("sportsbook_result", sb_event)
+    except Exception:
+        log.exception("Failed to emit sportsbook FLOW events")
 
     for r in results:
         log.info(
@@ -2086,7 +2136,7 @@ class SportsbookCog(commands.Cog):
                 profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else 0
                 bet_log.append({"uid": uid, "result": res, "pick": pick,
                                   "bet_type": btype, "matchup": matchup,
-                                  "wager": amt, "profit": profit})
+                                  "wager": amt, "profit": profit, "bet_id": bid})
 
             # Grade parlays
             parlays = con.execute(
@@ -2126,13 +2176,22 @@ class SportsbookCog(commands.Cog):
                     total_paid += payout - amt
                     con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
                     wins += 1
+                    bet_log.append({"uid": uid, "result": "Won", "pick": "parlay",
+                                    "bet_type": "parlay", "matchup": f"parlay_id={pid}",
+                                    "wager": amt, "profit": payout - amt, "bet_id": pid})
                 elif any_lost:
                     con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
                     losses += 1
+                    bet_log.append({"uid": uid, "result": "Lost", "pick": "parlay",
+                                    "bet_type": "parlay", "matchup": f"parlay_id={pid}",
+                                    "wager": amt, "profit": 0, "bet_id": pid})
                 elif any_pushed:
                     _update_balance(uid, amt, con)
                     con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
                     pushes += 1
+                    bet_log.append({"uid": uid, "result": "Push", "pick": "parlay",
+                                    "bet_type": "parlay", "matchup": f"parlay_id={pid}",
+                                    "wager": amt, "profit": 0, "bet_id": pid})
 
         embed = discord.Embed(title=f"✅  Week {week} Bets Graded", color=TSL_GOLD)
         embed.add_field(name="Settled",      value=str(settled),       inline=True)
@@ -2184,6 +2243,32 @@ class SportsbookCog(commands.Cog):
                     )
         except Exception:
             pass
+
+        try:
+            from flow_events import SportsbookEvent, flow_bus
+            for entry in bet_log:
+                if entry["result"] == "Won":
+                    ev_amount = entry["profit"]
+                    ev_desc = f"Won: {entry['pick']} ({entry['bet_type']}) on {entry['matchup']}"
+                elif entry["result"] == "Lost":
+                    ev_amount = -entry["wager"]
+                    ev_desc = f"Lost: {entry['pick']} ({entry['bet_type']}) on {entry['matchup']}"
+                else:
+                    ev_amount = 0
+                    ev_desc = f"Push: {entry['pick']} ({entry['bet_type']}) on {entry['matchup']}"
+                sb_event = SportsbookEvent(
+                    discord_id=entry["uid"],
+                    guild_id=interaction.guild_id,
+                    source="TSL_BET",
+                    bet_type=entry["bet_type"],
+                    amount=ev_amount,
+                    balance_after=_get_balance(entry["uid"]),
+                    description=ev_desc,
+                    bet_id=entry.get("bet_id"),
+                )
+                await flow_bus.emit("sportsbook_result", sb_event)
+        except Exception:
+            log.exception("Failed to emit sportsbook FLOW events")
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — OVERVIEW
