@@ -1,13 +1,13 @@
 """
 real_sportsbook_cog.py — ATLAS Flow: Real Sports Sportsbook
 =============================================================
-Bet on real NFL/NBA games with TSL Bucks using live odds from The Odds API.
+Bet on real sports with TSL Bucks using live odds from TheRundown API.
 
-Background tasks sync odds on a conservative schedule (~224 req/month)
-to stay within the 500 req/month free tier:
-  - NFL odds: Tue + Sat (Sep–Feb)
-  - NBA odds: 3x/week (Oct–Jun)
-  - Scores: every 4 hours (all sports)
+Supported leagues: NFL, NBA, MLB, NHL, NCAAB, UFC/MMA, EPL, MLS, WNBA
+
+Background tasks:
+  - Odds sync: every 15 minutes (in-season sports only)
+  - Score sync: every 15 minutes (all sports)
   - Lock check: every 60 seconds
 
 Author: TheWitt / ATLAS
@@ -45,16 +45,26 @@ SPORT_EMOJI = {
     "basketball_nba":       "\U0001f3c0",  # 🏀
     "baseball_mlb":         "\u26be",      # ⚾
     "icehockey_nhl":        "\U0001f3d2",  # 🏒
+    "basketball_ncaab":     "\U0001f3c0",  # 🏀
+    "mma_ufc":              "\U0001f94a",  # 🥊
+    "soccer_epl":           "\u26bd",      # ⚽
+    "soccer_mls":           "\u26bd",      # ⚽
+    "basketball_wnba":      "\U0001f3c0",  # 🏀
 }
 
 # Season windows + sync schedule per sport
 # months: which months the sport is in-season
 # sync_days: weekday numbers (Mon=0 .. Sun=6) to fetch fresh odds
 SPORT_SEASONS = {
-    "americanfootball_nfl": {"months": {9, 10, 11, 12, 1, 2},          "sync_days": {1, 5}},
-    "basketball_nba":       {"months": {10, 11, 12, 1, 2, 3, 4, 5, 6}, "sync_days": {0, 2, 4}},
-    "baseball_mlb":         {"months": {3, 4, 5, 6, 7, 8, 9, 10},      "sync_days": {0, 2, 4}},
-    "icehockey_nhl":        {"months": {10, 11, 12, 1, 2, 3, 4, 5, 6}, "sync_days": {1, 3, 5}},
+    "americanfootball_nfl": {"months": {9, 10, 11, 12, 1, 2}},
+    "basketball_nba":       {"months": {10, 11, 12, 1, 2, 3, 4, 5, 6}},
+    "baseball_mlb":         {"months": {3, 4, 5, 6, 7, 8, 9, 10}},
+    "icehockey_nhl":        {"months": {10, 11, 12, 1, 2, 3, 4, 5, 6}},
+    "basketball_ncaab":     {"months": {11, 12, 1, 2, 3, 4}},
+    "mma_ufc":              {"months": {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
+    "soccer_epl":           {"months": {8, 9, 10, 11, 12, 1, 2, 3, 4, 5}},
+    "soccer_mls":           {"months": {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}},
+    "basketball_wnba":      {"months": {5, 6, 7, 8, 9}},
 }
 
 
@@ -184,9 +194,9 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # BACKGROUND TASKS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    @tasks.loop(hours=1)
+    @tasks.loop(minutes=15)
     async def sync_scores_task(self):
-        """Fetch scores every hour, auto-grade completed bets."""
+        """Fetch scores every 15 minutes, auto-grade completed bets."""
         await asyncio.sleep(random.uniform(5, 15))
         await self._sync_scores()
 
@@ -213,9 +223,9 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     async def _before_lock(self):
         await self.bot.wait_until_ready()
 
-    @tasks.loop(hours=2)
+    @tasks.loop(minutes=15)
     async def sync_odds_task(self):
-        """Sync odds for all in-season sports every 2 hours."""
+        """Sync odds for all in-season sports every 15 minutes."""
         await asyncio.sleep(random.uniform(5, 15))
         now = datetime.now(timezone.utc)
         for sport_key, cfg in SPORT_SEASONS.items():

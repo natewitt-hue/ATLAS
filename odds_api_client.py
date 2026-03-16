@@ -30,6 +30,11 @@ SUPPORTED_SPORTS = {
     "basketball_nba":       "NBA",
     "baseball_mlb":         "MLB",
     "icehockey_nhl":        "NHL",
+    "basketball_ncaab":     "NCAAB",
+    "mma_ufc":              "UFC/MMA",
+    "soccer_epl":           "EPL",
+    "soccer_mls":           "MLS",
+    "basketball_wnba":      "WNBA",
 }
 
 # Map our sport keys → TheRundown sport IDs
@@ -38,6 +43,11 @@ SPORT_ID_MAP = {
     "basketball_nba":       4,
     "baseball_mlb":         3,
     "icehockey_nhl":        6,
+    "basketball_ncaab":     5,
+    "mma_ufc":              7,
+    "soccer_epl":           11,
+    "soccer_mls":           10,
+    "basketball_wnba":      8,
 }
 
 # DraftKings affiliate ID on TheRundown

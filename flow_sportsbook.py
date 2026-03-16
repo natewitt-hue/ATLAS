@@ -1578,11 +1578,43 @@ class SportsbookHubView(discord.ui.View):
     async def nhl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_real_sport(interaction, "icehockey_nhl")
 
-    # ── Row 1: Utility buttons ─────────────────────────────────────────────
+    # ── Row 1: More sports ───────────────────────────────────────────────
+
+    @discord.ui.button(label="NCAAB", emoji="\U0001f3c0",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:ncaab", row=1)
+    async def ncaab_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "basketball_ncaab")
+
+    @discord.ui.button(label="UFC", emoji="\U0001f94a",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:ufc", row=1)
+    async def ufc_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "mma_ufc")
+
+    @discord.ui.button(label="EPL", emoji="\u26bd",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:epl", row=1)
+    async def epl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "soccer_epl")
+
+    @discord.ui.button(label="MLS", emoji="\u26bd",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:mls", row=1)
+    async def mls_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "soccer_mls")
+
+    @discord.ui.button(label="WNBA", emoji="\U0001f3c0",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:wnba", row=1)
+    async def wnba_games(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show_real_sport(interaction, "basketball_wnba")
+
+    # ── Row 2: Utility buttons ─────────────────────────────────────────────
 
     @discord.ui.button(label="Stats", emoji="\U0001f4ca",
                        style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:stats", row=1)
+                       custom_id="atlas:sportsbook:stats", row=2)
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -1596,7 +1628,7 @@ class SportsbookHubView(discord.ui.View):
 
     @discord.ui.button(label="History", emoji="\U0001f4cb",
                        style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:history", row=1)
+                       custom_id="atlas:sportsbook:history", row=2)
     async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.cog._bethistory_impl(interaction, weeks=99)
@@ -1608,7 +1640,7 @@ class SportsbookHubView(discord.ui.View):
 
     @discord.ui.button(label="Leaderboard", emoji="\U0001f3c6",
                        style=discord.ButtonStyle.danger,
-                       custom_id="atlas:sportsbook:leaderboard", row=1)
+                       custom_id="atlas:sportsbook:leaderboard", row=2)
     async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.cog._leaderboard_impl(interaction)
@@ -1620,7 +1652,7 @@ class SportsbookHubView(discord.ui.View):
 
     @discord.ui.button(label="Parlay", emoji="\U0001f3b0",
                        style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:parlay", row=1)
+                       custom_id="atlas:sportsbook:parlay", row=2)
     async def parlay(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = interaction.user.id
         cart = _get_cart(uid)

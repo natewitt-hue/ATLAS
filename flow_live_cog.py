@@ -348,7 +348,7 @@ class FlowLiveCog(commands.Cog):
                 member = guild.get_member(s.discord_id)
                 slots_top_player = member.display_name if member else str(s.discord_id)
 
-        # Jackpot — query from DB
+        # Jackpot — query from casino_jackpot (3 tiers: mini/major/grand)
         jackpot_amount = 0
         jackpot_last_player = None
         jackpot_last_amount = 0
@@ -356,9 +356,29 @@ class FlowLiveCog(commands.Cog):
         try:
             import sqlite3
             conn = sqlite3.connect("flow_economy.db")
-            row = conn.execute("SELECT balance FROM jackpot_pool LIMIT 1").fetchone()
+            # Sum all tier pools for the headline number
+            row = conn.execute("SELECT COALESCE(SUM(pool), 0) FROM casino_jackpot").fetchone()
             if row:
                 jackpot_amount = row[0]
+            # Last winner across all tiers
+            winner_row = conn.execute(
+                "SELECT last_winner, last_amount, last_won_at FROM casino_jackpot "
+                "WHERE last_won_at IS NOT NULL ORDER BY last_won_at DESC LIMIT 1"
+            ).fetchone()
+            if winner_row and winner_row[0]:
+                jackpot_last_player = str(winner_row[0])
+                jackpot_last_amount = winner_row[1] or 0
+                # Convert ISO timestamp to relative time
+                from datetime import datetime, timezone
+                won_at = datetime.fromisoformat(winner_row[2])
+                delta = datetime.now(timezone.utc) - won_at.replace(tzinfo=timezone.utc)
+                mins = int(delta.total_seconds() / 60)
+                if mins < 60:
+                    jackpot_last_ago = f"{mins}m ago"
+                elif mins < 1440:
+                    jackpot_last_ago = f"{mins // 60}h ago"
+                else:
+                    jackpot_last_ago = f"{mins // 1440}d ago"
             conn.close()
         except Exception:
             pass
