@@ -354,6 +354,7 @@ def _build_header_html(
     outcome: str,
     badge_text: str,
     txn_id: Optional[str] = None,
+    subtitle: str = "FLOW Casino",
 ) -> str:
     """Build the shared card header: icon+title (left), username(s) (center), badge (right)."""
     txn_html = f'<div class="txn-id">TXN #{_esc(txn_id)}</div>' if txn_id else ""
@@ -374,7 +375,7 @@ def _build_header_html(
         <div class="game-icon-pill">{icon}</div>
         <div class="game-title-group">
           <div class="game-title">{_esc(title)}</div>
-          <div class="game-subtitle">FLOW Casino</div>
+          <div class="game-subtitle">{_esc(subtitle)}</div>
           {txn_html}
         </div>
       </div>

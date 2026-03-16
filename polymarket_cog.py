@@ -17,9 +17,12 @@ from discord import app_commands
 
 import aiohttp
 import aiosqlite
+import hashlib
 import json
 import asyncio
 import logging
+import math
+import time
 from datetime import datetime, timezone
 from typing import Optional
 import os
@@ -32,7 +35,14 @@ from flow_wallet import (
     DB_PATH,
     InsufficientFundsError,
 )
-from casino.renderer.prediction_card_renderer import render_market_page
+from casino.renderer.prediction_html_renderer import (
+    render_market_list_card,
+    render_market_detail_card,
+    render_bet_confirmation_card,
+    render_portfolio_card,
+    render_resolution_card,
+)
+import io
 
 log = logging.getLogger("polymarket_cog")
 
@@ -72,14 +82,46 @@ PAYOUT_SCALE = 100
 # Category mapping: Polymarket categories → display labels
 # Keys are lowercase — map_category() lowercases + normalizes hyphens before lookup
 CATEGORY_MAP = {
-    # Core
-    "politics":            "🏛️ Politics",
-    "sports":              "⚽ Sports",
-    "pop culture":         "🎬 Entertainment",
-    "pop-culture":         "🎬 Entertainment",
+    # ── Elections (campaigns, races, candidates) ──
+    "elections":           "🗳️ Elections",
+    "election":            "🗳️ Elections",
+    "presidential":        "🗳️ Elections",
+    "president":           "🗳️ Elections",
+    "governor":            "🗳️ Elections",
+    "senate":              "🗳️ Elections",
+    "congress":            "🗳️ Elections",
+    "mayor":               "🗳️ Elections",
+    "primary":             "🗳️ Elections",
+    "midterms":            "🗳️ Elections",
+    "campaign":            "🗳️ Elections",
+    # ── Government (policy, courts, governance) ──
+    "politics":            "🏛️ Government",
+    "government":          "🏛️ Government",
+    "policy":              "🏛️ Government",
+    "legislation":         "🏛️ Government",
+    "court":               "🏛️ Government",
+    "supreme court":       "🏛️ Government",
+    "us-current-affairs":  "🏛️ Government",
+    "us current affairs":  "🏛️ Government",
+    # ── Pop Culture ──
+    "pop culture":         "🌟 Pop Culture",
+    "pop-culture":         "🌟 Pop Culture",
+    "celebrity":           "🌟 Pop Culture",
+    "social media":        "🌟 Pop Culture",
+    "tiktok":              "🌟 Pop Culture",
+    "viral":               "🌟 Pop Culture",
+    "awards":              "🌟 Pop Culture",
+    "oscars":              "🌟 Pop Culture",
+    "grammys":             "🌟 Pop Culture",
+    "reality tv":          "🌟 Pop Culture",
+    "culture":             "🌟 Pop Culture",
+    # ── Entertainment (movies, TV, streaming) ──
     "entertainment":       "🎬 Entertainment",
-    "culture":             "🎬 Entertainment",
+    # ── Crypto (blocked) ──
     "crypto":              "🪙 Crypto",
+    # ── Sports (blocked) ──
+    "sports":              "⚽ Sports",
+    # ── Economics ──
     "business":            "📈 Economics",
     "finance":             "📈 Economics",
     "economics":           "📈 Economics",
@@ -89,19 +131,19 @@ CATEGORY_MAP = {
     "economic policy":     "📈 Economics",
     "jerome powell":       "📈 Economics",
     "fed":                 "📈 Economics",
+    # ── Science ──
     "science":             "🔬 Science",
     "health":              "🔬 Science",
+    # ── Tech ──
     "tech":                "💻 Tech",
+    # ── AI ──
     "ai":                  "🤖 AI",
     "artificial intelligence": "🤖 AI",
+    # ── World ──
     "world":               "🌍 World",
     "climate":             "🌍 World",
     "iran":                "🌍 World",
-    # Politics variants
-    "us-current-affairs":  "🏛️ Politics",
-    "us current affairs":  "🏛️ Politics",
-    "elections":           "🏛️ Politics",
-    # Sports sub-categories
+    # ── Sports sub-categories (all blocked) ──
     "nfl":                 "🏈 NFL",
     "nba":                 "🏀 NBA",
     "mlb":                 "⚾ MLB",
@@ -117,41 +159,64 @@ CATEGORY_MAP = {
     "boxing":              "🥊 MMA",
     "ufc":                 "🥊 MMA",
     "chess":               "♟️ Chess",
-    # Gaming
     "gaming":              "🎮 Gaming",
     "esports":             "🎮 Gaming",
 }
 
 CATEGORY_COLORS = {
-    "🏛️ Politics":     0x3498DB,
-    "⚽ Sports":        0x2ECC71,
+    "🗳️ Elections":     0x5B9BD5,
+    "🏛️ Government":    0x3498DB,
+    "🌟 Pop Culture":   0xFF69B4,
     "🎬 Entertainment": 0xE91E63,
-    "🪙 Crypto":        0xF39C12,
     "📈 Economics":     0x27AE60,
     "🔬 Science":       0x9B59B6,
     "💻 Tech":          0x1ABC9C,
     "🤖 AI":            0x00CED1,
     "🌍 World":         0xE67E22,
-    "🏈 NFL":           0x013369,
-    "🏀 NBA":           0xC9082A,
-    "⚾ MLB":           0x002D72,
-    "🥊 MMA":           0xD4AF37,
-    "♟️ Chess":         0x8B4513,
-    "🎮 Gaming":        0x7B68EE,
-    "🏒 NHL":           0x000080,
-    "⚽ Soccer":        0x2ECC71,
     "🌐 Other":         0x95A5A6,
 }
 
-MARKETS_PER_PAGE = 3         # Market cards shown per browse page (fits YES/NO buttons in 5-row limit)
+MARKETS_PER_PAGE = 5         # Market rows shown per browse page (compact list view)
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
-HOT_MARKETS_COUNT = 3        # Number of hot markets featured at top
 
-# Sports categories blocked from prediction markets (use /sportsbook instead)
+# Categories blocked from prediction markets
 BLOCKED_CATEGORIES = {
+    # Sports — use /sportsbook instead
     "⚽ Sports", "🏈 NFL", "🏀 NBA", "⚾ MLB", "🏒 NHL",
     "⚽ Soccer", "🥊 MMA", "♟️ Chess", "🎮 Gaming",
+    # Crypto — degen noise, not relevant for the league
+    "🪙 Crypto",
 }
+
+MAX_PER_CATEGORY = 4  # Cap per category in "All" view for diversity
+
+
+def _compute_market_score(market: dict, sync_epoch: int) -> float:
+    """Score for display ordering. Higher = shown first.
+
+    Components:
+      - base: log-scaled volume (prevents mega-markets from dominating)
+      - recency: 24h activity relative to total (rewards recent action)
+      - jitter: seeded randomness per sync cycle (variety every 5 min)
+      - balance_bonus: markets closer to 50/50 are more interesting
+    """
+    volume = market.get("volume", 0)
+    vol_24h = market.get("volume_24hr", 0)
+
+    base = math.log10(max(volume, 1))                    # ~3-7 range
+    recency = (vol_24h / max(volume, 1)) * 10             # 0-10 range
+
+    # Seeded randomness: same order within a sync cycle, different between
+    seed = hashlib.md5(
+        f"{market.get('market_id', '')}:{sync_epoch}".encode()
+    ).hexdigest()
+    jitter = (int(seed[:8], 16) / 0xFFFFFFFF) * 4        # 0-4 range
+
+    yes_p = market.get("yes_price", 0.5)
+    balance_bonus = (1 - abs(yes_p - 0.5) * 2) * 2       # 0-2 range (max at 50/50)
+
+    return base + recency + jitter + balance_bonus
+
 
 # ─────────────────────────────────────────────
 # DATABASE SETUP
@@ -414,7 +479,9 @@ def extract_category_from_event(event: dict, market_slug: str = "") -> str:
         SPECIFIC_SLUGS = {
             "nba", "nfl", "mlb", "nhl", "mma", "ufc", "boxing", "chess",
             "epl", "soccer", "ai", "crypto", "politics", "elections",
+            "election", "president", "governor", "senate",
             "economy", "fomc", "fed-rates",
+            "pop-culture", "celebrity", "tiktok", "awards",
         }
         for tag in tags:
             if isinstance(tag, dict):
@@ -453,12 +520,25 @@ def extract_category_from_event(event: dict, market_slug: str = "") -> str:
     # ── Tier 3: Slug pattern matching ──
     slug = (market_slug or event.get("slug", "")).lower()
     SLUG_PREFIXES = {
+        # Sports (blocked)
         "nba-": "nba", "nfl-": "nfl", "mlb-": "mlb", "nhl-": "nhl",
         "soccer-": "soccer", "epl-": "epl", "ufc-": "ufc",
         "boxing-": "boxing", "mma-": "mma", "chess-": "chess",
+        # Crypto (blocked)
         "bitcoin-": "crypto", "ethereum-": "crypto", "btc-": "crypto",
-        "trump-": "politics", "election-": "elections", "president-": "politics",
+        "eth-": "crypto", "solana-": "crypto", "defi-": "crypto",
+        # Elections
+        "election-": "elections", "president-": "presidential",
+        "governor-": "governor", "senate-": "senate",
+        "campaign-": "campaign", "primary-": "primary",
+        # Government
+        "trump-": "politics", "biden-": "politics",
+        "scotus-": "supreme court", "congress-": "politics",
+        # Economics
         "fed-": "economics", "fomc-": "fomc",
+        # Pop Culture
+        "celebrity-": "celebrity", "tiktok-": "tiktok",
+        "social-": "social media", "oscars-": "oscars",
     }
     for prefix, cat_key in SLUG_PREFIXES.items():
         if prefix in slug:
@@ -612,23 +692,42 @@ class WagerModal(discord.ui.Modal):
             ))
             await db.commit()
 
-        color  = 0x2ECC71 if self.side == "YES" else 0xE74C3C
-        symbol = "✅" if self.side == "YES" else "❌"
-        profit = payout - cost_bucks
-        embed  = discord.Embed(
-            title=f"{symbol} Contract Purchased",
+        new_bal = balance - cost_bucks
+        color = 0x2ECC71 if self.side == "YES" else 0xE74C3C
+
+        # Render V6 bet confirmation card
+        embed = discord.Embed(
+            title="Contract Purchased",
             color=color,
-            description=(
-                f"**{self.market_title}**\n\n"
-                f"Side: **{self.side}** · Price: **{self.price:.1%}** each\n"
-                f"Qty: **{quantity}** · Cost: **{cost_bucks:,} TSL Bucks**\n"
-                f"Potential: **{payout:,} TSL Bucks** if {self.side} wins\n\n"
-                f"*Profit if correct: +{profit:,} TSL Bucks*"
-            ),
         )
-        embed.set_footer(text="Use /portfolio to view your positions · ATLAS Flow Casino")
+        embed.set_footer(text="Use /portfolio to view your positions · FLOW Markets")
         embed.timestamp = datetime.now(timezone.utc)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        try:
+            png = await render_bet_confirmation_card(
+                market_title=self.market_title,
+                side=self.side,
+                price=self.price,
+                quantity=quantity,
+                cost=cost_bucks,
+                potential_payout=payout,
+                balance=new_bal,
+                player_name=interaction.user.display_name,
+            )
+            card_file = discord.File(io.BytesIO(png), filename="bet_confirm.png")
+            embed.set_image(url="attachment://bet_confirm.png")
+            await interaction.response.send_message(
+                embed=embed, file=card_file, ephemeral=True
+            )
+        except Exception:
+            log.exception("Failed to render bet confirmation card")
+            profit = payout - cost_bucks
+            embed.description = (
+                f"**{self.market_title}**\n"
+                f"Side: **{self.side}** · Qty: **{quantity}** · Cost: **${cost_bucks:,}**\n"
+                f"Potential: **${payout:,}** · Profit: **+${profit:,}**"
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         # Post to #ledger
         try:
@@ -719,13 +818,6 @@ class CategorySelect(discord.ui.Select):
             description=f"{total} markets" if total else None,
             default=True,
         )]
-        # Hot / Trending option
-        options.append(discord.SelectOption(
-            label="Hot / Trending",
-            value="hot",
-            emoji="🔥",
-            description="Sorted by 24h volume",
-        ))
         for cat in categories:
             count = counts.get(cat, 0)
             options.append(discord.SelectOption(
@@ -738,6 +830,7 @@ class CategorySelect(discord.ui.Select):
             options=options[:25],
             min_values=1,
             max_values=1,
+            row=0,
         )
         self.parent_view = parent_view
 
@@ -746,101 +839,125 @@ class CategorySelect(discord.ui.Select):
         await self.parent_view.apply_filter(interaction, chosen)
 
 
+class MarketSelect(discord.ui.Select):
+    """Dropdown to select a specific market from the current page."""
+
+    def __init__(self, markets: list[dict], parent_view):
+        options = []
+        for m in markets[:25]:
+            title = m.get("title", "Untitled")
+            yes_p = m.get("yes_price", 0.5)
+            cat = m.get("category", "Other")
+            options.append(discord.SelectOption(
+                label=title[:100],
+                value=m.get("market_id", ""),
+                description=f"YES {yes_p:.0%} | {cat}",
+            ))
+        if not options:
+            options = [discord.SelectOption(label="No markets", value="none")]
+        super().__init__(
+            placeholder="Select a market to view details…",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=1,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        chosen_id = self.values[0]
+        if chosen_id == "none":
+            return
+        await self.parent_view.select_market(interaction, chosen_id)
+
+
 class MarketBrowserView(discord.ui.View):
-    """Full market browser: category filter + YES/NO bet buttons + page nav."""
+    """Drill-down market browser: list → detail → bet."""
 
     def __init__(self, all_markets: list[dict], categories: list[str],
-                 hot_markets: list[dict] | None = None,
                  category_counts: dict | None = None,
                  cog=None):
         super().__init__(timeout=600)
         self.all_markets     = all_markets
         self.categories      = categories
-        self.hot_markets     = hot_markets or []
         self.category_counts = category_counts or {}
         self.filter          = "all"
         self.page            = 0
-        self.cog             = cog  # for live API calls
+        self.state           = "list"       # "list" or "detail"
+        self.selected_market = None         # dict when in detail state
+        self.cog             = cog
 
-        self.cat_select = CategorySelect(
-            categories, parent_view=self, category_counts=self.category_counts
-        )
-        self.add_item(self.cat_select)
-        self._rebuild_buttons()
+        self._rebuild_components()
 
     # ── Filtering / Pagination helpers ──
 
     def _filtered(self) -> list[dict]:
-        if self.filter == "hot":
-            return sorted(
-                self.all_markets,
-                key=lambda m: m.get("volume_24hr", 0),
-                reverse=True,
-            )
         if self.filter == "all":
-            return self.all_markets
+            # Apply per-category cap for diversity
+            seen: dict[str, int] = {}
+            result = []
+            for m in self.all_markets:  # already sorted by score
+                cat = m.get("category", "Other")
+                seen[cat] = seen.get(cat, 0) + 1
+                if seen[cat] <= MAX_PER_CATEGORY:
+                    result.append(m)
+            return result
         return [m for m in self.all_markets if m.get("category") == self.filter]
 
     def _max_page(self) -> int:
         return max(0, (len(self._filtered()) - 1) // MARKETS_PER_PAGE)
 
-    # ── Dynamic button management ──
-
-    def _rebuild_buttons(self):
-        """Clear and recreate YES/NO bet buttons + nav for the current page."""
-        # Remove everything except the CategorySelect
-        to_remove = [c for c in self.children if not isinstance(c, CategorySelect)]
-        for item in to_remove:
-            self.remove_item(item)
-
+    def _current_chunk(self) -> list[dict]:
         markets = self._filtered()
         start = self.page * MARKETS_PER_PAGE
-        chunk = markets[start : start + MARKETS_PER_PAGE]
+        return markets[start : start + MARKETS_PER_PAGE]
 
-        # Rows 1-3: YES / NO buttons per market card
-        for i, m in enumerate(chunk):
-            row = i + 1  # rows 1, 2, 3
-            yes_p = m.get("yes_price", 0.5)
-            no_p = m.get("no_price", 0.5)
+    # ── Component rebuilding ──
 
-            yes_btn = discord.ui.Button(
-                label=f"YES {yes_p:.0%}",
-                style=discord.ButtonStyle.success,
-                custom_id=f"yes_{i}_{self.page}",
-                row=row,
-            )
-            no_btn = discord.ui.Button(
-                label=f"NO {no_p:.0%}",
-                style=discord.ButtonStyle.danger,
-                custom_id=f"no_{i}_{self.page}",
-                row=row,
-            )
-            yes_btn.callback = self._make_bet_cb(m, "YES")
-            no_btn.callback = self._make_bet_cb(m, "NO")
-            self.add_item(yes_btn)
-            self.add_item(no_btn)
+    def _rebuild_components(self):
+        """Clear all components and rebuild for the current state."""
+        self.clear_items()
 
-        # Row 4: Navigation
+        if self.state == "list":
+            self._build_list_components()
+        else:
+            self._build_detail_components()
+
+    def _build_list_components(self):
+        """Build components for list view: CategorySelect + MarketSelect + nav."""
+        # Row 0: Category filter
+        cat_select = CategorySelect(
+            self.categories, parent_view=self,
+            category_counts=self.category_counts,
+        )
+        self.add_item(cat_select)
+
+        # Row 1: Market select dropdown
+        chunk = self._current_chunk()
+        market_select = MarketSelect(chunk, parent_view=self)
+        self.add_item(market_select)
+
+        # Row 2: Navigation
         prev_btn = discord.ui.Button(
             label="◀ Prev",
             style=discord.ButtonStyle.secondary,
             custom_id="nav_prev",
             disabled=self.page == 0,
-            row=4,
+            row=2,
         )
         page_btn = discord.ui.Button(
             label=f"{self.page + 1}/{self._max_page() + 1}",
             style=discord.ButtonStyle.secondary,
             custom_id="nav_page",
             disabled=True,
-            row=4,
+            row=2,
         )
         next_btn = discord.ui.Button(
             label="Next ▶",
             style=discord.ButtonStyle.secondary,
             custom_id="nav_next",
             disabled=self.page >= self._max_page(),
-            row=4,
+            row=2,
         )
         prev_btn.callback = self._prev
         next_btn.callback = self._next
@@ -848,10 +965,38 @@ class MarketBrowserView(discord.ui.View):
         self.add_item(page_btn)
         self.add_item(next_btn)
 
+    def _build_detail_components(self):
+        """Build components for detail view: Back + YES + NO."""
+        back_btn = discord.ui.Button(
+            label="🔙 Back to List",
+            style=discord.ButtonStyle.secondary,
+            custom_id="back_list",
+            row=0,
+        )
+        back_btn.callback = self._back_to_list
+        self.add_item(back_btn)
+
+        if self.selected_market:
+            yes_btn = discord.ui.Button(
+                label="Bet YES ✅",
+                style=discord.ButtonStyle.success,
+                custom_id="detail_yes",
+                row=1,
+            )
+            no_btn = discord.ui.Button(
+                label="Bet NO ❌",
+                style=discord.ButtonStyle.danger,
+                custom_id="detail_no",
+                row=1,
+            )
+            yes_btn.callback = self._make_bet_cb(self.selected_market, "YES")
+            no_btn.callback = self._make_bet_cb(self.selected_market, "NO")
+            self.add_item(yes_btn)
+            self.add_item(no_btn)
+
     def _make_bet_cb(self, market: dict, side: str):
-        """Closure-safe callback: use cached odds → open wager modal instantly."""
+        """Closure-safe callback: cached odds → open wager modal."""
         async def callback(interaction: discord.Interaction):
-            # Use cached price to avoid API timeout before modal response
             price = market["yes_price"] if side == "YES" else market["no_price"]
             modal = WagerModal(
                 market_id=market["market_id"],
@@ -863,13 +1008,45 @@ class MarketBrowserView(discord.ui.View):
             await interaction.response.send_modal(modal)
         return callback
 
-    # ── Navigation / Filter callbacks ──
+    # ── State transitions ──
+
+    async def select_market(self, interaction: discord.Interaction, market_id: str):
+        """Transition from list → detail view for a specific market."""
+        # Find the market in our data
+        market = next(
+            (m for m in self.all_markets if m.get("market_id") == market_id), None
+        )
+        if not market:
+            await interaction.response.defer()
+            return
+
+        self.state = "detail"
+        self.selected_market = market
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
+
+    async def _back_to_list(self, interaction: discord.Interaction):
+        """Transition from detail → list view."""
+        self.state = "list"
+        self.selected_market = None
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
 
     async def apply_filter(self, interaction: discord.Interaction, cat: str):
         self.filter = cat
         self.page = 0
-        self._rebuild_buttons()
-        embed, card_file = self._build_page()
+        self.state = "list"
+        self.selected_market = None
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -877,8 +1054,8 @@ class MarketBrowserView(discord.ui.View):
 
     async def _prev(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
-        self._rebuild_buttons()
-        embed, card_file = self._build_page()
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -886,82 +1063,54 @@ class MarketBrowserView(discord.ui.View):
 
     async def _next(self, interaction: discord.Interaction):
         self.page = min(self._max_page(), self.page + 1)
-        self._rebuild_buttons()
-        embed, card_file = self._build_page()
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
         await interaction.response.edit_message(**kwargs)
 
-    # ── Embed + Image builder ──
+    # ── Page builders ──
 
-    def _build_page(self) -> tuple[discord.Embed, discord.File | None]:
-        """Build embed + rendered card image for the current page."""
+    async def _build_page(self) -> tuple[discord.Embed, discord.File | None]:
+        """Build embed + V6 card for the current state."""
+        if self.state == "detail" and self.selected_market:
+            return await self._build_detail_page()
+        return await self._build_list_page()
+
+    async def _build_list_page(self) -> tuple[discord.Embed, discord.File | None]:
+        """Build the market list view."""
         markets = self._filtered()
         total = len(markets)
-        start = self.page * MARKETS_PER_PAGE
-        chunk = markets[start : start + MARKETS_PER_PAGE]
+        chunk = self._current_chunk()
 
-        if self.filter == "hot":
-            cat_label = "Hot / Trending"
-        elif self.filter == "all":
-            cat_label = "All Categories"
-        else:
-            cat_label = self.filter
-
+        cat_label = "All Categories" if self.filter == "all" else self.filter
         embed = discord.Embed(
-            title="ATLAS Flow -- Prediction Markets",
+            title="FLOW Prediction Markets",
+            description=f"**{total}** markets · Select one below to view details",
             color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
         )
 
-        embed.description = f"**{total}** markets | Page {self.page+1}/{self._max_page()+1}"
-
-        # Hot markets banner — only on page 0 of "all" filter
-        if self.page == 0 and self.filter == "all" and self.hot_markets:
-            hot_lines = []
-            for hm in self.hot_markets[:HOT_MARKETS_COUNT]:
-                vol_24h = hm.get("volume_24hr", 0)
-                yes_p = hm.get("yes_price", 0.5)
-                heat = hot_label(vol_24h)
-                hot_lines.append(
-                    f"{heat} **{hm['title'][:50]}** -- "
-                    f"YES {yes_p:.0%} | 24h: {fmt_volume(vol_24h)}"
-                )
-            if hot_lines:
-                embed.add_field(
-                    name="Trending Now",
-                    value="\n".join(hot_lines),
-                    inline=False,
-                )
-
-        # Render Pillow card image
         card_file = None
         if chunk:
             try:
-                card_data = [
-                    {
-                        "title": m.get("title", ""),
-                        "category": m.get("category", "Other"),
-                        "yes_price": m.get("yes_price", 0.5),
-                        "no_price": m.get("no_price", 0.5),
-                        "volume": m.get("volume", 0),
-                        "end_date": m.get("end_date", ""),
-                    }
-                    for m in chunk
-                ]
-                buf = render_market_page(card_data, self.page + 1, self._max_page() + 1)
-                card_file = discord.File(buf, filename="markets.png")
+                png = await render_market_list_card(
+                    chunk,
+                    page=self.page + 1,
+                    total_pages=self._max_page() + 1,
+                    filter_label=cat_label,
+                )
+                card_file = discord.File(io.BytesIO(png), filename="markets.png")
                 embed.set_image(url="attachment://markets.png")
             except Exception:
-                # Fallback: text-based cards if rendering fails
+                log.exception("Failed to render market list card")
                 for m in chunk:
                     yes_p = m.get("yes_price", 0.5)
                     no_p = m.get("no_price", 0.5)
                     cat = m.get("category", "Other")
-                    vol_str = fmt_volume(m.get("volume", 0))
                     embed.add_field(
                         name=f"{cat}  {m['title'][:55]}",
-                        value=f"**YES {yes_p:.0%}**  |  **NO {no_p:.0%}**  |  Vol: {vol_str}",
+                        value=f"YES {yes_p:.0%}  |  NO {no_p:.0%}",
                         inline=False,
                     )
         else:
@@ -971,7 +1120,41 @@ class MarketBrowserView(discord.ui.View):
                 inline=False,
             )
 
-        embed.set_footer(text="Click YES or NO below to bet | ATLAS Flow Casino")
+        embed.set_footer(text="FLOW Markets · Powered by Polymarket")
+        embed.timestamp = datetime.now(timezone.utc)
+        return embed, card_file
+
+    async def _build_detail_page(self) -> tuple[discord.Embed, discord.File | None]:
+        """Build the single-market detail view."""
+        m = self.selected_market
+        cat_label = m.get("category", "Other")
+
+        embed = discord.Embed(
+            title=m.get("title", "")[:80],
+            color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
+        )
+
+        card_file = None
+        try:
+            png = await render_market_detail_card(
+                title=m.get("title", ""),
+                category=m.get("category", "Other"),
+                yes_price=m.get("yes_price", 0.5),
+                no_price=m.get("no_price", 0.5),
+                volume=m.get("volume", 0),
+                liquidity=m.get("liquidity", 0),
+                end_date=m.get("end_date", ""),
+            )
+            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
+            embed.set_image(url="attachment://market_detail.png")
+        except Exception:
+            log.exception("Failed to render market detail card")
+            yes_p = m.get("yes_price", 0.5)
+            no_p = m.get("no_price", 0.5)
+            embed.add_field(name="YES", value=f"{yes_p:.0%}", inline=True)
+            embed.add_field(name="NO", value=f"{no_p:.0%}", inline=True)
+
+        embed.set_footer(text="FLOW Markets · Click YES or NO below to bet")
         embed.timestamp = datetime.now(timezone.utc)
         return embed, card_file
 
@@ -1346,29 +1529,56 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 ) as cursor:
                     winners = await cursor.fetchall()
 
+            # Build winner list for V6 card
+            winner_dicts = []
             if winners:
-                lines = []
                 for uid, qty, payout, cost in winners:
                     profit = payout - cost
                     member = ch.guild.get_member(int(uid))
-                    name   = member.display_name if member else f"<@{uid}>"
-                    lines.append(
-                        f"💰 **{name}** — {qty} contract(s) · "
-                        f"Payout: **{payout:,} TSL Bucks** · Profit: **+{profit:,} 🪙**"
-                    )
-                embed.add_field(
-                    name="🏅 Winners",
-                    value="\n".join(lines),
-                    inline=False,
-                )
+                    name = member.display_name if member else f"User {uid}"
+                    winner_dicts.append({
+                        "name": name,
+                        "qty": qty,
+                        "payout": payout,
+                        "profit": profit,
+                    })
 
-            embed.set_footer(text="Winnings automatically credited · ATLAS Flow Casino")
-            embed.timestamp = datetime.now(timezone.utc)
-
+            # Try V6 card render
             try:
-                await ch.send(embed=embed)
+                png = await render_resolution_card(
+                    market_title=title,
+                    result=result,
+                    winners=winner_dicts,
+                    total_won=won,
+                    total_lost=lost,
+                    total_voided=voided,
+                )
+                card_file = discord.File(io.BytesIO(png), filename="resolution.png")
+                embed.set_image(url="attachment://resolution.png")
+                embed.set_footer(text="Winnings automatically credited · FLOW Markets")
+                embed.timestamp = datetime.now(timezone.utc)
+                await ch.send(embed=embed, file=card_file)
             except Exception as e:
-                log.error(f"Failed to post resolution announcement: {e}")
+                log.error(f"Resolution card render failed: {e}")
+                # Text fallback
+                if winner_dicts:
+                    lines = []
+                    for w in winner_dicts:
+                        lines.append(
+                            f"💰 **{w['name']}** — {w['qty']} contract(s) · "
+                            f"Payout: **{w['payout']:,}** · Profit: **+{w['profit']:,}**"
+                        )
+                    embed.add_field(
+                        name="🏅 Winners",
+                        value="\n".join(lines),
+                        inline=False,
+                    )
+                embed.set_footer(text="Winnings automatically credited · FLOW Markets")
+                embed.timestamp = datetime.now(timezone.utc)
+                try:
+                    await ch.send(embed=embed)
+                except Exception as e2:
+                    log.error(f"Failed to post resolution announcement: {e2}")
 
     @sync_markets.before_loop
     async def _before_sync(self):
@@ -1432,12 +1642,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             for r in rows
         ]
 
-        # Hot markets: top by 24hr volume
-        hot_markets = sorted(
-            markets,
-            key=lambda m: m.get("volume_24hr", 0),
-            reverse=True,
-        )[:HOT_MARKETS_COUNT]
+        # ── Weighted shuffle: score → sort ──
+        sync_epoch = int(time.time() // 300)  # changes every 5 min
+        for m in markets:
+            m["_score"] = _compute_market_score(m, sync_epoch)
+        markets.sort(key=lambda m: m["_score"], reverse=True)
 
         # Category counts for the select menu
         category_counts: dict[str, int] = {}
@@ -1448,12 +1657,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         categories = sorted({m["category"] for m in markets})
         view = MarketBrowserView(
             markets, categories,
-            hot_markets=hot_markets,
             category_counts=category_counts,
             cog=self,
         )
 
-        embed, card_file = view._build_page()
+        embed, card_file = await view._build_page()
         kwargs = {"embed": embed, "view": view, "ephemeral": True}
         if card_file:
             kwargs["file"] = card_file
@@ -1615,30 +1823,70 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             )
             return
 
-        embed = discord.Embed(
-            title="📋 Your Prediction Market Portfolio",
-            color=0x3498DB,
-        )
+        # Build position dicts for V6 card
+        positions = []
+        total_invested = 0
+        total_potential = 0
+        for mid, title, side, buy_price, qty, cost, payout, status, created in rows:
+            if status != "open":
+                continue
+            positions.append({
+                "title": title or mid,
+                "side": side,
+                "qty": qty,
+                "cost": cost,
+                "payout": payout,
+                "buy_price": buy_price,
+            })
+            total_invested += cost
+            total_potential += payout
 
-        for r in rows:
-            mid, title, side, buy_price, qty, cost, payout, status, created = r
-            sym   = "✅" if side == "YES" else "❌"
-            s_map = {
-                "open": "🟡 Open", "won": "🏆 Won",
-                "lost": "💸 Lost", "voided": "🔁 Voided",
-            }
-            embed.add_field(
-                name=f"{sym} {(title or mid)[:50]}",
-                value=(
-                    f"**{side}** · {qty} contract(s)\n"
-                    f"Paid: **{cost:,} TSL Bucks** · "
-                    f"Potential: **{payout:,} TSL Bucks** · "
-                    f"{s_map.get(status, status)}"
-                ),
-                inline=False,
+        if not positions:
+            await interaction.followup.send(
+                "You have no open prediction market positions.",
+                ephemeral=True,
             )
+            return
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Get user balance
+        balance = 0
+        try:
+            from flow_wallet import get_balance
+            balance = await get_balance(user_id)
+        except Exception:
+            pass
+
+        try:
+            png = await render_portfolio_card(
+                positions=positions,
+                player_name=interaction.user.display_name,
+                total_invested=total_invested,
+                total_potential=total_potential,
+                balance=balance,
+            )
+            card_file = discord.File(io.BytesIO(png), filename="portfolio.png")
+            embed = discord.Embed(color=0x3498DB)
+            embed.set_image(url="attachment://portfolio.png")
+            await interaction.followup.send(embed=embed, file=card_file, ephemeral=True)
+        except Exception as e:
+            log.error(f"Portfolio card render failed: {e}")
+            # Text fallback
+            embed = discord.Embed(
+                title="📋 Your Prediction Market Portfolio",
+                color=0x3498DB,
+            )
+            for pos in positions:
+                sym = "✅" if pos["side"] == "YES" else "❌"
+                embed.add_field(
+                    name=f"{sym} {pos['title'][:50]}",
+                    value=(
+                        f"**{pos['side']}** · {pos['qty']} contract(s)\n"
+                        f"Paid: **{pos['cost']:,}** · "
+                        f"Potential: **{pos['payout']:,}**"
+                    ),
+                    inline=False,
+                )
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── Slash: /resolve_market (admin) ────────
 
