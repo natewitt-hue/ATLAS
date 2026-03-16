@@ -1300,6 +1300,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         # ── Pass 2: Auto-resolve closed markets ──────────────────────────
         await self._auto_resolve_pass()
 
+        # ── Pass 2b: Local DB scan — settle contracts the API pass missed ──
+        await self._local_settle_pass()
+
         # ── Pass 3: Gemini classification for "Other" markets (first sync only) ──
         if not self._first_sync_done:
             self._first_sync_done = True
@@ -1492,6 +1495,89 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         if auto_resolved:
             log.info(
                 f"Auto-resolve pass complete — {len(auto_resolved)} market(s) settled."
+            )
+            await self._announce_resolutions(auto_resolved)
+
+    async def _local_settle_pass(self):
+        """
+        Scan the local DB for markets with open contracts that the API-driven
+        _auto_resolve_pass may have missed (e.g. markets that closed >100
+        closures ago and fell off the Polymarket top-100 closed endpoint).
+
+        For each, fetch the market individually by ID and check if resolved.
+        """
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT DISTINCT c.market_id "
+                "FROM prediction_contracts c "
+                "JOIN prediction_markets m ON m.market_id = c.market_id "
+                "WHERE c.status = 'open' AND m.resolved_by = 'pending'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            return
+
+        market_ids = [row[0] for row in rows]
+        log.info(
+            f"Local settle pass: {len(market_ids)} market(s) with open contracts "
+            f"still pending resolution."
+        )
+
+        auto_resolved = []
+
+        for market_id in market_ids:
+            mkt = await self.client.fetch_market_by_id(market_id)
+            if not mkt:
+                log.warning(f"Local settle: could not fetch market {market_id}")
+                continue
+
+            result = detect_result(mkt)
+            if not result:
+                continue  # Market still open or not clearly resolved
+
+            # Settle it
+            result_upper = result.upper()
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM prediction_contracts "
+                    "WHERE market_id = ? AND status = 'open'",
+                    (market_id,)
+                ) as cursor:
+                    open_count = (await cursor.fetchone())[0]
+
+            if open_count == 0:
+                continue
+
+            log.info(
+                f"Local settle: auto-resolving {market_id} → {result_upper} "
+                f"({open_count} open contracts)"
+            )
+
+            counts = await self._resolve(market_id, result_upper)
+
+            # Mark market as auto-resolved
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE prediction_markets "
+                    "SET resolved_by = 'auto', result = ?, status = 'closed' "
+                    "WHERE market_id = ?",
+                    (result, market_id)
+                )
+                await db.commit()
+
+            title = mkt.get("question", "") or mkt.get("title", market_id)
+            auto_resolved.append({
+                "market_id": market_id,
+                "result":    result_upper,
+                "counts":    counts,
+                "title":     title,
+            })
+
+        if auto_resolved:
+            log.info(
+                f"Local settle pass complete — {len(auto_resolved)} market(s) settled."
             )
             await self._announce_resolutions(auto_resolved)
 
@@ -1918,6 +2004,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
+        await self._resolve_market_impl(interaction, slug, result)
+
+    async def _resolve_market_impl(self, interaction: discord.Interaction,
+                                   slug: str, result: str):
+        """Delegation target for boss_cog / commish_cog. Expects deferred interaction."""
         await self._ensure_db()
         slug   = slug.strip().lower()
         result = result.upper().strip()
@@ -2063,6 +2154,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
+        await self._market_status_impl(interaction)
+
+    async def _market_status_impl(self, interaction: discord.Interaction):
+        """Delegation target for boss_cog / commish_cog. Expects deferred interaction."""
         await self._ensure_db()
 
         # Test connectivity
@@ -2158,6 +2253,44 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             f"Voided **{total_voided}** contracts across **{len(sports_markets)}** "
             f"sports markets. All users refunded.",
             ephemeral=True,
+        )
+
+
+    # ── Impl: approve_market (called by commish_cog / boss_cog) ────
+
+    async def _approve_market_impl(self, interaction: discord.Interaction, slug: str):
+        """Mark a market as featured/approved for betting. Expects deferred interaction."""
+        await self._ensure_db()
+        slug = slug.strip().lower()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT market_id, title, featured FROM prediction_markets WHERE slug = ?",
+                (slug,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                await interaction.followup.send(
+                    f"❌ Market `{slug}` not found.", ephemeral=True
+                )
+                return
+
+            market_id, title, already_featured = row
+            if already_featured:
+                await interaction.followup.send(
+                    f"Market `{slug}` is already approved.", ephemeral=True
+                )
+                return
+
+            await db.execute(
+                "UPDATE prediction_markets SET featured = 1 WHERE market_id = ?",
+                (market_id,)
+            )
+            await db.commit()
+
+        await interaction.followup.send(
+            f"✅ Approved **{title or slug}** for featured betting.", ephemeral=True
         )
 
 

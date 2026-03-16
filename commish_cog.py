@@ -419,30 +419,33 @@ class CommishCog(commands.Cog):
     @markets_admin.command(name="resolve", description="Resolve a prediction market outcome.")
     @app_commands.describe(slug="Market slug to resolve", result="YES, NO, or VOID")
     async def markets_resolve(self, interaction: discord.Interaction, slug: str, result: str):
-        cog = self._get("PolymarketCog")
+        cog = self._get("Polymarket")
         if not cog:
             return await interaction.response.send_message("Polymarket not loaded.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         await cog._resolve_market_impl(interaction, slug, result)
 
     @markets_admin.command(name="status", description="Show Polymarket sync status and stats.")
     async def markets_status(self, interaction: discord.Interaction):
-        cog = self._get("PolymarketCog")
+        cog = self._get("Polymarket")
         if not cog:
             return await interaction.response.send_message("Polymarket not loaded.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         await cog._market_status_impl(interaction)
 
     @markets_admin.command(name="approve", description="Approve a long-term market for betting.")
     @app_commands.describe(slug="Market slug to approve")
     async def markets_approve(self, interaction: discord.Interaction, slug: str):
-        cog = self._get("PolymarketCog")
+        cog = self._get("Polymarket")
         if not cog:
             return await interaction.response.send_message("Polymarket not loaded.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         await cog._approve_market_impl(interaction, slug)
 
     @markets_admin.command(name="refund_sports", description="Void all open contracts on sports markets and refund users.")
     async def markets_refund_sports(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        cog = self._get("PolymarketCog")
+        cog = self._get("Polymarket")
         if not cog:
             return await interaction.followup.send("Polymarket not loaded.", ephemeral=True)
         await cog.refund_sports_impl(interaction)

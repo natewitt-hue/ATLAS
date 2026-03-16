@@ -1110,18 +1110,15 @@ class MarketsPanelView(discord.ui.View):
 
     @discord.ui.button(label="Market Status", emoji="\U0001f4cb", style=discord.ButtonStyle.secondary, row=0)
     async def market_status(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = interaction.client.get_cog("PolymarketCog")
+        cog = interaction.client.get_cog("Polymarket")
         if not cog:
             return await _send_cog_error(interaction, "Polymarket")
-        if not hasattr(cog, "_market_status_impl"):
-            return await interaction.response.send_message(
-                "\u23f3 Market status is not yet implemented.", ephemeral=True,
-            )
+        await interaction.response.defer(ephemeral=True)
         await cog._market_status_impl(interaction)
 
     @discord.ui.button(label="Refund Sports", emoji="\U0001f4b8", style=discord.ButtonStyle.danger, row=1)
     async def refund_sports(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = interaction.client.get_cog("PolymarketCog")
+        cog = interaction.client.get_cog("Polymarket")
         if not cog:
             return await _send_cog_error(interaction, "Polymarket")
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1188,13 +1185,10 @@ class MarketResolveFollowUpModal(discord.ui.Modal, title="Resolve Prediction Mar
         self.result = result
 
     async def on_submit(self, interaction: discord.Interaction):
-        cog = interaction.client.get_cog("PolymarketCog")
+        cog = interaction.client.get_cog("Polymarket")
         if not cog:
             return await _send_cog_error(interaction, "Polymarket")
-        if not hasattr(cog, "_resolve_market_impl"):
-            return await interaction.response.send_message(
-                "\u23f3 Market resolution is not yet implemented.", ephemeral=True,
-            )
+        await interaction.response.defer(ephemeral=True)
         await cog._resolve_market_impl(interaction, self.slug.value, self.result)
 
 
@@ -1202,13 +1196,10 @@ class BossMarketApproveModal(discord.ui.Modal, title="Approve Market"):
     slug = discord.ui.TextInput(label="Market Slug", placeholder="e.g., will-x-happen", required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
-        cog = interaction.client.get_cog("PolymarketCog")
+        cog = interaction.client.get_cog("Polymarket")
         if not cog:
             return await _send_cog_error(interaction, "Polymarket")
-        if not hasattr(cog, "_approve_market_impl"):
-            return await interaction.response.send_message(
-                "\u23f3 Market approval is not yet implemented.", ephemeral=True,
-            )
+        await interaction.response.defer(ephemeral=True)
         await cog._approve_market_impl(interaction, self.slug.value)
 
 
