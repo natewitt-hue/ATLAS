@@ -158,6 +158,99 @@ class SessionTracker:
         # key: (discord_id, guild_id)
         self._active: dict[tuple[int, int], PlayerSession] = {}
 
+    def _ensure_sessions_table(self):
+        try:
+            import sqlite3
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS flow_live_sessions (
+                    discord_id     INTEGER NOT NULL,
+                    guild_id       INTEGER NOT NULL,
+                    started_at     REAL    NOT NULL,
+                    last_activity  REAL    NOT NULL,
+                    total_games    INTEGER DEFAULT 0,
+                    wins           INTEGER DEFAULT 0,
+                    losses         INTEGER DEFAULT 0,
+                    pushes         INTEGER DEFAULT 0,
+                    net_profit     INTEGER DEFAULT 0,
+                    biggest_win    INTEGER DEFAULT 0,
+                    biggest_loss   INTEGER DEFAULT 0,
+                    current_streak INTEGER DEFAULT 0,
+                    best_streak    INTEGER DEFAULT 0,
+                    games_by_type  TEXT    DEFAULT '{}',
+                    events         TEXT    DEFAULT '[]',
+                    PRIMARY KEY (discord_id, guild_id)
+                )
+            """)
+            conn.commit()
+            conn.close()
+        except Exception:
+            log.exception("Failed to create flow_live_sessions table")
+
+    def _persist(self, session: PlayerSession):
+        import json, sqlite3
+        try:
+            d = session.to_dict()
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn.execute("""
+                INSERT OR REPLACE INTO flow_live_sessions
+                (discord_id, guild_id, started_at, last_activity,
+                 total_games, wins, losses, pushes, net_profit,
+                 biggest_win, biggest_loss, current_streak, best_streak,
+                 games_by_type, events)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                d["discord_id"], d["guild_id"], d["started_at"], d["last_activity"],
+                d["total_games"], d["wins"], d["losses"], d["pushes"], d["net_profit"],
+                d["biggest_win"], d["biggest_loss"], d["current_streak"], d["best_streak"],
+                json.dumps(d["games_by_type"]), json.dumps(d["events"]),
+            ))
+            conn.commit()
+            conn.close()
+        except sqlite3.OperationalError:
+            log.warning("DB locked during session persist for %s — will retry next event", session.discord_id)
+        except Exception:
+            log.exception("Failed to persist session for %s", session.discord_id)
+
+    def _delete_persisted(self, discord_id: int, guild_id: int):
+        try:
+            import sqlite3
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn.execute(
+                "DELETE FROM flow_live_sessions WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            log.exception("Failed to delete persisted session for %s", discord_id)
+
+    def load_persisted(self) -> int:
+        import json, sqlite3
+        self._ensure_sessions_table()
+        try:
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            cursor = conn.execute("SELECT * FROM flow_live_sessions")
+            col_names = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            conn.close()
+            count = 0
+            for row in rows:
+                try:
+                    d = dict(zip(col_names, row))
+                    d["games_by_type"] = json.loads(d.get("games_by_type", "{}"))
+                    d["events"] = json.loads(d.get("events", "[]"))
+                    session = PlayerSession.from_dict(d)
+                    self._active[(session.discord_id, session.guild_id)] = session
+                    count += 1
+                except Exception:
+                    log.exception("Skipping corrupt session row: %s", row[:2])
+            return count
+        except Exception:
+            log.exception("Failed to load persisted sessions")
+            return 0
+
     def record(self, event: "GameResultEvent") -> PlayerSession:
         key = (event.discord_id, event.guild_id)
         session = self._active.get(key)
@@ -168,6 +261,7 @@ class SessionTracker:
             )
             self._active[key] = session
         session.record(event)
+        self._persist(session)
         return session
 
     def get_active(self, discord_id: int, guild_id: int) -> Optional[PlayerSession]:
@@ -183,6 +277,7 @@ class SessionTracker:
                 to_remove.append(key)
         for key in to_remove:
             del self._active[key]
+            self._delete_persisted(*key)
         return expired
 
     def get_all_active(self, guild_id: int) -> list[PlayerSession]:
