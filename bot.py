@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.13.0"  # Bump with every push
+ATLAS_VERSION = "2.14.0"  # Unified style system
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
@@ -238,6 +238,14 @@ async def setup_hook():
             print("ATLAS: User affinity system initialized.")
         except Exception as e:
             print(f"ATLAS: Affinity DB setup failed: {e}")
+
+    # HTML render engine — page pool for card rendering
+    try:
+        from atlas_html_engine import init_pool
+        await init_pool()
+        print("ATLAS: HTML render engine initialized.")
+    except Exception as e:
+        print(f"ATLAS: Render engine init failed: {e}")
 
     # FIX #9: Only sync command tree on initial boot (setup_hook runs once).
     # This avoids burning Discord's 200 syncs/day rate limit during debugging.
@@ -730,8 +738,8 @@ if __name__ == "__main__":
     _orig_close = bot.close
     async def _graceful_close():
         try:
-            from card_renderer import close_browser
-            await close_browser()
+            from atlas_html_engine import drain_pool
+            await drain_pool()
         except Exception:
             pass
         await _orig_close()
