@@ -799,6 +799,10 @@ def _build_playoff_results(match, caller_db, question, resolved_names):
 @_register("player_stats", [
     # "who has the most passing TDs all-time", "who leads in sacks"
     r'\b(?:who\s+(?:has|leads?|is\s+leading)\s+(?:the\s+)?(?:most|league\s+in))\s+(\w[\w\s]*)',
+    # "who has the worst/least/fewest passing yards"
+    r'\b(?:who\s+(?:has|is)\s+(?:the\s+)?(?:worst|least|fewest|lowest))\s+(\w[\w\s]*)',
+    # "worst passer", "worst rusher"
+    r'\b(?:worst|bottom)\s+(?:\d+\s+)?(passers?|rushers?|receivers?|tacklers?)',
     # "top rushing yards this season"
     r'\btop\s+(?:\d+\s+)?(?:in\s+)?(passing\s+(?:yards?|tds?|touchdowns?)|rushing\s+(?:yards?|tds?|touchdowns?)|receiving\s+(?:yards?|tds?|touchdowns?)|tackles?|sacks?|interceptions?|forced\s+fumbles?|fumble\s+recoveries?|deflections?|passer\s+rating)',
 ])
@@ -811,6 +815,11 @@ def _build_player_stats(match, caller_db, question, resolved_names):
     cast_type = 'REAL' if agg == 'AVG' else 'INTEGER'
     season = _extract_season(question)
     limit = _extract_limit(question, default=10)
+
+    # Detect "worst"/"least"/"lowest"/"bottom"/"fewest" → sort ascending
+    text_lower = question.lower()
+    sort_asc = any(kw in text_lower for kw in ['worst', 'least', 'lowest', 'bottom', 'fewest'])
+    sort_dir = 'ASC' if sort_asc else 'DESC'
 
     sql = f"""
         SELECT extendedName AS player_name, teamName,
@@ -825,12 +834,12 @@ def _build_player_stats(match, caller_db, question, resolved_names):
     if season:
         sql += " AND seasonIndex = ?"
         params_list.append(str(season))
-    sql += f" GROUP BY extendedName ORDER BY stat_value DESC LIMIT ?"
+    sql += f" GROUP BY extendedName ORDER BY stat_value {sort_dir} LIMIT ?"
     params_list.append(limit)
 
     return IntentResult(
         intent="player_stats", sql=sql, params=tuple(params_list), tier=1,
-        meta={"stat": stat_key, "type": "player_stats"}
+        meta={"stat": stat_key, "sort": "asc" if sort_asc else "desc", "type": "player_stats"}
     )
 
 

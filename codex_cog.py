@@ -115,22 +115,25 @@ _conv_cache: dict[int, list[ConversationTurn]] = {}
 def _init_conversation_db() -> None:
     """Create conversation_history table if it doesn't exist."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS conversation_history (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    discord_id INTEGER NOT NULL,
-                    question   TEXT    NOT NULL,
-                    sql_query  TEXT,
-                    answer     TEXT    NOT NULL,
-                    created_at REAL   NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_conv_user_time
-                ON conversation_history(discord_id, created_at DESC)
-            """)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                question   TEXT    NOT NULL,
+                sql_query  TEXT,
+                answer     TEXT    NOT NULL,
+                created_at REAL   NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conv_user_time
+            ON conversation_history(discord_id, created_at DESC)
+        """)
+        conn.commit()
+        conn.close()
+        print("[CodexCog] conversation_history table ready")
     except Exception as e:
         print(f"[CodexCog] Conversation DB init error: {e}")
 
@@ -182,7 +185,7 @@ def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str
         _conv_cache[discord_id] = turns[-CONV_MAX_TURNS:]
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 "INSERT INTO conversation_history "
@@ -190,6 +193,22 @@ def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str
                 "VALUES (?, ?, ?, ?, ?)",
                 (discord_id, turn.question, turn.sql, turn.answer, turn.timestamp),
             )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            print("[CodexCog] conversation_history missing — recreating")
+            _init_conversation_db()
+            try:
+                with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                    conn.execute(
+                        "INSERT INTO conversation_history "
+                        "(discord_id, question, sql_query, answer, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (discord_id, turn.question, turn.sql, turn.answer, turn.timestamp),
+                    )
+            except Exception:
+                pass
+        else:
+            print(f"[CodexCog] Conversation persist error: {e}")
     except Exception as e:
         print(f"[CodexCog] Conversation persist error: {e}")
 
