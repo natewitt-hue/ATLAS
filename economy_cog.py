@@ -625,14 +625,10 @@ class EconomyCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         uid = interaction.user.id
 
-        # Render the Flow Hub card (sync Pillow, runs fast)
-        import functools
+        # Render the Flow Hub card (async HTML engine)
         from flow_cards import build_flow_card, card_to_file
-        loop = interaction.client.loop
-        img = await loop.run_in_executor(
-            None, functools.partial(build_flow_card, uid)
-        )
-        file = card_to_file(img, filename="flow.png")
+        png = await build_flow_card(uid)
+        file = card_to_file(png, filename="flow.png")
 
         embed = discord.Embed(color=0xD4AF37)
         embed.set_image(url="attachment://flow.png")
