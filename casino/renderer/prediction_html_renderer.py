@@ -885,3 +885,434 @@ async def render_resolution_card(
 
     html = _wrap_prediction_card(outcome, content)
     return await render_card(html)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CURATED LIST CARD (10-market composite with sentiment)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_curated_list_html(
+    markets: list[dict],
+    filter_label: str = "Curated · All Categories",
+) -> str:
+    """Build HTML for a curated 10-market list with community sentiment bars."""
+    header = build_header_html(
+        icon="📊",
+        title="PREDICTION MARKETS",
+        players=[],
+        outcome="active",
+        badge_text=f"{len(markets)} CURATED",
+        subtitle="FLOW Markets",
+    )
+
+    rows_html = ""
+    for i, m in enumerate(markets):
+        title = m.get("title", "Untitled")
+        category = m.get("category", "Other")
+        yes_price = m.get("yes_price", 0.5)
+        no_price = m.get("no_price", 1 - yes_price)
+        cat_color = _category_color(category)
+        parts = category.split(" ", 1)
+        cat_name = parts[1] if len(parts) > 1 else parts[0]
+
+        # Community sentiment
+        sentiment = m.get("sentiment", {})
+        sentiment_html = ""
+        if sentiment.get("total", 0) > 0:
+            yes_pct = sentiment.get("yes_pct", 50)
+            sentiment_html = f"""
+            <div class="sentiment-bar">
+              <div class="sentiment-fill" style="width: {yes_pct}%;"></div>
+              <span class="sentiment-label">{esc(sentiment.get('label', ''))}</span>
+            </div>"""
+        elif sentiment:
+            sentiment_html = """
+            <div class="sentiment-bar empty">
+              <span class="sentiment-label">Be the first</span>
+            </div>"""
+
+        rows_html += f"""
+        <div class="market-list-row">
+          <div class="market-index">{i + 1}</div>
+          <div style="flex: 1; min-width: 0;">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 3px;">
+              <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+              <div class="market-title-text">{esc(title)}</div>
+            </div>
+            {sentiment_html}
+          </div>
+          <div class="odds-pill">
+            <span class="odds-yes">{yes_price:.0%}</span>
+            <span class="odds-no">{no_price:.0%}</span>
+          </div>
+        </div>"""
+
+    if not markets:
+        rows_html = """
+        <div style="padding: 24px 20px; text-align: center; color: var(--text-muted);
+                    font-family: 'Outfit', sans-serif; font-size: 14px;">
+          No curated markets available. Check back soon.
+        </div>"""
+
+    filter_html = f"""
+    <div style="padding: 6px 20px 2px; font-family: 'Outfit', sans-serif;
+                font-weight: 600; font-size: 10px; color: var(--text-dim);
+                letter-spacing: 1px; text-transform: uppercase;">
+      {esc(filter_label)}
+    </div>"""
+
+    return f"""
+    {header}
+    <div class="gold-divider"></div>
+    {filter_html}
+    {rows_html}
+    <div class="gold-divider"></div>
+    """
+
+
+def _curated_css() -> str:
+    """Extra CSS for curated list and daily drop cards."""
+    return """
+/* ── Sentiment bar ── */
+.sentiment-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(248,113,113,0.25);
+  position: relative;
+  margin-top: 2px;
+  overflow: hidden;
+}
+.sentiment-bar.empty {
+  background: rgba(255,255,255,0.06);
+}
+.sentiment-fill {
+  height: 100%;
+  background: rgba(74,222,128,0.5);
+  border-radius: 2px;
+}
+.sentiment-label {
+  position: absolute;
+  right: 0;
+  top: -14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ── Daily Drop spotlight ── */
+.spotlight-section {
+  padding: 14px 20px;
+}
+.spotlight-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 800;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: #111;
+  background: var(--gold);
+  margin-bottom: 8px;
+}
+.spotlight-title {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text-primary);
+  line-height: 1.3;
+  margin-bottom: 8px;
+}
+.spotlight-analysis {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-sub);
+  line-height: 1.5;
+  margin-bottom: 10px;
+  font-style: italic;
+}
+.supporting-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 20px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.supporting-row:last-child { border-bottom: none; }
+.supporting-hook {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.3;
+  margin-top: 2px;
+}
+.leaderboard-section {
+  padding: 8px 20px;
+}
+.leaderboard-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.leaderboard-name {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary);
+  flex: 1;
+}
+.leaderboard-stat {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--win);
+}
+
+/* ── Price alert ── */
+.alert-body {
+  padding: 14px 20px;
+}
+.alert-direction {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 800;
+  font-size: 28px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+.alert-direction.up { color: var(--win); }
+.alert-direction.down { color: var(--loss); }
+.alert-prices {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  font-size: 18px;
+}
+.alert-old { color: var(--text-muted); text-decoration: line-through; }
+.alert-arrow { color: var(--text-dim); font-size: 14px; }
+.alert-new { color: var(--text-primary); }
+.alert-holders {
+  text-align: center;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+"""
+
+
+async def render_curated_list_card(
+    markets: list[dict],
+    filter_label: str = "Curated · All Categories",
+) -> bytes:
+    """Render curated 10-market list card to PNG bytes."""
+    content = _build_curated_list_html(markets, filter_label)
+    base_html = wrap_card(content, "active")
+    html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
+    return await render_card(html)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DAILY DROP CARD (spotlight + 4 supporting + leaderboard)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def render_daily_drop_card(
+    spotlight: dict,
+    supporting: list[dict],
+    community: dict,
+    leaderboard: list[dict],
+) -> bytes:
+    """Render daily drop card to PNG bytes.
+
+    spotlight: {market_id, title, category, yes_price, no_price, analysis}
+    supporting: [{market_id, title, category, yes_price, no_price, hook}, ...]
+    community: {market_id: {label, yes_pct, total}, ...}
+    leaderboard: [{name, profit, streak}, ...]
+    """
+    header = build_header_html(
+        icon="🔥",
+        title="DAILY DROP",
+        players=[],
+        outcome="jackpot",
+        badge_text="TODAY'S PICKS",
+        subtitle="FLOW Markets",
+    )
+
+    # Spotlight section
+    sp = spotlight
+    cat_color = _category_color(sp.get("category", "Other"))
+    parts = sp.get("category", "Other").split(" ", 1)
+    cat_name = parts[1] if len(parts) > 1 else parts[0]
+    yes_p = sp.get("yes_price", 0.5)
+    no_p = sp.get("no_price", 0.5)
+
+    sp_sentiment = community.get(sp.get("market_id", ""), {})
+    sp_sentiment_html = ""
+    if sp_sentiment.get("total", 0) > 0:
+        sp_sentiment_html = f"""
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px;
+                    color: var(--text-muted); margin-top: 4px;">
+          {esc(sp_sentiment.get('label', ''))}
+        </div>"""
+
+    spotlight_html = f"""
+    <div class="spotlight-section">
+      <div class="spotlight-badge">MARKET OF THE DAY</div>
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+        <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+      </div>
+      <div class="spotlight-title">{esc(sp.get('title', ''))}</div>
+      <div class="prob-bar">
+        <div class="prob-fill-yes" style="width: {max(0.02, yes_p):.0%};">YES {yes_p:.0%}</div>
+        <div class="prob-fill-no" style="width: {max(0.02, no_p):.0%};">NO {no_p:.0%}</div>
+      </div>
+      <div class="spotlight-analysis">{esc(sp.get('analysis', ''))}</div>
+      {sp_sentiment_html}
+    </div>"""
+
+    # Supporting markets
+    supporting_html = ""
+    for s in supporting:
+        s_cat_color = _category_color(s.get("category", "Other"))
+        s_parts = s.get("category", "Other").split(" ", 1)
+        s_cat_name = s_parts[1] if len(s_parts) > 1 else s_parts[0]
+        s_yes = s.get("yes_price", 0.5)
+        s_no = s.get("no_price", 0.5)
+
+        hook_html = ""
+        if s.get("hook"):
+            hook_html = f'<div class="supporting-hook">{esc(s["hook"])}</div>'
+
+        supporting_html += f"""
+        <div class="supporting-row">
+          <div style="flex: 1; min-width: 0;">
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px;">
+              <div class="category-badge" style="background: {s_cat_color}; font-size: 9px;">{esc(s_cat_name)}</div>
+              <div class="market-title-text" style="font-size: 12px;">{esc(s.get('title', ''))}</div>
+            </div>
+            {hook_html}
+          </div>
+          <div class="odds-pill">
+            <span class="odds-yes">{s_yes:.0%}</span>
+            <span class="odds-no">{s_no:.0%}</span>
+          </div>
+        </div>"""
+
+    # Leaderboard section
+    lb_html = ""
+    if leaderboard:
+        lb_rows = ""
+        for entry in leaderboard[:3]:
+            name = entry.get("name", "Unknown")
+            profit = entry.get("profit", 0)
+            streak = entry.get("streak", 0)
+            stat_text = f"+${profit:,}"
+            if streak >= 3:
+                stat_text += f" · {streak}W streak"
+            lb_rows += f"""
+            <div class="leaderboard-row">
+              <div class="winner-rank" style="color: var(--gold);">🏆</div>
+              <div class="leaderboard-name">{esc(name)}</div>
+              <div class="leaderboard-stat">{stat_text}</div>
+            </div>"""
+
+        lb_html = f"""
+        <div class="gold-divider"></div>
+        <div style="padding: 4px 20px 2px; font-family: 'Outfit', sans-serif;
+                    font-weight: 700; font-size: 10px; color: var(--gold-dim);
+                    letter-spacing: 1.2px; text-transform: uppercase;">
+          TOP PREDICTORS THIS WEEK
+        </div>
+        <div class="leaderboard-section">{lb_rows}</div>"""
+
+    content = f"""
+    {header}
+    <div class="gold-divider"></div>
+    {spotlight_html}
+    <div class="gold-divider"></div>
+    <div style="padding: 4px 20px 2px; font-family: 'Outfit', sans-serif;
+                font-weight: 700; font-size: 10px; color: var(--gold-dim);
+                letter-spacing: 1.2px; text-transform: uppercase;">
+      ALSO WORTH WATCHING
+    </div>
+    {supporting_html}
+    {lb_html}
+    <div class="gold-divider"></div>
+    """
+
+    base_html = wrap_card(content, "jackpot")
+    html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
+    return await render_card(html)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PRICE ALERT CARD
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def render_price_alert_card(
+    market: dict,
+    old_price: float,
+    new_price: float,
+    holders: int = 0,
+) -> bytes:
+    """Render price movement alert card to PNG bytes."""
+    direction = "up" if new_price > old_price else "down"
+    delta = abs(new_price - old_price)
+    arrow = "↑" if direction == "up" else "↓"
+    outcome = "win" if direction == "up" else "loss"
+
+    title = market.get("title", "")
+    category = market.get("category", "Other")
+    cat_color = _category_color(category)
+    parts = category.split(" ", 1)
+    cat_name = parts[1] if len(parts) > 1 else parts[0]
+
+    header = build_header_html(
+        icon="📈" if direction == "up" else "📉",
+        title="PRICE ALERT",
+        players=[],
+        outcome=outcome,
+        badge_text=f"{arrow} {delta:.0%} MOVE",
+        subtitle="FLOW Markets",
+    )
+
+    holders_text = (
+        f"{holders} TSL member{'s' if holders != 1 else ''} holding positions"
+        if holders > 0
+        else "No TSL positions yet"
+    )
+
+    body = f"""
+    <div class="alert-body">
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+        <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+      </div>
+      <div class="market-question">{esc(title)}</div>
+      <div class="alert-direction {direction}">{arrow} {delta:.0%}</div>
+      <div class="alert-prices">
+        <span class="alert-old">{old_price:.0%}</span>
+        <span class="alert-arrow">→</span>
+        <span class="alert-new">{new_price:.0%}</span>
+      </div>
+      <div class="alert-holders">{esc(holders_text)}</div>
+    </div>"""
+
+    content = f"""
+    {header}
+    <div class="gold-divider"></div>
+    {body}
+    <div class="gold-divider"></div>
+    """
+
+    base_html = wrap_card(content, "push")
+    html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
+    return await render_card(html)

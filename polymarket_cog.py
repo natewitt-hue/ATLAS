@@ -22,8 +22,9 @@ import json
 import asyncio
 import logging
 import math
+import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import os
 import re
@@ -41,6 +42,9 @@ from casino.renderer.prediction_html_renderer import (
     render_bet_confirmation_card,
     render_portfolio_card,
     render_resolution_card,
+    render_curated_list_card,
+    render_daily_drop_card,
+    render_price_alert_card,
 )
 import io
 
@@ -176,7 +180,7 @@ CATEGORY_COLORS = {
     "🌐 Other":         0x95A5A6,
 }
 
-MARKETS_PER_PAGE = 5         # Market rows shown per browse page (compact list view)
+MARKETS_PER_PAGE = 10        # Market rows shown per curated view
 LOPSIDED_THRESHOLD = 0.80    # Filter markets where YES or NO > 80%
 
 # Categories blocked from prediction markets
@@ -191,31 +195,72 @@ BLOCKED_CATEGORIES = {
 MAX_PER_CATEGORY = 4  # Cap per category in "All" view for diversity
 
 
-def _compute_market_score(market: dict, sync_epoch: int) -> float:
-    """Score for display ordering. Higher = shown first.
+def _compute_curation_score(
+    market: dict,
+    days_in_pool: float,
+    same_category_count: int,
+) -> tuple[float, dict]:
+    """Compute 0-100 curation score for a market.
 
-    Components:
-      - base: log-scaled volume (prevents mega-markets from dominating)
-      - recency: 24h activity relative to total (rewards recent action)
-      - jitter: seeded randomness per sync cycle (variety every 5 min)
-      - balance_bonus: markets closer to 50/50 are more interesting
+    Returns (score, breakdown_dict).
+    Signals:
+      - velocity (25%): log10 of 24hr volume, percentile-ranked
+      - tension  (20%): how close to 50/50
+      - freshness(20%): new markets boosted, decays over 20 days
+      - urgency  (15%): time-to-close bonus (peak at 7 days)
+      - liquidity(10%): higher = more trustworthy odds
+      - diversity(10%): penalizes over-represented categories
     """
-    volume = market.get("volume", 0)
-    vol_24h = market.get("volume_24hr", 0)
+    vol_24h = market.get("volume_24hr", 0) or 0
+    yes_p = market.get("yes_price", 0.5) or 0.5
+    liquidity = market.get("liquidity", 0) or 0
 
-    base = math.log10(max(volume, 1))                    # ~3-7 range
-    recency = (vol_24h / max(volume, 1)) * 10             # 0-10 range
+    # ── Velocity (0-25): log10 of absolute 24hr volume ──
+    velocity = min(math.log10(max(vol_24h, 1)) / 7.0, 1.0) * 25  # 7 = log10(10M)
 
-    # Seeded randomness: same order within a sync cycle, different between
-    seed = hashlib.md5(
-        f"{market.get('market_id', '')}:{sync_epoch}".encode()
-    ).hexdigest()
-    jitter = (int(seed[:8], 16) / 0xFFFFFFFF) * 4        # 0-4 range
+    # ── Tension (0-20): closer to 50/50 = more interesting ──
+    tension = (1 - abs(yes_p - 0.5) * 2) * 20
 
-    yes_p = market.get("yes_price", 0.5)
-    balance_bonus = (1 - abs(yes_p - 0.5) * 2) * 2       # 0-2 range (max at 50/50)
+    # ── Freshness (0-20): new markets boosted, decays 1pt/day ──
+    freshness = max(0, 20 - days_in_pool)
 
-    return base + recency + jitter + balance_bonus
+    # ── Urgency (0-15): peak at 7 days out ──
+    end_date = market.get("end_date", "")
+    urgency = 0.0
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            days_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
+            if days_left < 0:
+                urgency = 0
+            elif days_left <= 3:
+                urgency = 15  # maximum urgency
+            elif days_left <= 7:
+                urgency = 15  # peak zone
+            elif days_left <= 30:
+                urgency = 15 * (1 - (days_left - 7) / 23)  # linear decay 7→30 days
+            elif days_left <= 90:
+                urgency = 15 * 0.2 * (1 - (days_left - 30) / 60)  # slow decay
+            # >90 days → 0
+        except (ValueError, TypeError):
+            urgency = 5  # fallback: some urgency
+
+    # ── Liquidity (0-10) ──
+    liq_score = min(liquidity / 100_000, 1.0) * 10
+
+    # ── Diversity (0-10): penalize over-represented categories ──
+    diversity = max(0, 10 - same_category_count * 2)
+
+    score = velocity + tension + freshness + urgency + liq_score + diversity
+    breakdown = {
+        "velocity": round(velocity, 1),
+        "tension": round(tension, 1),
+        "freshness": round(freshness, 1),
+        "urgency": round(urgency, 1),
+        "liquidity": round(liq_score, 1),
+        "diversity": round(diversity, 1),
+    }
+    return round(score, 2), breakdown
 
 
 # ─────────────────────────────────────────────
@@ -266,6 +311,52 @@ async def init_prediction_db(db_path: str = DB_PATH):
                 ON prediction_contracts(market_id, status);
             CREATE INDEX IF NOT EXISTS idx_pred_markets_status
                 ON prediction_markets(status, category);
+
+            -- Curation engine tables
+
+            CREATE TABLE IF NOT EXISTS curated_scores (
+                market_id   TEXT PRIMARY KEY,
+                score       REAL NOT NULL,
+                score_breakdown TEXT,
+                cluster_id  TEXT,
+                last_shown  TEXT,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                FOREIGN KEY (market_id) REFERENCES prediction_markets(market_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_drops (
+                drop_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                drop_date           TEXT NOT NULL UNIQUE,
+                spotlight_market_id TEXT NOT NULL,
+                spotlight_analysis  TEXT,
+                supporting          TEXT,
+                community_data      TEXT,
+                leaderboard_data    TEXT,
+                posted_at           TEXT,
+                message_id          TEXT,
+                FOREIGN KEY (spotlight_market_id) REFERENCES prediction_markets(market_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS price_snapshots (
+                market_id   TEXT NOT NULL,
+                yes_price   REAL NOT NULL,
+                snapshot_at TEXT NOT NULL,
+                PRIMARY KEY (market_id, snapshot_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_snapshots_time
+                ON price_snapshots(snapshot_at);
+
+            CREATE TABLE IF NOT EXISTS market_engagement (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id   TEXT NOT NULL,
+                event_type  TEXT NOT NULL,
+                user_id     TEXT,
+                source      TEXT,
+                created_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_engagement_market
+                ON market_engagement(market_id, event_type);
         """)
 
         # Migrations: add columns for trending/hot support
@@ -1169,6 +1260,265 @@ class MarketBrowserView(discord.ui.View):
 
 
 # ─────────────────────────────────────────────
+# CURATED BROWSER VIEW (replaces MarketBrowserView for /markets)
+# ─────────────────────────────────────────────
+
+class CuratedMarketSelect(discord.ui.Select):
+    """Select menu for drilling into a curated market."""
+
+    def __init__(self, markets: list[dict], parent_view):
+        self._parent = parent_view
+        options = []
+        for i, m in enumerate(markets[:25]):
+            cat = m.get("category", "Other")
+            parts = cat.split(" ", 1)
+            emoji = parts[0] if len(parts) > 1 else "📊"
+            label = m.get("title", "")[:95]
+            yes_p = m.get("yes_price", 0.5)
+            desc = f"YES {yes_p:.0%}"
+            sentiment = m.get("sentiment", {})
+            if sentiment.get("total", 0) > 0:
+                desc += f" · {sentiment['label']}"
+            options.append(discord.SelectOption(
+                label=label,
+                value=m.get("market_id", str(i)),
+                description=desc[:100],
+                emoji=emoji,
+            ))
+        if not options:
+            options = [discord.SelectOption(label="No markets", value="none")]
+        super().__init__(
+            placeholder="Select a market to view details...",
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        market_id = self.values[0]
+        if market_id == "none":
+            await interaction.response.defer()
+            return
+        await self._parent.select_market(interaction, market_id)
+
+
+class CuratedBrowserView(discord.ui.View):
+    """Curated market browser with weighted rotation."""
+
+    def __init__(
+        self,
+        markets: list[dict],
+        categories: list[str],
+        category_counts: dict | None = None,
+        cog=None,
+        view_mode: str = "curated",
+        filter_category: str | None = None,
+    ):
+        super().__init__(timeout=600)
+        self.markets = markets
+        self.categories = categories
+        self.category_counts = category_counts or {}
+        self.cog = cog
+        self.view_mode = view_mode
+        self.filter_category = filter_category
+        self.state = "list"
+        self.selected_market = None
+
+        self._rebuild_components()
+
+    def _rebuild_components(self):
+        self.clear_items()
+        if self.state == "list":
+            self._build_list_components()
+        else:
+            self._build_detail_components()
+
+    def _build_list_components(self):
+        # Row 0: Market select
+        select = CuratedMarketSelect(self.markets, parent_view=self)
+        self.add_item(select)
+
+        # Row 1: Refresh button
+        refresh_btn = discord.ui.Button(
+            label="🔄 Refresh",
+            style=discord.ButtonStyle.secondary,
+            custom_id="curated_refresh",
+            row=1,
+        )
+        refresh_btn.callback = self._refresh
+        self.add_item(refresh_btn)
+
+    def _build_detail_components(self):
+        back_btn = discord.ui.Button(
+            label="🔙 Back to List",
+            style=discord.ButtonStyle.secondary,
+            custom_id="curated_back",
+            row=0,
+        )
+        back_btn.callback = self._back_to_list
+        self.add_item(back_btn)
+
+        if self.selected_market:
+            yes_btn = discord.ui.Button(
+                label="Bet YES ✅",
+                style=discord.ButtonStyle.success,
+                custom_id="curated_yes",
+                row=1,
+            )
+            no_btn = discord.ui.Button(
+                label="Bet NO ❌",
+                style=discord.ButtonStyle.danger,
+                custom_id="curated_no",
+                row=1,
+            )
+            yes_btn.callback = self._make_bet_cb(self.selected_market, "YES")
+            no_btn.callback = self._make_bet_cb(self.selected_market, "NO")
+            self.add_item(yes_btn)
+            self.add_item(no_btn)
+
+    def _make_bet_cb(self, market: dict, side: str):
+        async def callback(interaction: discord.Interaction):
+            price = market["yes_price"] if side == "YES" else market["no_price"]
+            modal = WagerModal(
+                market_id=market["market_id"],
+                slug=market["slug"],
+                side=side,
+                price=price,
+                title=market["title"],
+            )
+            await interaction.response.send_modal(modal)
+        return callback
+
+    async def select_market(self, interaction: discord.Interaction, market_id: str):
+        market = next((m for m in self.markets if m.get("market_id") == market_id), None)
+        if not market:
+            await interaction.response.defer()
+            return
+
+        # Log engagement
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
+                    "VALUES (?, 'view', ?, 'markets_cmd', ?)",
+                    (market_id, str(interaction.user.id), datetime.now(timezone.utc).isoformat()),
+                )
+                await db.commit()
+        except Exception:
+            pass
+
+        self.state = "detail"
+        self.selected_market = market
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
+
+    async def _back_to_list(self, interaction: discord.Interaction):
+        self.state = "list"
+        self.selected_market = None
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        """Refresh with a new curated selection."""
+        if self.cog:
+            self.markets = await self.cog._get_curated_selection(
+                count=MARKETS_PER_PAGE,
+                category=self.filter_category,
+                view_mode=self.view_mode,
+            )
+        self._rebuild_components()
+        embed, card_file = await self._build_page()
+        kwargs = {"embed": embed, "view": self, "attachments": []}
+        if card_file:
+            kwargs["attachments"] = [card_file]
+        await interaction.response.edit_message(**kwargs)
+
+    async def _build_page(self) -> tuple[discord.Embed, discord.File | None]:
+        if self.state == "detail" and self.selected_market:
+            return await self._build_detail_page()
+        return await self._build_list_page()
+
+    async def _build_list_page(self) -> tuple[discord.Embed, discord.File | None]:
+        total = len(self.markets)
+        view_labels = {
+            "curated": "Curated", "trending": "Trending",
+            "popular": "Popular", "new": "New",
+        }
+        filter_label = self.filter_category or f"{view_labels.get(self.view_mode, 'Curated')} · All Categories"
+
+        embed = discord.Embed(
+            title="FLOW Prediction Markets",
+            description=f"**{total}** markets · Select one below to view details & bet",
+            color=0xD4AF37,
+        )
+
+        card_file = None
+        if self.markets:
+            try:
+                png = await render_curated_list_card(
+                    self.markets,
+                    filter_label=filter_label,
+                )
+                card_file = discord.File(io.BytesIO(png), filename="markets.png")
+                embed.set_image(url="attachment://markets.png")
+            except Exception:
+                log.exception("Failed to render curated list card")
+                for m in self.markets:
+                    yes_p = m.get("yes_price", 0.5)
+                    no_p = m.get("no_price", 0.5)
+                    embed.add_field(
+                        name=f"{m.get('category', '')}  {m['title'][:55]}",
+                        value=f"YES {yes_p:.0%}  |  NO {no_p:.0%}",
+                        inline=False,
+                    )
+
+        embed.set_footer(text="FLOW Markets · Powered by Polymarket")
+        embed.timestamp = datetime.now(timezone.utc)
+        return embed, card_file
+
+    async def _build_detail_page(self) -> tuple[discord.Embed, discord.File | None]:
+        m = self.selected_market
+        embed = discord.Embed(
+            title=m.get("title", "")[:80],
+            color=0x3498DB,
+        )
+
+        card_file = None
+        try:
+            png = await render_market_detail_card(
+                title=m.get("title", ""),
+                category=m.get("category", "Other"),
+                yes_price=m.get("yes_price", 0.5),
+                no_price=m.get("no_price", 0.5),
+                volume=m.get("volume", 0),
+                liquidity=m.get("liquidity", 0),
+                end_date=m.get("end_date", ""),
+            )
+            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
+            embed.set_image(url="attachment://market_detail.png")
+        except Exception:
+            log.exception("Failed to render market detail card")
+            embed.add_field(name="YES", value=f"{m.get('yes_price', 0.5):.0%}", inline=True)
+            embed.add_field(name="NO", value=f"{m.get('no_price', 0.5):.0%}", inline=True)
+
+        # Add sentiment info
+        sentiment = m.get("sentiment", {})
+        if sentiment.get("total", 0) > 0:
+            embed.description = f"🏛️ {sentiment['label']}"
+
+        embed.set_footer(text="FLOW Markets · Click YES or NO below to bet")
+        embed.timestamp = datetime.now(timezone.utc)
+        return embed, card_file
+
+
+# ─────────────────────────────────────────────
 # THE COG
 # ─────────────────────────────────────────────
 
@@ -1184,10 +1534,15 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         self.client = PolymarketClient()
         self._db_ready = False
         self._first_sync_done = False
+        self._sync_count = 0
+        self._alerts_this_hour = 0
+        self._alert_hour = -1
         self.sync_markets.start()
+        self.daily_drop_task.start()
 
     def cog_unload(self):
         self.sync_markets.cancel()
+        self.daily_drop_task.cancel()
         asyncio.create_task(self.client.close())
 
     async def _ensure_db(self):
@@ -1311,6 +1666,26 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             except Exception as e:
                 log.warning(f"Gemini classification pass failed: {e}")
 
+        # ── Pass 4: Update curation scores ──
+        try:
+            await self._update_curation_scores()
+        except Exception as e:
+            log.warning(f"Curation scoring pass failed: {e}")
+
+        # ── Pass 5: Price snapshots (every 3rd sync = ~15 min) ──
+        self._sync_count = getattr(self, "_sync_count", 0) + 1
+        if self._sync_count % 3 == 0:
+            try:
+                await self._store_price_snapshots()
+            except Exception as e:
+                log.warning(f"Price snapshot pass failed: {e}")
+
+        # ── Pass 6: Price movement alerts ──
+        try:
+            await self._check_price_alerts()
+        except Exception as e:
+            log.warning(f"Price alert check failed: {e}")
+
     async def _classify_unknown_categories(self):
         """
         One-time Gemini classification for markets still labeled 'Other'.
@@ -1391,6 +1766,514 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             await db.commit()
 
         log.info(f"Gemini classified {updated}/{len(unknowns)} markets ({blocked} sports blocked).")
+
+    # ── Curation Engine ─────────────────────────
+
+    async def _update_curation_scores(self):
+        """Score all active markets for curation. Runs every sync cycle."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Fetch all active markets
+            blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
+            async with db.execute(f"""
+                SELECT market_id, event_id, title, category,
+                       yes_price, no_price, volume, liquidity,
+                       COALESCE(volume_24hr, 0), end_date
+                FROM prediction_markets
+                WHERE status = 'active'
+                  AND category NOT IN ({blocked_ph})
+            """, tuple(BLOCKED_CATEGORIES)) as cursor:
+                rows = await cursor.fetchall()
+
+            if not rows:
+                return
+
+            # Get existing created_at timestamps for freshness
+            async with db.execute(
+                "SELECT market_id, created_at FROM curated_scores"
+            ) as cursor:
+                existing = {r[0]: r[1] for r in await cursor.fetchall()}
+
+            # Count markets per category for diversity scoring
+            cat_counts: dict[str, int] = {}
+            for r in rows:
+                cat = r[3] or "Other"
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+            # Score each market, dedup by event_id
+            event_best: dict[str, tuple[str, float, dict]] = {}  # event_id → (market_id, score, breakdown)
+
+            for r in rows:
+                market_id, event_id, title, category = r[0], r[1], r[2], r[3]
+                market = {
+                    "yes_price": r[4], "no_price": r[5],
+                    "volume": r[6], "liquidity": r[7],
+                    "volume_24hr": r[8], "end_date": r[9],
+                }
+
+                # Calculate days in pool
+                created = existing.get(market_id)
+                if created:
+                    try:
+                        created_dt = datetime.fromisoformat(created)
+                        days_in_pool = (datetime.now(timezone.utc) - created_dt).total_seconds() / 86400
+                    except (ValueError, TypeError):
+                        days_in_pool = 0
+                else:
+                    days_in_pool = 0
+
+                same_cat = cat_counts.get(category or "Other", 0)
+                score, breakdown = _compute_curation_score(market, days_in_pool, same_cat)
+
+                # Dedup by event_id: keep highest score per event
+                cluster = event_id or market_id
+                if cluster not in event_best or score > event_best[cluster][1]:
+                    event_best[cluster] = (market_id, score, breakdown)
+
+            # Upsert scores for winning markets
+            winners = {mid for mid, _, _ in event_best.values()}
+            for cluster, (market_id, score, breakdown) in event_best.items():
+                created_at = existing.get(market_id, now)
+                await db.execute("""
+                    INSERT INTO curated_scores (market_id, score, score_breakdown, cluster_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(market_id) DO UPDATE SET
+                        score = excluded.score,
+                        score_breakdown = excluded.score_breakdown,
+                        cluster_id = excluded.cluster_id,
+                        updated_at = excluded.updated_at
+                """, (market_id, score, json.dumps(breakdown), cluster, created_at, now))
+
+            # Remove scores for markets no longer active or that lost dedup
+            active_ids = {r[0] for r in rows}
+            async with db.execute("SELECT market_id FROM curated_scores") as cursor:
+                all_scored = {r[0] for r in await cursor.fetchall()}
+
+            stale = all_scored - winners
+            if stale:
+                ph = ",".join("?" for _ in stale)
+                await db.execute(f"DELETE FROM curated_scores WHERE market_id IN ({ph})", tuple(stale))
+
+            await db.commit()
+            log.info(f"Curation scores updated: {len(winners)} markets scored.")
+
+    async def _get_curated_selection(
+        self,
+        count: int = 10,
+        category: str | None = None,
+        view_mode: str = "curated",
+    ) -> list[dict]:
+        """Get a curated selection of markets using weighted random sampling.
+
+        view_mode: 'curated' (weighted random), 'trending' (top volume_24hr),
+                   'popular' (most TSL bets), 'new' (newest)
+        """
+        async with aiosqlite.connect(DB_PATH) as db:
+            if view_mode == "trending":
+                query = """
+                    SELECT pm.market_id, pm.slug, pm.title, pm.category,
+                           pm.yes_price, pm.no_price, pm.volume, pm.end_date,
+                           COALESCE(pm.volume_24hr, 0) as v24, pm.liquidity, pm.event_id
+                    FROM prediction_markets pm
+                    WHERE pm.status = 'active'
+                """
+                params: list = []
+                if category:
+                    query += " AND pm.category = ?"
+                    params.append(category)
+                query += " ORDER BY v24 DESC LIMIT ?"
+                params.append(count)
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+
+            elif view_mode == "popular":
+                query = """
+                    SELECT pm.market_id, pm.slug, pm.title, pm.category,
+                           pm.yes_price, pm.no_price, pm.volume, pm.end_date,
+                           COALESCE(pm.volume_24hr, 0), pm.liquidity, pm.event_id,
+                           COUNT(pc.id) as bet_count
+                    FROM prediction_markets pm
+                    LEFT JOIN prediction_contracts pc ON pc.market_id = pm.market_id AND pc.status = 'open'
+                    WHERE pm.status = 'active'
+                """
+                params = []
+                if category:
+                    query += " AND pm.category = ?"
+                    params.append(category)
+                query += " GROUP BY pm.market_id ORDER BY bet_count DESC LIMIT ?"
+                params.append(count)
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+
+            elif view_mode == "new":
+                query = """
+                    SELECT pm.market_id, pm.slug, pm.title, pm.category,
+                           pm.yes_price, pm.no_price, pm.volume, pm.end_date,
+                           COALESCE(pm.volume_24hr, 0), pm.liquidity, pm.event_id
+                    FROM prediction_markets pm
+                    WHERE pm.status = 'active'
+                """
+                params = []
+                if category:
+                    query += " AND pm.category = ?"
+                    params.append(category)
+                query += " ORDER BY pm.last_synced DESC LIMIT ?"
+                params.append(count)
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+
+            else:  # curated — weighted random
+                query = """
+                    SELECT pm.market_id, pm.slug, pm.title, pm.category,
+                           pm.yes_price, pm.no_price, pm.volume, pm.end_date,
+                           COALESCE(pm.volume_24hr, 0), pm.liquidity, pm.event_id,
+                           cs.score, cs.last_shown
+                    FROM curated_scores cs
+                    JOIN prediction_markets pm ON pm.market_id = cs.market_id
+                    WHERE pm.status = 'active'
+                """
+                params = []
+                if category:
+                    query += " AND pm.category = ?"
+                    params.append(category)
+                query += " ORDER BY cs.score DESC LIMIT 100"
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+
+                if rows:
+                    rows = self._weighted_sample(rows, count)
+
+            # Build market dicts
+            markets = []
+            for r in rows:
+                markets.append({
+                    "market_id":   r[0],
+                    "slug":        r[1],
+                    "title":       r[2],
+                    "category":    r[3],
+                    "yes_price":   r[4] if r[4] is not None else 0.5,
+                    "no_price":    r[5] if r[5] is not None else 0.5,
+                    "volume":      r[6] or 0,
+                    "end_date":    r[7] or "",
+                    "volume_24hr": r[8] or 0,
+                    "liquidity":   r[9] or 0,
+                    "event_id":    r[10] if len(r) > 10 else "",
+                })
+
+            # Add community sentiment
+            for m in markets:
+                sentiment = await self._get_community_sentiment(m["market_id"], db)
+                m["sentiment"] = sentiment
+
+            # Update last_shown for curated mode
+            if view_mode == "curated" and markets:
+                now = datetime.now(timezone.utc).isoformat()
+                for m in markets:
+                    await db.execute(
+                        "UPDATE curated_scores SET last_shown = ? WHERE market_id = ?",
+                        (now, m["market_id"]),
+                    )
+                await db.commit()
+
+        return markets
+
+    def _weighted_sample(self, rows: list, count: int) -> list:
+        """Weighted random sampling without replacement with recency penalty and category diversity."""
+        now = datetime.now(timezone.utc)
+        weighted = []
+        for r in rows:
+            score = r[11] if len(r) > 11 else 1.0
+            last_shown = r[12] if len(r) > 12 else None
+
+            # Recency penalty
+            penalty = 1.0
+            if last_shown:
+                try:
+                    shown_dt = datetime.fromisoformat(last_shown)
+                    hours_ago = (now - shown_dt).total_seconds() / 3600
+                    if hours_ago < 2:
+                        penalty = 0.1
+                    elif hours_ago < 12:
+                        penalty = 0.5
+                except (ValueError, TypeError):
+                    pass
+
+            weighted.append((r, max(score * penalty, 0.01)))
+
+        # Weighted random sampling without replacement, with category diversity
+        selected = []
+        cat_counts: dict[str, int] = {}
+        remaining = list(weighted)
+
+        for _ in range(min(count, len(remaining))):
+            if not remaining:
+                break
+
+            weights = [w for _, w in remaining]
+            total = sum(weights)
+            if total <= 0:
+                break
+
+            probs = [w / total for w in weights]
+            idx = random.choices(range(len(remaining)), weights=probs, k=1)[0]
+            row, _ = remaining[idx]
+
+            cat = row[3] or "Other"  # category is at index 3
+            if cat_counts.get(cat, 0) >= 2:
+                # Skip — try next best
+                remaining.pop(idx)
+                continue
+
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            selected.append(row)
+            remaining.pop(idx)
+
+        return selected
+
+    async def _get_community_sentiment(self, market_id: str, db) -> dict:
+        """Get TSL community betting sentiment for a market."""
+        async with db.execute("""
+            SELECT side, COUNT(*) as cnt
+            FROM prediction_contracts
+            WHERE market_id = ? AND status = 'open'
+            GROUP BY side
+        """, (market_id,)) as cursor:
+            rows = await cursor.fetchall()
+
+        yes_count = 0
+        no_count = 0
+        for side, cnt in rows:
+            if side == "YES":
+                yes_count = cnt
+            else:
+                no_count = cnt
+
+        total = yes_count + no_count
+        return {
+            "yes_count": yes_count,
+            "no_count": no_count,
+            "total": total,
+            "yes_pct": round(yes_count / total * 100) if total > 0 else 0,
+            "label": (
+                f"TSL is {round(yes_count / total * 100)}% YES"
+                if total > 0
+                else "Be the first to bet"
+            ),
+        }
+
+    # ── Price Snapshots & Alerts ─────────────────
+
+    async def _store_price_snapshots(self):
+        """Store price snapshots for movement detection. Runs every ~15 min."""
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT market_id, yes_price FROM prediction_markets WHERE status = 'active'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+            for market_id, yes_price in rows:
+                await db.execute(
+                    "INSERT OR IGNORE INTO price_snapshots (market_id, yes_price, snapshot_at) "
+                    "VALUES (?, ?, ?)",
+                    (market_id, yes_price, now),
+                )
+
+            # Prune snapshots older than 48 hours
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+            await db.execute("DELETE FROM price_snapshots WHERE snapshot_at < ?", (cutoff,))
+
+            await db.commit()
+
+    async def _check_price_alerts(self):
+        """Detect >10pp price movements in the last hour and post alerts."""
+        now = datetime.now(timezone.utc)
+        hour_ago = (now - timedelta(hours=1)).isoformat()
+
+        # Rate limit: max 3 alerts per hour
+        alerts_this_hour = getattr(self, "_alerts_this_hour", 0)
+        alert_hour = getattr(self, "_alert_hour", 0)
+        current_hour = now.hour
+        if current_hour != alert_hour:
+            alerts_this_hour = 0
+            self._alert_hour = current_hour
+
+        if alerts_this_hour >= 3:
+            return
+
+        # Get today's daily drop markets to skip
+        today = now.strftime("%Y-%m-%d")
+        drop_market_ids: set[str] = set()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT spotlight_market_id, supporting FROM daily_drops WHERE drop_date = ?",
+                (today,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    drop_market_ids.add(row[0])
+                    try:
+                        supporting = json.loads(row[1]) if row[1] else []
+                        for s in supporting:
+                            if isinstance(s, dict):
+                                drop_market_ids.add(s.get("market_id", ""))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            # Find markets with big moves
+            async with db.execute("""
+                SELECT pm.market_id, pm.title, pm.category, pm.yes_price, pm.no_price,
+                       ps.yes_price as old_price
+                FROM prediction_markets pm
+                JOIN price_snapshots ps ON ps.market_id = pm.market_id
+                WHERE pm.status = 'active'
+                  AND ps.snapshot_at <= ?
+                  AND ps.snapshot_at >= ?
+                ORDER BY ps.snapshot_at ASC
+            """, (hour_ago, (now - timedelta(hours=1, minutes=30)).isoformat())) as cursor:
+                rows = await cursor.fetchall()
+
+            for market_id, title, category, current_price, no_price, old_price in rows:
+                if market_id in drop_market_ids:
+                    continue
+
+                delta = abs(current_price - old_price)
+                if delta < 0.10:
+                    continue
+
+                if alerts_this_hour >= 3:
+                    break
+
+                # Get holder count
+                async with db.execute(
+                    "SELECT COUNT(*) FROM prediction_contracts "
+                    "WHERE market_id = ? AND status = 'open'",
+                    (market_id,),
+                ) as cursor:
+                    holders = (await cursor.fetchone())[0]
+
+                # Log engagement
+                await db.execute(
+                    "INSERT INTO market_engagement (market_id, event_type, source, created_at) "
+                    "VALUES (?, 'alert_fired', 'price_alert', ?)",
+                    (market_id, now.isoformat()),
+                )
+                await db.commit()
+
+                # Post alert
+                channel = self._channel()
+                if channel:
+                    try:
+                        from casino.renderer.prediction_html_renderer import render_price_alert_card
+                        png = await render_price_alert_card(
+                            market={
+                                "title": title, "category": category,
+                                "yes_price": current_price, "no_price": no_price,
+                            },
+                            old_price=old_price,
+                            new_price=current_price,
+                            holders=holders,
+                        )
+                        direction = "up" if current_price > old_price else "down"
+                        embed = discord.Embed(
+                            title=f"Price Alert {'📈' if direction == 'up' else '📉'}",
+                            color=0x4ADE80 if direction == "up" else 0xF87171,
+                        )
+                        card_file = discord.File(io.BytesIO(png), filename="price_alert.png")
+                        embed.set_image(url="attachment://price_alert.png")
+
+                        # Add bet button
+                        view = discord.ui.View(timeout=3600)
+                        bet_btn = discord.ui.Button(
+                            label="Bet Now",
+                            style=discord.ButtonStyle.primary,
+                            custom_id=f"alert_bet_{market_id}",
+                        )
+
+                        async def _alert_bet_cb(interaction: discord.Interaction, mid=market_id):
+                            # Log engagement
+                            async with aiosqlite.connect(DB_PATH) as db2:
+                                await db2.execute(
+                                    "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
+                                    "VALUES (?, 'alert_click', ?, 'price_alert', ?)",
+                                    (mid, str(interaction.user.id), datetime.now(timezone.utc).isoformat()),
+                                )
+                                await db2.commit()
+                            # Show detail card
+                            await self.select_market_detail(interaction, mid)
+
+                        bet_btn.callback = _alert_bet_cb
+                        view.add_item(bet_btn)
+
+                        await channel.send(embed=embed, file=card_file, view=view)
+                        alerts_this_hour += 1
+                    except Exception as e:
+                        log.warning(f"Price alert render/post failed: {e}")
+
+        self._alerts_this_hour = alerts_this_hour
+
+    async def select_market_detail(self, interaction: discord.Interaction, market_id: str):
+        """Show a market detail card with bet buttons (used by alerts and drilldowns)."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT market_id, slug, title, category, yes_price, no_price, "
+                "volume, end_date, liquidity "
+                "FROM prediction_markets WHERE market_id = ?",
+                (market_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        if not row:
+            await interaction.followup.send("Market not found.", ephemeral=True)
+            return
+
+        m = {
+            "market_id": row[0], "slug": row[1], "title": row[2],
+            "category": row[3], "yes_price": row[4] or 0.5,
+            "no_price": row[5] or 0.5, "volume": row[6] or 0,
+            "end_date": row[7] or "", "liquidity": row[8] or 0,
+        }
+
+        # Log engagement
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
+                "VALUES (?, 'view', ?, 'markets_cmd', ?)",
+                (market_id, str(interaction.user.id), datetime.now(timezone.utc).isoformat()),
+            )
+            await db.commit()
+
+        try:
+            png = await render_market_detail_card(
+                title=m["title"], category=m["category"],
+                yes_price=m["yes_price"], no_price=m["no_price"],
+                volume=m["volume"], liquidity=m["liquidity"],
+                end_date=m["end_date"],
+            )
+            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
+            embed = discord.Embed(color=0x3498DB)
+            embed.set_image(url="attachment://market_detail.png")
+        except Exception:
+            embed = discord.Embed(title=m["title"][:80], color=0x3498DB)
+            embed.add_field(name="YES", value=f"{m['yes_price']:.0%}", inline=True)
+            embed.add_field(name="NO", value=f"{m['no_price']:.0%}", inline=True)
+            card_file = None
+
+        view = BetButtonView(
+            market_id=m["market_id"], slug=m["slug"], title=m["title"],
+            yes_price=m["yes_price"], no_price=m["no_price"], cog=self,
+        )
+
+        kwargs = {"embed": embed, "view": view, "ephemeral": True}
+        if card_file:
+            kwargs["file"] = card_file
+        await interaction.followup.send(**kwargs)
 
     async def _auto_resolve_pass(self):
         """
@@ -1679,6 +2562,350 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     async def _before_sync(self):
         await self.bot.wait_until_ready()
 
+    # ── Daily Drop Task ─────────────────────────
+
+    @tasks.loop(time=datetime(2000, 1, 1, 14, 0).time())  # 9 AM EST = 14:00 UTC
+    async def daily_drop_task(self):
+        """Generate and post the daily curated market drop."""
+        await self._ensure_db()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Check if already posted today
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT drop_id FROM daily_drops WHERE drop_date = ?", (today,)
+            ) as cursor:
+                if await cursor.fetchone():
+                    return  # Already posted
+
+        log.info("Generating Daily Drop...")
+        try:
+            await self._generate_daily_drop(today)
+        except Exception as e:
+            log.error(f"Daily Drop generation failed: {e}")
+
+    @daily_drop_task.before_loop
+    async def _before_daily_drop(self):
+        await self.bot.wait_until_ready()
+
+    async def _generate_daily_drop(self, today: str):
+        """Build shortlist, call Gemini, render card, post to channel."""
+        # Step 1: Build shortlist — top 30 by curation score, max 3 per category
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("""
+                SELECT pm.market_id, pm.slug, pm.title, pm.category,
+                       pm.yes_price, pm.no_price, pm.volume, pm.end_date,
+                       pm.liquidity, cs.score
+                FROM curated_scores cs
+                JOIN prediction_markets pm ON pm.market_id = cs.market_id
+                WHERE pm.status = 'active'
+                ORDER BY cs.score DESC
+                LIMIT 100
+            """) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            log.warning("No curated markets available for Daily Drop.")
+            return
+
+        # Enforce max 3 per category
+        shortlist = []
+        cat_counts: dict[str, int] = {}
+        for r in rows:
+            cat = r[3] or "Other"
+            if cat_counts.get(cat, 0) >= 3:
+                continue
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            shortlist.append({
+                "market_id": r[0], "slug": r[1], "title": r[2],
+                "category": r[3], "yes_price": r[4] or 0.5,
+                "no_price": r[5] or 0.5, "volume": r[6] or 0,
+                "end_date": r[7] or "", "liquidity": r[8] or 0,
+                "score": r[9],
+            })
+            if len(shortlist) >= 30:
+                break
+
+        if len(shortlist) < 5:
+            log.warning(f"Only {len(shortlist)} markets in shortlist — need at least 5.")
+            return
+
+        # Step 2: Gemini editorial pass
+        spotlight = None
+        supporting = []
+
+        gemini = _get_gemini_client()
+        if gemini:
+            try:
+                spotlight, supporting = await self._gemini_curate(shortlist)
+            except Exception as e:
+                log.warning(f"Gemini curation failed: {e}")
+                # Retry once
+                await asyncio.sleep(30)
+                try:
+                    spotlight, supporting = await self._gemini_curate(shortlist)
+                except Exception as e2:
+                    log.error(f"Gemini curation retry failed: {e2}")
+
+        # Fallback: use top 5 by score without editorial text
+        if not spotlight:
+            spotlight = shortlist[0]
+            spotlight["analysis"] = ""
+            supporting = [
+                {**m, "hook": ""} for m in shortlist[1:5]
+            ]
+
+        # Step 3: Community momentum
+        community_data = {}
+        async with aiosqlite.connect(DB_PATH) as db:
+            all_market_ids = [spotlight["market_id"]] + [s["market_id"] for s in supporting]
+            for mid in all_market_ids:
+                community_data[mid] = await self._get_community_sentiment(mid, db)
+
+        # Step 4: Leaderboard
+        leaderboard = await self._get_prediction_leaderboard()
+
+        # Step 5: Render card
+        try:
+            png = await render_daily_drop_card(
+                spotlight=spotlight,
+                supporting=supporting,
+                community=community_data,
+                leaderboard=leaderboard,
+            )
+        except Exception as e:
+            log.error(f"Daily Drop card render failed: {e}")
+            return
+
+        # Step 6: Post to channel
+        channel = self._channel()
+        if not channel:
+            log.warning("Prediction channel not found — cannot post Daily Drop.")
+            return
+
+        embed = discord.Embed(
+            title="🔥 Daily Drop — Today's Prediction Markets",
+            color=0xD4AF37,
+        )
+        card_file = discord.File(io.BytesIO(png), filename="daily_drop.png")
+        embed.set_image(url="attachment://daily_drop.png")
+        embed.set_footer(text="Use /markets to browse all markets · FLOW Markets")
+        embed.timestamp = datetime.now(timezone.utc)
+
+        # Select menu for the 5 featured markets
+        all_featured = [spotlight] + supporting
+        options = []
+        for m in all_featured[:5]:
+            parts = m.get("category", "Other").split(" ", 1)
+            emoji = parts[0] if len(parts) > 1 else "📊"
+            options.append(discord.SelectOption(
+                label=m.get("title", "")[:95],
+                value=m.get("market_id", ""),
+                description=f"YES {m.get('yes_price', 0.5):.0%}",
+                emoji=emoji,
+            ))
+
+        view = discord.ui.View(timeout=None)
+        select = discord.ui.Select(
+            placeholder="Select a market to bet...",
+            options=options if options else [discord.SelectOption(label="None", value="none")],
+        )
+
+        async def _drop_select_cb(interaction: discord.Interaction):
+            mid = select.values[0]
+            if mid == "none":
+                await interaction.response.defer()
+                return
+            # Log engagement
+            try:
+                async with aiosqlite.connect(DB_PATH) as db2:
+                    await db2.execute(
+                        "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
+                        "VALUES (?, 'view', ?, 'daily_drop', ?)",
+                        (mid, str(interaction.user.id), datetime.now(timezone.utc).isoformat()),
+                    )
+                    await db2.commit()
+            except Exception:
+                pass
+            await self.select_market_detail(interaction, mid)
+
+        select.callback = _drop_select_cb
+        view.add_item(select)
+
+        msg = await channel.send(embed=embed, file=card_file, view=view)
+
+        # Step 7: Store the selection
+        async with aiosqlite.connect(DB_PATH) as db:
+            supporting_json = json.dumps([
+                {"market_id": s["market_id"], "hook": s.get("hook", "")}
+                for s in supporting
+            ])
+            await db.execute("""
+                INSERT INTO daily_drops
+                    (drop_date, spotlight_market_id, spotlight_analysis,
+                     supporting, community_data, leaderboard_data,
+                     posted_at, message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                today, spotlight["market_id"],
+                spotlight.get("analysis", ""),
+                supporting_json,
+                json.dumps(community_data),
+                json.dumps(leaderboard),
+                datetime.now(timezone.utc).isoformat(),
+                str(msg.id),
+            ))
+            await db.commit()
+
+        log.info(f"Daily Drop posted: spotlight={spotlight['title'][:50]}")
+
+    async def _gemini_curate(self, shortlist: list[dict]) -> tuple[dict, list[dict]]:
+        """Use Gemini to select spotlight + 4 supporting markets from shortlist."""
+        gemini = _get_gemini_client()
+        if not gemini:
+            raise RuntimeError("Gemini client unavailable")
+
+        # Build market list for prompt
+        market_lines = []
+        for i, m in enumerate(shortlist):
+            market_lines.append(json.dumps({
+                "index": i,
+                "market_id": m["market_id"],
+                "title": m["title"],
+                "category": m["category"],
+                "yes_price": round(m["yes_price"], 2),
+                "no_price": round(m["no_price"], 2),
+                "volume": m.get("volume", 0),
+            }))
+
+        # Get persona for system instruction
+        try:
+            from echo_loader import get_persona
+            system_instruction = get_persona("analytical")
+        except Exception:
+            system_instruction = "You are ATLAS, the editorial voice of The Simulation League."
+
+        prompt = (
+            f"From these {len(shortlist)} prediction markets, select:\n"
+            f"1. ONE \"Market of the Day\" — the most interesting, debatable, culturally relevant.\n"
+            f"   Write a 2-3 sentence spotlight analysis in ATLAS voice (3rd person, punchy, cites numbers).\n"
+            f"2. FOUR supporting markets across different categories.\n"
+            f"   For each, write a 1-line hook that makes someone want to bet.\n\n"
+            f"Rules:\n"
+            f"- Never pick markets >85% in either direction (basically decided)\n"
+            f"- Maximize category diversity across all 5 picks\n"
+            f"- Prioritize genuine uncertainty, cultural relevance, debate-worthy topics\n"
+            f"- Avoid repetitive topics (multiple markets about the same person/event)\n\n"
+            f"Markets:\n" + "\n".join(market_lines) + "\n\n"
+            f"Respond as JSON:\n"
+            f'{{"spotlight": {{"market_id": "...", "analysis": "..."}}, '
+            f'"supporting": [{{"market_id": "...", "hook": "..."}}, ...]}}'
+        )
+
+        loop = asyncio.get_running_loop()
+
+        def _call():
+            return gemini.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[prompt],
+                config={"system_instruction": system_instruction},
+            )
+
+        response = await loop.run_in_executor(None, _call)
+        text = response.text.strip()
+
+        # Parse JSON
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if not json_match:
+            raise ValueError("Gemini returned non-JSON for curation")
+
+        result = json.loads(json_match.group())
+        sp_data = result.get("spotlight", {})
+        sup_data = result.get("supporting", [])
+
+        # Map back to full market dicts
+        market_map = {m["market_id"]: m for m in shortlist}
+
+        sp_id = sp_data.get("market_id", "")
+        spotlight = market_map.get(sp_id, shortlist[0]).copy()
+        spotlight["analysis"] = sp_data.get("analysis", "")
+
+        supporting = []
+        for s in sup_data[:4]:
+            s_id = s.get("market_id", "")
+            if s_id in market_map:
+                m = market_map[s_id].copy()
+                m["hook"] = s.get("hook", "")
+                supporting.append(m)
+
+        # Fill to 4 if Gemini didn't return enough
+        while len(supporting) < 4 and len(shortlist) > len(supporting) + 1:
+            for m in shortlist:
+                if m["market_id"] != spotlight["market_id"] and m["market_id"] not in {s["market_id"] for s in supporting}:
+                    mc = m.copy()
+                    mc["hook"] = ""
+                    supporting.append(mc)
+                    break
+            else:
+                break
+
+        return spotlight, supporting
+
+    async def _get_prediction_leaderboard(self) -> list[dict]:
+        """Get top prediction traders by weekly profit + streaks."""
+        week_start = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Weekly profit
+            async with db.execute("""
+                SELECT user_id,
+                       SUM(CASE WHEN status = 'won' THEN potential_payout ELSE 0 END) -
+                       SUM(CASE WHEN status IN ('won', 'lost') THEN cost_bucks ELSE 0 END) as profit
+                FROM prediction_contracts
+                WHERE resolved_at > ?
+                  AND status IN ('won', 'lost')
+                GROUP BY user_id
+                HAVING profit > 0
+                ORDER BY profit DESC
+                LIMIT 5
+            """, (week_start,)) as cursor:
+                profit_rows = await cursor.fetchall()
+
+            leaderboard = []
+            for user_id, profit in profit_rows:
+                # Calculate streak
+                async with db.execute("""
+                    SELECT status FROM prediction_contracts
+                    WHERE user_id = ? AND status IN ('won', 'lost')
+                    ORDER BY resolved_at DESC
+                    LIMIT 20
+                """, (user_id,)) as cursor:
+                    statuses = [r[0] for r in await cursor.fetchall()]
+
+                streak = 0
+                for s in statuses:
+                    if s == "won":
+                        streak += 1
+                    elif s == "lost":
+                        break
+                    # voided: skip (doesn't break or extend)
+
+                # Resolve display name
+                guild = self.bot.guilds[0] if self.bot.guilds else None
+                name = str(user_id)
+                if guild:
+                    member = guild.get_member(int(user_id))
+                    if member:
+                        name = member.display_name
+
+                leaderboard.append({
+                    "name": name,
+                    "profit": int(profit),
+                    "streak": streak,
+                })
+
+            return leaderboard
+
     # ── Utility ─────────────────────────────────
 
     def _channel(self):
@@ -1688,76 +2915,67 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
     @app_commands.command(
         name="markets",
-        description="Browse live Polymarket prediction markets."
+        description="Browse curated prediction markets."
     )
-    async def markets_cmd(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        view="How to sort markets (default: curated)",
+        category="Filter by category",
+    )
+    @app_commands.choices(view=[
+        app_commands.Choice(name="Curated (default)", value="curated"),
+        app_commands.Choice(name="Trending", value="trending"),
+        app_commands.Choice(name="Popular", value="popular"),
+        app_commands.Choice(name="New", value="new"),
+    ])
+    async def markets_cmd(
+        self,
+        interaction: discord.Interaction,
+        view: str = "curated",
+        category: str | None = None,
+    ):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
-            return  # interaction expired before we could respond
+            return
         await self._ensure_db()
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
-            async with db.execute(f"""
-                SELECT market_id, slug, title, category,
-                       yes_price, no_price, volume, end_date,
-                       COALESCE(volume_24hr, 0), COALESCE(featured, 0), liquidity
-                FROM prediction_markets
-                WHERE status = 'active'
-                  AND yes_price <= ?
-                  AND no_price  <= ?
-                  AND category NOT IN ({blocked_ph})
-                ORDER BY volume DESC
-                LIMIT 200
-            """, (LOPSIDED_THRESHOLD, LOPSIDED_THRESHOLD, *BLOCKED_CATEGORIES)) as cursor:
-                rows = await cursor.fetchall()
+        markets = await self._get_curated_selection(
+            count=MARKETS_PER_PAGE,
+            category=category,
+            view_mode=view,
+        )
 
-        if not rows:
+        if not markets:
             await interaction.followup.send(
                 "⚠️ No markets synced yet. Try again in a moment.",
                 ephemeral=True,
             )
             return
 
-        markets = [
-            {
-                "market_id":   r[0],
-                "slug":        r[1],
-                "title":       r[2],
-                "category":    r[3],
-                "yes_price":   r[4] if r[4] is not None else 0.5,
-                "no_price":    r[5] if r[5] is not None else 0.5,
-                "volume":      r[6] or 0,
-                "end_date":    r[7] or "",
-                "volume_24hr": r[8] or 0,
-                "featured":    r[9] or 0,
-                "liquidity":   r[10] or 0,
-            }
-            for r in rows
-        ]
-
-        # ── Weighted shuffle: score → sort ──
-        sync_epoch = int(time.time() // 300)  # changes every 5 min
-        for m in markets:
-            m["_score"] = _compute_market_score(m, sync_epoch)
-        markets.sort(key=lambda m: m["_score"], reverse=True)
-
         # Category counts for the select menu
         category_counts: dict[str, int] = {}
-        for m in markets:
-            cat = m.get("category", "🌐 Other")
-            category_counts[cat] = category_counts.get(cat, 0) + 1
+        async with aiosqlite.connect(DB_PATH) as db:
+            blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
+            async with db.execute(f"""
+                SELECT category, COUNT(*) FROM prediction_markets
+                WHERE status = 'active' AND category NOT IN ({blocked_ph})
+                GROUP BY category
+            """, tuple(BLOCKED_CATEGORIES)) as cursor:
+                for cat, cnt in await cursor.fetchall():
+                    category_counts[cat] = cnt
 
-        categories = sorted({m["category"] for m in markets})
-        view = MarketBrowserView(
-            markets, categories,
+        categories = sorted(category_counts.keys())
+        browser = CuratedBrowserView(
+            markets=markets,
+            categories=categories,
             category_counts=category_counts,
             cog=self,
+            view_mode=view,
+            filter_category=category,
         )
 
-        embed, card_file = await view._build_page()
-        kwargs = {"embed": embed, "view": view, "ephemeral": True}
+        embed, card_file = await browser._build_page()
+        kwargs = {"embed": embed, "view": browser, "ephemeral": True}
         if card_file:
             kwargs["file"] = card_file
         await interaction.followup.send(**kwargs)
@@ -2066,7 +3284,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
             # Fetch market title for event emission
             async with db.execute(
-                "SELECT question FROM prediction_markets WHERE market_id = ?",
+                "SELECT title FROM prediction_markets WHERE market_id = ?",
                 (market_id,)
             ) as cur:
                 row = await cur.fetchone()
