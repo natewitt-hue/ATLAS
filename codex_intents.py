@@ -470,13 +470,15 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         )
 
     # Player stat leaderboard
+    # (primary_col, secondary_col, table, pos_filter, worst_col)
+    # worst_col: efficiency metric to use for "worst" queries (None = use primary)
     stat_map = {
-        'pass': ('passYds', 'passTDs', 'offensive_stats', 'QB'),
-        'rush': ('rushYds', 'rushTDs', 'offensive_stats', 'HB'),
-        'receiv': ('recYds', 'recTDs', 'offensive_stats', None),
-        'tackl': ('defTotalTackles', None, 'defensive_stats', None),
-        'sack': ('defSacks', None, 'defensive_stats', None),
-        'intercept': ('defInts', None, 'defensive_stats', None),
+        'pass': ('passYds', 'passTDs', 'offensive_stats', 'QB', 'passerRating'),
+        'rush': ('rushYds', 'rushTDs', 'offensive_stats', 'HB', None),
+        'receiv': ('recYds', 'recTDs', 'offensive_stats', None, None),
+        'tackl': ('defTotalTackles', None, 'defensive_stats', None, None),
+        'sack': ('defSacks', None, 'defensive_stats', None, None),
+        'intercept': ('defInts', None, 'defensive_stats', None, None),
     }
 
     stat_key = None
@@ -488,13 +490,23 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     if not stat_key:
         return None  # Fall through to Tier 2/3
 
-    primary_col, secondary_col, table, pos_filter = stat_map[stat_key]
-    select_cols = f"SUM(CAST({primary_col} AS INTEGER)) AS total_stat"
-    if secondary_col:
-        select_cols += f", SUM(CAST({secondary_col} AS INTEGER)) AS total_secondary"
+    primary_col, secondary_col, table, pos_filter, worst_col = stat_map[stat_key]
+    sort_asc = any(kw in text_lower for kw in ['worst', 'bottom', 'fewest', 'least', 'lowest'])
+    sort_dir = 'ASC' if sort_asc else 'DESC'
+
+    # "Worst passer" → use efficiency metric (passer rating) instead of volume
+    if sort_asc and worst_col:
+        select_cols = f"ROUND(AVG(CAST({worst_col} AS REAL)), 1) AS total_stat"
+        if secondary_col:
+            select_cols += f", SUM(CAST({secondary_col} AS INTEGER)) AS total_secondary"
+    else:
+        select_cols = f"SUM(CAST({primary_col} AS INTEGER)) AS total_stat"
+        if secondary_col:
+            select_cols += f", SUM(CAST({secondary_col} AS INTEGER)) AS total_secondary"
 
     sql = f"""
-        SELECT extendedName AS player_name, teamName, {select_cols}
+        SELECT extendedName AS player_name, teamName, {select_cols},
+               COUNT(*) AS games_played
         FROM {table}
         WHERE stageIndex = '1'
     """
@@ -505,10 +517,8 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     if season:
         sql += " AND seasonIndex = ?"
         params_list.append(str(season))
-    sort_asc = any(kw in text_lower for kw in ['worst', 'bottom', 'fewest', 'least', 'lowest'])
-    sort_dir = 'ASC' if sort_asc else 'DESC'
-    # Filter out zero-stat players when sorting ASC (otherwise backups dominate)
-    having = " HAVING total_stat > 0" if sort_asc else ""
+    # Minimum games filter for "worst" queries — exclude one-game backups
+    having = " HAVING COUNT(*) >= 4" if sort_asc else ""
     sql += f" GROUP BY extendedName{having} ORDER BY total_stat {sort_dir} LIMIT ?"
     params_list.append(limit)
 
@@ -868,7 +878,8 @@ def _build_player_stats(match, caller_db, question, resolved_names):
 
     sql = f"""
         SELECT extendedName AS player_name, teamName,
-               {agg}(CAST({column} AS {cast_type})) AS stat_value
+               {agg}(CAST({column} AS {cast_type})) AS stat_value,
+               COUNT(*) AS games_played
         FROM {table}
         WHERE stageIndex = '1'
     """
@@ -879,8 +890,8 @@ def _build_player_stats(match, caller_db, question, resolved_names):
     if season:
         sql += " AND seasonIndex = ?"
         params_list.append(str(season))
-    # Filter out zero-stat players when sorting ASC (otherwise backups dominate)
-    having = " HAVING stat_value > 0" if sort_asc else ""
+    # Minimum games filter for "worst" queries — exclude one-game backups
+    having = " HAVING COUNT(*) >= 4" if sort_asc else ""
     sql += f" GROUP BY extendedName{having} ORDER BY stat_value {sort_dir} LIMIT ?"
     params_list.append(limit)
 
