@@ -81,6 +81,13 @@ def _extract_season(text: str) -> int | None:
     m = re.search(r'(?:season|s)\s*(\d+)', text, re.IGNORECASE)
     if m:
         return int(m.group(1))
+    # Word-number seasons: "season three" → 3
+    m = re.search(
+        r'(?:season)\s+(one|two|three|four|five|six|seven|eight|nine|ten)',
+        text, re.IGNORECASE,
+    )
+    if m:
+        return _WORD_NUMS.get(m.group(1).lower())
     if re.search(r'\bthis\s+season\b|\bcurrent\s+season\b', text, re.IGNORECASE):
         return _current_season()
     if re.search(r'\blast\s+season\b|\bprevious\s+season\b', text, re.IGNORECASE):
@@ -117,7 +124,7 @@ def _normalize_question(text: str) -> str:
     text = re.sub(r"\bwhere's\b", "where is", text, flags=re.IGNORECASE)
     # Strip possessives before known intent keywords (Lions' record → Lions record)
     text = re.sub(
-        r"(\w+)'s?\s+(record|draft|stats?|games?|streak|roster|abilities|x-factor)",
+        r"(\w+)'s?\s+(record|draft|stats?|games?|streak|roster|abilities|x-factor|trades?|wins?|losses?|history|offense|defense|players?|picks?|team|schedule)",
         r"\1 \2", text, flags=re.IGNORECASE,
     )
     return text
@@ -125,15 +132,11 @@ def _normalize_question(text: str) -> str:
 
 def _resolve_team(text: str) -> str | None:
     """Resolve a text fragment to a canonical team name via _TEAM_ALIASES.
-    _TEAM_ALIASES is defined below, before the team-based intents."""
+    _TEAM_ALIASES is defined below, before the team-based intents.
+    Uses exact key match only — no substring matching to avoid false positives
+    like 'was' → Commanders or 'no' → Saints."""
     team_input = text.strip().lower()
-    team_name = _TEAM_ALIASES.get(team_input)
-    if not team_name:
-        for alias, name in _TEAM_ALIASES.items():
-            if team_input in alias or alias in team_input:
-                team_name = name
-                break
-    return team_name
+    return _TEAM_ALIASES.get(team_input)
 
 
 # ── Self-reference collision ─────────────────────────────────────────────────
@@ -408,7 +411,7 @@ def _build_alltime_record(match, caller_db, question, resolved_names):
 @_register("leaderboard", [
     r'\b(?:who|which\s+owner)\s+(?:has|have)\s+(?:the\s+)?most\s+(wins?|losses|games|championships?)',
     r'\btop\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)?\s*(rushers?|passers?|receivers?|tacklers?)',
-    r'\b(?:leading|best|top)\s+(passers?|rushers?|receivers?|scorers?)',
+    r'\b(?:leading|best|top|worst|bottom)\s+(passers?|rushers?|receivers?|scorers?)',
     r'\bleaderboard\s+(?:for\s+)?(passing|rushing|receiving|tackles|sacks|interceptions)',
     r'\bwinningest\s+(?:owners?|coaches?|players?)',
 ])
@@ -417,8 +420,8 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     season = _extract_season(question)
     limit = _extract_limit(question, default=10)
 
-    # Determine if this is an owner wins leaderboard or player stat leaderboard
-    if any(kw in text_lower for kw in ['wins', 'winningest', 'losses', 'championships']):
+    # Determine if this is an owner wins/losses leaderboard or player stat leaderboard
+    if any(kw in text_lower for kw in ['wins', 'winningest', 'championships']):
         # Owner wins leaderboard
         sql = """
             SELECT winner_user AS owner, COUNT(*) AS total_wins
@@ -435,6 +438,25 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         return IntentResult(
             intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
             meta={"type": "leaderboard", "stat": "wins"}
+        )
+
+    if 'loss' in text_lower:
+        # Owner losses leaderboard
+        sql = """
+            SELECT loser_user AS owner, COUNT(*) AS total_losses
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex = '1'
+              AND loser_user IS NOT NULL AND loser_user != ''
+        """
+        params_list = []
+        if season:
+            sql += " AND seasonIndex = ?"
+            params_list.append(str(season))
+        sql += " GROUP BY loser_user ORDER BY total_losses DESC LIMIT ?"
+        params_list.append(limit)
+        return IntentResult(
+            intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
+            meta={"type": "leaderboard", "stat": "losses"}
         )
 
     # Player stat leaderboard
@@ -473,12 +495,14 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     if season:
         sql += " AND seasonIndex = ?"
         params_list.append(str(season))
-    sql += f" GROUP BY extendedName ORDER BY total_stat DESC LIMIT ?"
+    sort_asc = any(kw in text_lower for kw in ['worst', 'bottom', 'fewest', 'least', 'lowest'])
+    sort_dir = 'ASC' if sort_asc else 'DESC'
+    sql += f" GROUP BY extendedName ORDER BY total_stat {sort_dir} LIMIT ?"
     params_list.append(limit)
 
     return IntentResult(
         intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
-        meta={"type": "leaderboard", "stat": stat_key}
+        meta={"type": "leaderboard", "stat": stat_key, "sort": sort_dir.lower()}
     )
 
 
@@ -666,8 +690,8 @@ def _build_team_record(match, caller_db, question, resolved_names):
 # ── Intent 8: Draft History ─────────────────────────────────────────────────
 
 @_register("draft_history", [
-    r'\b(?:who\s+did\s+)?(?:the\s+)?(\w+)\s+draft\b',
-    r"\b(\w+)(?:'s)?\s+draft\s+(?:picks?|history|class)",
+    r'\b(?:who\s+did\s+)?(?:the\s+)?(\w+(?:\s+\w+)?)\s+draft\b',
+    r"\b(\w+(?:\s+\w+)?)(?:'s)?\s+draft\s+(?:picks?|history|class)",
 ])
 def _build_draft_history(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -801,8 +825,6 @@ def _build_playoff_results(match, caller_db, question, resolved_names):
     r'\b(?:who\s+(?:has|leads?|is\s+leading)\s+(?:the\s+)?(?:most|league\s+in))\s+(\w[\w\s]*)',
     # "who has the worst/least/fewest passing yards"
     r'\b(?:who\s+(?:has|is)\s+(?:the\s+)?(?:worst|least|fewest|lowest))\s+(\w[\w\s]*)',
-    # "worst passer", "worst rusher"
-    r'\b(?:worst|bottom)\s+(?:\d+\s+)?(passers?|rushers?|receivers?|tacklers?)',
     # "top rushing yards this season"
     r'\btop\s+(?:\d+\s+)?(?:in\s+)?(passing\s+(?:yards?|tds?|touchdowns?)|rushing\s+(?:yards?|tds?|touchdowns?)|receiving\s+(?:yards?|tds?|touchdowns?)|tackles?|sacks?|interceptions?|forced\s+fumbles?|fumble\s+recoveries?|deflections?|passer\s+rating)',
 ])
@@ -888,19 +910,28 @@ def _build_trade_history(match, caller_db, question, resolved_names):
 @_register("team_stats", [
     r'\b(?:which|what)\s+team\s+(?:has|have|is)\s+(?:the\s+)?(?:best|worst|most|least|highest|lowest)\s+(offense|defense|offence|defence|points?|scoring)',
     r'\b(?:which|what)\s+team\s+scores?\s+(?:the\s+)?most\s+points?',
+    r'\bwho\s+(?:has|have)\s+(?:the\s+)?(?:most|fewest|least|lowest|highest)\s+(points?|offense|defense|offence|defence|scoring)',
 ])
 def _build_team_stats(match, caller_db, question, resolved_names):
     text_lower = question.lower()
 
+    # Detect worst/least/lowest qualifier to flip sort direction
+    flip = any(kw in text_lower for kw in ['worst', 'least', 'lowest', 'fewest'])
+
     # Determine sort column and direction
     if any(kw in text_lower for kw in ['offense', 'offence', 'offensive']):
-        sort_col, sort_dir = 'CAST(offTotalYds AS INTEGER)', 'DESC'
+        sort_col = 'CAST(offTotalYds AS INTEGER)'
+        sort_dir = 'ASC' if flip else 'DESC'
     elif any(kw in text_lower for kw in ['defense', 'defence', 'defensive']):
-        sort_col, sort_dir = 'CAST(defTotalYds AS INTEGER)', 'ASC'
+        sort_col = 'CAST(defTotalYds AS INTEGER)'
+        # Defense: best = fewest yards (ASC), worst = most yards (DESC)
+        sort_dir = 'DESC' if flip else 'ASC'
     elif any(kw in text_lower for kw in ['points', 'scoring', 'scores']):
-        sort_col, sort_dir = 'CAST(ptsFor AS INTEGER)', 'DESC'
+        sort_col = 'CAST(ptsFor AS INTEGER)'
+        sort_dir = 'ASC' if flip else 'DESC'
     else:
-        sort_col, sort_dir = 'CAST(ptsFor AS INTEGER)', 'DESC'
+        sort_col = 'CAST(ptsFor AS INTEGER)'
+        sort_dir = 'ASC' if flip else 'DESC'
 
     limit = _extract_limit(question, default=10)
 
@@ -926,7 +957,8 @@ def _build_team_stats(match, caller_db, question, resolved_names):
 @_register("owner_history", [
     r'\b(?:what\s+)?teams?\s+(?:has|have|did)\s+(\S+)\s+(?:owned?|run|managed|coached)',
     r"\b(\S+)\s+(?:team|ownership)\s+history",
-    r'\bwho\s+(?:owned?|ran|managed)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s+(?:in\s+)?(?:season\s*(\d+))',
+    r'\bwho\s+(?:owned?|ran|managed)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s+in\s+season\s*(\d+)',
+    r'\bwho\s+(?:owned?|ran|managed)\s+(?:the\s+)?(\w+)',
 ])
 def _build_owner_history(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -1338,8 +1370,8 @@ def _build_from_classification(
     """Build IntentResult from Gemini classification output."""
 
     if intent == "h2h_record":
-        o1 = params.get("owner1", caller_db)
-        o2 = params.get("owner2")
+        o1 = _resolve_name(params.get("owner1", ""), resolved_names) or params.get("owner1", caller_db)
+        o2 = _resolve_name(params.get("owner2", ""), resolved_names) or params.get("owner2")
         if not o1 or not o2:
             return IntentResult(intent="unknown", tier=3)
         sql, sql_params = get_h2h_sql_and_params(o1, o2, params.get("season"))
@@ -1349,7 +1381,8 @@ def _build_from_classification(
         )
 
     if intent == "season_record":
-        owner = params.get("owner", caller_db)
+        raw_owner = params.get("owner", "")
+        owner = _resolve_name(raw_owner, resolved_names) or raw_owner or caller_db
         season = params.get("season", _current_season())
         if not owner:
             return IntentResult(intent="unknown", tier=3)
@@ -1369,7 +1402,8 @@ def _build_from_classification(
         )
 
     if intent == "alltime_record":
-        owner = params.get("owner", caller_db)
+        raw_owner = params.get("owner", "")
+        owner = _resolve_name(raw_owner, resolved_names) or raw_owner or caller_db
         if not owner:
             return IntentResult(intent="unknown", tier=3)
         sql = """
@@ -1388,7 +1422,8 @@ def _build_from_classification(
         )
 
     if intent == "recent_games":
-        owner = params.get("owner", caller_db)
+        raw_owner = params.get("owner", "")
+        owner = _resolve_name(raw_owner, resolved_names) or raw_owner or caller_db
         count = params.get("count", 5)
         if not owner:
             return IntentResult(intent="unknown", tier=3)
@@ -1408,7 +1443,8 @@ def _build_from_classification(
         )
 
     if intent == "streak":
-        owner = params.get("owner", caller_db)
+        raw_owner = params.get("owner", "")
+        owner = _resolve_name(raw_owner, resolved_names) or raw_owner or caller_db
         if not owner:
             return IntentResult(intent="unknown", tier=3)
         sql = """
@@ -1429,7 +1465,8 @@ def _build_from_classification(
         stat_type = params.get("stat_type", "wins")
         limit = params.get("limit", 10)
         season = params.get("season")
-        if any(kw in stat_type.lower() for kw in ['wins', 'winningest', 'losses']):
+        st_lower = stat_type.lower()
+        if any(kw in st_lower for kw in ['wins', 'winningest']):
             sql = "SELECT winner_user AS owner, COUNT(*) AS total_wins FROM games WHERE status IN ('2','3') AND stageIndex = '1' AND winner_user IS NOT NULL AND winner_user != ''"
             p = []
             if season:
@@ -1438,6 +1475,15 @@ def _build_from_classification(
             sql += " GROUP BY winner_user ORDER BY total_wins DESC LIMIT ?"
             p.append(limit)
             return IntentResult(intent="leaderboard", sql=sql, params=tuple(p), tier=2, meta={"type": "leaderboard", "stat": "wins"})
+        if 'loss' in st_lower:
+            sql = "SELECT loser_user AS owner, COUNT(*) AS total_losses FROM games WHERE status IN ('2','3') AND stageIndex = '1' AND loser_user IS NOT NULL AND loser_user != ''"
+            p = []
+            if season:
+                sql += " AND seasonIndex = ?"
+                p.append(str(season))
+            sql += " GROUP BY loser_user ORDER BY total_losses DESC LIMIT ?"
+            p.append(limit)
+            return IntentResult(intent="leaderboard", sql=sql, params=tuple(p), tier=2, meta={"type": "leaderboard", "stat": "losses"})
         # Player stat leaderboard — try stat registry
         stat_key, stat_info = _lookup_stat(stat_type)
         if stat_info:
@@ -1523,6 +1569,9 @@ def _build_from_classification(
         cast_type = 'REAL' if agg == 'AVG' else 'INTEGER'
         season = params.get("season")
         limit = params.get("limit", 10)
+        sort_dir = params.get("sort", "DESC")  # Gemini can pass "ASC" for worst/least
+        if sort_dir not in ("ASC", "DESC"):
+            sort_dir = "DESC"
         sql = f"SELECT extendedName AS player_name, teamName, {agg}(CAST({column} AS {cast_type})) AS stat_value FROM {table} WHERE stageIndex = '1'"
         p = []
         if pos_filter:
@@ -1531,9 +1580,9 @@ def _build_from_classification(
         if season:
             sql += " AND seasonIndex = ?"
             p.append(str(season))
-        sql += " GROUP BY extendedName ORDER BY stat_value DESC LIMIT ?"
+        sql += f" GROUP BY extendedName ORDER BY stat_value {sort_dir} LIMIT ?"
         p.append(limit)
-        return IntentResult(intent="player_stats", sql=sql, params=tuple(p), tier=2, meta={"stat": stat_key, "type": "player_stats"})
+        return IntentResult(intent="player_stats", sql=sql, params=tuple(p), tier=2, meta={"stat": stat_key, "sort": sort_dir.lower(), "type": "player_stats"})
 
     if intent == "trade_history":
         team = params.get("team", "")
@@ -1551,7 +1600,19 @@ def _build_from_classification(
         return IntentResult(intent="trade_history", sql=sql, params=tuple(p), tier=2, meta={"team": team_name, "type": "trades"})
 
     if intent == "team_stats":
-        sql = "SELECT teamName, CAST(offTotalYds AS INTEGER) AS off_yds, CAST(defTotalYds AS INTEGER) AS def_yds, CAST(ptsFor AS INTEGER) AS pts_for, CAST(ptsAgainst AS INTEGER) AS pts_against FROM standings ORDER BY CAST(ptsFor AS INTEGER) DESC LIMIT 10"
+        stat_cat = params.get("stat_category", "points")
+        sort_pref = params.get("sort", "best")  # "best" or "worst"
+        cat_lower = stat_cat.lower() if stat_cat else "points"
+        if any(kw in cat_lower for kw in ['offense', 'offence', 'offensive']):
+            sort_col = 'CAST(offTotalYds AS INTEGER)'
+            sort_dir = 'ASC' if sort_pref == 'worst' else 'DESC'
+        elif any(kw in cat_lower for kw in ['defense', 'defence', 'defensive']):
+            sort_col = 'CAST(defTotalYds AS INTEGER)'
+            sort_dir = 'DESC' if sort_pref == 'worst' else 'ASC'
+        else:
+            sort_col = 'CAST(ptsFor AS INTEGER)'
+            sort_dir = 'ASC' if sort_pref == 'worst' else 'DESC'
+        sql = f"SELECT teamName, CAST(offTotalYds AS INTEGER) AS off_yds, CAST(defTotalYds AS INTEGER) AS def_yds, CAST(ptsFor AS INTEGER) AS pts_for, CAST(ptsAgainst AS INTEGER) AS pts_against, CAST(tODiff AS INTEGER) AS to_diff FROM standings ORDER BY {sort_col} {sort_dir} LIMIT 10"
         return IntentResult(intent="team_stats", sql=sql, params=(), tier=2, meta={"type": "team_stats"})
 
     if intent == "owner_history":

@@ -148,6 +148,37 @@ TEST_CASES = [
 
     ("free agents at QB", "TestCaller",
      "Q40: Free agent filter", "roster_query"),
+
+    # === Audit Fix Tests (10 tests) ===
+    ("who has the most losses", "TestCaller",
+     "Q41: Losses leaderboard (not wins)", "leaderboard"),
+
+    ("which team has the worst offense", "TestCaller",
+     "Q42: Worst offense sort ASC", "team_stats"),
+
+    ("which team has the worst defense", "TestCaller",
+     "Q43: Worst defense sort DESC (most yards)", "team_stats"),
+
+    ("worst passer this season", "TestCaller",
+     "Q44: Worst player stat leaderboard", "leaderboard"),
+
+    ("who has the fewest points", "TestCaller",
+     "Q45: Team stats fewest points", "team_stats"),
+
+    ("Bears record this season", "TestCaller",
+     "Q46: Team name that was substring-matching 'chi'", "team_record"),
+
+    ("what was the score of the Commanders game", "TestCaller",
+     "Q47: 'was' in question should not match Commanders alias", "game_score"),
+
+    ("Cowboys record season three", "TestCaller",
+     "Q48: Word-number season", "team_record"),
+
+    ("Witt's trades this season", "TestCaller",
+     "Q49: Possessive + trades keyword", "trade_history"),
+
+    ("who has the least sacks", "TestCaller",
+     "Q50: Least/worst player stat", "player_stats"),
 ]
 
 
