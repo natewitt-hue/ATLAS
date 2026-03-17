@@ -20,23 +20,12 @@ Usage:
 
 from __future__ import annotations
 
-import html as html_mod
 from datetime import datetime
+
+from atlas_html_engine import render_card, wrap_card, esc
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
-
-def _esc(text) -> str:
-    return html_mod.escape(str(text))
-
-
-_NOISE_SVG = (
-    "data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E"
-    "%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' "
-    "numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E"
-    "%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"
-)
-
 
 def _now_ts() -> str:
     """Return a human-readable UTC timestamp for the card footer."""
@@ -60,7 +49,7 @@ def _commentary_html(commentary: str) -> str:
       font-style:italic;
       color:#b0a890;
       line-height:1.45;
-  ">{_esc(commentary)}</div>
+  ">{esc(commentary)}</div>
 </div>"""
 
 
@@ -80,7 +69,7 @@ def _footer_html(player: str) -> str:
       font-weight:600;
       color:#FBBF24;
       font-family:'Outfit',sans-serif;
-  ">{_esc(player)}</div>
+  ">{esc(player)}</div>
   <div style="
       font-size:11px;
       color:#9a9280;
@@ -99,7 +88,6 @@ def _wrap_card(
     body_html: str,
     commentary: str,
     player: str,
-    font_css: str,
 ) -> str:
     """Build a full HTML document around the card shell.
 
@@ -112,49 +100,15 @@ def _wrap_card(
         body_html: the event-specific HTML content block.
         commentary: ATLAS one-liner (may be empty).
         player: player display name for the footer.
-        font_css: @font-face declarations from _font_face_css().
     """
     commentary_block = _commentary_html(commentary)
     footer_block = _footer_html(player)
 
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-{font_css}
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-  background: #0a0a0a;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  padding: 16px;
-  font-family: 'Outfit', system-ui, sans-serif;
-}}
-</style>
-</head>
-<body>
-<div class="card" style="
-    width:700px;
-    border-radius:14px;
-    overflow:hidden;
-    position:relative;
-    background:#111111;
-    border:1px solid rgba(212,175,55,0.18);
-    font-family:'Outfit',system-ui,sans-serif;
-    color:#fff;
-">
-
-  <!-- Noise texture overlay -->
-  <div style="position:absolute;inset:0;opacity:0.035;
-      background-image:url('{_NOISE_SVG}');
-      pointer-events:none;z-index:1;"></div>
-
+    inner_html = f"""
   <!-- 5px status bar -->
-  <div style="height:5px;width:100%;{status_bar_css}position:relative;z-index:2;"></div>
+  <div style="height:5px;width:100%;{status_bar_css}"></div>
 
-  <div style="position:relative;z-index:2;padding:18px 22px;">
+  <div style="padding:18px 22px;">
 
     <!-- ── Header ──────────────────────────────────────────────────── -->
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
@@ -166,10 +120,10 @@ body {{
       ">{icon_emoji}</div>
       <div>
         <div style="font-size:18px;font-weight:800;letter-spacing:1px;color:#e8e0d0;">
-          {_esc(game_label)}
+          {esc(game_label)}
         </div>
         <div style="font-size:10px;color:#9a9280;font-family:'JetBrains Mono',monospace;letter-spacing:1.5px;">
-          {_esc(event_label)}
+          {esc(event_label)}
         </div>
       </div>
     </div>
@@ -181,14 +135,13 @@ body {{
     {footer_block}
 
   </div><!-- /inner padding -->
-</div><!-- /card -->
-</body>
-</html>"""
+"""
+    return wrap_card(inner_html)
 
 
 # ── Jackpot card ──────────────────────────────────────────────────────────────
 
-def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary: str, font_css: str) -> str:
+def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary: str) -> str:
     amount_str = f"${amount:,}"
     mult_str = f"{multiplier:,.1f}x"
 
@@ -222,7 +175,7 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
       filter:drop-shadow(0 2px 10px rgba(212,175,55,0.45));
       line-height:1.05;
       margin-bottom:6px;
-  ">{_esc(amount_str)}</div>
+  ">{esc(amount_str)}</div>
 
   <div style="
       display:inline-block;
@@ -235,10 +188,10 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
       font-weight:700;
       color:#FFDA50;
       margin-bottom:10px;
-  ">{_esc(mult_str)} multiplier</div>
+  ">{esc(mult_str)} multiplier</div>
 
   <div style="font-size:14px;color:#b0a890;margin-top:4px;">
-    <span style="color:#FBBF24;font-weight:700;">{_esc(player)}</span> hit the progressive jackpot
+    <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> hit the progressive jackpot
   </div>
 </div>"""
 
@@ -251,7 +204,6 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
         body_html=body,
         commentary=commentary,
         player=player,
-        font_css=font_css,
     )
 
 
@@ -262,16 +214,13 @@ async def render_jackpot_card(
     commentary: str = "",
 ) -> bytes:
     """Render a jackpot hit highlight card to PNG bytes."""
-    from casino.renderer.casino_html_renderer import _font_face_css, _render_card_html
-
-    font_css = _font_face_css()
-    doc = _build_jackpot_html(player, amount, multiplier, commentary, font_css)
-    return await _render_card_html(doc, width=732)
+    doc = _build_jackpot_html(player, amount, multiplier, commentary)
+    return await render_card(doc)
 
 
 # ── PvP Coinflip card ─────────────────────────────────────────────────────────
 
-def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str, font_css: str) -> str:
+def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> str:
     amount_str = f"${amount:,}"
 
     body = f"""
@@ -304,14 +253,14 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str, font_
           color:#e8e0d0;
           line-height:1.2;
           word-break:break-word;
-      ">{_esc(winner)}</div>
+      ">{esc(winner)}</div>
       <div style="
           font-family:'JetBrains Mono',monospace;
           font-size:20px;
           font-weight:700;
           color:#4ADE80;
           margin-top:6px;
-      ">+{_esc(amount_str)}</div>
+      ">+{esc(amount_str)}</div>
     </div>
 
     <!-- VS divider -->
@@ -345,14 +294,14 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str, font_
           color:#9a9280;
           line-height:1.2;
           word-break:break-word;
-      ">{_esc(loser)}</div>
+      ">{esc(loser)}</div>
       <div style="
           font-family:'JetBrains Mono',monospace;
           font-size:20px;
           font-weight:700;
           color:#F87171;
           margin-top:6px;
-      ">-{_esc(amount_str)}</div>
+      ">-{esc(amount_str)}</div>
     </div>
 
   </div>
@@ -368,7 +317,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str, font_
       font-size:13px;
       color:#b0a890;
       font-family:'JetBrains Mono',monospace;
-  ">Pot: <span style="color:#D4AF37;font-weight:700;">{_esc(amount_str)} each</span> &middot; Total moved: <span style="color:#D4AF37;font-weight:700;">{_esc(f"${amount * 2:,}")}</span></div>
+  ">Pot: <span style="color:#D4AF37;font-weight:700;">{esc(amount_str)} each</span> &middot; Total moved: <span style="color:#D4AF37;font-weight:700;">{esc(f"${amount * 2:,}")}</span></div>
 
 </div>"""
 
@@ -381,7 +330,6 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str, font_
         body_html=body,
         commentary=commentary,
         player=winner,
-        font_css=font_css,
     )
 
 
@@ -392,16 +340,13 @@ async def render_pvp_card(
     commentary: str = "",
 ) -> bytes:
     """Render a PvP coinflip result highlight card to PNG bytes."""
-    from casino.renderer.casino_html_renderer import _font_face_css, _render_card_html
-
-    font_css = _font_face_css()
-    doc = _build_pvp_html(winner, loser, amount, commentary, font_css)
-    return await _render_card_html(doc, width=732)
+    doc = _build_pvp_html(winner, loser, amount, commentary)
+    return await render_card(doc)
 
 
 # ── Crash Last Man Standing card ──────────────────────────────────────────────
 
-def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentary: str, font_css: str) -> str:
+def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentary: str) -> str:
     mult_str = f"{multiplier:,.2f}x"
     payout_str = f"${payout:,}"
 
@@ -436,7 +381,7 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
       filter:drop-shadow(0 2px 12px {mult_glow});
       line-height:1.0;
       margin-bottom:4px;
-  ">{_esc(mult_str)}</div>
+  ">{esc(mult_str)}</div>
 
   <div style="font-size:13px;color:#9a9280;font-family:'JetBrains Mono',monospace;
       letter-spacing:1px;margin-bottom:16px;">CRASH MULTIPLIER</div>
@@ -452,10 +397,10 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
       font-size:22px;
       font-weight:800;
       color:#4ADE80;
-  ">+{_esc(payout_str)}</div>
+  ">+{esc(payout_str)}</div>
 
   <div style="font-size:14px;color:#b0a890;margin-top:14px;">
-    <span style="color:#FBBF24;font-weight:700;">{_esc(player)}</span> rode it out solo &mdash; last one alive
+    <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> rode it out solo &mdash; last one alive
   </div>
 </div>"""
 
@@ -468,7 +413,6 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
         body_html=body,
         commentary=commentary,
         player=player,
-        font_css=font_css,
     )
 
 
@@ -479,11 +423,8 @@ async def render_crash_lms_card(
     commentary: str = "",
 ) -> bytes:
     """Render a Crash Last Man Standing highlight card to PNG bytes."""
-    from casino.renderer.casino_html_renderer import _font_face_css, _render_card_html
-
-    font_css = _font_face_css()
-    doc = _build_crash_lms_html(player, multiplier, payout, commentary, font_css)
-    return await _render_card_html(doc, width=732)
+    doc = _build_crash_lms_html(player, multiplier, payout, commentary)
+    return await render_card(doc)
 
 
 # ── Prediction market resolution card ────────────────────────────────────────
@@ -494,7 +435,6 @@ def _build_prediction_html(
     winners: int,
     payout: int,
     commentary: str,
-    font_css: str,
 ) -> str:
     payout_str = f"${payout:,}"
     is_yes = resolution.upper().startswith("Y")
@@ -521,7 +461,7 @@ def _build_prediction_html(
       margin-bottom:14px;
       padding-bottom:12px;
       border-bottom:1px solid rgba(255,255,255,0.07);
-  ">{_esc(title)}</div>
+  ">{esc(title)}</div>
 
   <!-- Resolution row -->
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
@@ -540,7 +480,7 @@ def _build_prediction_html(
       <div style="font-size:11px;color:#9a9280;font-family:'JetBrains Mono',monospace;
           letter-spacing:1px;margin-bottom:3px;">RESOLVED</div>
       <div style="font-size:13px;color:#b0a890;">
-        <span style="color:#e8e0d0;font-weight:600;">{_esc(winner_text)}</span> share the pot
+        <span style="color:#e8e0d0;font-weight:600;">{esc(winner_text)}</span> share the pot
       </div>
     </div>
   </div>
@@ -563,7 +503,7 @@ def _build_prediction_html(
         font-size:20px;
         font-weight:800;
         color:#D4AF37;
-    ">{_esc(payout_str)}</div>
+    ">{esc(payout_str)}</div>
   </div>
 
 </div>"""
@@ -577,7 +517,6 @@ def _build_prediction_html(
         body_html=body,
         commentary=commentary,
         player=f"{winners:,} winner{'s' if winners != 1 else ''}",
-        font_css=font_css,
     )
 
 
@@ -589,11 +528,8 @@ async def render_prediction_card(
     commentary: str = "",
 ) -> bytes:
     """Render a prediction market resolution highlight card to PNG bytes."""
-    from casino.renderer.casino_html_renderer import _font_face_css, _render_card_html
-
-    font_css = _font_face_css()
-    doc = _build_prediction_html(title, resolution, winners, payout, commentary, font_css)
-    return await _render_card_html(doc, width=732)
+    doc = _build_prediction_html(title, resolution, winners, payout, commentary)
+    return await render_card(doc)
 
 
 # ── Sportsbook parlay card ────────────────────────────────────────────────────
@@ -604,7 +540,6 @@ def _build_parlay_html(
     odds: str,
     payout: int,
     commentary: str,
-    font_css: str,
 ) -> str:
     payout_str = f"${payout:,}"
 
@@ -655,7 +590,7 @@ def _build_parlay_html(
           font-weight:800;
           color:#D4AF37;
           line-height:1.0;
-      ">{_esc(odds)}</div>
+      ">{esc(odds)}</div>
       <div style="font-size:11px;color:#9a9280;margin-top:4px;">AMERICAN</div>
     </div>
 
@@ -682,9 +617,9 @@ def _build_parlay_html(
         color:#4ADE80;
         filter:drop-shadow(0 2px 8px rgba(74,222,128,0.35));
         line-height:1.0;
-    ">+{_esc(payout_str)}</div>
+    ">+{esc(payout_str)}</div>
     <div style="font-size:13px;color:#b0a890;margin-top:8px;">
-      <span style="color:#FBBF24;font-weight:700;">{_esc(player)}</span> cashed a {legs}-leg parlay
+      <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> cashed a {legs}-leg parlay
     </div>
   </div>
 
@@ -699,7 +634,6 @@ def _build_parlay_html(
         body_html=body,
         commentary=commentary,
         player=player,
-        font_css=font_css,
     )
 
 
@@ -711,8 +645,5 @@ async def render_parlay_card(
     commentary: str = "",
 ) -> bytes:
     """Render a sportsbook parlay hit highlight card to PNG bytes."""
-    from casino.renderer.casino_html_renderer import _font_face_css, _render_card_html
-
-    font_css = _font_face_css()
-    doc = _build_parlay_html(player, legs, odds, payout, commentary, font_css)
-    return await _render_card_html(doc, width=732)
+    doc = _build_parlay_html(player, legs, odds, payout, commentary)
+    return await render_card(doc)
