@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.17.1"  # Fix: DB_SCHEMA import broke oracle_cog — uses _build_schema() now
+ATLAS_VERSION = "2.17.2"  # Wire intent detection into Oracle Hub AskTSLModal
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")

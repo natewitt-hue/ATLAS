@@ -216,9 +216,11 @@ except ImportError:
 
 # Shared H2H SQL from intent system
 _get_h2h_sql = None
+_detect_intent = None
 _resolve_db_username_fn = None
 try:
     from codex_intents import get_h2h_sql_and_params as _get_h2h_sql
+    from codex_intents import detect_intent as _detect_intent
 except ImportError:
     pass
 try:
@@ -2765,6 +2767,13 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                 await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
                 return
 
+            # ── Resolve caller identity ─────────────────────────
+            caller_db = None
+            if _resolve_db_username_fn:
+                caller_db = _resolve_db_username_fn(interaction.user.id)
+            if not caller_db:
+                caller_db = interaction.user.name
+
             # ── Conversation memory ─────────────────────────────
             conv_block = ""
             if _build_conversation_block:
@@ -2779,39 +2788,56 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                 except Exception:
                     pass
 
-            sql = await gemini_sql(annotated, client, alias_map, conv_context=conv_block)
-            if not sql:
-                await interaction.followup.send(
-                    "📊 Couldn't generate a query for that. Try rephrasing — "
-                    "be specific about player names, seasons, or owners.",
-                    ephemeral=True,
-                )
-                return
+            # ── Three-tier intent detection ─────────────────────
+            intent_result = None
+            tier_label = "Tier 3 (NL→SQL)"
+            if _detect_intent:
+                intent_result = await _detect_intent(q, caller_db, alias_map, client)
 
-            rows, error = run_sql(sql)
-            if error:
-                fix_prompt = (
-                    f"This SQLite query for a Madden database failed:\n{sql}\n\n"
-                    f"Error: {error}\n\n"
-                    f"REMINDER: ALL columns are stored as TEXT. Always use "
-                    f"CAST(col AS INTEGER) for numeric comparisons.\n"
-                    f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
-                )
-                loop = asyncio.get_running_loop()
-                fix_response = await loop.run_in_executor(
-                    None,
-                    lambda: client.models.generate_content(
-                        model="gemini-2.0-flash", contents=fix_prompt
-                    ),
-                )
-                sql = extract_sql(fix_response.text) or sql
-                rows, error = run_sql(sql)
+            if intent_result and intent_result.tier < 3 and intent_result.sql:
+                # Tier 1/2: deterministic SQL — skip Gemini SQL generation
+                rows, error = run_sql(intent_result.sql, intent_result.params)
+                sql = intent_result.sql
+                tier_label = f"Tier {intent_result.tier} ({'regex' if intent_result.tier == 1 else 'classified'})"
                 if error:
+                    # Fall through to Gemini SQL on deterministic failure
+                    intent_result = None
+
+            if not intent_result or intent_result.tier >= 3 or not intent_result.sql:
+                # Tier 3: Gemini NL→SQL fallback
+                sql = await gemini_sql(annotated, client, alias_map, conv_context=conv_block)
+                if not sql:
                     await interaction.followup.send(
-                        "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
+                        "📊 Couldn't generate a query for that. Try rephrasing — "
+                        "be specific about player names, seasons, or owners.",
+                        ephemeral=True,
                     )
                     return
+
+                rows, error = run_sql(sql)
+                if error:
+                    fix_prompt = (
+                        f"This SQLite query for a Madden database failed:\n{sql}\n\n"
+                        f"Error: {error}\n\n"
+                        f"REMINDER: ALL columns are stored as TEXT. Always use "
+                        f"CAST(col AS INTEGER) for numeric comparisons.\n"
+                        f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
+                        f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
+                    )
+                    loop = asyncio.get_running_loop()
+                    fix_response = await loop.run_in_executor(
+                        None,
+                        lambda: client.models.generate_content(
+                            model="gemini-2.0-flash", contents=fix_prompt
+                        ),
+                    )
+                    sql = extract_sql(fix_response.text) or sql
+                    rows, error = run_sql(sql)
+                    if error:
+                        await interaction.followup.send(
+                            "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
+                        )
+                        return
 
             answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
             answer = await gemini_answer(q, sql, rows, client, conv_context=answer_context)
@@ -2826,7 +2852,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                 color=C_DARK,
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
-            footer_parts = [f"🔍 {len(rows)} records analyzed"]
+            footer_parts = [f"🔍 {len(rows)} records analyzed", tier_label]
             if alias_map:
                 footer_parts.append(
                     f"🔎 Resolved: {', '.join(f'{k}→{v}' for k, v in alias_map.items())}"
