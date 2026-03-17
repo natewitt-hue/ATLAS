@@ -157,3 +157,288 @@ def resolve_stat_keyword(keyword: str) -> StatDef | None:
             col = _STAT_KEYWORDS[key]
             return STAT_DEFS.get(col)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: Composable QueryBuilder
+# ---------------------------------------------------------------------------
+class Query:
+    """
+    Composable SQL builder with domain guards.
+
+    Usage:
+        rows, err = (Query("offensive_stats")
+            .filter(season=6, stage="regular")
+            .stat("passYds")
+            .sort("best")
+            .limit(10)
+            .execute())
+    """
+
+    # Stage name → stageIndex mapping
+    _STAGE_MAP = {"preseason": "0", "regular": "1", "playoffs": "2"}
+
+    def __init__(self, table: str):
+        self._table = table
+        self._selects: list[str] = []
+        self._wheres: list[str] = []
+        self._params: list[Any] = []
+        self._group_bys: list[str] = []
+        self._having: str | None = None
+        self._order_by: str | None = None
+        self._limit_val: int | None = None
+        self._stat_def: StatDef | None = None
+        self._sort_mode: str | None = None  # "best" or "worst"
+        self._aggregates: dict[str, str] = {}  # col → agg_func
+
+    def select(self, *columns: str) -> "Query":
+        self._selects.extend(columns)
+        return self
+
+    def filter(self, **kwargs) -> "Query":
+        """Add WHERE filters. Supports: season, stage, pos, user, team."""
+        for key, val in kwargs.items():
+            if key == "season":
+                self._wheres.append("seasonIndex = ?")
+                self._params.append(str(val))
+            elif key == "stage":
+                stage_val = self._STAGE_MAP.get(str(val).lower(), str(val))
+                self._wheres.append("stageIndex = ?")
+                self._params.append(stage_val)
+            elif key == "pos":
+                self._wheres.append("pos = ?")
+                self._params.append(str(val))
+            elif key == "user":
+                self._wheres.append("(homeUser = ? OR awayUser = ?)")
+                self._params.extend([str(val), str(val)])
+            elif key == "team":
+                self._wheres.append("(homeTeamName = ? OR awayTeamName = ? OR teamName = ?)")
+                self._params.extend([str(val), str(val), str(val)])
+            else:
+                self._wheres.append(f"{key} = ?")
+                self._params.append(str(val))
+        return self
+
+    def where(self, clause: str, *params) -> "Query":
+        """Add a raw WHERE clause. Values MUST be passed as params."""
+        _validate_where_clause(clause)
+        self._wheres.append(clause)
+        self._params.extend(params)
+        return self
+
+    def stat(self, stat_name: str) -> "Query":
+        """Set the stat to query. Applies domain rules from STAT_DEFS."""
+        sd = STAT_DEFS.get(stat_name)
+        if sd is None:
+            sd = resolve_stat_keyword(stat_name)
+        if sd is None:
+            raise ValueError(f"Unknown stat: {stat_name}")
+        self._stat_def = sd
+        # Auto-apply position filter
+        if sd.pos:
+            self.filter(pos=sd.pos)
+        return self
+
+    def sort(self, mode: str) -> "Query":
+        """Set sort mode: 'best' or 'worst'. Domain rules applied at build time."""
+        if mode not in ("best", "worst"):
+            raise ValueError(f"sort mode must be 'best' or 'worst', got '{mode}'")
+        self._sort_mode = mode
+        return self
+
+    def aggregate(self, **kwargs) -> "Query":
+        """Add aggregations: aggregate(passYds='SUM', passTDs='SUM')."""
+        self._aggregates.update(kwargs)
+        return self
+
+    def group_by(self, *columns: str) -> "Query":
+        self._group_bys.extend(columns)
+        return self
+
+    def having(self, clause: str) -> "Query":
+        self._having = clause
+        return self
+
+    def sort_by(self, column: str, direction: str = "DESC") -> "Query":
+        """Explicit sort (bypasses domain guards). Use sort() when possible.
+        If column already contains CAST or commas, it's treated as a raw expression."""
+        d = direction.upper()
+        if d not in ("ASC", "DESC"):
+            raise ValueError(f"direction must be ASC or DESC, got '{d}'")
+        # If column is already a complex expression (contains CAST, parens, or commas),
+        # use it as-is to avoid double-wrapping
+        if "CAST(" in column.upper() or "," in column or "(" in column:
+            self._order_by = f"{column} {d}"
+        else:
+            text_cols = ("extendedName", "teamName", "fullName", "player_name",
+                         "stat_value", "margin", "total_pts")
+            cast = f"CAST({column} AS REAL)" if column not in text_cols else column
+            self._order_by = f"{cast} {d}"
+        return self
+
+    def limit(self, n: int) -> "Query":
+        self._limit_val = n
+        return self
+
+    # Valid table names (prevents empty-table queries)
+    _VALID_TABLES = {
+        "games", "teams", "standings", "offensive_stats", "defensive_stats",
+        "team_stats", "trades", "players", "player_abilities", "owner_tenure",
+        "player_draft_map",
+    }
+
+    def build(self) -> tuple[str, tuple]:
+        """Build the SQL query string and parameter tuple."""
+        sd = self._stat_def
+        selects = list(self._selects)
+        wheres = list(self._wheres)
+        params = list(self._params)
+        group_bys = list(self._group_bys)
+        having = self._having
+        order_by = self._order_by
+        table = self._table
+
+        # If a stat was set, apply domain rules
+        if sd:
+            actual_col = sd.column
+            actual_agg = sd.agg
+            cast_type = "REAL" if actual_agg == "AVG" else "INTEGER"
+
+            # Efficiency vs volume: "worst" on a stat with efficiency_alt
+            if self._sort_mode == "worst" and sd.efficiency_alt:
+                alt = STAT_DEFS.get(sd.efficiency_alt)
+                if alt:
+                    actual_col = alt.column
+                    actual_agg = alt.agg
+                    cast_type = "REAL"
+
+            # Build aggregation select
+            agg_expr = f"{actual_agg}(CAST({actual_col} AS {cast_type}))"
+            if actual_agg == "AVG":
+                agg_expr = f"ROUND({agg_expr}, 1)"
+            selects.append(f"{agg_expr} AS stat_value")
+
+            # Auto group by player name if it's a player stat table
+            if sd.table in ("offensive_stats", "defensive_stats") and not group_bys:
+                selects = ["extendedName AS player_name", "teamName"] + selects
+                group_bys = ["extendedName", "teamName"]
+
+            # Sort direction: domain-aware
+            if self._sort_mode:
+                sort_dir = _resolve_sort_direction(sd, self._sort_mode)
+                order_by = f"stat_value {sort_dir}"
+
+            # Min games filter for "worst" queries
+            if self._sort_mode == "worst":
+                having = f"COUNT(*) >= {sd.min_games}"
+
+            table = sd.table
+
+        # Process explicit aggregates (non-stat path)
+        agg_selects = []
+        for col, agg_func in self._aggregates.items():
+            cast_type = "REAL" if agg_func == "AVG" else "INTEGER"
+            agg_selects.append(f"{agg_func}(CAST({col} AS {cast_type})) AS {col}")
+        if agg_selects:
+            selects.extend(agg_selects)
+
+        # Validate table name
+        if table not in self._VALID_TABLES:
+            raise ValueError(f"Invalid table name: '{table}'. Must be one of: {self._VALID_TABLES}")
+
+        # Build SQL
+        select_str = ", ".join(selects) if selects else "*"
+        sql = f"SELECT {select_str} FROM {table}"
+
+        # Completed games filter (auto-applied for games table)
+        if table == "games" and not any("status" in w for w in wheres):
+            wheres.append("status IN ('2', '3')")
+
+        if wheres:
+            sql += " WHERE " + " AND ".join(wheres)
+        if group_bys:
+            sql += " GROUP BY " + ", ".join(group_bys)
+        if having:
+            sql += f" HAVING {having}"
+        if order_by:
+            sql += f" ORDER BY {order_by}"
+        if self._limit_val:
+            sql += f" LIMIT {self._limit_val}"
+
+        return sql, tuple(params)
+
+    def execute(self) -> tuple[list[dict], str | None]:
+        """Build and execute the query, returning (rows, error)."""
+        sql, params = self.build()
+        return _run_sql(sql, params)
+
+
+def _resolve_sort_direction(sd: StatDef, mode: str) -> str:
+    """
+    Resolve sort direction based on stat category and mode.
+
+    For offense: best=DESC (most), worst=ASC (fewest)
+    For defense team stats: best=ASC (fewest yards allowed), worst=DESC (most)
+    For individual defensive stats (tackles, sacks, ints): best=DESC (most), worst=ASC
+    """
+    if sd.table == "team_stats" and sd.category == "defense":
+        # Team defense: best = fewest yards = ASC
+        return "ASC" if mode == "best" else "DESC"
+    if sd.table == "standings" and sd.column == "ptsAgainst":
+        # Points against: best = fewest = ASC
+        return "ASC" if mode == "best" else "DESC"
+    # Everything else (offense, individual defense): best = most = DESC
+    return "DESC" if mode == "best" else "ASC"
+
+
+# Known safe column names from all tables (for .where() validation)
+_KNOWN_COLUMNS = {
+    # games
+    "id", "scheduleId", "seasonIndex", "stageIndex", "weekIndex",
+    "homeTeamId", "awayTeamId", "homeTeamName", "awayTeamName",
+    "homeScore", "awayScore", "status", "homeUser", "awayUser",
+    "winner_user", "loser_user", "winner_team", "loser_team",
+    # offensive_stats
+    "fullName", "extendedName", "gameId", "teamId", "teamName", "rosterId", "pos",
+    "passAtt", "passComp", "passCompPct", "passTDs", "passInts", "passYds",
+    "passSacks", "passerRating", "rushAtt", "rushYds", "rushTDs", "rushFum",
+    "recCatches", "recDrops", "recYds", "recTDs", "recYdsAfterCatch",
+    # defensive_stats
+    "statId", "defTotalTackles", "defSacks", "defInts", "defForcedFum",
+    "defFumRec", "defTDs", "defDeflections",
+    # team_stats
+    "offTotalYds", "offPassYds", "offRushYds", "defTotalYds", "defPassYds",
+    "defRushYds", "ptsFor", "ptsAgainst", "tODiff",
+    # players
+    "firstName", "lastName", "age", "playerBestOvr", "dev", "isFA", "isOnIR",
+    "jerseyNum", "college", "yearsPro", "capHit",
+    # standings
+    "totalWins", "totalLosses", "divisionName", "conferenceName", "seed", "winPct",
+    # player_draft_map
+    "drafting_team", "drafting_season", "draftRound", "draftPick", "was_traded",
+    # owner_tenure
+    "userName", "games_played",
+    # player_abilities
+    "title", "description",
+    # trades
+    "team1Name", "team2Name", "team1Sent", "team2Sent",
+}
+
+
+def _validate_where_clause(clause: str) -> None:
+    """Validate a raw WHERE clause. Blocks dangerous SQL and validates column refs."""
+    upper = clause.upper().strip()
+    # Block dangerous keywords
+    dangerous = {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "EXEC",
+                 "EXECUTE", "UNION", "--", ";", "/*"}
+    for d in dangerous:
+        if d in upper:
+            raise ValueError(f"Unsafe SQL pattern in WHERE clause: {d}")
+    # Validate that any identifiers (non-operator, non-keyword tokens) are known columns
+    import re
+    identifiers = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', clause)
+    safe_keywords = {"IN", "NOT", "LIKE", "BETWEEN", "IS", "NULL", "AND", "OR",
+                     "CAST", "AS", "INTEGER", "REAL", "TEXT", "ABS", "COUNT"}
+    for ident in identifiers:
+        if ident.upper() not in safe_keywords and ident not in _KNOWN_COLUMNS:
+            raise ValueError(f"Unknown column in WHERE clause: {ident}")
