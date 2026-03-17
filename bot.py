@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.17.2"  # Wire intent detection into Oracle Hub AskTSLModal
+ATLAS_VERSION = "2.18.0"  # Stress-tested intent detection: 10/10 queries pass, opponent filters, word order
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")

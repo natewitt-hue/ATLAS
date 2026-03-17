@@ -170,6 +170,8 @@ def _register(name: str, patterns: list[str]):
 # ── Intent 1: Head-to-Head Record ────────────────────────────────────────────
 
 @_register("h2h_record", [
+    # "Chokolate_Thunda's record vs MeLLoW_FiRe", "Witt's record vs JT"
+    r"\b(\S+?)(?:'s)?\s+record\s+(?:vs\.?|against|with|versus)\s+(\S+)",
     # "my record vs JT", "record against Killa"
     r'\b(?:record|h2h|head[\s-]?to[\s-]?head)\s+(?:vs\.?|against|with|versus)\s+(\S+)',
     # "how do I stack up against JT", "how have I done vs Killa"
@@ -189,6 +191,18 @@ def _build_h2h(match, caller_db, question, resolved_names):
     if not owner1 or not owner2:
         return None
 
+    # "my" / "i" → use caller identity
+    if owner1.lower() in ('my', 'i', 'me'):
+        owner1 = caller_db
+    if owner2.lower() in ('my', 'i', 'me'):
+        owner2 = caller_db
+
+    # Reject common English words that aren't owner names
+    _STOP_WORDS = {'games', 'game', 'record', 'the', 'what', 'is', 'last', 'recent',
+                   'this', 'that', 'season', 'all', 'time', 'how', 'did', 'does', 'do'}
+    if owner1.lower() in _STOP_WORDS or owner2.lower() in _STOP_WORDS:
+        return None  # Not a real H2H — fall through to other intents
+
     # Resolve through alias map + fuzzy resolver (handles short nicknames like "JT")
     owner1 = _resolve_name(owner1, resolved_names) or owner1
     owner2 = _resolve_name(owner2, resolved_names) or owner2
@@ -206,6 +220,8 @@ def _build_h2h(match, caller_db, question, resolved_names):
 @_register("season_record", [
     # "my record this season", "Witt's record in season 5"
     r"\b(?:my|(\S+?)(?:'s)?)\s+record\s+(?:this|in|for)?\s*(?:season|s)\s*(\d+)?",
+    # "my season record", "Witt's season 5 record" (reversed word order)
+    r"\b(?:my|(\S+?)(?:'s)?)\s+season\s*(\d+)?\s+record",
     # "my wins and losses this season"
     r"\b(?:my|(\S+?)(?:'s)?)\s+wins?\s+(?:and\s+)?loss(?:es)?\s*(?:this\s+season)?",
     # "how am I doing this season", "how is Witt doing"
@@ -361,40 +377,76 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
 # ── Intent 5: Recent Games ──────────────────────────────────────────────────
 
 @_register("recent_games", [
-    r"\b(?:my|(\S+?)(?:'s)?)\s+last\s+(\d+)\s+games?",
+    # "my last 5 games vs Killa" — with opponent filter
+    r"\b(?:my|(\S+?)(?:'s)?)\s+last\s+(\d+)\s+games?\s+(?:vs\.?|against|versus)\s+(\S+)",
+    # "my last 5 games" — no opponent
+    r"\b(?:my|(\S+?)(?:'s)?)\s+last\s+(\d+)\s+games?(?!\s+(?:vs|against|versus))",
     r"\b(?:my|(\S+?)(?:'s)?)\s+recent\s+(?:games?|results?|matchups?)",
     r"\b(?:my|(\S+?)(?:'s)?)\s+(?:last|most\s+recent)\s+game\b",
 ])
 def _build_recent_games(match, caller_db, question, resolved_names):
-    groups = [g for g in match.groups() if g]
+    groups = list(match.groups())  # Keep positional structure
     owner = None
     count = 5  # default
-    for g in groups:
-        if g and g.isdigit():
+    opponent = None
+
+    # Check if "my" was used (first group is None because (?:my|(\S+?)...) matched "my")
+    used_my = bool(re.search(r'\bmy\b', question, re.IGNORECASE)) and groups[0] is None
+
+    non_none = [g for g in groups if g]
+    for g in non_none:
+        if g.isdigit():
             count = int(g)
-        elif g:
+        elif used_my and owner is None:
+            # "my" was used → caller is owner, this name is the opponent
+            owner = caller_db
+            opponent = _resolve_name(g, resolved_names) or g
+        elif owner is None:
             owner = _resolve_name(g, resolved_names) or g
+        elif opponent is None:
+            opponent = _resolve_name(g, resolved_names) or g
+
     if not owner:
         owner = caller_db
     if not owner:
         return None
 
-    sql = """
-        SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName,
-               homeScore, awayScore, homeUser, awayUser,
-               winner_user, loser_user
-        FROM games
-        WHERE status IN ('2','3')
-          AND stageIndex = '1'
-          AND (homeUser = ? OR awayUser = ?)
-        ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC
-        LIMIT ?
-    """
-    params = (owner, owner, count)
-    return IntentResult(
-        intent="recent_games", sql=sql, params=params, tier=1,
-        meta={"owner": owner, "count": count, "type": "game_log"}
-    )
+    if opponent:
+        # Recent games filtered by opponent
+        sql = """
+            SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName,
+                   homeScore, awayScore, homeUser, awayUser,
+                   winner_user, loser_user
+            FROM games
+            WHERE status IN ('2','3')
+              AND stageIndex = '1'
+              AND ((homeUser = ? AND awayUser = ?)
+                OR (homeUser = ? AND awayUser = ?))
+            ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC
+            LIMIT ?
+        """
+        params = (owner, opponent, opponent, owner, count)
+        return IntentResult(
+            intent="recent_games", sql=sql, params=params, tier=1,
+            meta={"owner": owner, "opponent": opponent, "count": count, "type": "game_log"}
+        )
+    else:
+        sql = """
+            SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName,
+                   homeScore, awayScore, homeUser, awayUser,
+                   winner_user, loser_user
+            FROM games
+            WHERE status IN ('2','3')
+              AND stageIndex = '1'
+              AND (homeUser = ? OR awayUser = ?)
+            ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC
+            LIMIT ?
+        """
+        params = (owner, owner, count)
+        return IntentResult(
+            intent="recent_games", sql=sql, params=params, tier=1,
+            meta={"owner": owner, "count": count, "type": "game_log"}
+        )
 
 
 # ── Intent 6: Streak ────────────────────────────────────────────────────────
