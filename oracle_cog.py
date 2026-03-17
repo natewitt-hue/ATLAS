@@ -191,8 +191,8 @@ resolve_names_in_question = None
 gemini_sql = None
 gemini_answer = None
 extract_sql = None
-DB_SCHEMA = ""
 KNOWN_USERS = ""
+_build_schema_fn = None
 _build_conversation_block = None
 _add_conversation_turn = None
 
@@ -206,7 +206,7 @@ try:
         resolve_names_in_question,
         _build_conversation_block,
         _add_conversation_turn,
-        DB_SCHEMA,
+        _build_schema as _build_schema_fn,
         KNOWN_USERS,
     )
     _HISTORY_OK = True
@@ -2796,7 +2796,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                     f"REMINDER: ALL columns are stored as TEXT. Always use "
                     f"CAST(col AS INTEGER) for numeric comparisons.\n"
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{DB_SCHEMA}"
+                    f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
                 )
                 loop = asyncio.get_running_loop()
                 fix_response = await loop.run_in_executor(
