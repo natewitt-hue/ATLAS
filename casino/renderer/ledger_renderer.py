@@ -9,11 +9,10 @@ Reuses the browser singleton from card_renderer.py.
 
 from __future__ import annotations
 
-import html as html_mod
 from datetime import datetime, timezone
 from typing import Optional
 
-from casino.renderer.casino_html_renderer import _font_face_css
+from atlas_html_engine import render_card as _engine_render_card, esc, _font_face_css
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
 GAME_INFO = {
@@ -193,7 +192,7 @@ body {
 
 def _esc(text: str) -> str:
     """HTML-escape user-controlled text."""
-    return html_mod.escape(str(text))
+    return esc(text)
 
 
 def _pl_color(value: int) -> str:
@@ -368,33 +367,8 @@ def _build_transaction_html(
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 async def _render_html_to_png(html_content: str) -> bytes:
-    """Render HTML string to PNG bytes via Playwright."""
-    from card_renderer import _get_browser
-
-    browser = await _get_browser()
-    page = await browser.new_page(viewport={"width": 720, "height": 400})
-    try:
-        await page.set_content(html_content, wait_until="load", timeout=10000)
-
-        card = await page.query_selector(".card")
-        clip = None
-        if card:
-            box = await card.bounding_box()
-            if box:
-                await page.set_viewport_size({
-                    "width": 720,
-                    "height": int(box["height"]) + 4,
-                })
-                clip = {
-                    "x": box["x"],
-                    "y": box["y"],
-                    "width": box["width"],
-                    "height": box["height"],
-                }
-
-        return await page.screenshot(clip=clip, type="png")
-    finally:
-        await page.close()
+    """Render HTML string to PNG bytes via unified engine."""
+    return await _engine_render_card(html_content, width=720)
 
 
 async def render_ledger_card(

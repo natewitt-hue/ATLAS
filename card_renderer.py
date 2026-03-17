@@ -35,15 +35,16 @@ trade_data dict keys:
 
 from __future__ import annotations
 
-import html as _html_mod
 import json
 import base64
 from pathlib import Path
 
+from atlas_html_engine import render_card as engine_render_card, wrap_card, esc
+
 
 def _esc(text) -> str:
     """Escape user-controlled text for safe HTML embedding."""
-    return _html_mod.escape(str(text))
+    return esc(text)
 
 # ── Genesis icon loader (base64 for inline HTML) ─────────────────────────────
 
@@ -808,35 +809,9 @@ async def render_trade_card(data: dict) -> bytes | None:
     Render a trade card to PNG bytes.
     Returns None on failure (caller should fall back to embed).
     """
-    page = None
     try:
-        browser = await _get_browser()
-        page    = await browser.new_page(viewport={"width": 720, "height": 1200})
-
         html = _build_html(data)
-        await page.set_content(html, wait_until="networkidle")
-
-        # Size to content — initialise box before conditional to prevent
-        # UnboundLocalError when card element is not found.
-        box = None
-        card = await page.query_selector(".card")
-        if card:
-            box = await card.bounding_box()
-            if box:
-                await page.set_viewport_size({
-                    "width": 720,
-                    "height": int(box["height"]) + 20
-                })
-
-        clip = None
-        if card and box:
-            clip = {"x": 0, "y": 0, "width": 720, "height": int(box["height"]) + 20}
-        png_bytes = await page.screenshot(clip=clip, type="png")
-        return png_bytes
-
+        return await engine_render_card(html, width=720)
     except Exception as e:
         print(f"[card_renderer] Render error: {e}")
         return None
-    finally:
-        if page:
-            await page.close()
