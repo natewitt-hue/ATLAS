@@ -1618,7 +1618,7 @@ class SportsbookHubView(discord.ui.View):
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            img = await asyncio.to_thread(build_stats_card, interaction.user.id)
+            img = await build_stats_card(interaction.user.id)
             file = card_to_file(img, "stats.png")
             embed = discord.Embed(color=TSL_GOLD)
             embed.set_image(url="attachment://stats.png")
@@ -1922,7 +1922,7 @@ class SportsbookCog(commands.Cog):
     async def sportsbook(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            img = await asyncio.to_thread(build_sportsbook_card, interaction.user.id)
+            img = await build_sportsbook_card(interaction.user.id)
             file = card_to_file(img, "sportsbook.png")
             embed = discord.Embed(color=TSL_GOLD)
             embed.set_image(url="attachment://sportsbook.png")
