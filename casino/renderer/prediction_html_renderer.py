@@ -14,14 +14,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from casino.renderer.casino_html_renderer import (
-    _base_css,
-    _build_data_grid_html,
-    _build_footer_html,
-    _build_header_html,
-    _esc,
-    _render_card_html,
-    _wrap_card,
+from atlas_html_engine import (
+    render_card,
+    wrap_card,
+    esc,
+    build_header_html,
+    build_data_grid_html,
+    build_footer_html,
 )
 
 # ── Category badge colors (hex) ──────────────────────────────────────────────
@@ -482,20 +481,10 @@ def _implied_profit(price: float) -> str:
 
 
 def _wrap_prediction_card(status_class: str, content: str) -> str:
-    """Wrap prediction market content with base + prediction CSS."""
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>{_base_css()}{_prediction_css()}</style>
-</head>
-<body>
-<div class="card">
-  <div class="status-bar {_esc(status_class)}"></div>
-  {content}
-</div>
-</body>
-</html>"""
+    """Wrap prediction market content with base engine CSS + prediction-specific CSS."""
+    base_html = wrap_card(content, status_class)
+    # Inject prediction-specific CSS before </head>
+    return base_html.replace("</style>", f"{_prediction_css()}</style>", 1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -509,7 +498,7 @@ def _build_market_list_html(
     filter_label: str = "All Categories",
 ) -> str:
     """Build HTML for the market list card (compact rows, scannable)."""
-    header = _build_header_html(
+    header = build_header_html(
         icon="📊",
         title="PREDICTION MARKETS",
         players=[],
@@ -533,8 +522,8 @@ def _build_market_list_html(
         rows_html += f"""
         <div class="market-list-row">
           <div class="market-index">{idx}</div>
-          <div class="category-badge" style="background: {cat_color};">{_esc(cat_name)}</div>
-          <div class="market-title-text">{_esc(title)}</div>
+          <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+          <div class="market-title-text">{esc(title)}</div>
           <div class="odds-pill">
             <span class="odds-yes">{yes_price:.0%}</span>
             <span class="odds-no">{no_price:.0%}</span>
@@ -552,7 +541,7 @@ def _build_market_list_html(
     <div style="padding: 6px 20px 2px; font-family: 'Outfit', sans-serif;
                 font-weight: 600; font-size: 10px; color: var(--text-dim);
                 letter-spacing: 1px; text-transform: uppercase;">
-      {_esc(filter_label)}
+      {esc(filter_label)}
     </div>"""
 
     return f"""
@@ -573,7 +562,7 @@ async def render_market_list_card(
     """Render market list browse card to PNG bytes."""
     content = _build_market_list_html(markets, page, total_pages, filter_label)
     html = _wrap_prediction_card("active", content)
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -598,7 +587,7 @@ def _build_market_detail_html(
     cat_name = parts[1] if len(parts) > 1 else parts[0]
     cat_color = _category_color(category)
 
-    header = _build_header_html(
+    header = build_header_html(
         icon="📊",
         title=cat_name.upper(),
         players=[],
@@ -622,7 +611,7 @@ def _build_market_detail_html(
         pos_text = f"YOUR BET: {user_position}"
         if user_contracts:
             pos_text += f" × {user_contracts}"
-        position_html = f'<div class="position-badge {side_class}">{_esc(pos_text)}</div>'
+        position_html = f'<div class="position-badge {side_class}">{esc(pos_text)}</div>'
 
     # Meta line
     meta_parts = []
@@ -643,7 +632,7 @@ def _build_market_detail_html(
     {header}
     <div class="gold-divider"></div>
     <div class="market-detail-body">
-      <div class="market-question">{_esc(title)}</div>
+      <div class="market-question">{esc(title)}</div>
       <div class="prob-bar">
         <div class="prob-fill-yes" style="width: {yes_pct:.0%};">YES {yes_price:.0%}</div>
         <div class="prob-fill-no" style="width: {no_pct:.0%};">NO {no_price:.0%}</div>
@@ -652,17 +641,17 @@ def _build_market_detail_html(
         <div class="price-box yes">
           <div class="price-side yes">YES</div>
           <div class="price-value">{yes_price:.0%}</div>
-          <div class="price-profit yes">{_esc(yes_profit)}</div>
+          <div class="price-profit yes">{esc(yes_profit)}</div>
         </div>
         <div class="price-box no">
           <div class="price-side no">NO</div>
           <div class="price-value">{no_price:.0%}</div>
-          <div class="price-profit no">{_esc(no_profit)}</div>
+          <div class="price-profit no">{esc(no_profit)}</div>
         </div>
       </div>
       {position_html}
     </div>
-    <div class="meta-line"><span>{_esc(meta_text)}</span></div>
+    <div class="meta-line"><span>{esc(meta_text)}</span></div>
     <div class="gold-divider"></div>
     """
 
@@ -685,7 +674,7 @@ async def render_market_detail_card(
         liquidity, end_date, user_position, user_contracts, user_cost,
     )
     html = _wrap_prediction_card("active", content)
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -707,7 +696,7 @@ async def render_bet_confirmation_card(
     outcome = "win" if side.upper() == "YES" else "loss"
     side_class = "yes" if side.upper() == "YES" else "no"
 
-    header = _build_header_html(
+    header = build_header_html(
         icon="📊",
         title="PREDICTION MARKET",
         players=[player_name],
@@ -719,7 +708,7 @@ async def render_bet_confirmation_card(
 
     body = f"""
     <div class="bet-detail-body">
-      <div class="bet-market-title">{_esc(market_title)}</div>
+      <div class="bet-market-title">{esc(market_title)}</div>
       <div class="bet-info-grid">
         <div class="bet-info-cell">
           <div class="bet-info-label">Side</div>
@@ -737,8 +726,8 @@ async def render_bet_confirmation_card(
     </div>
     """
 
-    data_grid = _build_data_grid_html(cost, potential_payout, balance)
-    footer = _build_footer_html(balance)
+    data_grid = build_data_grid_html(cost, potential_payout, balance)
+    footer = build_footer_html(balance)
 
     content = f"""
     {header}
@@ -751,7 +740,7 @@ async def render_bet_confirmation_card(
     """
 
     html = _wrap_prediction_card(outcome, content)
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -769,7 +758,7 @@ async def render_portfolio_card(
 
     Each position dict: {title, side, qty, cost, payout, buy_price}
     """
-    header = _build_header_html(
+    header = build_header_html(
         icon="📋",
         title="PORTFOLIO",
         players=[player_name],
@@ -789,7 +778,7 @@ async def render_portfolio_card(
         rows_html += f"""
         <div class="portfolio-row">
           <div class="portfolio-side {side_class}">{side}</div>
-          <div class="portfolio-title">{_esc(title)}</div>
+          <div class="portfolio-title">{esc(title)}</div>
           <div class="portfolio-qty">×{qty}</div>
           <div class="portfolio-cost">${cost:,}</div>
         </div>"""
@@ -821,7 +810,7 @@ async def render_portfolio_card(
       </div>
     </div>"""
 
-    footer = _build_footer_html(balance)
+    footer = build_footer_html(balance)
 
     content = f"""
     {header}
@@ -834,7 +823,7 @@ async def render_portfolio_card(
     """
 
     html = _wrap_prediction_card("active", content)
-    return await _render_card_html(html)
+    return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -857,7 +846,7 @@ async def render_resolution_card(
     outcome = "win" if is_yes else "loss"
     result_class = "yes" if is_yes else "no"
 
-    header = _build_header_html(
+    header = build_header_html(
         icon="🏆",
         title="MARKET RESOLVED",
         players=[],
@@ -876,13 +865,13 @@ async def render_resolution_card(
         winners_html += f"""
         <div class="winners-row">
           <div class="winner-rank">#{rank}</div>
-          <div class="winner-name">{_esc(name)}</div>
+          <div class="winner-name">{esc(name)}</div>
           <div class="winner-payout">+${profit:,}</div>
         </div>"""
 
     body = f"""
     <div class="resolution-body">
-      <div class="bet-market-title">{_esc(market_title)}</div>
+      <div class="bet-market-title">{esc(market_title)}</div>
       <div class="resolution-result {result_class}">{result.upper()}</div>
       {winners_html}
     </div>"""
@@ -895,4 +884,4 @@ async def render_resolution_card(
     """
 
     html = _wrap_prediction_card(outcome, content)
-    return await _render_card_html(html)
+    return await render_card(html)
