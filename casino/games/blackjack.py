@@ -29,10 +29,12 @@ from casino.casino_db import (
     is_casino_open, get_channel_id, get_max_bet, check_achievements,
 )
 from casino.play_again import PlayAgainView
-from casino.renderer.card_renderer import SUITS, VALUES
 from casino.renderer.casino_html_renderer import render_blackjack_card
 from embed_helpers import casino_result_footer
 
+
+SUITS  = ["♠", "♥", "♦", "♣"]
+VALUES = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 
 # ── Session registry: discord_id → BlackjackSession ──────────────────────────
 active_sessions: dict[int, "BlackjackSession"] = {}

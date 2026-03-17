@@ -1,6 +1,6 @@
 # ATLAS — Claude Code Instructions
 
-ATLAS (Autonomous TSL League Administration System) is a Discord bot serving as the full admin infrastructure for The Simulation League (TSL) — a Madden NFL sim league with ~31 active teams across 95+ Super Bowl seasons. Entry point: `bot.py`. Python 3.14, discord.py 2.3+, Google Gemini 2.0 Flash via `google-genai`, Pandas DataFrames, SQLite, Pillow.
+ATLAS (Autonomous TSL League Administration System) is a Discord bot serving as the full admin infrastructure for The Simulation League (TSL) — a Madden NFL sim league with ~31 active teams across 95+ Super Bowl seasons. Entry point: `bot.py`. Python 3.14, discord.py 2.3+, Google Gemini 2.0 Flash via `google-genai`, Pandas DataFrames, SQLite, Playwright (HTML→PNG rendering).
 
 ---
 
@@ -80,6 +80,28 @@ build_member_db              →  tsl_members table (identity registry)
 | **Flow** | Economy, sportsbook, casino | `flow_sportsbook.py`, `casino/`, `economy_cog.py` |
 | **Codex** | History, records, NL→SQL→NL via Gemini | `codex_cog.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
+| **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_html_engine.py` |
+
+### Rendering Stack
+
+All card renders use a single pipeline:
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Style Tokens | `atlas_style_tokens.py` | Single source of truth for colors, fonts, spacing, layout |
+| HTML Engine | `atlas_html_engine.py` | Page pool + `render_card()` + `wrap_card()` |
+| Casino Games | `casino/renderer/casino_html_renderer.py` | Blackjack, Slots, Crash, Coinflip, Scratch |
+| Highlights | `casino/renderer/highlight_renderer.py` | Jackpot, PvP, Crash LMS, Prediction, Parlay |
+| Flow Live | `casino/renderer/session_recap_renderer.py`, `pulse_renderer.py` | Session Recap, Pulse Dashboard |
+| Predictions | `casino/renderer/prediction_html_renderer.py` | Market List, Detail, Bet, Portfolio, Resolution |
+| Trade | `card_renderer.py` | Trade card |
+| Ledger | `casino/renderer/ledger_renderer.py` | Transaction ledger |
+| Hub Cards | `flow_cards.py`, `sportsbook_cards.py` | Flow Hub, Sportsbook Hub, Stats Card |
+
+Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` → PNG bytes
+Width: 480px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
+
+**Quarantined (do not import):** `QUARANTINE/atlas_card_renderer.py` (Pillow hub card renderer, replaced), `QUARANTINE/card_renderer.py` (legacy Pillow casino renderer, superseded by HTML v6)
 
 ### Cog Load Order (order matters)
 
