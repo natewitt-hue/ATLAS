@@ -126,6 +126,74 @@ def _val_losses_not_wins():
     return validator
 
 
+def _val_has_rows():
+    """Verify at least 1 row returned."""
+    def validator(rows, meta, question):
+        if len(rows) >= 1:
+            return True, f"{len(rows)} rows returned ✓"
+        return False, "no rows returned"
+    return validator
+
+
+def _val_min_rows(n):
+    """Verify at least n rows returned."""
+    def validator(rows, meta, question):
+        if len(rows) >= n:
+            return True, f"{len(rows)} rows ≥ {n} ✓"
+        return False, f"only {len(rows)} rows, expected ≥ {n}"
+    return validator
+
+
+def _val_season_filter(season):
+    """Verify seasonIndex matches expected season in all rows."""
+    def validator(rows, meta, question):
+        expected = str(season)
+        for i, row in enumerate(rows):
+            d = dict(row) if hasattr(row, 'keys') else {}
+            val = d.get("seasonIndex")
+            if val is not None and str(val) != expected:
+                return False, f"row {i}: seasonIndex={val}, expected {expected}"
+        return True, f"seasonIndex={expected} ✓"
+    return validator
+
+
+def _val_team_filter(team):
+    """Verify team name appears in results (any team-related column)."""
+    def validator(rows, meta, question):
+        team_lower = team.lower()
+        team_cols = ["homeTeamName", "awayTeamName", "teamName", "team1Name",
+                     "team2Name", "drafting_team", "winner_team", "loser_team"]
+        for row in rows:
+            d = dict(row) if hasattr(row, 'keys') else {}
+            for col in team_cols:
+                val = d.get(col, "")
+                if val and team_lower in str(val).lower():
+                    return True, f"found '{team}' in {col} ✓"
+        return False, f"'{team}' not found in any team column"
+    return validator
+
+
+def _val_col_not_null(col):
+    """Verify column is not None/empty in all rows."""
+    def validator(rows, meta, question):
+        for i, row in enumerate(rows):
+            d = dict(row) if hasattr(row, 'keys') else {}
+            val = d.get(col)
+            if val is None or str(val).strip() == "":
+                return False, f"row {i}: {col} is null/empty"
+        return True, f"{col} not null ✓"
+    return validator
+
+
+def _val_meta_key_exists(key):
+    """Verify meta dict has key (regardless of value)."""
+    def validator(rows, meta, question):
+        if key in meta:
+            return True, f"meta[{key}] exists ✓"
+        return False, f"meta[{key}] missing"
+    return validator
+
+
 # ── Test cases ──────────────────────────────────────────────────────────────
 # (question, simulated_caller_db, description, expected_intent, [validators])
 TEST_CASES = [
@@ -313,6 +381,197 @@ TEST_CASES = [
     ("best owner this season", "TestCaller",
      "Q52: Best owner = most wins (sort DESC)", "leaderboard",
      [_val_sort_desc("total_wins"), _val_meta_key("sort", "desc")]),
+
+    # === Category A: Bug-Catching Tests (4 tests) ===
+    ("who has the fewest losses", "TestCaller",
+     "Q53: Fewest losses = ASC sort (bug fix validation)", "leaderboard",
+     [_val_sort_asc("total_losses"), _val_losses_not_wins(), _val_meta_key("sort", "asc")]),
+
+    ("owner with the least losses this season", "TestCaller",
+     "Q54: Least losses + season filter", "leaderboard",
+     [_val_sort_asc("total_losses"), _val_losses_not_wins()]),
+
+    ("which team has the best offense this season", "TestCaller",
+     "Q55: Best offense = most yards (DESC)", "team_stats",
+     [_val_sort_desc("off_yds"), _val_has_rows()]),
+
+    ("which team has the worst defense this season", "TestCaller",
+     "Q56: Worst defense = most yards allowed (DESC)", "team_stats",
+     [_val_sort_desc("def_yds"), _val_has_rows()]),
+
+    # === Category B: Streak Intent Tests (4 tests) ===
+    ("my current win streak", "TheWitt",
+     "Q57: Streak intent with 'my' caller", "streak",
+     [_val_has_rows(), _val_meta_key("owner", "TheWitt")]),
+
+    ("my streak", "TheWitt",
+     "Q58: Minimal streak query", "streak",
+     [_val_has_rows(), _val_meta_key("owner", "TheWitt")]),
+
+    ("is Killa on a winning streak", "TestCaller",
+     "Q59: Streak for named opponent", "streak",
+     [_val_has_rows()]),
+
+    ("Witt's losing streak", "TestCaller",
+     "Q60: Possessive + streak", "streak",
+     [_val_has_rows()]),
+
+    # === Category C: Intent Collision Tests (8 tests) ===
+    ("Witt vs Killa", "TestCaller",
+     "Q61: Owner names → h2h_record (not game_score)", "h2h_record",
+     [_val_has_rows()]),
+
+    ("Lions vs Packers", "TestCaller",
+     "Q62: Team names → game_score (not h2h)", "game_score",
+     [_val_has_rows(), _val_team_filter("Lions")]),
+
+    ("who has the most wins this season", "TestCaller",
+     "Q63: Most wins + season → leaderboard", "leaderboard",
+     [_val_sort_desc("total_wins"), _val_has_rows()]),
+
+    ("top QB", "TestCaller",
+     "Q64: Short position query → roster_query", "roster_query",
+     [_val_sort_desc("ovr"), _val_has_rows()]),
+
+    ("Cowboys draft picks", "TestCaller",
+     "Q65: Team + draft → draft_history", "draft_history",
+     [_val_has_rows()]),
+
+    ("Packers record", "TestCaller",
+     "Q66: Team + record → team_record (not season_record)", "team_record",
+     [_val_has_rows()]),
+
+    ("my record", "TheWitt",
+     "Q67: Bare 'my record' → alltime_record (no season)", "alltime_record",
+     [_val_has_rows()]),
+
+    ("top 5 sacks", "TestCaller",
+     "Q68: Top N stat → player_stats", "player_stats",
+     [_val_sort_desc("stat_value"), _val_min_rows(5)]),
+
+    # === Category D: Sort Direction Exhaustive Tests (10 tests) ===
+    ("who has the most rushing TDs all-time", "TestCaller",
+     "Q69: Most rushing TDs = DESC", "player_stats",
+     [_val_sort_desc("stat_value"), _val_has_rows()]),
+
+    ("who has the fewest rushing yards", "TestCaller",
+     "Q70: Fewest rushing yards = ASC", "player_stats",
+     [_val_sort_asc("stat_value"), _val_meta_key("sort", "asc")]),
+
+    ("worst receiver this season", "TestCaller",
+     "Q71: Worst receiver leaderboard = ASC", "leaderboard",
+     [_val_sort_asc("total_stat"), _val_meta_key("sort", "asc")]),
+
+    ("best passer this season", "TestCaller",
+     "Q72: Best passer leaderboard = DESC", "leaderboard",
+     [_val_sort_desc("total_stat"), _val_meta_key("sort", "desc")]),
+
+    ("which team allows the most points", "TestCaller",
+     "Q73: Most points against = DESC", "team_stats",
+     [_val_sort_desc("pts_against"), _val_has_rows()]),
+
+    ("which team has the best defense", "TestCaller",
+     "Q74: Best defense = fewest yards (ASC)", "team_stats",
+     [_val_sort_asc("def_yds"), _val_has_rows()]),
+
+    ("lowest scoring game ever", "TestCaller",
+     "Q75: Lowest scoring = ASC total_pts", "records_extremes",
+     [_val_sort_asc("total_pts"), _val_has_rows()]),
+
+    ("most lopsided game this season", "TestCaller",
+     "Q76: Most lopsided = DESC margin", "records_extremes",
+     [_val_sort_desc("margin"), _val_has_rows()]),
+
+    ("bottom 5 passers", "TestCaller",
+     "Q77: Bottom N → ASC leaderboard", "leaderboard",
+     [_val_sort_asc("total_stat"), _val_meta_key("sort", "asc")]),
+
+    ("who has the highest passer rating", "TestCaller",
+     "Q78: Highest passer rating = DESC", "player_stats",
+     [_val_sort_desc("stat_value"), _val_has_rows()]),
+
+    # === Category E: Edge Case Phrasing Tests (8 tests) ===
+    ("witt record this season", "TestCaller",
+     "Q79: Lowercase name + no possessive", "season_record",
+     [_val_has_rows()]),
+
+    ("my games against Tuna", "TheWitt",
+     "Q80: 'games against' = recent_games", "recent_games",
+     [_val_opponent_filter("Tuna"), _val_has_rows()]),
+
+    ("NFC West standings", "TestCaller",
+     "Q81: NFC West division standings", "standings_query",
+     [_val_col_equals("divisionName", "NFC West"), _val_has_rows()]),
+
+    ("AFC standings", "TestCaller",
+     "Q82: Conference standings", "standings_query",
+     [_val_has_rows()]),
+
+    ("who drafted for New England", "TestCaller",
+     "Q83: Multi-word team + draft phrasing", "draft_history",
+     [_val_has_rows()]),
+
+    ("what abilities does Jalen Hurts have", "TestCaller",
+     "Q84: Player abilities by name", "player_abilities_query",
+     [_val_has_rows()]),
+
+    ("who's the best owner all time", "TestCaller",
+     "Q85: Contraction who's + best owner", "leaderboard",
+     [_val_sort_desc("total_wins"), _val_has_rows()]),
+
+    ("how are the Packers doing this season", "TestCaller",
+     "Q86: Full sentence team record", "team_record",
+     [_val_has_rows()]),
+
+    # === Category F: Data Accuracy for Under-Validated Intents (8 tests) ===
+    ("my record vs Killa", "TheWitt",
+     "Q87: H2H with data validation", "h2h_record",
+     [_val_has_rows(), _val_meta_key("owner2", "KillaE94")]),
+
+    ("Witt's record this season", "TestCaller",
+     "Q88: Season record with validation", "season_record",
+     [_val_has_rows()]),
+
+    ("my all-time record", "TheWitt",
+     "Q89: All-time record with validation", "alltime_record",
+     [_val_has_rows()]),
+
+    ("who won the Super Bowl in season 1", "TestCaller",
+     "Q90: Super Bowl season 1 (no playoff data in DB)", "playoff_results",
+     [_val_meta_key("type", "playoffs")]),
+
+    ("what was the score of the Cowboys game this season", "TestCaller",
+     "Q91: Game score + team filter", "game_score",
+     [_val_has_rows(), _val_team_filter("Cowboys")]),
+
+    ("who did the Eagles draft in season 3", "TestCaller",
+     "Q92: Draft history + season filter", "draft_history",
+     [_val_has_rows()]),
+
+    ("Lions trades this season", "TestCaller",
+     "Q93: Trade history + team filter", "trade_history",
+     [_val_meta_key("team", "Lions")]),
+
+    ("what teams has Killa owned", "TestCaller",
+     "Q94: Owner history with validation", "owner_history",
+     [_val_has_rows()]),
+
+    # === Category G: SQL Injection Safety Tests (4 tests) ===
+    ("my record; DROP TABLE games", "TheWitt",
+     "Q95: SQL injection semicolon", "alltime_record",
+     [_val_has_rows()]),
+
+    ("top passers' OR 1=1 --", "TestCaller",
+     "Q96: SQL injection quote + OR", "leaderboard",
+     [_val_has_rows()]),
+
+    ('who has the most wins" UNION SELECT * FROM games --', "TestCaller",
+     "Q97: SQL injection UNION", "leaderboard",
+     [_val_sort_desc("total_wins")]),
+
+    ("my all-time record; DELETE FROM games", "TheWitt",
+     "Q98: SQL injection in alltime query — semicolon safely ignored", "alltime_record",
+     [_val_has_rows()]),
 ]
 
 
@@ -376,9 +635,9 @@ async def main():
         intent_match = r["intent"] == expected_intent
         tier_ok = r["tier"] <= 2
 
-        # Run data validators
+        # Run data validators (run even with 0 rows for validators like _val_has_rows)
         data_issues = []
-        if validators and r["rows"]:
+        if validators:
             data_tested_count += 1
             for val_fn in validators:
                 ok, msg = val_fn(r["rows"], r["meta"], r["question"])
@@ -394,7 +653,7 @@ async def main():
             intent_match_count += 1
         if tier_ok:
             tier_pass_count += 1
-        if data_ok and validators and r["rows"]:
+        if data_ok and validators:
             data_pass_count += 1
 
         status = "PASS" if passed else "FAIL"
@@ -425,7 +684,7 @@ async def main():
                 print(f"    ... ({len(r['rows']) - 3} more)")
 
         # Data validation results
-        if validators and r["rows"]:
+        if validators:
             for val_fn in validators:
                 ok, msg = val_fn(r["rows"], r["meta"], r["question"])
                 v_status = "✓" if ok else "✗"

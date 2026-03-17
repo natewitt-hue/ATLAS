@@ -376,6 +376,8 @@ def _build_season_record(match, caller_db, question, resolved_names):
     r"\b(?:my|(\S+?)(?:'s)?)\s+record\s+(?:all[\s-]?time|overall|total|ever)",
     # "how many games have I won", "how many wins does Witt have" (no season qualifier)
     r'\bhow\s+many\s+(?:total\s+)?(?:wins?|games?|losses?)\s+(?:do(?:es)?|have|has|did)\s+(?:i|(\S+))\s+(?:have|played|won|lost)\b',
+    # "my record" (bare, no season qualifier → all-time)
+    r'\b(?:my)\s+record\b(?!\s+(?:this|last|in|season|vs|against|versus))',
 ])
 def _build_alltime_record(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -409,13 +411,15 @@ def _build_alltime_record(match, caller_db, question, resolved_names):
 # ── Intent 4: Leaderboard ───────────────────────────────────────────────────
 
 @_register("leaderboard", [
-    r'\b(?:who|which\s+owner)\s+(?:has|have)\s+(?:the\s+)?most\s+(wins?|losses|games|championships?)',
+    r'\b(?:who|which\s+owner)\s+(?:has|have)\s+(?:the\s+)?(?:most|fewest|least)\s+(wins?|losses|games|championships?)',
     r'\btop\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)?\s*(rushers?|passers?|receivers?|tacklers?)',
-    r'\b(?:leading|best|top|worst|bottom)\s+(passers?|rushers?|receivers?|scorers?|owners?)',
+    r'\b(?:leading|best|top|worst|bottom)\s+(?:\d+\s+)?(passers?|rushers?|receivers?|scorers?|owners?)',
     r'\bleaderboard\s+(?:for\s+)?(passing|rushing|receiving|tackles|sacks|interceptions)',
     r'\bwinningest\s+(?:owners?|coaches?|players?)',
     # "worst owner", "best owner this season"
     r'\b(?:worst|best)\s+owner',
+    # "owner with the most/least losses"
+    r'\bowner\s+with\s+(?:the\s+)?(?:most|fewest|least)\s+(wins?|losses)',
 ])
 def _build_leaderboard(match, caller_db, question, resolved_names):
     text_lower = question.lower()
@@ -425,10 +429,10 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     # Determine if this is an owner wins/losses leaderboard or player stat leaderboard
     is_owner_query = any(kw in text_lower for kw in ['wins', 'winningest', 'championships', 'owner'])
     sort_worst = any(kw in text_lower for kw in ['worst', 'bottom', 'fewest', 'least', 'lowest'])
+    sort_dir = 'ASC' if sort_worst else 'DESC'
 
     if is_owner_query and not ('loss' in text_lower):
         # Owner wins leaderboard — "worst owner" sorts ASC (fewest wins)
-        sort_dir = 'ASC' if sort_worst else 'DESC'
         sql = f"""
             SELECT winner_user AS owner, COUNT(*) AS total_wins
             FROM games
@@ -458,11 +462,11 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         if season:
             sql += " AND seasonIndex = ?"
             params_list.append(str(season))
-        sql += " GROUP BY loser_user ORDER BY total_losses DESC LIMIT ?"
+        sql += f" GROUP BY loser_user ORDER BY total_losses {sort_dir} LIMIT ?"
         params_list.append(limit)
         return IntentResult(
             intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
-            meta={"type": "leaderboard", "stat": "losses"}
+            meta={"type": "leaderboard", "stat": "losses", "sort": sort_dir.lower()}
         )
 
     # Player stat leaderboard
@@ -521,6 +525,8 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     r"\b(?:my|(\S+?)(?:'s)?)\s+last\s+(\d+)\s+games?(?!\s+(?:vs|against|versus))",
     r"\b(?:my|(\S+?)(?:'s)?)\s+recent\s+(?:games?|results?|matchups?)",
     r"\b(?:my|(\S+?)(?:'s)?)\s+(?:last|most\s+recent)\s+game\b",
+    # "my games against Tuna", "my games vs Killa"
+    r"\b(?:my|(\S+?)(?:'s)?)\s+games?\s+(?:vs\.?|against|versus)\s+(\S+)",
 ])
 def _build_recent_games(match, caller_db, question, resolved_names):
     groups = list(match.groups())  # Keep positional structure
@@ -590,12 +596,15 @@ def _build_recent_games(match, caller_db, question, resolved_names):
 # ── Intent 6: Streak ────────────────────────────────────────────────────────
 
 @_register("streak", [
+    # "is Killa on a winning streak" (must be before generic pattern)
+    r'\b(?:am\s+i|is\s+(\S+))\s+on\s+a\s+(?:win|los)',
     r"\b(?:my|(\S+?)(?:'s)?)\s+(?:current\s+)?(?:win(?:ning)?|los(?:s|ing))\s+streak",
     r"\b(?:my|(\S+?)(?:'s)?)\s+(?:current\s+)?streak\b",
-    r'\b(?:am\s+i|is\s+(\S+))\s+on\s+a\s+(?:win|los)',
 ])
 def _build_streak(match, caller_db, question, resolved_names):
-    groups = [g for g in match.groups() if g]
+    _STREAK_STOP = {'a', 'an', 'the', 'is', 'on', 'am', 'i', 'winning', 'losing',
+                    'win', 'loss', 'current', 'streak'}
+    groups = [g for g in match.groups() if g and g.lower() not in _STREAK_STOP]
     owner = None
     for g in groups:
         if g:
@@ -664,6 +673,8 @@ _TEAM_ALIASES = {
 @_register("team_record", [
     r'\bhow\s+(?:are|is)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s+doing',
     r'\b(?:the\s+)?(\w+(?:\s+\w+)?)\s+record\s+(?:this|in)?\s*(?:season|s)\s*(\d+)?',
+    # "Packers record" (bare team + record)
+    r'\b(?:the\s+)?(\w+(?:\s+\w+)?)\s+record\b',
 ])
 def _build_team_record(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -698,6 +709,8 @@ def _build_team_record(match, caller_db, question, resolved_names):
 @_register("draft_history", [
     r'\b(?:who\s+did\s+)?(?:the\s+)?(\w+(?:\s+\w+)?)\s+draft\b',
     r"\b(\w+(?:\s+\w+)?)(?:'s)?\s+draft\s+(?:picks?|history|class)",
+    # "who drafted for New England"
+    r'\bwho\s+drafted\s+(?:for\s+)?(?:the\s+)?(\w+(?:\s+\w+)?)',
 ])
 def _build_draft_history(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -737,6 +750,8 @@ def _build_draft_history(match, caller_db, question, resolved_names):
     r'\bscore\s+(?:of\s+)?(?:the\s+)?(\w+(?:\s+\w+)?)\s+game',
     # "Lions vs Packers score/result"
     r'\b(\w+(?:\s+\w+)?)\s+(?:vs\.?|versus)\s+(\w+(?:\s+\w+)?)\s+(?:score|result)',
+    # "Lions vs Packers" (bare team vs team — handled if both resolve to teams)
+    r'\b(\w+(?:\s+\w+)?)\s+(?:vs\.?|versus)\s+(\w+(?:\s+\w+)?)\b',
 ])
 def _build_game_score(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -828,7 +843,7 @@ def _build_playoff_results(match, caller_db, question, resolved_names):
 
 @_register("player_stats", [
     # "who has the most passing TDs all-time", "who leads in sacks"
-    r'\b(?:who\s+(?:has|leads?|is\s+leading)\s+(?:the\s+)?(?:most|league\s+in))\s+(\w[\w\s]*)',
+    r'\b(?:who\s+(?:has|leads?|is\s+leading)\s+(?:the\s+)?(?:most|highest|league\s+in))\s+(\w[\w\s]*)',
     # "who has the worst/least/fewest passing yards"
     r'\b(?:who\s+(?:has|is)\s+(?:the\s+)?(?:worst|least|fewest|lowest))\s+(\w[\w\s]*)',
     # "top rushing yards this season"
@@ -917,6 +932,8 @@ def _build_trade_history(match, caller_db, question, resolved_names):
     r'\b(?:which|what)\s+team\s+(?:has|have|is)\s+(?:the\s+)?(?:best|worst|most|least|highest|lowest)\s+(offense|defense|offence|defence|points?|scoring)',
     r'\b(?:which|what)\s+team\s+scores?\s+(?:the\s+)?most\s+points?',
     r'\bwho\s+(?:has|have)\s+(?:the\s+)?(?:most|fewest|least|lowest|highest)\s+(points?|offense|defense|offence|defence|scoring)',
+    # "which team allows/gives up the most points"
+    r'\b(?:which|what)\s+team\s+(?:allows?|gives?\s+up)\s+(?:the\s+)?(?:most|fewest|least)\s+points?',
 ])
 def _build_team_stats(match, caller_db, question, resolved_names):
     text_lower = question.lower()
@@ -932,6 +949,9 @@ def _build_team_stats(match, caller_db, question, resolved_names):
         sort_col = 'CAST(defTotalYds AS INTEGER)'
         # Defense: best = fewest yards (ASC), worst = most yards (DESC)
         sort_dir = 'DESC' if flip else 'ASC'
+    elif any(kw in text_lower for kw in ['allows', 'gives up', 'gives']):
+        sort_col = 'CAST(ptsAgainst AS INTEGER)'
+        sort_dir = 'ASC' if flip else 'DESC'
     elif any(kw in text_lower for kw in ['points', 'scoring', 'scores']):
         sort_col = 'CAST(ptsFor AS INTEGER)'
         sort_dir = 'ASC' if flip else 'DESC'
@@ -1210,8 +1230,9 @@ def _build_roster_query(match, caller_db, question, resolved_names):
 
 @_register("player_abilities_query", [
     r'\bwho\s+has\s+(?:x[\s-]?factor|superstar)\s+(?:on|for)\s+(?:the\s+)?(\w+(?:\s+\w+)?)',
-    r'\b(\w+(?:\s+\w+)?)\s+(?:x[\s-]?factors?|superstars?|abilities)\b',
+    # "what abilities does Jalen Hurts have" (must be before generic pattern)
     r'\bwhat\s+abilities\s+does\s+(\w[\w\s]+?)\s+have',
+    r'\b(\w+(?:\s+\w+)?)\s+(?:x[\s-]?factors?|superstars?|abilities)\b',
 ])
 def _build_player_abilities(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
