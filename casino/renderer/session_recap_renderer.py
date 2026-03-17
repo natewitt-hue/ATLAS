@@ -20,13 +20,12 @@ Usage:
 
 from __future__ import annotations
 
-import html as html_mod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from flow_live_cog import PlayerSession
 
-from casino.renderer.casino_html_renderer import _font_face_css, _render_card_html
+from atlas_html_engine import render_card, wrap_card, esc
 
 # ── Game type icon mapping ────────────────────────────────────────────────────
 
@@ -45,12 +44,6 @@ GAME_LABELS: dict[str, str] = {
     "coinflip": "Coinflip",
     "coinflip_pvp": "PvP Flip",
 }
-
-
-# ── Helper: HTML escape ───────────────────────────────────────────────────────
-
-def _esc(text) -> str:
-    return html_mod.escape(str(text))
 
 
 # ── Helper: format duration ───────────────────────────────────────────────────
@@ -198,7 +191,7 @@ def _build_session_recap_html(
             pills.append(
                 f'<div class="game-pill">'
                 f'  <span class="game-pill-icon">{icon}</span>'
-                f'  <span class="game-pill-label">{_esc(label)}</span>'
+                f'  <span class="game-pill-label">{esc(label)}</span>'
                 f'  <span class="game-pill-count">{count}x</span>'
                 f'</div>'
             )
@@ -214,13 +207,13 @@ def _build_session_recap_html(
     if highlights:
         rows = []
         for h in highlights:
-            note_html = f'<span class="hl-note">{_esc(h["note"])}</span>' if h["note"] else ""
+            note_html = f'<span class="hl-note">{esc(h["note"])}</span>' if h["note"] else ""
             rows.append(
                 f'<div class="highlight-row">'
                 f'  <span class="hl-icon">{h["icon"]}</span>'
-                f'  <span class="hl-label">{_esc(h["label"])}</span>'
+                f'  <span class="hl-label">{esc(h["label"])}</span>'
                 f'  {note_html}'
-                f'  <span class="hl-amount {_esc(h["color"])}">{_esc(h["amount"])}</span>'
+                f'  <span class="hl-amount {esc(h["color"])}">{esc(h["amount"])}</span>'
                 f'</div>'
             )
         highlights_html = f"""
@@ -234,7 +227,7 @@ def _build_session_recap_html(
     if commentary:
         commentary_html = f"""
     <div class="gold-divider"></div>
-    <div class="commentary-line">{_esc(commentary)}</div>"""
+    <div class="commentary-line">{esc(commentary)}</div>"""
 
     # Win rate
     win_rate = 0
@@ -256,74 +249,16 @@ def _build_session_recap_html(
         <div class="data-value red">{bl_str}</div>
       </div>"""
 
-    font_css = _font_face_css()
-
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
+    body_html = f"""
 <style>
-{font_css}
-
-:root {{
-  --bg: #111111;
-  --gold: #D4AF37;
-  --gold-light: #FFDA50;
-  --gold-dim: #8C7324;
-  --win: #4ADE80;
-  --loss: #F87171;
-  --push: #FBBF24;
-  --text-primary: #e8e0d0;
-  --text-sub: #c0b8a8;
-  --text-muted: #b0a890;
-  --text-dim: #555;
-}}
-
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-
-body {{
-  background: transparent;
-  font-family: 'Outfit', sans-serif;
-  color: #fff;
-  padding: 0;
-}}
-
-.card {{
-  width: 700px;
-  border-radius: 14px;
-  overflow: hidden;
-  position: relative;
-  background: var(--bg);
-  border: 1px solid rgba(212,175,55,0.18);
-}}
-
-/* Noise texture overlay */
-.card::before {{
-  content: '';
-  position: absolute;
-  inset: 0;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  pointer-events: none;
-  z-index: 1;
-}}
-
-.card > * {{ position: relative; z-index: 2; }}
-
-/* Status bar */
-.status-bar {{ height: 5px; width: 100%; }}
-.status-bar.win  {{ background: linear-gradient(90deg, #4ADE80, #22C55E, #4ADE80); }}
-.status-bar.loss {{ background: linear-gradient(90deg, #F87171, #EF4444, #F87171); }}
-.status-bar.push {{ background: linear-gradient(90deg, #FBBF24, #D97706, #FBBF24); }}
-
-/* Header */
-.header {{
+/* Session recap component styles */
+.sr-header {{
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 14px 20px 8px;
 }}
-.header-left {{
+.sr-header-left {{
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -343,7 +278,7 @@ body {{
   letter-spacing: 1px;
   text-transform: uppercase;
 }}
-.header-right {{
+.sr-header-right {{
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -360,45 +295,6 @@ body {{
   padding: 3px 10px;
   letter-spacing: 0.5px;
 }}
-.streak-badge {{
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 10px;
-  border-radius: 12px;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 700;
-  font-size: 11px;
-  letter-spacing: 0.5px;
-}}
-.streak-badge.hot {{
-  background: rgba(251,146,60,0.15);
-  border: 1px solid rgba(251,146,60,0.35);
-  color: #FB923C;
-}}
-.streak-badge.fire {{
-  background: rgba(239,68,68,0.15);
-  border: 1px solid rgba(239,68,68,0.35);
-  color: #F87171;
-}}
-.streak-badge.legendary {{
-  background: rgba(212,175,55,0.15);
-  border: 1px solid rgba(212,175,55,0.4);
-  color: #FFDA50;
-}}
-.streak-badge.cold {{
-  background: rgba(96,165,250,0.12);
-  border: 1px solid rgba(96,165,250,0.3);
-  color: #60A5FA;
-}}
-
-/* Gold divider */
-.gold-divider {{
-  height: 1px;
-  margin: 0 20px;
-  background: linear-gradient(90deg, transparent, rgba(212,175,55,0.3) 15%, rgba(212,175,55,0.3) 85%, transparent);
-}}
-
 /* Hero P&L */
 .hero-pnl {{
   display: flex;
@@ -425,45 +321,10 @@ body {{
 .hero-pnl-value.green {{ color: var(--win); }}
 .hero-pnl-value.red   {{ color: var(--loss); }}
 .hero-pnl-value.amber {{ color: var(--push); }}
-
-/* Stats grid */
-.data-grid {{
-  display: grid;
-  gap: 6px;
-  padding: 8px 20px 10px;
-}}
+/* Stats grid overrides */
 .data-grid.cols4 {{ grid-template-columns: repeat(4, 1fr); }}
 .data-grid.cols2 {{ grid-template-columns: repeat(2, 1fr); }}
-.data-cell {{
-  background: rgba(255,255,255,0.03);
-  border-radius: 8px;
-  padding: 10px 12px;
-  text-align: center;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  border-left: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(0,0,0,0.3);
-  border-right: 1px solid rgba(0,0,0,0.2);
-}}
-.data-label {{
-  font-family: 'Outfit', sans-serif;
-  font-weight: 700;
-  font-size: 10px;
-  color: var(--gold-dim);
-  letter-spacing: 1.5px;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-}}
-.data-value {{
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  color: var(--text-primary);
-}}
-.data-value.green {{ color: var(--win); }}
-.data-value.red   {{ color: var(--loss); }}
-.data-value.amber {{ color: var(--push); }}
-.data-value.gold  {{ color: var(--gold); }}
-
+.data-grid {{ padding: 8px 20px 10px; }}
 /* Section label */
 .section-label {{
   font-family: 'Outfit', sans-serif;
@@ -474,7 +335,6 @@ body {{
   text-transform: uppercase;
   padding: 2px 20px 6px;
 }}
-
 /* Game breakdown pills */
 .game-pills-row {{
   display: flex;
@@ -491,9 +351,7 @@ body {{
   border-radius: 20px;
   border: 1px solid rgba(212,175,55,0.15);
 }}
-.game-pill-icon {{
-  font-size: 14px;
-}}
+.game-pill-icon {{ font-size: 14px; }}
 .game-pill-label {{
   font-family: 'Outfit', sans-serif;
   font-weight: 700;
@@ -506,7 +364,6 @@ body {{
   font-size: 11px;
   color: var(--gold);
 }}
-
 /* Highlights block */
 .highlights-block {{
   padding: 0 20px 12px;
@@ -523,10 +380,7 @@ body {{
   padding: 7px 12px;
   border-left: 2px solid rgba(212,175,55,0.2);
 }}
-.hl-icon {{
-  font-size: 15px;
-  flex-shrink: 0;
-}}
+.hl-icon {{ font-size: 15px; flex-shrink: 0; }}
 .hl-label {{
   font-family: 'Outfit', sans-serif;
   font-weight: 600;
@@ -553,7 +407,6 @@ body {{
 .hl-amount.green {{ color: var(--win); }}
 .hl-amount.red   {{ color: var(--loss); }}
 .hl-amount.amber {{ color: var(--push); }}
-
 /* Best streak note */
 .best-streak-note {{
   font-family: 'JetBrains Mono', monospace;
@@ -562,7 +415,6 @@ body {{
   color: var(--gold-dim);
   letter-spacing: 0.3px;
 }}
-
 /* Commentary line */
 .commentary-line {{
   font-family: 'Outfit', sans-serif;
@@ -574,7 +426,6 @@ body {{
   padding: 8px 24px 12px;
   line-height: 1.4;
 }}
-
 /* Win rate bar */
 .win-rate-row {{
   display: flex;
@@ -611,19 +462,15 @@ body {{
   white-space: nowrap;
 }}
 </style>
-</head>
-<body>
-<div class="card">
-  <div class="status-bar {_esc(status_class)}"></div>
 
   <!-- Header -->
-  <div class="header">
-    <div class="header-left">
-      <div class="player-name">{_esc(display_name)}</div>
+  <div class="sr-header">
+    <div class="sr-header-left">
+      <div class="player-name">{esc(display_name)}</div>
       <div class="session-sub">Session Recap</div>
     </div>
-    <div class="header-right">
-      <div class="duration-badge">&#128336; {_esc(duration)}</div>
+    <div class="sr-header-right">
+      <div class="duration-badge">&#128336; {esc(duration)}</div>
       {streak_html}
       {best_streak_html}
     </div>
@@ -634,7 +481,7 @@ body {{
   <!-- Hero P&L -->
   <div class="hero-pnl">
     <div class="hero-pnl-label">Net P&amp;L</div>
-    <div class="hero-pnl-value {_esc(pnl_color)}">{_esc(pnl_str)}</div>
+    <div class="hero-pnl-value {esc(pnl_color)}">{esc(pnl_str)}</div>
   </div>
 
   <div class="gold-divider"></div>
@@ -681,12 +528,9 @@ body {{
 
   <!-- Commentary -->
   {commentary_html}
+"""
 
-</div>
-</body>
-</html>"""
-
-    return html
+    return wrap_card(body_html, status_class)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -708,4 +552,4 @@ async def render_session_recap(
         PNG bytes of the rendered card.
     """
     html = _build_session_recap_html(session, display_name, commentary)
-    return await _render_card_html(html, width=700)
+    return await render_card(html)

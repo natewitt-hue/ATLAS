@@ -17,9 +17,10 @@ Usage:
 
 from __future__ import annotations
 
-import html as html_mod
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+from atlas_html_engine import render_card, wrap_card, esc
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -129,10 +130,6 @@ def build_pulse_data(
 
 # ── HTML helpers ─────────────────────────────────────────────────────────────
 
-def _esc(text) -> str:
-    return html_mod.escape(str(text))
-
-
 _NOISE_SVG = (
     "data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E"
     "%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' "
@@ -161,40 +158,36 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
   <div style="font-size:16px;text-align:center;">{h.icon}</div>
   <div style="font-size:13px;color:#c0b8a8;line-height:1.3;">{h.description_html}</div>
   <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;
-      color:{amount_color};text-align:right;">{_esc(h.amount_html)}</div>
+      color:{amount_color};text-align:right;">{esc(h.amount_html)}</div>
   <div style="font-size:11px;color:#9a9280;text-align:right;
-      font-family:'JetBrains Mono',monospace;">{_esc(h.time_ago)}</div>
+      font-family:'JetBrains Mono',monospace;">{esc(h.time_ago)}</div>
 </div>""")
     return "\n".join(rows)
 
 
 def _build_pulse_html(data: PulseData) -> str:
-    from casino.renderer.casino_html_renderer import _font_face_css
-
-    font_css = _font_face_css()
-
     # Jackpot hero
     jackpot_str = f"${data.jackpot_amount:,}"
     if data.jackpot_last_player:
         last_hit_line = (
-            f'Last hit: <span style="color:#D4AF37;">{_esc(data.jackpot_last_player)}</span>'
+            f'Last hit: <span style="color:#D4AF37;">{esc(data.jackpot_last_player)}</span>'
             f' won ${data.jackpot_last_amount:,}'
         )
     else:
         last_hit_line = "No jackpot hit yet"
-    jackpot_ago = _esc(data.jackpot_last_ago)
+    jackpot_ago = esc(data.jackpot_last_ago)
 
     # BJ card sub-line
     if data.bj_streak_player and data.bj_streak_count > 0:
         bj_streak_line = (
-            f'<span style="color:#D4AF37;">{_esc(data.bj_streak_player)}</span>'
+            f'<span style="color:#D4AF37;">{esc(data.bj_streak_player)}</span>'
             f' on a {data.bj_streak_count}-win streak'
         )
     else:
         bj_streak_line = '<span style="color:#9a9280;">No active streak</span>'
 
     if data.bj_players:
-        bj_players_line = ", ".join(_esc(p) for p in data.bj_players[:4])
+        bj_players_line = ", ".join(esc(p) for p in data.bj_players[:4])
         if len(data.bj_players) > 4:
             bj_players_line += f" +{len(data.bj_players) - 4}"
     else:
@@ -203,7 +196,7 @@ def _build_pulse_html(data: PulseData) -> str:
     # Slots sub-line
     if data.slots_top_player:
         slots_sub = (
-            f'Top: <span style="color:#D4AF37;">{_esc(data.slots_top_player)}</span>'
+            f'Top: <span style="color:#D4AF37;">{esc(data.slots_top_player)}</span>'
             f' ${data.slots_top_amount:,} ({data.slots_top_mult}x)'
         )
     else:
@@ -212,15 +205,15 @@ def _build_pulse_html(data: PulseData) -> str:
     # Sportsbook sub-line
     if data.sb_hot_player and data.sb_hot_desc:
         sb_sub = (
-            f'<span style="color:#D4AF37;">{_esc(data.sb_hot_player)}</span>'
-            f' {_esc(data.sb_hot_desc)}'
+            f'<span style="color:#D4AF37;">{esc(data.sb_hot_player)}</span>'
+            f' {esc(data.sb_hot_desc)}'
         )
     else:
         sb_sub = '<span style="color:#9a9280;">No active bets</span>'
 
     # Predictions sub-line
     if data.pred_hot_title:
-        pred_title_html = f'<div style="font-size:14px;font-weight:600;color:#e8e0d0;margin-bottom:4px;">{_esc(data.pred_hot_title)}</div>'
+        pred_title_html = f'<div style="font-size:14px;font-weight:600;color:#e8e0d0;margin-bottom:4px;">{esc(data.pred_hot_title)}</div>'
         pred_sub = (
             f'YES {data.pred_yes_pct}% &middot; NO {data.pred_no_pct}%'
             f' &middot; ${data.pred_volume:,} volume'
@@ -231,52 +224,16 @@ def _build_pulse_html(data: PulseData) -> str:
 
     highlights_html = _highlight_rows_html(data.highlights)
 
-    # Footer totals (derived from highlights — sum wins/losses)
-    total_won = sum(
-        0 for h in data.highlights if not h.is_loss
-    )
-    # We don't have raw totals here — placeholders for caller to supply
-    # Use the jackpot data and sportsbook volume as rough proxies
+    # Footer totals
     footer_won = f"${data.sb_volume:,}" if data.sb_volume else "$0"
 
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
+    body_html = f"""
 <style>
-{font_css}
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-  background: #0a0a0a;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  padding: 12px;
-  font-family: 'Outfit', system-ui, sans-serif;
+@keyframes pulse {{
+  0%, 100% {{ opacity: 1; }}
+  50% {{ opacity: 0.4; }}
 }}
 </style>
-</head>
-<body>
-<div class="card" style="
-    width:480px;
-    border-radius:14px;
-    overflow:hidden;
-    position:relative;
-    background:#111111;
-    border:1px solid rgba(212,175,55,0.18);
-    font-family:'Outfit',system-ui,sans-serif;
-    color:#fff;
-">
-
-  <!-- Noise texture overlay -->
-  <div style="position:absolute;inset:0;opacity:0.035;
-      background-image:url('{_NOISE_SVG}');
-      pointer-events:none;z-index:1;"></div>
-
-  <!-- Gold status bar -->
-  <div style="height:5px;width:100%;
-      background:linear-gradient(90deg,#D4AF37,#FFDA50,#D4AF37);
-      position:relative;z-index:2;"></div>
 
   <div style="position:relative;z-index:2;padding:16px 18px;">
 
@@ -448,16 +405,14 @@ body {{
     </div>
 
   </div><!-- /inner padding -->
-</div><!-- /card -->
-</body>
-</html>"""
+"""
+
+    return wrap_card(body_html, status_class="jackpot")
 
 
 # ── Renderer ─────────────────────────────────────────────────────────────────
 
 async def render_pulse_card(data: PulseData) -> bytes:
     """Render the pulse dashboard card to PNG bytes via Playwright."""
-    from casino.renderer.casino_html_renderer import _render_card_html
-
     html = _build_pulse_html(data)
-    return await _render_card_html(html, width=504)  # 480px card + 12px padding each side
+    return await render_card(html)
