@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.19.4"  # Stress test V2: 98 tests, losses sort fix, streak/abilities regex fixes
+ATLAS_VERSION = "2.19.5"  # Filter zero-stat backups from worst/least player queries
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")

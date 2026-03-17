@@ -507,7 +507,9 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         params_list.append(str(season))
     sort_asc = any(kw in text_lower for kw in ['worst', 'bottom', 'fewest', 'least', 'lowest'])
     sort_dir = 'ASC' if sort_asc else 'DESC'
-    sql += f" GROUP BY extendedName ORDER BY total_stat {sort_dir} LIMIT ?"
+    # Filter out zero-stat players when sorting ASC (otherwise backups dominate)
+    having = " HAVING total_stat > 0" if sort_asc else ""
+    sql += f" GROUP BY extendedName{having} ORDER BY total_stat {sort_dir} LIMIT ?"
     params_list.append(limit)
 
     return IntentResult(
@@ -877,7 +879,9 @@ def _build_player_stats(match, caller_db, question, resolved_names):
     if season:
         sql += " AND seasonIndex = ?"
         params_list.append(str(season))
-    sql += f" GROUP BY extendedName ORDER BY stat_value {sort_dir} LIMIT ?"
+    # Filter out zero-stat players when sorting ASC (otherwise backups dominate)
+    having = " HAVING stat_value > 0" if sort_asc else ""
+    sql += f" GROUP BY extendedName{having} ORDER BY stat_value {sort_dir} LIMIT ?"
     params_list.append(limit)
 
     return IntentResult(
