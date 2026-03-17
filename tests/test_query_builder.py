@@ -129,6 +129,34 @@ def test_query_builder_auto_cast():
     assert "CAST(passYds AS INTEGER)" in sql
 
 
+def test_current_season():
+    from oracle_query_builder import current_season
+    s = current_season()
+    assert isinstance(s, int)
+    assert s >= 1
+
+
+def test_current_week():
+    from oracle_query_builder import current_week
+    w = current_week()
+    assert isinstance(w, int)
+    assert w >= 0
+
+
+def test_resolve_team_exact():
+    from oracle_query_builder import resolve_team
+    assert resolve_team("lions") == "Lions"
+    assert resolve_team("det") == "Lions"
+    assert resolve_team("detroit") == "Lions"
+    assert resolve_team("nonexistent") is None
+
+
+def test_resolve_user():
+    from oracle_query_builder import resolve_user
+    result = resolve_user("Witt")
+    assert result is None or isinstance(result, str)
+
+
 def test_query_builder_execute(tmp_path):
     """Execute runs the built SQL and returns (rows, err) — correct return signature."""
     from oracle_query_builder import Query

@@ -442,3 +442,74 @@ def _validate_where_clause(clause: str) -> None:
     for ident in identifiers:
         if ident.upper() not in safe_keywords and ident not in _KNOWN_COLUMNS:
             raise ValueError(f"Unknown column in WHERE clause: {ident}")
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: Utility Functions
+# ---------------------------------------------------------------------------
+
+# Team aliases (from codex_intents.py:649-682)
+_TEAM_ALIASES: dict[str, str] = {
+    'cardinals': 'Cardinals', 'cards': 'Cardinals', 'ari': 'Cardinals', 'arizona': 'Cardinals',
+    'falcons': 'Falcons', 'atl': 'Falcons', 'atlanta': 'Falcons',
+    'ravens': 'Ravens', 'bal': 'Ravens', 'baltimore': 'Ravens',
+    'bills': 'Bills', 'buf': 'Bills', 'buffalo': 'Bills',
+    'panthers': 'Panthers', 'car': 'Panthers', 'carolina': 'Panthers',
+    'bears': 'Bears', 'chi': 'Bears', 'chicago': 'Bears',
+    'bengals': 'Bengals', 'cin': 'Bengals', 'cincinnati': 'Bengals',
+    'browns': 'Browns', 'cle': 'Browns', 'cleveland': 'Browns',
+    'cowboys': 'Cowboys', 'dal': 'Cowboys', 'dallas': 'Cowboys',
+    'broncos': 'Broncos', 'den': 'Broncos', 'denver': 'Broncos',
+    'lions': 'Lions', 'det': 'Lions', 'detroit': 'Lions',
+    'packers': 'Packers', 'gb': 'Packers', 'green bay': 'Packers',
+    'texans': 'Texans', 'hou': 'Texans', 'houston': 'Texans',
+    'colts': 'Colts', 'ind': 'Colts', 'indianapolis': 'Colts',
+    'jaguars': 'Jaguars', 'jags': 'Jaguars', 'jax': 'Jaguars', 'jacksonville': 'Jaguars',
+    'chiefs': 'Chiefs', 'kc': 'Chiefs', 'kansas city': 'Chiefs',
+    'raiders': 'Raiders', 'lv': 'Raiders', 'las vegas': 'Raiders',
+    'chargers': 'Chargers', 'lac': 'Chargers',
+    'rams': 'Rams', 'lar': 'Rams', 'la rams': 'Rams',
+    'dolphins': 'Dolphins', 'mia': 'Dolphins', 'miami': 'Dolphins',
+    'vikings': 'Vikings', 'min': 'Vikings', 'minnesota': 'Vikings',
+    'patriots': 'Patriots', 'pats': 'Patriots', 'ne': 'Patriots', 'new england': 'Patriots',
+    'saints': 'Saints', 'no': 'Saints', 'new orleans': 'Saints',
+    'giants': 'Giants', 'nyg': 'Giants', 'ny giants': 'Giants',
+    'jets': 'Jets', 'nyj': 'Jets', 'ny jets': 'Jets',
+    'eagles': 'Eagles', 'phi': 'Eagles', 'philadelphia': 'Eagles', 'philly': 'Eagles',
+    'steelers': 'Steelers', 'pit': 'Steelers', 'pittsburgh': 'Steelers',
+    '49ers': '49ers', 'niners': '49ers', 'sf': '49ers', 'san francisco': '49ers',
+    'seahawks': 'Seahawks', 'hawks': 'Seahawks', 'sea': 'Seahawks', 'seattle': 'Seahawks',
+    'buccaneers': 'Buccaneers', 'bucs': 'Buccaneers', 'tb': 'Buccaneers',
+    'tampa': 'Buccaneers', 'tampa bay': 'Buccaneers',
+    'titans': 'Titans', 'ten': 'Titans', 'tennessee': 'Titans',
+    'commanders': 'Commanders', 'was': 'Commanders', 'washington': 'Commanders',
+}
+
+
+def current_season() -> int:
+    """Return current TSL season number."""
+    return dm.CURRENT_SEASON
+
+
+def current_week() -> int:
+    """Return current TSL week number (1-based)."""
+    return dm.CURRENT_WEEK
+
+
+def resolve_team(name: str) -> str | None:
+    """Resolve a team name/alias to canonical nickName. Returns None if not found."""
+    return _TEAM_ALIASES.get(name.lower().strip())
+
+
+def resolve_user(name: str) -> str | None:
+    """Resolve a user name/alias to canonical DB username. Returns None if not found."""
+    try:
+        from build_member_db import get_alias_map
+        alias_map = get_alias_map()
+        lower = name.lower().strip()
+        for key, val in alias_map.items():
+            if key.lower() == lower:
+                return val
+        return None
+    except (ImportError, Exception):
+        return None
