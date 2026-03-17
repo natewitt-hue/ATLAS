@@ -1,7 +1,8 @@
 """
 test_oracle_stress.py - Oracle Stress Test Harness
-Runs 40 targeted questions through the full intent detection pipeline
+Runs targeted questions through the full intent detection pipeline
 without Discord, printing tier, SQL, params, row count, and sample data.
+Includes data validation to verify results are factually correct.
 """
 import asyncio
 import sys
@@ -23,162 +24,295 @@ from codex_intents import detect_intent, check_self_reference_collision
 # Bootstrap identity system
 _ensure_codex_identity()
 
+
+# ── Data Validators ────────────────────────────────────────────────────────
+# Each validator receives (rows, meta, question) and returns (ok, message)
+
+def _val_sort_desc(col):
+    """Verify results are sorted descending by column."""
+    def validator(rows, meta, question):
+        if len(rows) < 2:
+            return True, "too few rows to validate sort"
+        vals = [dict(r).get(col) for r in rows if dict(r).get(col) is not None]
+        if not vals:
+            return True, f"column '{col}' not found"
+        nums = [float(v) for v in vals]
+        for i in range(len(nums) - 1):
+            if nums[i] < nums[i + 1]:
+                return False, f"NOT sorted DESC by {col}: {nums[i]} < {nums[i+1]} at position {i}"
+        return True, f"sorted DESC by {col} ✓"
+    return validator
+
+
+def _val_sort_asc(col):
+    """Verify results are sorted ascending by column."""
+    def validator(rows, meta, question):
+        if len(rows) < 2:
+            return True, "too few rows to validate sort"
+        vals = [dict(r).get(col) for r in rows if dict(r).get(col) is not None]
+        if not vals:
+            return True, f"column '{col}' not found"
+        nums = [float(v) for v in vals]
+        for i in range(len(nums) - 1):
+            if nums[i] > nums[i + 1]:
+                return False, f"NOT sorted ASC by {col}: {nums[i]} > {nums[i+1]} at position {i}"
+        return True, f"sorted ASC by {col} ✓"
+    return validator
+
+
+def _val_col_equals(col, expected):
+    """Verify a specific column has the expected value in all rows."""
+    def validator(rows, meta, question):
+        for i, row in enumerate(rows):
+            d = dict(row) if hasattr(row, 'keys') else {}
+            val = d.get(col)
+            if val is not None and str(val) != str(expected):
+                return False, f"row {i}: {col}={val}, expected {expected}"
+        return True, f"{col}={expected} ✓"
+    return validator
+
+
+def _val_col_contains(col, substring):
+    """Verify a column contains a substring in at least one row."""
+    def validator(rows, meta, question):
+        for row in rows:
+            d = dict(row) if hasattr(row, 'keys') else {}
+            val = str(d.get(col, ""))
+            if substring.lower() in val.lower():
+                return True, f"found '{substring}' in {col} ✓"
+        return False, f"'{substring}' not found in any row's {col}"
+    return validator
+
+
+def _val_meta_key(key, expected):
+    """Verify a meta key has the expected value."""
+    def validator(rows, meta, question):
+        val = meta.get(key)
+        if val == expected:
+            return True, f"meta[{key}]={expected} ✓"
+        return False, f"meta[{key}]={val}, expected {expected}"
+    return validator
+
+
+def _val_opponent_filter(opponent_name):
+    """Verify all returned games involve the specified opponent."""
+    def validator(rows, meta, question):
+        resolved = fuzzy_resolve_user(opponent_name)
+        if not resolved:
+            return True, f"could not resolve '{opponent_name}'"
+        total = len(rows)
+        matching = 0
+        for row in rows:
+            d = dict(row) if hasattr(row, 'keys') else {}
+            if d.get("homeUser") == resolved or d.get("awayUser") == resolved:
+                matching += 1
+        if matching < total:
+            return False, f"opponent filter failed: {matching}/{total} games vs {resolved}"
+        return True, f"all {total} games vs {resolved} ✓"
+    return validator
+
+
+def _val_losses_not_wins():
+    """Verify losses leaderboard returns loser_user, not winner_user."""
+    def validator(rows, meta, question):
+        if not rows:
+            return True, "no rows"
+        d = dict(rows[0]) if hasattr(rows[0], 'keys') else {}
+        if "total_losses" in d:
+            return True, "uses total_losses column ✓"
+        if "total_wins" in d:
+            return False, "WRONG: returns total_wins instead of total_losses"
+        return True, "column check inconclusive"
+    return validator
+
+
 # ── Test cases ──────────────────────────────────────────────────────────────
-# (question, simulated_caller_db, description, expected_intent)
+# (question, simulated_caller_db, description, expected_intent, [validators])
 TEST_CASES = [
     # === Original 10 (unchanged) ===
     ("what is my record vs diddy", "TheWitt",
-     "Q1: H2H regex + nickname 'diddy' + caller identity", "h2h_record"),
+     "Q1: H2H regex + nickname 'diddy' + caller identity", "h2h_record", []),
 
     ("JT vs Tuna", "TestCaller",
-     "Q2: Two short nicknames, no keywords", "h2h_record"),
+     "Q2: Two short nicknames, no keywords", "h2h_record", []),
 
     ("how are the Saints doing", "TestCaller",
-     "Q3: Team record regex", "team_record"),
+     "Q3: Team record regex", "team_record", []),
 
     ("my season record", "TheWitt",
-     "Q4: REVERSED word order (season before record)", "season_record"),
+     "Q4: REVERSED word order (season before record)", "season_record", []),
 
     ("Witt's all-time record", "TestCaller",
-     "Q5: Possessive 's + alltime_record intent", "alltime_record"),
+     "Q5: Possessive 's + alltime_record intent", "alltime_record", []),
 
     ("top 5 passers this season", "TestCaller",
-     "Q6: Leaderboard + season filter", "leaderboard"),
+     "Q6: Leaderboard + season filter", "leaderboard",
+     [_val_sort_desc("total_stat")]),
 
     ("who did New Orleans draft", "TestCaller",
-     "Q7: Multi-word team name in draft", "draft_history"),
+     "Q7: Multi-word team name in draft", "draft_history", []),
 
     ("what is Chokolate_Thunda's record vs MeLLoW_FiRe", "TestCaller",
-     "Q8: Exact DB usernames with underscores + mixed case", "h2h_record"),
+     "Q8: Exact DB usernames with underscores + mixed case", "h2h_record", []),
 
     ("my last 5 games vs Killa", "TheWitt",
-     "Q9: Recent games WITH opponent filter", "recent_games"),
+     "Q9: Recent games WITH opponent filter", "recent_games",
+     [_val_opponent_filter("Killa")]),
 
     ("what is Shottaz record this season", "TestCaller",
-     "Q10: NULL db_username member resolution", "season_record"),
+     "Q10: NULL db_username member resolution", "season_record", []),
 
     # === New Intent Coverage (20 tests) ===
     ("who won the Super Bowl in season 3", "TestCaller",
-     "Q11: Super Bowl winner query", "playoff_results"),
+     "Q11: Super Bowl winner query", "playoff_results", []),
 
     ("playoff results this season", "TestCaller",
-     "Q12: Playoff results current season", "playoff_results"),
+     "Q12: Playoff results current season", "playoff_results", []),
 
     ("who has the most passing TDs all-time", "TestCaller",
-     "Q13: Player stat leaderboard - pass TDs", "player_stats"),
+     "Q13: Player stat leaderboard - pass TDs", "player_stats",
+     [_val_sort_desc("stat_value")]),
 
     ("top rushing yards this season", "TestCaller",
-     "Q14: Player stat leaderboard - rush yds", "player_stats"),
+     "Q14: Player stat leaderboard - rush yds", "player_stats",
+     [_val_sort_desc("stat_value")]),
 
     ("who leads the league in sacks", "TestCaller",
-     "Q15: Player stat - sacks", "player_stats"),
+     "Q15: Player stat - sacks", "player_stats",
+     [_val_sort_desc("stat_value")]),
 
     ("what trades did the Lions make", "TestCaller",
-     "Q16: Team trade history", "trade_history"),
+     "Q16: Team trade history", "trade_history", []),
 
     ("trades this season", "TestCaller",
-     "Q17: All trades current season", "trade_history"),
+     "Q17: All trades current season", "trade_history", []),
 
     ("which team has the best offense", "TestCaller",
-     "Q18: Team stat ranking - offense", "team_stats"),
+     "Q18: Team stat ranking - offense", "team_stats",
+     [_val_sort_desc("off_yds")]),
 
     ("which team scores the most points", "TestCaller",
-     "Q19: Team stat - points", "team_stats"),
+     "Q19: Team stat - points", "team_stats",
+     [_val_sort_desc("pts_for")]),
 
     ("what was the score of Lions vs Packers", "TestCaller",
-     "Q20: Game score lookup", "game_score"),
+     "Q20: Game score lookup", "game_score", []),
 
     ("score of the Chiefs game", "TestCaller",
-     "Q21: Single team game score", "game_score"),
+     "Q21: Single team game score", "game_score", []),
 
     ("what teams has Witt owned", "TestCaller",
-     "Q22: Owner team history", "owner_history"),
+     "Q22: Owner team history", "owner_history", []),
 
     ("who owned the Bears in season 2", "TestCaller",
-     "Q23: Team owner lookup", "owner_history"),
+     "Q23: Team owner lookup", "owner_history", []),
 
     ("biggest blowout ever", "TestCaller",
-     "Q24: Records - biggest blowout", "records_extremes"),
+     "Q24: Records - biggest blowout", "records_extremes",
+     [_val_sort_desc("margin")]),
 
     ("closest game this season", "TestCaller",
-     "Q25: Records - closest game", "records_extremes"),
+     "Q25: Records - closest game", "records_extremes",
+     [_val_sort_asc("margin")]),
 
     ("highest scoring game", "TestCaller",
-     "Q26: Records - highest scoring", "records_extremes"),
+     "Q26: Records - highest scoring", "records_extremes",
+     [_val_sort_desc("total_pts")]),
 
     ("NFC East standings", "TestCaller",
-     "Q27: Division standings", "standings_query"),
+     "Q27: Division standings", "standings_query",
+     [_val_col_equals("divisionName", "NFC East")]),
 
     ("who is the best QB in the league", "TestCaller",
-     "Q28: Best player at position", "roster_query"),
+     "Q28: Best player at position", "roster_query", []),
 
     ("Lions roster", "TestCaller",
-     "Q29: Team roster", "roster_query"),
+     "Q29: Team roster", "roster_query",
+     [_val_sort_desc("ovr")]),
 
     ("who has x-factor on the Packers", "TestCaller",
-     "Q30: Team abilities", "player_abilities_query"),
+     "Q30: Team abilities", "player_abilities_query", []),
 
     # === Edge Case / Regex Fix Tests (10 tests) ===
     ("my record last season", "TheWitt",
-     "Q31: 'last season' parsing", "season_record"),
+     "Q31: 'last season' parsing", "season_record", []),
 
     ("top five passers", "TestCaller",
-     "Q32: Word number 'five'", "leaderboard"),
+     "Q32: Word number 'five'", "leaderboard",
+     [_val_sort_desc("total_stat")]),
 
     ("what's my record this season", "TheWitt",
-     "Q33: Contraction 'what's'", "season_record"),
+     "Q33: Contraction 'what's'", "season_record", []),
 
     ("the Lions record this season", "TestCaller",
-     "Q34: Team possessive / team record", "team_record"),
+     "Q34: Team possessive / team record", "team_record", []),
 
     ("how many games have I won", "TheWitt",
-     "Q35: 'how many' routing to alltime", "alltime_record"),
+     "Q35: 'how many' routing to alltime", "alltime_record", []),
 
     ("how many wins do I have this season", "TheWitt",
-     "Q36: 'how many' + season", "season_record"),
+     "Q36: 'how many' + season", "season_record", []),
 
     ("who has most wins", "TestCaller",
-     "Q37: Winningest owner leaderboard", "leaderboard"),
+     "Q37: Winningest owner leaderboard", "leaderboard",
+     [_val_sort_desc("total_wins")]),
 
     ("Cowboys record season 4", "TestCaller",
-     "Q38: Team + specific season", "team_record"),
+     "Q38: Team + specific season", "team_record", []),
 
     ("who leads the league in interceptions", "TestCaller",
-     "Q39: Defensive stat - interceptions", "player_stats"),
+     "Q39: Defensive stat - interceptions", "player_stats",
+     [_val_sort_desc("stat_value")]),
 
     ("free agents at QB", "TestCaller",
-     "Q40: Free agent filter", "roster_query"),
+     "Q40: Free agent filter", "roster_query",
+     [_val_col_equals("teamName", "Free Agent")]),
 
-    # === Audit Fix Tests (10 tests) ===
+    # === Audit Fix Tests (12 tests) ===
     ("who has the most losses", "TestCaller",
-     "Q41: Losses leaderboard (not wins)", "leaderboard"),
+     "Q41: Losses leaderboard (not wins)", "leaderboard",
+     [_val_losses_not_wins(), _val_sort_desc("total_losses")]),
 
     ("which team has the worst offense", "TestCaller",
-     "Q42: Worst offense sort ASC", "team_stats"),
+     "Q42: Worst offense sort ASC", "team_stats",
+     [_val_sort_asc("off_yds")]),
 
     ("which team has the worst defense", "TestCaller",
-     "Q43: Worst defense sort DESC (most yards)", "team_stats"),
+     "Q43: Worst defense sort DESC (most yards)", "team_stats",
+     [_val_sort_desc("def_yds")]),
 
     ("worst passer this season", "TestCaller",
-     "Q44: Worst player stat leaderboard", "leaderboard"),
+     "Q44: Worst player stat leaderboard", "leaderboard",
+     [_val_sort_asc("total_stat"), _val_meta_key("sort", "asc")]),
 
     ("who has the fewest points", "TestCaller",
-     "Q45: Team stats fewest points", "team_stats"),
+     "Q45: Team stats fewest points", "team_stats",
+     [_val_sort_asc("pts_for")]),
 
     ("Bears record this season", "TestCaller",
-     "Q46: Team name that was substring-matching 'chi'", "team_record"),
+     "Q46: Team name that was substring-matching 'chi'", "team_record", []),
 
     ("what was the score of the Commanders game", "TestCaller",
-     "Q47: 'was' in question should not match Commanders alias", "game_score"),
+     "Q47: 'was' in question should not match Commanders alias", "game_score", []),
 
     ("Cowboys record season three", "TestCaller",
-     "Q48: Word-number season", "team_record"),
+     "Q48: Word-number season", "team_record",
+     [_val_meta_key("season", 3)]),
 
     ("Witt's trades this season", "TestCaller",
-     "Q49: Possessive + trades keyword", "trade_history"),
+     "Q49: Possessive + trades keyword", "trade_history", []),
 
     ("who has the least sacks", "TestCaller",
-     "Q50: Least/worst player stat", "player_stats"),
+     "Q50: Least/worst player stat", "player_stats",
+     [_val_sort_asc("stat_value"), _val_meta_key("sort", "asc")]),
+
+    ("worst owner this season", "TestCaller",
+     "Q51: Worst owner = fewest wins (sort ASC)", "leaderboard",
+     [_val_sort_asc("total_wins"), _val_meta_key("sort", "asc")]),
+
+    ("best owner this season", "TestCaller",
+     "Q52: Best owner = most wins (sort DESC)", "leaderboard",
+     [_val_sort_desc("total_wins"), _val_meta_key("sort", "desc")]),
 ]
 
 
@@ -226,25 +360,42 @@ async def main():
     fail_count = 0
     intent_match_count = 0
     tier_pass_count = 0
+    data_pass_count = 0
+    data_tested_count = 0
 
-    for question, caller, desc, expected_intent in TEST_CASES:
+    for test_entry in TEST_CASES:
+        question, caller, desc, expected_intent = test_entry[:4]
+        validators = test_entry[4] if len(test_entry) > 4 else []
+
         r = await run_test(question, caller, desc)
         results.append(r)
 
-        # Validate
+        # Validate intent/tier
         has_rows = len(r["rows"]) > 0
         no_error = r["error"] is None
         intent_match = r["intent"] == expected_intent
         tier_ok = r["tier"] <= 2
 
-        # Core pass criteria: correct intent, tier ≤ 2, no SQL error
-        # has_rows is informational — some intents (e.g. playoffs) may have no data in DB
-        passed = no_error and intent_match and tier_ok
+        # Run data validators
+        data_issues = []
+        if validators and r["rows"]:
+            data_tested_count += 1
+            for val_fn in validators:
+                ok, msg = val_fn(r["rows"], r["meta"], r["question"])
+                if not ok:
+                    data_issues.append(msg)
+
+        data_ok = len(data_issues) == 0
+
+        # Core pass criteria: correct intent, tier ≤ 2, no SQL error, data valid
+        passed = no_error and intent_match and tier_ok and data_ok
 
         if intent_match:
             intent_match_count += 1
         if tier_ok:
             tier_pass_count += 1
+        if data_ok and validators and r["rows"]:
+            data_pass_count += 1
 
         status = "PASS" if passed else "FAIL"
         if passed:
@@ -273,25 +424,23 @@ async def main():
             if len(r["rows"]) > 3:
                 print(f"    ... ({len(r['rows']) - 3} more)")
 
-        # Extra analysis for Q9 - check if opponent filter worked
-        if "Q9" in desc and r["rows"]:
-            killa_resolved = fuzzy_resolve_user("Killa")
-            killa_games = 0
-            for row in r["rows"]:
-                d = dict(row) if hasattr(row, "keys") else {}
-                if d.get("homeUser") == killa_resolved or d.get("awayUser") == killa_resolved:
-                    killa_games += 1
-            print(f"  [Q9 CHECK] Killa resolved to: {killa_resolved}")
-            print(f"  [Q9 CHECK] Games vs Killa in results: {killa_games}/{len(r['rows'])}")
-            if killa_games < len(r["rows"]):
-                print(f"  [Q9 CHECK] *** OPPONENT FILTER NOT APPLIED ***")
+        # Data validation results
+        if validators and r["rows"]:
+            for val_fn in validators:
+                ok, msg = val_fn(r["rows"], r["meta"], r["question"])
+                v_status = "✓" if ok else "✗"
+                print(f"  DATA [{v_status}]: {msg}")
+        if data_issues:
+            for issue in data_issues:
+                print(f"  DATA FAIL: {issue}")
 
     print(f"\n{'=' * 80}")
     print(f"RESULTS: {pass_count}/{len(TEST_CASES)} passed")
-    print(f"  Intent match: {intent_match_count}/{len(TEST_CASES)}")
-    print(f"  Tier ≤ 2:     {tier_pass_count}/{len(TEST_CASES)}")
-    print(f"  Rows > 0:     {sum(1 for r in results if len(r['rows']) > 0)}/{len(TEST_CASES)}")
-    print(f"  No SQL error: {sum(1 for r in results if r['error'] is None)}/{len(TEST_CASES)}")
+    print(f"  Intent match:    {intent_match_count}/{len(TEST_CASES)}")
+    print(f"  Tier ≤ 2:        {tier_pass_count}/{len(TEST_CASES)}")
+    print(f"  Rows > 0:        {sum(1 for r in results if len(r['rows']) > 0)}/{len(TEST_CASES)}")
+    print(f"  No SQL error:    {sum(1 for r in results if r['error'] is None)}/{len(TEST_CASES)}")
+    print(f"  Data validated:  {data_pass_count}/{data_tested_count} (of {data_tested_count} tested)")
     print(f"{'=' * 80}")
 
     return results

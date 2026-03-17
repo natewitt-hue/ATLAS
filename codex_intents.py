@@ -411,9 +411,11 @@ def _build_alltime_record(match, caller_db, question, resolved_names):
 @_register("leaderboard", [
     r'\b(?:who|which\s+owner)\s+(?:has|have)\s+(?:the\s+)?most\s+(wins?|losses|games|championships?)',
     r'\btop\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)?\s*(rushers?|passers?|receivers?|tacklers?)',
-    r'\b(?:leading|best|top|worst|bottom)\s+(passers?|rushers?|receivers?|scorers?)',
+    r'\b(?:leading|best|top|worst|bottom)\s+(passers?|rushers?|receivers?|scorers?|owners?)',
     r'\bleaderboard\s+(?:for\s+)?(passing|rushing|receiving|tackles|sacks|interceptions)',
     r'\bwinningest\s+(?:owners?|coaches?|players?)',
+    # "worst owner", "best owner this season"
+    r'\b(?:worst|best)\s+owner',
 ])
 def _build_leaderboard(match, caller_db, question, resolved_names):
     text_lower = question.lower()
@@ -421,9 +423,13 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     limit = _extract_limit(question, default=10)
 
     # Determine if this is an owner wins/losses leaderboard or player stat leaderboard
-    if any(kw in text_lower for kw in ['wins', 'winningest', 'championships']):
-        # Owner wins leaderboard
-        sql = """
+    is_owner_query = any(kw in text_lower for kw in ['wins', 'winningest', 'championships', 'owner'])
+    sort_worst = any(kw in text_lower for kw in ['worst', 'bottom', 'fewest', 'least', 'lowest'])
+
+    if is_owner_query and not ('loss' in text_lower):
+        # Owner wins leaderboard — "worst owner" sorts ASC (fewest wins)
+        sort_dir = 'ASC' if sort_worst else 'DESC'
+        sql = f"""
             SELECT winner_user AS owner, COUNT(*) AS total_wins
             FROM games
             WHERE status IN ('2','3') AND stageIndex = '1'
@@ -433,11 +439,11 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         if season:
             sql += " AND seasonIndex = ?"
             params_list.append(str(season))
-        sql += " GROUP BY winner_user ORDER BY total_wins DESC LIMIT ?"
+        sql += f" GROUP BY winner_user ORDER BY total_wins {sort_dir} LIMIT ?"
         params_list.append(limit)
         return IntentResult(
             intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
-            meta={"type": "leaderboard", "stat": "wins"}
+            meta={"type": "leaderboard", "stat": "wins", "sort": sort_dir.lower()}
         )
 
     if 'loss' in text_lower:

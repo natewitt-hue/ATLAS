@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.19.2"  # Audit fixes: team alias safety, losses leaderboard, sort directions, Tier 2 name resolution
+ATLAS_VERSION = "2.19.3"  # Data-validated stress test + worst owner fix
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
