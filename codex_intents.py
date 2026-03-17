@@ -81,15 +81,59 @@ def _extract_season(text: str) -> int | None:
     m = re.search(r'(?:season|s)\s*(\d+)', text, re.IGNORECASE)
     if m:
         return int(m.group(1))
-    if re.search(r'\bthis\s+season\b', text, re.IGNORECASE):
+    if re.search(r'\bthis\s+season\b|\bcurrent\s+season\b', text, re.IGNORECASE):
         return _current_season()
+    if re.search(r'\blast\s+season\b|\bprevious\s+season\b', text, re.IGNORECASE):
+        return _current_season() - 1
     return None
 
 
+_WORD_NUMS = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'fifteen': 15, 'twenty': 20,
+}
+
+
 def _extract_limit(text: str, default: int = 10) -> int:
-    """Extract a numeric limit like 'top 5' or 'last 3'."""
+    """Extract a numeric limit like 'top 5' or 'last three'."""
     m = re.search(r'(?:top|last|recent)\s+(\d+)', text, re.IGNORECASE)
-    return int(m.group(1)) if m else default
+    if m:
+        return int(m.group(1))
+    m = re.search(
+        r'(?:top|last|recent)\s+(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)',
+        text, re.IGNORECASE,
+    )
+    if m:
+        return _WORD_NUMS.get(m.group(1).lower(), default)
+    return default
+
+
+def _normalize_question(text: str) -> str:
+    """Preprocess question text: expand contractions, strip possessives before keywords."""
+    text = re.sub(r"\bwhat's\b", "what is", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwho's\b", "who is", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhow's\b", "how is", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwhere's\b", "where is", text, flags=re.IGNORECASE)
+    # Strip possessives before known intent keywords (Lions' record → Lions record)
+    text = re.sub(
+        r"(\w+)'s?\s+(record|draft|stats?|games?|streak|roster|abilities|x-factor)",
+        r"\1 \2", text, flags=re.IGNORECASE,
+    )
+    return text
+
+
+def _resolve_team(text: str) -> str | None:
+    """Resolve a text fragment to a canonical team name via _TEAM_ALIASES.
+    _TEAM_ALIASES is defined below, before the team-based intents."""
+    team_input = text.strip().lower()
+    team_name = _TEAM_ALIASES.get(team_input)
+    if not team_name:
+        for alias, name in _TEAM_ALIASES.items():
+            if team_input in alias or alias in team_input:
+                team_name = name
+                break
+    return team_name
 
 
 # ── Self-reference collision ─────────────────────────────────────────────────
@@ -151,6 +195,59 @@ def get_h2h_sql_and_params(
     return sql, tuple(params)
 
 
+# ── Stat Registry (extensible stat keyword → SQL mapping) ─────────────────
+
+STAT_REGISTRY = {
+    # Passing (sorted longest-first for matching)
+    'passing touchdowns': ('offensive_stats', 'passTDs', 'SUM', 'QB'),
+    'passing yards': ('offensive_stats', 'passYds', 'SUM', 'QB'),
+    'passing tds': ('offensive_stats', 'passTDs', 'SUM', 'QB'),
+    'pass tds': ('offensive_stats', 'passTDs', 'SUM', 'QB'),
+    'pass yards': ('offensive_stats', 'passYds', 'SUM', 'QB'),
+    'interceptions thrown': ('offensive_stats', 'passInts', 'SUM', 'QB'),
+    'passer rating': ('offensive_stats', 'passerRating', 'AVG', 'QB'),
+    'completion percentage': ('offensive_stats', 'passCompPct', 'AVG', 'QB'),
+    'completions': ('offensive_stats', 'passComp', 'SUM', 'QB'),
+    # Rushing
+    'rushing touchdowns': ('offensive_stats', 'rushTDs', 'SUM', None),
+    'rushing yards': ('offensive_stats', 'rushYds', 'SUM', None),
+    'rushing tds': ('offensive_stats', 'rushTDs', 'SUM', None),
+    'rush yards': ('offensive_stats', 'rushYds', 'SUM', None),
+    'rush tds': ('offensive_stats', 'rushTDs', 'SUM', None),
+    'fumbles': ('offensive_stats', 'rushFum', 'SUM', None),
+    # Receiving
+    'receiving touchdowns': ('offensive_stats', 'recTDs', 'SUM', None),
+    'receiving yards': ('offensive_stats', 'recYds', 'SUM', None),
+    'receiving tds': ('offensive_stats', 'recTDs', 'SUM', None),
+    'receptions': ('offensive_stats', 'recCatches', 'SUM', None),
+    'catches': ('offensive_stats', 'recCatches', 'SUM', None),
+    'drops': ('offensive_stats', 'recDrops', 'SUM', None),
+    'yards after catch': ('offensive_stats', 'recYdsAfterCatch', 'SUM', None),
+    # Defense
+    'forced fumbles': ('defensive_stats', 'defForcedFum', 'SUM', None),
+    'fumble recoveries': ('defensive_stats', 'defFumRec', 'SUM', None),
+    'defensive tds': ('defensive_stats', 'defTDs', 'SUM', None),
+    'defensive touchdowns': ('defensive_stats', 'defTDs', 'SUM', None),
+    'pass deflections': ('defensive_stats', 'defDeflections', 'SUM', None),
+    'deflections': ('defensive_stats', 'defDeflections', 'SUM', None),
+    'tackles': ('defensive_stats', 'defTotalTackles', 'SUM', None),
+    'sacks': ('defensive_stats', 'defSacks', 'SUM', None),
+    'interceptions': ('defensive_stats', 'defInts', 'SUM', None),
+}
+
+# Pre-sorted keys by length (longest first) for correct matching
+_STAT_KEYS_SORTED = sorted(STAT_REGISTRY.keys(), key=len, reverse=True)
+
+
+def _lookup_stat(text: str):
+    """Find the best matching stat in STAT_REGISTRY (longest match first)."""
+    text_lower = text.lower()
+    for key in _STAT_KEYS_SORTED:
+        if key in text_lower:
+            return key, STAT_REGISTRY[key]
+    return None, None
+
+
 # ── Intent registry ──────────────────────────────────────────────────────────
 
 # Each intent: (name, compiled_patterns, build_fn)
@@ -199,9 +296,14 @@ def _build_h2h(match, caller_db, question, resolved_names):
 
     # Reject common English words that aren't owner names
     _STOP_WORDS = {'games', 'game', 'record', 'the', 'what', 'is', 'last', 'recent',
-                   'this', 'that', 'season', 'all', 'time', 'how', 'did', 'does', 'do'}
+                   'this', 'that', 'season', 'all', 'time', 'how', 'did', 'does', 'do',
+                   'score', 'scores', 'result', 'results'}
     if owner1.lower() in _STOP_WORDS or owner2.lower() in _STOP_WORDS:
         return None  # Not a real H2H — fall through to other intents
+
+    # If either name is a team name, this is a game_score query, not H2H
+    if _resolve_team(owner1) or _resolve_team(owner2):
+        return None
 
     # Resolve through alias map + fuzzy resolver (handles short nicknames like "JT")
     owner1 = _resolve_name(owner1, resolved_names) or owner1
@@ -219,19 +321,24 @@ def _build_h2h(match, caller_db, question, resolved_names):
 
 @_register("season_record", [
     # "my record this season", "Witt's record in season 5"
-    r"\b(?:my|(\S+?)(?:'s)?)\s+record\s+(?:this|in|for)?\s*(?:season|s)\s*(\d+)?",
+    r"\b(?:my|(\S+?)(?:'s)?)\s+record\s+(?:this|in|for|last|previous)?\s*(?:season|s)\s*(\d+)?",
     # "my season record", "Witt's season 5 record" (reversed word order)
-    r"\b(?:my|(\S+?)(?:'s)?)\s+season\s*(\d+)?\s+record",
+    r"\b(?:my|(\S+?)(?:'s)?)\s+(?:last\s+|previous\s+)?season\s*(\d+)?\s+record",
     # "my wins and losses this season"
     r"\b(?:my|(\S+?)(?:'s)?)\s+wins?\s+(?:and\s+)?loss(?:es)?\s*(?:this\s+season)?",
     # "how am I doing this season", "how is Witt doing"
     r'\bhow\s+(?:am\s+i|is\s+(\S+))\s+doing\s*(?:this\s+season)?',
+    # "how many wins do I have this season"
+    r'\bhow\s+many\s+(?:wins?|losses?|games?)\s+(?:do(?:es)?|have|has)\s+(?:i|(\S+))\s+have\s+(?:this|in|for|last)\s+season',
 ])
 def _build_season_record(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
     owner = None
     for g in groups:
         if g and not g.isdigit():
+            # If the captured name is a team name, fall through to team_record
+            if _resolve_team(g):
+                return None
             owner = _resolve_name(g, resolved_names) or g
             break
     if not owner:
@@ -264,7 +371,8 @@ def _build_season_record(match, caller_db, question, resolved_names):
 @_register("alltime_record", [
     r"\b(?:my|(\S+?)(?:'s)?)\s+(?:all[\s-]?time|lifetime|career|overall)\s+record",
     r"\b(?:my|(\S+?)(?:'s)?)\s+record\s+(?:all[\s-]?time|overall|total|ever)",
-    r'\bhow\s+many\s+(?:total\s+)?(?:wins?|games?)\s+(?:do(?:es)?|have|has)\s+(?:i|(\S+))\s+have',
+    # "how many games have I won", "how many wins does Witt have" (no season qualifier)
+    r'\bhow\s+many\s+(?:total\s+)?(?:wins?|games?|losses?)\s+(?:do(?:es)?|have|has|did)\s+(?:i|(\S+))\s+(?:have|played|won|lost)\b',
 ])
 def _build_alltime_record(match, caller_db, question, resolved_names):
     groups = [g for g in match.groups() if g]
@@ -299,7 +407,7 @@ def _build_alltime_record(match, caller_db, question, resolved_names):
 
 @_register("leaderboard", [
     r'\b(?:who|which\s+owner)\s+(?:has|have)\s+(?:the\s+)?most\s+(wins?|losses|games|championships?)',
-    r'\btop\s+(\d+)?\s*(rushers?|passers?|receivers?|tacklers?)',
+    r'\btop\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty)?\s*(rushers?|passers?|receivers?|tacklers?)',
     r'\b(?:leading|best|top)\s+(passers?|rushers?|receivers?|scorers?)',
     r'\bleaderboard\s+(?:for\s+)?(passing|rushing|receiving|tackles|sacks|interceptions)',
     r'\bwinningest\s+(?:owners?|coaches?|players?)',
@@ -354,7 +462,7 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         select_cols += f", SUM(CAST({secondary_col} AS INTEGER)) AS total_secondary"
 
     sql = f"""
-        SELECT fullName, teamName, {select_cols}
+        SELECT extendedName AS player_name, teamName, {select_cols}
         FROM {table}
         WHERE stageIndex = '1'
     """
@@ -365,7 +473,7 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     if season:
         sql += " AND seasonIndex = ?"
         params_list.append(str(season))
-    sql += f" GROUP BY fullName ORDER BY total_stat DESC LIMIT ?"
+    sql += f" GROUP BY extendedName ORDER BY total_stat DESC LIMIT ?"
     params_list.append(limit)
 
     return IntentResult(
@@ -532,14 +640,7 @@ def _build_team_record(match, caller_db, question, resolved_names):
     if not groups:
         return None
 
-    team_input = groups[0].strip().lower()
-    team_name = _TEAM_ALIASES.get(team_input)
-    if not team_name:
-        # Try partial match
-        for alias, name in _TEAM_ALIASES.items():
-            if team_input in alias or alias in team_input:
-                team_name = name
-                break
+    team_name = _resolve_team(groups[0])
     if not team_name:
         return None  # Not a recognized team — fall through
 
@@ -573,13 +674,7 @@ def _build_draft_history(match, caller_db, question, resolved_names):
     if not groups:
         return None
 
-    team_input = groups[0].strip().lower()
-    team_name = _TEAM_ALIASES.get(team_input)
-    if not team_name:
-        for alias, name in _TEAM_ALIASES.items():
-            if team_input in alias or alias in team_input:
-                team_name = name
-                break
+    team_name = _resolve_team(groups[0])
     if not team_name:
         return None
 
@@ -603,6 +698,506 @@ def _build_draft_history(match, caller_db, question, resolved_names):
     )
 
 
+# ── Intent 9: Game Score ────────────────────────────────────────────────────
+
+@_register("game_score", [
+    # "what was the score of Lions vs Packers"
+    r'\bscore\s+(?:of\s+)?(?:the\s+)?(\w+(?:\s+\w+)?)\s+(?:vs\.?|versus|against|and)\s+(\w+(?:\s+\w+)?)',
+    # "score of the Chiefs game"
+    r'\bscore\s+(?:of\s+)?(?:the\s+)?(\w+(?:\s+\w+)?)\s+game',
+    # "Lions vs Packers score/result"
+    r'\b(\w+(?:\s+\w+)?)\s+(?:vs\.?|versus)\s+(\w+(?:\s+\w+)?)\s+(?:score|result)',
+])
+def _build_game_score(match, caller_db, question, resolved_names):
+    groups = [g for g in match.groups() if g]
+    if not groups:
+        return None
+
+    team1 = _resolve_team(groups[0])
+    team2 = _resolve_team(groups[1]) if len(groups) > 1 else None
+    if not team1:
+        return None
+
+    season = _extract_season(question)
+    limit = _extract_limit(question, default=5)
+
+    if team2:
+        sql = """
+            SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName,
+                   homeScore, awayScore, homeUser, awayUser, winner_team
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex = '1'
+              AND ((homeTeamName = ? AND awayTeamName = ?)
+                OR (homeTeamName = ? AND awayTeamName = ?))
+        """
+        params_list = [team1, team2, team2, team1]
+    else:
+        sql = """
+            SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName,
+                   homeScore, awayScore, homeUser, awayUser, winner_team
+            FROM games
+            WHERE status IN ('2','3') AND stageIndex = '1'
+              AND (homeTeamName = ? OR awayTeamName = ?)
+        """
+        params_list = [team1, team1]
+
+    if season:
+        sql += " AND seasonIndex = ?"
+        params_list.append(str(season))
+    sql += " ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC LIMIT ?"
+    params_list.append(limit)
+
+    return IntentResult(
+        intent="game_score", sql=sql, params=tuple(params_list), tier=1,
+        meta={"team1": team1, "team2": team2, "type": "score"}
+    )
+
+
+# ── Intent 10: Playoff Results ─────────────────────────────────────────────
+
+@_register("playoff_results", [
+    r'\b(?:who\s+won|winner\s+of)\s+(?:the\s+)?(?:super\s*bowl|championship|title)',
+    r'\bsuper\s*bowl\s+(?:results?|winners?|history|champs?|champions?)',
+    r'\bplayoff\s+(?:results?|games?|scores?|bracket)',
+    r'\bchampionship\s+game\s+(?:scores?|results?)',
+])
+def _build_playoff_results(match, caller_db, question, resolved_names):
+    text_lower = question.lower()
+    season = _extract_season(question)
+    limit = _extract_limit(question, default=10)
+
+    if any(kw in text_lower for kw in ['super bowl', 'superbowl', 'championship', 'title']):
+        sql = """
+            SELECT seasonIndex, homeTeamName, awayTeamName, homeScore, awayScore,
+                   homeUser, awayUser, winner_team, winner_user
+            FROM games
+            WHERE status IN ('2','3') AND CAST(stageIndex AS INTEGER) >= 200
+        """
+    else:
+        sql = """
+            SELECT seasonIndex, weekIndex, stageIndex, homeTeamName, awayTeamName,
+                   homeScore, awayScore, winner_team, winner_user
+            FROM games
+            WHERE status IN ('2','3') AND CAST(stageIndex AS INTEGER) >= 2
+        """
+
+    params_list = []
+    if season:
+        sql += " AND seasonIndex = ?"
+        params_list.append(str(season))
+    sql += " ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC LIMIT ?"
+    params_list.append(limit)
+
+    return IntentResult(
+        intent="playoff_results", sql=sql, params=tuple(params_list), tier=1,
+        meta={"type": "playoffs"}
+    )
+
+
+# ── Intent 11: Player Stats ───────────────────────────────────────────────
+
+@_register("player_stats", [
+    # "who has the most passing TDs all-time", "who leads in sacks"
+    r'\b(?:who\s+(?:has|leads?|is\s+leading)\s+(?:the\s+)?(?:most|league\s+in))\s+(\w[\w\s]*)',
+    # "top rushing yards this season"
+    r'\btop\s+(?:\d+\s+)?(?:in\s+)?(passing\s+(?:yards?|tds?|touchdowns?)|rushing\s+(?:yards?|tds?|touchdowns?)|receiving\s+(?:yards?|tds?|touchdowns?)|tackles?|sacks?|interceptions?|forced\s+fumbles?|fumble\s+recoveries?|deflections?|passer\s+rating)',
+])
+def _build_player_stats(match, caller_db, question, resolved_names):
+    stat_key, stat_info = _lookup_stat(question)
+    if not stat_info:
+        return None
+
+    table, column, agg, pos_filter = stat_info
+    cast_type = 'REAL' if agg == 'AVG' else 'INTEGER'
+    season = _extract_season(question)
+    limit = _extract_limit(question, default=10)
+
+    sql = f"""
+        SELECT extendedName AS player_name, teamName,
+               {agg}(CAST({column} AS {cast_type})) AS stat_value
+        FROM {table}
+        WHERE stageIndex = '1'
+    """
+    params_list = []
+    if pos_filter:
+        sql += " AND pos = ?"
+        params_list.append(pos_filter)
+    if season:
+        sql += " AND seasonIndex = ?"
+        params_list.append(str(season))
+    sql += f" GROUP BY extendedName ORDER BY stat_value DESC LIMIT ?"
+    params_list.append(limit)
+
+    return IntentResult(
+        intent="player_stats", sql=sql, params=tuple(params_list), tier=1,
+        meta={"stat": stat_key, "type": "player_stats"}
+    )
+
+
+# ── Intent 12: Trade History ──────────────────────────────────────────────
+
+@_register("trade_history", [
+    r'\b(?:what\s+)?trades?\s+(?:did|has|have)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s+(?:made?|done|completed)',
+    r'\b(?:the\s+)?(\w+(?:\s+\w+)?)\s+trades?\s*(?:this|in|for|last)?\s*(?:season)?',
+    r'\btrades?\s+(?:this|in|for|last)\s+season',
+    r'\brecent\s+trades?\b',
+    r'\btrade\s+history\b',
+])
+def _build_trade_history(match, caller_db, question, resolved_names):
+    groups = [g for g in match.groups() if g]
+    season = _extract_season(question)
+    limit = _extract_limit(question, default=20)
+
+    team_name = _resolve_team(groups[0]) if groups else None
+
+    sql = """
+        SELECT team1Name, team2Name, seasonIndex, team1Sent, team2Sent
+        FROM trades WHERE status IN ('approved', 'accepted')
+    """
+    params_list = []
+    if team_name:
+        sql += " AND (team1Name LIKE ? OR team2Name LIKE ?)"
+        params_list.extend([f"%{team_name}%", f"%{team_name}%"])
+    if season:
+        sql += " AND seasonIndex = ?"
+        params_list.append(str(season))
+    elif not team_name:
+        # No team and no season — default to current season
+        sql += " AND seasonIndex = ?"
+        params_list.append(str(_current_season()))
+    sql += " ORDER BY CAST(seasonIndex AS INTEGER) DESC LIMIT ?"
+    params_list.append(limit)
+
+    return IntentResult(
+        intent="trade_history", sql=sql, params=tuple(params_list), tier=1,
+        meta={"team": team_name, "type": "trades"}
+    )
+
+
+# ── Intent 13: Team Stats (uses standings table) ─────────────────────────
+
+@_register("team_stats", [
+    r'\b(?:which|what)\s+team\s+(?:has|have|is)\s+(?:the\s+)?(?:best|worst|most|least|highest|lowest)\s+(offense|defense|offence|defence|points?|scoring)',
+    r'\b(?:which|what)\s+team\s+scores?\s+(?:the\s+)?most\s+points?',
+])
+def _build_team_stats(match, caller_db, question, resolved_names):
+    text_lower = question.lower()
+
+    # Determine sort column and direction
+    if any(kw in text_lower for kw in ['offense', 'offence', 'offensive']):
+        sort_col, sort_dir = 'CAST(offTotalYds AS INTEGER)', 'DESC'
+    elif any(kw in text_lower for kw in ['defense', 'defence', 'defensive']):
+        sort_col, sort_dir = 'CAST(defTotalYds AS INTEGER)', 'ASC'
+    elif any(kw in text_lower for kw in ['points', 'scoring', 'scores']):
+        sort_col, sort_dir = 'CAST(ptsFor AS INTEGER)', 'DESC'
+    else:
+        sort_col, sort_dir = 'CAST(ptsFor AS INTEGER)', 'DESC'
+
+    limit = _extract_limit(question, default=10)
+
+    sql = f"""
+        SELECT teamName,
+               CAST(offTotalYds AS INTEGER) AS off_yds,
+               CAST(defTotalYds AS INTEGER) AS def_yds,
+               CAST(ptsFor AS INTEGER) AS pts_for,
+               CAST(ptsAgainst AS INTEGER) AS pts_against,
+               CAST(tODiff AS INTEGER) AS to_diff
+        FROM standings
+        ORDER BY {sort_col} {sort_dir}
+        LIMIT ?
+    """
+    return IntentResult(
+        intent="team_stats", sql=sql, params=(limit,), tier=1,
+        meta={"type": "team_stats"}
+    )
+
+
+# ── Intent 14: Owner History ─────────────────────────────────────────────
+
+@_register("owner_history", [
+    r'\b(?:what\s+)?teams?\s+(?:has|have|did)\s+(\S+)\s+(?:owned?|run|managed|coached)',
+    r"\b(\S+)\s+(?:team|ownership)\s+history",
+    r'\bwho\s+(?:owned?|ran|managed)\s+(?:the\s+)?(\w+(?:\s+\w+)?)\s+(?:in\s+)?(?:season\s*(\d+))',
+])
+def _build_owner_history(match, caller_db, question, resolved_names):
+    groups = [g for g in match.groups() if g]
+    if not groups:
+        return None
+
+    text_lower = question.lower()
+
+    # "who owned the Bears in season 2" — team lookup
+    if 'who' in text_lower and ('owned' in text_lower or 'ran' in text_lower or 'managed' in text_lower):
+        team_name = _resolve_team(groups[0])
+        if not team_name:
+            return None
+        season = _extract_season(question)
+        sql = """
+            SELECT userName, teamName, seasonIndex, games_played
+            FROM owner_tenure WHERE teamName LIKE ?
+        """
+        params_list = [f"%{team_name}%"]
+        if season:
+            sql += " AND seasonIndex = ?"
+            params_list.append(str(season))
+        sql += " ORDER BY CAST(seasonIndex AS INTEGER)"
+        return IntentResult(
+            intent="owner_history", sql=sql, params=tuple(params_list), tier=1,
+            meta={"team": team_name, "type": "owner_history"}
+        )
+
+    # "what teams has Witt owned" — owner lookup
+    owner = _resolve_name(groups[0], resolved_names) or groups[0]
+    sql = """
+        SELECT teamName, seasonIndex, games_played
+        FROM owner_tenure WHERE userName = ?
+        ORDER BY CAST(seasonIndex AS INTEGER)
+    """
+    return IntentResult(
+        intent="owner_history", sql=sql, params=(owner,), tier=1,
+        meta={"owner": owner, "type": "owner_history"}
+    )
+
+
+# ── Intent 15: Records / Extremes ────────────────────────────────────────
+
+@_register("records_extremes", [
+    r'\bbiggest\s+(?:blowout|blowouts?|win|margin)',
+    r'\bclosest\s+(?:game|games?|finish|finishes)',
+    r'\bhighest\s+scoring\s+(?:game|games?)',
+    r'\blowest\s+scoring\s+(?:game|games?)',
+    r'\bmost\s+(?:lopsided|one[\s-]?sided)\s+(?:game|games?)',
+])
+def _build_records_extremes(match, caller_db, question, resolved_names):
+    text_lower = question.lower()
+    season = _extract_season(question)
+    limit = _extract_limit(question, default=5)
+
+    if 'biggest' in text_lower or 'blowout' in text_lower or 'lopsided' in text_lower or 'one-sided' in text_lower:
+        sort_expr = "margin DESC"
+    elif 'closest' in text_lower:
+        sort_expr = "margin ASC"
+    elif 'highest' in text_lower:
+        sort_expr = "total_pts DESC"
+    elif 'lowest' in text_lower:
+        sort_expr = "total_pts ASC"
+    else:
+        sort_expr = "margin DESC"
+
+    sql = f"""
+        SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName,
+               homeScore, awayScore, homeUser, awayUser,
+               ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin,
+               (CAST(homeScore AS INTEGER) + CAST(awayScore AS INTEGER)) AS total_pts
+        FROM games
+        WHERE status IN ('2','3') AND stageIndex = '1'
+    """
+    params_list = []
+    if season:
+        sql += " AND seasonIndex = ?"
+        params_list.append(str(season))
+    sql += f" ORDER BY {sort_expr} LIMIT ?"
+    params_list.append(limit)
+
+    return IntentResult(
+        intent="records_extremes", sql=sql, params=tuple(params_list), tier=1,
+        meta={"type": "records"}
+    )
+
+
+# ── Intent 16: Standings ─────────────────────────────────────────────────
+
+# Division aliases for standings queries
+_DIV_ALIASES = {
+    'nfc east': 'NFC East', 'nfc west': 'NFC West', 'nfc north': 'NFC North', 'nfc south': 'NFC South',
+    'afc east': 'AFC East', 'afc west': 'AFC West', 'afc north': 'AFC North', 'afc south': 'AFC South',
+}
+
+@_register("standings_query", [
+    r'\b((?:nfc|afc)\s+(?:east|west|north|south))\s+standings?',
+    r'\b(?:current\s+)?standings?\b',
+    r'\bplayoff\s+(?:picture|race|standings?)',
+    r'\bwho\s+leads?\s+(?:the\s+)?(nfc|afc|(?:nfc|afc)\s+(?:east|west|north|south))',
+    r'\bdivision\s+(?:standings?|leaders?|rankings?)',
+])
+def _build_standings(match, caller_db, question, resolved_names):
+    groups = [g for g in match.groups() if g]
+    limit = _extract_limit(question, default=32)
+
+    sql = """
+        SELECT teamName, totalWins, totalLosses, winPct, ptsFor, ptsAgainst,
+               seed, rank, divisionName, conferenceName, divWins, divLosses, confWins, confLosses
+        FROM standings
+        WHERE 1=1
+    """
+    params_list = []
+
+    # Check for division or conference filter
+    text_lower = question.lower()
+    div_match = None
+    for alias, div_name in _DIV_ALIASES.items():
+        if alias in text_lower:
+            div_match = div_name
+            break
+
+    if div_match:
+        sql += " AND divisionName = ?"
+        params_list.append(div_match)
+    elif 'nfc' in text_lower and not any(d in text_lower for d in ['east', 'west', 'north', 'south']):
+        sql += " AND conferenceName = ?"
+        params_list.append('NFC')
+    elif 'afc' in text_lower and not any(d in text_lower for d in ['east', 'west', 'north', 'south']):
+        sql += " AND conferenceName = ?"
+        params_list.append('AFC')
+
+    sql += " ORDER BY CAST(rank AS INTEGER) LIMIT ?"
+    params_list.append(limit)
+
+    return IntentResult(
+        intent="standings_query", sql=sql, params=tuple(params_list), tier=1,
+        meta={"type": "standings"}
+    )
+
+
+# ── Intent 17: Roster Query ──────────────────────────────────────────────
+
+_POS_ALIASES = {
+    'quarterback': 'QB', 'qb': 'QB', 'qbs': 'QB',
+    'running back': 'HB', 'rb': 'HB', 'hb': 'HB', 'halfback': 'HB', 'rbs': 'HB',
+    'wide receiver': 'WR', 'wr': 'WR', 'wrs': 'WR', 'receiver': 'WR', 'receivers': 'WR',
+    'tight end': 'TE', 'te': 'TE', 'tes': 'TE',
+    'linebacker': 'MLB', 'lb': 'MLB', 'lbs': 'MLB',
+    'cornerback': 'CB', 'cb': 'CB', 'cbs': 'CB', 'corner': 'CB',
+    'safety': 'FS', 'safeties': 'FS', 'fs': 'FS', 'ss': 'SS',
+    'defensive end': 'RE', 'de': 'RE', 'des': 'RE',
+    'defensive tackle': 'DT', 'dt': 'DT', 'dts': 'DT',
+    'kicker': 'K', 'k': 'K',
+    'punter': 'P', 'p': 'P',
+}
+
+def _resolve_position(text: str) -> str | None:
+    text_lower = text.lower().strip()
+    return _POS_ALIASES.get(text_lower)
+
+
+@_register("roster_query", [
+    # "Lions roster"
+    r'\b(\w+(?:\s+\w+)?)\s+roster\b',
+    # "best QB in the league", "highest rated QB", "who is the best QB"
+    r'\b(?:best|highest\s+rated|top)\s+(QB|HB|WR|TE|MLB|CB|FS|SS|RE|DT|K|P|quarterback|running\s+back|wide\s+receiver|tight\s+end|linebacker|cornerback|safety|defensive\s+end|defensive\s+tackle|kicker|punter)\b',
+    # "free agents at QB"
+    r'\bfree\s+agents?\s*(?:at|for)?\s*(QB|HB|WR|TE|MLB|CB|FS|SS|RE|DT|K|P|quarterback|running\s+back|wide\s+receiver|tight\s+end|linebacker|cornerback|safety|defensive\s+end|defensive\s+tackle|kicker|punter)?',
+])
+def _build_roster_query(match, caller_db, question, resolved_names):
+    groups = [g for g in match.groups() if g]
+    text_lower = question.lower()
+    limit = _extract_limit(question, default=15)
+
+    # Free agent query
+    if 'free agent' in text_lower:
+        pos = _resolve_position(groups[0]) if groups else None
+        sql = """
+            SELECT firstName, lastName, pos, teamName,
+                   CAST(playerBestOvr AS INTEGER) AS ovr, dev
+            FROM players WHERE teamName = 'Free Agent'
+        """
+        params_list = []
+        if pos:
+            sql += " AND pos = ?"
+            params_list.append(pos)
+        sql += " ORDER BY ovr DESC LIMIT ?"
+        params_list.append(limit)
+        return IntentResult(
+            intent="roster_query", sql=sql, params=tuple(params_list), tier=1,
+            meta={"type": "roster", "filter": "free_agents"}
+        )
+
+    # "best QB in the league"
+    if any(kw in text_lower for kw in ['best', 'highest rated', 'top']):
+        pos = _resolve_position(groups[0]) if groups else None
+        if not pos:
+            return None
+        # Check for team filter
+        team_name = None
+        for alias, name in _TEAM_ALIASES.items():
+            if alias in text_lower:
+                team_name = name
+                break
+
+        sql = """
+            SELECT firstName, lastName, pos, teamName,
+                   CAST(playerBestOvr AS INTEGER) AS ovr, dev
+            FROM players WHERE pos = ?
+        """
+        params_list = [pos]
+        if team_name:
+            sql += " AND teamName LIKE ?"
+            params_list.append(f"%{team_name}%")
+        sql += " ORDER BY ovr DESC LIMIT ?"
+        params_list.append(limit)
+        return IntentResult(
+            intent="roster_query", sql=sql, params=tuple(params_list), tier=1,
+            meta={"type": "roster", "position": pos}
+        )
+
+    # "Lions roster"
+    if groups:
+        team_name = _resolve_team(groups[0])
+        if not team_name:
+            return None
+        sql = """
+            SELECT firstName, lastName, pos,
+                   CAST(playerBestOvr AS INTEGER) AS ovr, dev, age, contractYearsLeft
+            FROM players WHERE teamName LIKE ?
+            ORDER BY ovr DESC LIMIT ?
+        """
+        return IntentResult(
+            intent="roster_query", sql=sql, params=(f"%{team_name}%", limit), tier=1,
+            meta={"team": team_name, "type": "roster"}
+        )
+
+    return None
+
+
+# ── Intent 18: Player Abilities ──────────────────────────────────────────
+
+@_register("player_abilities_query", [
+    r'\bwho\s+has\s+(?:x[\s-]?factor|superstar)\s+(?:on|for)\s+(?:the\s+)?(\w+(?:\s+\w+)?)',
+    r'\b(\w+(?:\s+\w+)?)\s+(?:x[\s-]?factors?|superstars?|abilities)\b',
+    r'\bwhat\s+abilities\s+does\s+(\w[\w\s]+?)\s+have',
+])
+def _build_player_abilities(match, caller_db, question, resolved_names):
+    groups = [g for g in match.groups() if g]
+    if not groups:
+        return None
+
+    text_lower = question.lower()
+
+    # Try team resolution first
+    team_name = _resolve_team(groups[0])
+    if team_name:
+        sql = """
+            SELECT firstName, lastName, teamName, title, description
+            FROM player_abilities WHERE teamName LIKE ?
+            ORDER BY firstName
+        """
+        return IntentResult(
+            intent="player_abilities_query", sql=sql, params=(f"%{team_name}%",), tier=1,
+            meta={"team": team_name, "type": "abilities"}
+        )
+
+    # Individual player lookup
+    player_name = groups[0].strip()
+    sql = """
+        SELECT firstName, lastName, teamName, title, description
+        FROM player_abilities WHERE firstName || ' ' || lastName LIKE ?
+    """
+    return IntentResult(
+        intent="player_abilities_query", sql=sql, params=(f"%{player_name}%",), tier=1,
+        meta={"player": player_name, "type": "abilities"}
+    )
+
+
 # ── Tier 1: Regex Pre-flight ────────────────────────────────────────────────
 
 def _match_regex(
@@ -611,6 +1206,7 @@ def _match_regex(
     resolved_names: dict[str, str],
 ) -> IntentResult | None:
     """Try all regex patterns in priority order. Return first match or None."""
+    question = _normalize_question(question)
     for _name, patterns, build_fn in _INTENT_REGISTRY:
         for pattern in patterns:
             m = pattern.search(question)
@@ -636,7 +1232,17 @@ INTENTS:
 6. streak — An owner's current winning or losing streak
 7. team_record — A team's record (by team name, not owner)
 8. draft_history — Draft picks for a team, season, or round
-9. unknown — Question doesn't fit any of the above
+9. game_score — Score of a specific game or matchup between teams
+10. playoff_results — Super Bowl winners, championship games, playoff results
+11. player_stats — Individual player stats or stat leaders by category
+12. trade_history — Trades made by a team or in a season
+13. team_stats — Team-level stats (best/worst offense, defense, points)
+14. owner_history — What teams an owner has controlled, or who owned a team
+15. records_extremes — Biggest blowout, closest game, highest/lowest scoring
+16. standings_query — Division/conference standings, playoff picture
+17. roster_query — Team rosters, best players at a position, free agents
+18. player_abilities_query — X-Factor/Superstar abilities for a team or player
+19. unknown — Question doesn't fit any of the above
 
 CONTEXT:
 - The person asking has db_username: '{caller_db}'
@@ -656,6 +1262,16 @@ Parameter schemas by intent:
 - streak: {{"owner": str}}
 - team_record: {{"team_name": str, "season": int|null}}
 - draft_history: {{"team": str|null, "season": int|null}}
+- game_score: {{"team1": str, "team2": str|null, "season": int|null}}
+- playoff_results: {{"type": "superbowl"|"playoff", "season": int|null}}
+- player_stats: {{"stat_category": str, "season": int|null, "limit": int}}
+- trade_history: {{"team": str|null, "season": int|null}}
+- team_stats: {{"stat_category": str}}
+- owner_history: {{"owner": str|null, "team": str|null, "season": int|null}}
+- records_extremes: {{"type": "blowout"|"closest"|"highest"|"lowest", "season": int|null, "limit": int}}
+- standings_query: {{"division": str|null, "conference": str|null}}
+- roster_query: {{"team": str|null, "position": str|null, "free_agents": bool}}
+- player_abilities_query: {{"team": str|null, "player_name": str|null}}
 - unknown: {{}}
 
 User question: "{question}"
@@ -800,8 +1416,222 @@ def _build_from_classification(
             meta={"owner": owner, "type": "streak", "compute_in_python": True}
         )
 
-    # For leaderboard, team_record, draft_history — fall through to Tier 3
-    # (too many sub-variants for reliable Gemini param extraction)
+    if intent == "leaderboard":
+        stat_type = params.get("stat_type", "wins")
+        limit = params.get("limit", 10)
+        season = params.get("season")
+        if any(kw in stat_type.lower() for kw in ['wins', 'winningest', 'losses']):
+            sql = "SELECT winner_user AS owner, COUNT(*) AS total_wins FROM games WHERE status IN ('2','3') AND stageIndex = '1' AND winner_user IS NOT NULL AND winner_user != ''"
+            p = []
+            if season:
+                sql += " AND seasonIndex = ?"
+                p.append(str(season))
+            sql += " GROUP BY winner_user ORDER BY total_wins DESC LIMIT ?"
+            p.append(limit)
+            return IntentResult(intent="leaderboard", sql=sql, params=tuple(p), tier=2, meta={"type": "leaderboard", "stat": "wins"})
+        # Player stat leaderboard — try stat registry
+        stat_key, stat_info = _lookup_stat(stat_type)
+        if stat_info:
+            table, column, agg, pos_filter = stat_info
+            cast_type = 'REAL' if agg == 'AVG' else 'INTEGER'
+            sql = f"SELECT extendedName AS player_name, teamName, {agg}(CAST({column} AS {cast_type})) AS total_stat FROM {table} WHERE stageIndex = '1'"
+            p = []
+            if pos_filter:
+                sql += " AND pos = ?"
+                p.append(pos_filter)
+            if season:
+                sql += " AND seasonIndex = ?"
+                p.append(str(season))
+            sql += " GROUP BY extendedName ORDER BY total_stat DESC LIMIT ?"
+            p.append(limit)
+            return IntentResult(intent="leaderboard", sql=sql, params=tuple(p), tier=2, meta={"type": "leaderboard", "stat": stat_key})
+        return IntentResult(intent="unknown", tier=3)
+
+    if intent == "team_record":
+        team = params.get("team_name", "")
+        team_name = _resolve_team(team) if team else None
+        if not team_name:
+            return IntentResult(intent="unknown", tier=3)
+        season = params.get("season", _current_season())
+        sql = """SELECT SUM(CASE WHEN winner_team = ? THEN 1 ELSE 0 END) AS wins,
+                        SUM(CASE WHEN loser_team = ? THEN 1 ELSE 0 END) AS losses
+                 FROM games WHERE status IN ('2','3') AND stageIndex = '1'
+                   AND seasonIndex = ? AND (homeTeamName = ? OR awayTeamName = ?)"""
+        return IntentResult(intent="team_record", sql=sql, params=(team_name, team_name, str(season), team_name, team_name), tier=2, meta={"team": team_name, "season": season, "type": "record"})
+
+    if intent == "draft_history":
+        team = params.get("team", "")
+        team_name = _resolve_team(team) if team else None
+        if not team_name:
+            return IntentResult(intent="unknown", tier=3)
+        season = params.get("season")
+        sql = "SELECT extendedName, drafting_team, drafting_season, draftRound, draftPick, pos, playerBestOvr, dev, was_traded FROM player_draft_map WHERE drafting_team LIKE ?"
+        p = [f"%{team_name}%"]
+        if season:
+            sql += " AND drafting_season = ?"
+            p.append(str(season))
+        sql += " ORDER BY CAST(draftRound AS INTEGER), CAST(draftPick AS INTEGER)"
+        return IntentResult(intent="draft_history", sql=sql, params=tuple(p), tier=2, meta={"team": team_name, "type": "draft_class"})
+
+    if intent == "game_score":
+        t1 = _resolve_team(params.get("team1", ""))
+        t2 = _resolve_team(params.get("team2", "")) if params.get("team2") else None
+        if not t1:
+            return IntentResult(intent="unknown", tier=3)
+        season = params.get("season")
+        if t2:
+            sql = "SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName, homeScore, awayScore, homeUser, awayUser, winner_team FROM games WHERE status IN ('2','3') AND stageIndex = '1' AND ((homeTeamName = ? AND awayTeamName = ?) OR (homeTeamName = ? AND awayTeamName = ?))"
+            p = [t1, t2, t2, t1]
+        else:
+            sql = "SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName, homeScore, awayScore, homeUser, awayUser, winner_team FROM games WHERE status IN ('2','3') AND stageIndex = '1' AND (homeTeamName = ? OR awayTeamName = ?)"
+            p = [t1, t1]
+        if season:
+            sql += " AND seasonIndex = ?"
+            p.append(str(season))
+        sql += " ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC LIMIT 5"
+        return IntentResult(intent="game_score", sql=sql, params=tuple(p), tier=2, meta={"team1": t1, "team2": t2, "type": "score"})
+
+    if intent == "playoff_results":
+        ptype = params.get("type", "playoff")
+        season = params.get("season")
+        if ptype == "superbowl":
+            sql = "SELECT seasonIndex, homeTeamName, awayTeamName, homeScore, awayScore, homeUser, awayUser, winner_team, winner_user FROM games WHERE status IN ('2','3') AND CAST(stageIndex AS INTEGER) >= 200"
+        else:
+            sql = "SELECT seasonIndex, weekIndex, stageIndex, homeTeamName, awayTeamName, homeScore, awayScore, winner_team, winner_user FROM games WHERE status IN ('2','3') AND CAST(stageIndex AS INTEGER) >= 2"
+        p = []
+        if season:
+            sql += " AND seasonIndex = ?"
+            p.append(str(season))
+        sql += " ORDER BY CAST(seasonIndex AS INTEGER) DESC LIMIT 10"
+        return IntentResult(intent="playoff_results", sql=sql, params=tuple(p), tier=2, meta={"type": "playoffs"})
+
+    if intent == "player_stats":
+        stat_cat = params.get("stat_category", "")
+        stat_key, stat_info = _lookup_stat(stat_cat)
+        if not stat_info:
+            return IntentResult(intent="unknown", tier=3)
+        table, column, agg, pos_filter = stat_info
+        cast_type = 'REAL' if agg == 'AVG' else 'INTEGER'
+        season = params.get("season")
+        limit = params.get("limit", 10)
+        sql = f"SELECT extendedName AS player_name, teamName, {agg}(CAST({column} AS {cast_type})) AS stat_value FROM {table} WHERE stageIndex = '1'"
+        p = []
+        if pos_filter:
+            sql += " AND pos = ?"
+            p.append(pos_filter)
+        if season:
+            sql += " AND seasonIndex = ?"
+            p.append(str(season))
+        sql += " GROUP BY extendedName ORDER BY stat_value DESC LIMIT ?"
+        p.append(limit)
+        return IntentResult(intent="player_stats", sql=sql, params=tuple(p), tier=2, meta={"stat": stat_key, "type": "player_stats"})
+
+    if intent == "trade_history":
+        team = params.get("team", "")
+        team_name = _resolve_team(team) if team else None
+        season = params.get("season")
+        sql = "SELECT team1Name, team2Name, seasonIndex, team1Sent, team2Sent FROM trades WHERE status IN ('approved', 'accepted')"
+        p = []
+        if team_name:
+            sql += " AND (team1Name LIKE ? OR team2Name LIKE ?)"
+            p.extend([f"%{team_name}%", f"%{team_name}%"])
+        if season:
+            sql += " AND seasonIndex = ?"
+            p.append(str(season))
+        sql += " ORDER BY CAST(seasonIndex AS INTEGER) DESC LIMIT 20"
+        return IntentResult(intent="trade_history", sql=sql, params=tuple(p), tier=2, meta={"team": team_name, "type": "trades"})
+
+    if intent == "team_stats":
+        sql = "SELECT teamName, CAST(offTotalYds AS INTEGER) AS off_yds, CAST(defTotalYds AS INTEGER) AS def_yds, CAST(ptsFor AS INTEGER) AS pts_for, CAST(ptsAgainst AS INTEGER) AS pts_against FROM standings ORDER BY CAST(ptsFor AS INTEGER) DESC LIMIT 10"
+        return IntentResult(intent="team_stats", sql=sql, params=(), tier=2, meta={"type": "team_stats"})
+
+    if intent == "owner_history":
+        owner = params.get("owner")
+        team = params.get("team")
+        season = params.get("season")
+        if owner:
+            resolved = _resolve_name(owner, resolved_names) or owner
+            sql = "SELECT teamName, seasonIndex, games_played FROM owner_tenure WHERE userName = ? ORDER BY CAST(seasonIndex AS INTEGER)"
+            return IntentResult(intent="owner_history", sql=sql, params=(resolved,), tier=2, meta={"owner": resolved, "type": "owner_history"})
+        if team:
+            team_name = _resolve_team(team)
+            if not team_name:
+                return IntentResult(intent="unknown", tier=3)
+            sql = "SELECT userName, teamName, seasonIndex, games_played FROM owner_tenure WHERE teamName LIKE ?"
+            p = [f"%{team_name}%"]
+            if season:
+                sql += " AND seasonIndex = ?"
+                p.append(str(season))
+            sql += " ORDER BY CAST(seasonIndex AS INTEGER)"
+            return IntentResult(intent="owner_history", sql=sql, params=tuple(p), tier=2, meta={"team": team_name, "type": "owner_history"})
+        return IntentResult(intent="unknown", tier=3)
+
+    if intent == "records_extremes":
+        rtype = params.get("type", "blowout")
+        season = params.get("season")
+        limit = params.get("limit", 5)
+        sort_map = {"blowout": "margin DESC", "closest": "margin ASC", "highest": "total_pts DESC", "lowest": "total_pts ASC"}
+        sort_expr = sort_map.get(rtype, "margin DESC")
+        sql = f"SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName, homeScore, awayScore, homeUser, awayUser, ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin, (CAST(homeScore AS INTEGER) + CAST(awayScore AS INTEGER)) AS total_pts FROM games WHERE status IN ('2','3') AND stageIndex = '1'"
+        p = []
+        if season:
+            sql += " AND seasonIndex = ?"
+            p.append(str(season))
+        sql += f" ORDER BY {sort_expr} LIMIT ?"
+        p.append(limit)
+        return IntentResult(intent="records_extremes", sql=sql, params=tuple(p), tier=2, meta={"type": "records"})
+
+    if intent == "standings_query":
+        division = params.get("division")
+        conference = params.get("conference")
+        sql = "SELECT teamName, totalWins, totalLosses, winPct, ptsFor, ptsAgainst, seed, rank, divisionName, conferenceName FROM standings WHERE 1=1"
+        p = []
+        if division:
+            sql += " AND divisionName LIKE ?"
+            p.append(f"%{division}%")
+        elif conference:
+            sql += " AND conferenceName = ?"
+            p.append(conference.upper())
+        sql += " ORDER BY CAST(rank AS INTEGER) LIMIT 32"
+        return IntentResult(intent="standings_query", sql=sql, params=tuple(p), tier=2, meta={"type": "standings"})
+
+    if intent == "roster_query":
+        team = params.get("team")
+        position = params.get("position")
+        free_agents = params.get("free_agents", False)
+        if free_agents:
+            sql = "SELECT firstName, lastName, pos, teamName, CAST(playerBestOvr AS INTEGER) AS ovr, dev FROM players WHERE teamName = 'Free Agent'"
+            p = []
+            if position:
+                pos = _resolve_position(position) or position.upper()
+                sql += " AND pos = ?"
+                p.append(pos)
+            sql += " ORDER BY ovr DESC LIMIT 15"
+            return IntentResult(intent="roster_query", sql=sql, params=tuple(p), tier=2, meta={"type": "roster"})
+        if team:
+            team_name = _resolve_team(team)
+            if team_name:
+                sql = "SELECT firstName, lastName, pos, CAST(playerBestOvr AS INTEGER) AS ovr, dev, age FROM players WHERE teamName LIKE ? ORDER BY ovr DESC LIMIT 15"
+                return IntentResult(intent="roster_query", sql=sql, params=(f"%{team_name}%",), tier=2, meta={"team": team_name, "type": "roster"})
+        if position:
+            pos = _resolve_position(position) or position.upper()
+            sql = "SELECT firstName, lastName, pos, teamName, CAST(playerBestOvr AS INTEGER) AS ovr, dev FROM players WHERE pos = ? ORDER BY ovr DESC LIMIT 10"
+            return IntentResult(intent="roster_query", sql=sql, params=(pos,), tier=2, meta={"type": "roster", "position": pos})
+        return IntentResult(intent="unknown", tier=3)
+
+    if intent == "player_abilities_query":
+        team = params.get("team")
+        player_name = params.get("player_name")
+        if team:
+            team_name = _resolve_team(team)
+            if team_name:
+                sql = "SELECT firstName, lastName, teamName, title, description FROM player_abilities WHERE teamName LIKE ? ORDER BY firstName"
+                return IntentResult(intent="player_abilities_query", sql=sql, params=(f"%{team_name}%",), tier=2, meta={"team": team_name, "type": "abilities"})
+        if player_name:
+            sql = "SELECT firstName, lastName, teamName, title, description FROM player_abilities WHERE firstName || ' ' || lastName LIKE ?"
+            return IntentResult(intent="player_abilities_query", sql=sql, params=(f"%{player_name}%",), tier=2, meta={"player": player_name, "type": "abilities"})
+        return IntentResult(intent="unknown", tier=3)
+
     return IntentResult(intent="unknown", tier=3)
 
 
@@ -821,6 +1651,7 @@ async def detect_intent(
     Tier 3: Returns IntentResult(tier=3) → caller uses existing gemini_sql() pipeline
     """
     resolved = resolved_names or {}
+    question = _normalize_question(question)
 
     # Tier 1: Regex
     result = _match_regex(question, caller_db, resolved)

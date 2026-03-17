@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.18.0"  # Stress-tested intent detection: 10/10 queries pass, opponent filters, word order
+ATLAS_VERSION = "2.19.0"  # Oracle expansion: 18 intents, STAT_REGISTRY, 40/40 stress test coverage
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
