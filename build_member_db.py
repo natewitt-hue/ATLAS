@@ -1202,14 +1202,32 @@ def sync_db_usernames_from_teams(db_path: str = DB_PATH) -> dict:
             skipped.append(f"{discord_u} ({team_abbr})")
 
     conn.commit()
-    conn.close()
 
     if filled:
         print(f"[MemberDB] Auto-filled {filled} db_username(s) from teams table")
     if skipped:
         print(f"[MemberDB] Could not auto-fill: {', '.join(skipped)}")
 
-    return {"filled": filled, "skipped": skipped}
+    # ── Orphan detection: find game usernames with no tsl_members entry ──
+    orphans = []
+    if "games" in tables:
+        all_game_users = cur.execute(
+            "SELECT DISTINCT homeUser FROM games WHERE homeUser != '' AND homeUser IS NOT NULL "
+            "UNION SELECT DISTINCT awayUser FROM games WHERE awayUser != '' AND awayUser IS NOT NULL"
+        ).fetchall()
+        known_db_users = set(
+            r[0].lower() for r in cur.execute(
+                "SELECT db_username FROM tsl_members WHERE db_username IS NOT NULL"
+            ).fetchall()
+        )
+        for (gu,) in all_game_users:
+            if gu.lower() not in known_db_users and gu.lower() != "cpu":
+                orphans.append(gu)
+        if orphans:
+            print(f"[MemberDB] ⚠️  Orphaned game usernames (no tsl_members entry): {', '.join(orphans)}")
+
+    conn.close()
+    return {"filled": filled, "skipped": skipped, "orphans": orphans}
 
 
 def validate_db_usernames(db_path: str = DB_PATH) -> list[dict]:
@@ -1263,6 +1281,106 @@ def get_db_username_for_discord_id(discord_id: int | str, db_path: str = DB_PATH
     return row[0] if row and row[0] else None
 
 
+def resolve_db_username(discord_id: int | str, db_path: str = DB_PATH) -> str | None:
+    """
+    Dynamic identity resolution with caching.
+
+    Resolution chain:
+      1. Check tsl_members.db_username (cached value from prior resolution)
+      2. If NULL, look up tsl_members.team → teams.userName (live API data)
+         → Cache result back into tsl_members.db_username
+      3. If still NULL, fuzzy match discord_username against games.homeUser/awayUser
+         → Cache if confident match found
+      4. Return None if all steps fail
+
+    This replaces the old get_db_username_for_discord_id() as the primary resolver.
+    """
+    conn = sqlite3.connect(db_path, timeout=5)
+    sid = str(discord_id)
+
+    # Step 1: Check cached db_username
+    row = conn.execute(
+        "SELECT db_username, team, discord_username FROM tsl_members WHERE discord_id = ?",
+        (sid,)
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        return None
+
+    db_u, team_abbr, discord_u = row
+
+    # Already resolved — return cached value
+    if db_u:
+        conn.close()
+        return db_u
+
+    # Step 2: Look up team → teams.userName
+    if team_abbr:
+        teams_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='teams'"
+        ).fetchone()
+        if teams_exists:
+            team_row = conn.execute(
+                "SELECT userName FROM teams WHERE abbrName = ? AND userName IS NOT NULL AND userName != ''",
+                (team_abbr,)
+            ).fetchone()
+            if team_row:
+                db_u = team_row[0]
+                conn.execute(
+                    "UPDATE tsl_members SET db_username = ? WHERE discord_id = ?",
+                    (db_u, sid)
+                )
+                conn.commit()
+                conn.close()
+                print(f"[MemberDB] Auto-resolved {discord_u} → {db_u} via teams table ({team_abbr})")
+                return db_u
+
+    # Step 3: Fuzzy match discord_username against games.homeUser/awayUser
+    if discord_u:
+        games_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='games'"
+        ).fetchone()
+        if games_exists:
+            # Get all unique usernames from games
+            game_users = conn.execute(
+                "SELECT DISTINCT homeUser FROM games WHERE homeUser != '' AND homeUser IS NOT NULL "
+                "UNION SELECT DISTINCT awayUser FROM games WHERE awayUser != '' AND awayUser IS NOT NULL"
+            ).fetchall()
+            game_user_list = [r[0] for r in game_users]
+
+            from difflib import get_close_matches
+
+            # Try exact case-insensitive match first
+            for gu in game_user_list:
+                if gu.lower() == discord_u.lower():
+                    db_u = gu
+                    break
+
+            # Then fuzzy match
+            if not db_u:
+                matches = get_close_matches(
+                    discord_u.lower(),
+                    [u.lower() for u in game_user_list],
+                    n=1, cutoff=0.70
+                )
+                if matches:
+                    db_u = next(u for u in game_user_list if u.lower() == matches[0])
+
+            if db_u:
+                conn.execute(
+                    "UPDATE tsl_members SET db_username = ? WHERE discord_id = ?",
+                    (db_u, sid)
+                )
+                conn.commit()
+                conn.close()
+                print(f"[MemberDB] Auto-resolved {discord_u} → {db_u} via games fuzzy match")
+                return db_u
+
+    conn.close()
+    return None
+
+
 def get_known_users(db_path: str = DB_PATH) -> list[str]:
     """
     Return list of all db_usernames for use as KNOWN_USERS in history_cog.
@@ -1285,15 +1403,19 @@ def get_alias_map(db_path: str = DB_PATH) -> dict[str, str]:
       xbox -> db_username
       display_name -> db_username
     All keys lowercased for case-insensitive matching.
+
+    Also dynamically resolves members with a team but NULL db_username
+    by looking up teams.userName — so the alias map is never stale.
     """
     conn = sqlite3.connect(db_path)
+
+    # Standard aliases for members with known db_username
     rows = conn.execute("""
         SELECT discord_username, db_username, nickname,
                display_name, psn, xbox
         FROM tsl_members
         WHERE db_username IS NOT NULL
     """).fetchall()
-    conn.close()
 
     alias_map = {}
     for discord_u, db_u, nick, display, psn, xbox in rows:
@@ -1302,6 +1424,29 @@ def get_alias_map(db_path: str = DB_PATH) -> dict[str, str]:
         for alias in [discord_u, nick, display, psn, xbox]:
             if alias:
                 alias_map[alias.lower()] = target
+
+    # Dynamic resolution: members with team but NULL db_username
+    # Look up teams.userName live so these members aren't invisible
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "teams" in tables:
+        null_rows = conn.execute("""
+            SELECT m.discord_username, m.nickname, m.display_name, m.psn, m.xbox, m.team,
+                   t.userName
+            FROM tsl_members m
+            JOIN teams t ON m.team = t.abbrName
+            WHERE m.db_username IS NULL AND m.team IS NOT NULL AND m.active = 1
+                  AND t.userName IS NOT NULL AND t.userName != ''
+        """).fetchall()
+        for discord_u, nick, display, psn, xbox, _team, teams_user in null_rows:
+            target = teams_user
+            alias_map[teams_user.lower()] = target
+            for alias in [discord_u, nick, display, psn, xbox]:
+                if alias:
+                    alias_map[alias.lower()] = target
+
+    conn.close()
     return alias_map
 
 

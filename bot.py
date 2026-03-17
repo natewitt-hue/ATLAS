@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.16.0"  # Prediction market curation engine
+ATLAS_VERSION = "2.17.0"  # Rock-solid query system: intent detection + dynamic identity resolution
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")

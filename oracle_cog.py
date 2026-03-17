@@ -214,6 +214,18 @@ except ImportError:
     _HISTORY_OK = False
     print("[oracle_cog] codex_cog not available — /ask history queries disabled")
 
+# Shared H2H SQL from intent system
+_get_h2h_sql = None
+_resolve_db_username_fn = None
+try:
+    from codex_intents import get_h2h_sql_and_params as _get_h2h_sql
+except ImportError:
+    pass
+try:
+    from build_member_db import resolve_db_username as _resolve_db_username_fn
+except ImportError:
+    pass
+
 # Optional affinity module
 try:
     import affinity as _affinity_mod
@@ -2613,19 +2625,24 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
             await interaction.followup.send(f"❓ Couldn't find `{self.owner2.value}`. Check spelling.", ephemeral=True)
             return
 
-        rows, err = run_sql("""
-            SELECT
-                seasonIndex,
-                SUM(CASE WHEN winner_user=? THEN 1 ELSE 0 END) AS u1_wins,
-                SUM(CASE WHEN winner_user=? THEN 1 ELSE 0 END) AS u2_wins,
-                COUNT(*) AS games_played
-            FROM games
-            WHERE status IN ('2','3') AND stageIndex='1'
-              AND ((homeUser=? AND awayUser=?)
-                OR (homeUser=? AND awayUser=?))
-            GROUP BY seasonIndex
-            ORDER BY CAST(seasonIndex AS INTEGER)
-        """, (u1, u2, u1, u2, u2, u1))
+        if _get_h2h_sql:
+            sql, params = _get_h2h_sql(u1, u2)
+        else:
+            sql = """
+                SELECT
+                    seasonIndex,
+                    SUM(CASE WHEN winner_user=? THEN 1 ELSE 0 END) AS u1_wins,
+                    SUM(CASE WHEN winner_user=? THEN 1 ELSE 0 END) AS u2_wins,
+                    COUNT(*) AS games_played
+                FROM games
+                WHERE status IN ('2','3') AND stageIndex='1'
+                  AND ((homeUser=? AND awayUser=?)
+                    OR (homeUser=? AND awayUser=?))
+                GROUP BY seasonIndex
+                ORDER BY CAST(seasonIndex AS INTEGER)
+            """
+            params = (u1, u2, u1, u2, u2, u1)
+        rows, err = run_sql(sql, params)
 
         embed = discord.Embed(
             title=f"⚔️ Rivalry Report: {u1} vs {u2}",
@@ -3499,7 +3516,13 @@ class HubView(discord.ui.View):
     )
     async def btn_h2h(self, interaction: discord.Interaction, _b: discord.ui.Button):
         # Modal handles its own defer — send modal directly, no defer before
-        await interaction.response.send_modal(H2HModal(default_owner=interaction.user.name))
+        # Pre-fill with resolved db_username so user sees their game identity
+        default_name = interaction.user.name
+        if _resolve_db_username_fn:
+            resolved = _resolve_db_username_fn(interaction.user.id)
+            if resolved:
+                default_name = resolved
+        await interaction.response.send_modal(H2HModal(default_owner=default_name))
 
     @discord.ui.button(
         label="📅 Recap", style=discord.ButtonStyle.secondary,

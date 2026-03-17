@@ -53,8 +53,17 @@ except ImportError:
 
 try:
     from build_member_db import get_db_username_for_discord_id as _get_db_username
+    from build_member_db import resolve_db_username as _resolve_db_username
 except ImportError:
     _get_db_username = None
+    _resolve_db_username = None
+
+try:
+    from codex_intents import detect_intent, check_self_reference_collision, get_h2h_sql_and_params
+except ImportError:
+    detect_intent = None
+    check_self_reference_collision = None
+    get_h2h_sql_and_params = None
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DB_PATH   = os.path.join(os.path.dirname(__file__), "tsl_history.db")
@@ -600,17 +609,29 @@ class CodexCog(commands.Cog):
             return
 
         try:
-            # Resolve caller via Discord ID; fall back to fuzzy username match
-            caller_db = _get_db_username(interaction.user.id) if _get_db_username else None
+            # ── 1. Dynamic identity resolution ────────────────────
+            caller_db = None
+            if _resolve_db_username:
+                caller_db = _resolve_db_username(interaction.user.id)
+            if not caller_db and _get_db_username:
+                caller_db = _get_db_username(interaction.user.id)
             if not caller_db:
                 caller_db = fuzzy_resolve_user(interaction.user.name) or interaction.user.name
 
+            # ── 2. Resolve names in question ──────────────────────
             caller_context = (
                 f"[Context: the person asking is TSL owner with db_username='{caller_db}'. "
                 f"When the question uses 'me', 'my', or 'I', use '{caller_db}' in SQL WHERE clauses.]"
             )
             question_with_context = f"{caller_context} {question}"
             annotated_question, alias_map = resolve_names_in_question(question_with_context)
+
+            # ── 3. Self-reference collision check ─────────────────
+            if check_self_reference_collision and alias_map:
+                collision_msg = check_self_reference_collision(caller_db, alias_map)
+                if collision_msg:
+                    await interaction.followup.send(f"⚠️ {collision_msg}")
+                    return
 
             conv_block = _build_conversation_block(interaction.user.id)
 
@@ -623,6 +644,49 @@ class CodexCog(commands.Cog):
                 except Exception:
                     pass
 
+            # ── 4. Three-tier intent detection ────────────────────
+            intent_result = None
+            if detect_intent:
+                intent_result = await detect_intent(
+                    question, caller_db, alias_map, self.gemini
+                )
+
+            # ── 5. Tier 1/2: Deterministic SQL ────────────────────
+            if intent_result and intent_result.tier < 3 and intent_result.sql:
+                rows, error = run_sql(intent_result.sql, intent_result.params)
+                if not error:
+                    answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
+                    answer = await gemini_answer(
+                        question, intent_result.sql, rows, self.gemini,
+                        conv_context=answer_context,
+                    )
+                    _add_conversation_turn(interaction.user.id, question, intent_result.sql, answer)
+
+                    embed = discord.Embed(
+                        title="📊 TSL Historical Intelligence",
+                        description=_truncate_for_embed(answer),
+                        color=0xC9962A
+                    )
+                    embed.set_author(
+                        name="ATLAS · Autonomous TSL League Administration System",
+                        icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
+                    )
+                    footer_parts = [f"🔍 {len(rows)} records analyzed"]
+                    tier_label = "Tier 1 (regex)" if intent_result.tier == 1 else "Tier 2 (classified)"
+                    footer_parts.append(f"⚡ {intent_result.intent} via {tier_label}")
+                    if alias_map:
+                        resolved_str = ", ".join(f"{k}→{v}" for k, v in alias_map.items())
+                        footer_parts.append(f"🔎 Resolved: {resolved_str}")
+                    if conv_block:
+                        footer_parts.append("💬 Conversational")
+                    embed.set_footer(
+                        text=" | ".join(footer_parts) + " · ATLAS™ Codex Module",
+                        icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
+                    )
+                    await interaction.followup.send(embed=embed)
+                    return
+
+            # ── 6. Tier 3: Existing NL→SQL pipeline (unchanged) ───
             sql = await gemini_sql(
                 annotated_question, self.gemini, alias_map,
                 conv_context=conv_block,
@@ -681,6 +745,7 @@ class CodexCog(commands.Cog):
                 icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
             )
             footer_parts = [f"🔍 {len(rows)} records analyzed"]
+            footer_parts.append("🧠 Tier 3 (NL→SQL)")
             if alias_map:
                 resolved_str = ", ".join(f"{k}→{v}" for k, v in alias_map.items())
                 footer_parts.append(f"🔎 Resolved: {resolved_str}")
@@ -782,26 +847,30 @@ class CodexCog(commands.Cog):
             await interaction.followup.send(f"Couldn't find an owner matching `{owner2}`.")
             return
 
-        sql = """
-        SELECT
-            seasonIndex,
-            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u1_wins,
-            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u2_wins,
-            COUNT(*) AS games_played,
-            GROUP_CONCAT(
-                'S' || seasonIndex || ' W' || (CAST(weekIndex AS INTEGER)+1) ||
-                ': ' || homeTeamName || ' ' || homeScore || '-' || awayScore || ' ' || awayTeamName
-            ) AS game_log
-        FROM games
-        WHERE status IN ('2','3')
-          AND stageIndex = '1'
-          AND ((homeUser = ? AND awayUser = ?)
-            OR (homeUser = ? AND awayUser = ?))
-        GROUP BY seasonIndex
-        ORDER BY CAST(seasonIndex AS INTEGER)
-        """
+        if get_h2h_sql_and_params:
+            sql, params = get_h2h_sql_and_params(u1, u2)
+        else:
+            sql = """
+            SELECT
+                seasonIndex,
+                SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u1_wins,
+                SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u2_wins,
+                COUNT(*) AS games_played,
+                GROUP_CONCAT(
+                    'S' || seasonIndex || ' W' || (CAST(weekIndex AS INTEGER)+1) ||
+                    ': ' || homeTeamName || ' ' || homeScore || '-' || awayScore || ' ' || awayTeamName
+                ) AS game_log
+            FROM games
+            WHERE status IN ('2','3')
+              AND stageIndex = '1'
+              AND ((homeUser = ? AND awayUser = ?)
+                OR (homeUser = ? AND awayUser = ?))
+            GROUP BY seasonIndex
+            ORDER BY CAST(seasonIndex AS INTEGER)
+            """
+            params = (u1, u2, u1, u2, u2, u1)
 
-        rows, error = run_sql(sql, (u1, u2, u1, u2, u2, u1))
+        rows, error = run_sql(sql, params)
         if error or not rows:
             await interaction.followup.send(
                 f"No completed regular season games found between **{u1}** and **{u2}**."
