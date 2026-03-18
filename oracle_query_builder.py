@@ -71,14 +71,17 @@ STAT_DEFS: dict[str, StatDef] = {
     "passCompPct":  StatDef("offensive_stats", "passCompPct",  "AVG", "QB", "offense"),
     "passComp":     StatDef("offensive_stats", "passComp",     "SUM", "QB", "offense"),
     # --- Rushing (no position filter) ---
-    "rushTDs":      StatDef("offensive_stats", "rushTDs",      "SUM", None, "offense"),
-    "rushYds":      StatDef("offensive_stats", "rushYds",      "SUM", None, "offense"),
-    "rushFum":      StatDef("offensive_stats", "rushFum",      "SUM", None, "offense"),
+    "rushTDs":          StatDef("offensive_stats", "rushTDs",          "SUM", None, "offense"),
+    "rushYds":          StatDef("offensive_stats", "rushYds",          "SUM", None, "offense"),
+    "rushFum":          StatDef("offensive_stats", "rushFum",          "SUM", None, "offense"),
+    "rushYdsPerAtt":    StatDef("offensive_stats", "rushYdsPerAtt",    "AVG", None, "offense"),
+    "rushBrokenTackles":StatDef("offensive_stats", "rushBrokenTackles","SUM", None, "offense"),
     # --- Receiving (no position filter) ---
     "recTDs":       StatDef("offensive_stats", "recTDs",       "SUM", None, "offense"),
     "recYds":       StatDef("offensive_stats", "recYds",       "SUM", None, "offense"),
     "recCatches":   StatDef("offensive_stats", "recCatches",   "SUM", None, "offense"),
-    "recDrops":     StatDef("offensive_stats", "recDrops",     "SUM", None, "offense"),
+    "recDrops":         StatDef("offensive_stats", "recDrops",         "SUM", None, "offense"),
+    "recYdsPerCatch":   StatDef("offensive_stats", "recYdsPerCatch",   "AVG", None, "offense"),
     "recYdsAfterCatch": StatDef("offensive_stats", "recYdsAfterCatch", "SUM", None, "offense"),
     # --- Defense (individual player stats, no position filter) ---
     "defForcedFum":     StatDef("defensive_stats", "defForcedFum",     "SUM", None, "defense"),
@@ -526,12 +529,29 @@ def stat_leaders(
     season: int | None = None,
     sort: str = "best",
     limit: int = 10,
+    pos_group: list[str] | None = None,
 ) -> tuple[list[dict], str | None]:
-    """Player stat leaders with full domain rules (sort, efficiency, min games, pos)."""
+    """Player stat leaders with full domain rules (sort, efficiency, min games, pos).
+
+    Args:
+        pos_group: Override position filter with a list of positions (e.g. ["HB", "FB"]).
+                   When set, suppresses the auto-applied pos filter from STAT_DEFS.
+    """
     sd = STAT_DEFS.get(stat) or resolve_stat_keyword(stat)
     if sd is None:
         return [], f"Unknown stat: {stat}"
-    q = Query(sd.table).stat(stat).sort(sort).limit(limit)
+
+    if pos_group:
+        # Build query without .stat() auto-pos, then set stat_def manually
+        q = Query(sd.table)
+        q._stat_def = sd
+        q.sort(sort)
+        placeholders = ", ".join("?" for _ in pos_group)
+        q.where(f"pos IN ({placeholders})", *pos_group)
+        q.limit(limit)
+    else:
+        q = Query(sd.table).stat(stat).sort(sort).limit(limit)
+
     if season is not None:
         q.filter(season=season)
     else:

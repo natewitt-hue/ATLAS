@@ -40,6 +40,7 @@ from discord.ext import commands
 import analysis as an
 import data_manager as dm
 import intelligence as ig
+import oracle_query_builder as oqb
 
 from permissions import ADMIN_USER_IDS
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -398,119 +399,85 @@ def _ring_info(username: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  HISTORICAL SQL HELPERS
+#  HISTORICAL SQL HELPERS  (powered by oracle_query_builder)
 # ─────────────────────────────────────────────────────────────────────────────
-def _safe_sql(query: str, params: tuple = ()) -> list[dict]:
-    """Execute a SQL query if history DB is available; return [] on any error."""
-    if not _HISTORY_OK:
-        return []
-    rows, err = run_sql(query, params)
-    return rows if not err else []
 
 def _franchise_alltime(tn: str) -> dict:
-    pat = f"%{tn}%"
-    rows = _safe_sql("""
-        SELECT
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as wins,
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as losses
-        FROM games
-        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
-          AND status IN ('2','3') AND stageIndex='1'
-    """, (pat, pat, pat, pat, pat, pat))
-    r = rows[0] if rows else {}
-    return {"wins": int(r.get("wins") or 0), "losses": int(r.get("losses") or 0)}
+    rows, err = oqb.team_record_query(tn)
+    if err or not rows:
+        return {"wins": 0, "losses": 0}
+    r = rows[0]
+    return {"wins": int(r.get("total_wins") or 0), "losses": int(r.get("total_losses") or 0)}
 
 def _franchise_by_season(tn: str) -> list[dict]:
-    pat = f"%{tn}%"
-    return _safe_sql("""
+    canonical = oqb.resolve_team(tn) or tn
+    rows, _ = oqb._run_sql("""
         SELECT seasonIndex,
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as wins,
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as losses
+          COUNT(CASE WHEN winner_team = ? THEN 1 END) as wins,
+          COUNT(CASE WHEN loser_team = ? THEN 1 END) as losses
         FROM games
-        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
+        WHERE (homeTeamName = ? OR awayTeamName = ?)
           AND status IN ('2','3') AND stageIndex='1'
         GROUP BY seasonIndex ORDER BY CAST(seasonIndex AS INT)
-    """, (pat, pat, pat, pat, pat, pat))
+    """, (canonical, canonical, canonical, canonical))
+    return rows
 
 def _franchise_nemesis(tn: str) -> Optional[dict]:
     """Franchise's worst all-time opponent (min 4 games)."""
-    pat = f"%{tn}%"
-    rows = _safe_sql("""
+    canonical = oqb.resolve_team(tn) or tn
+    rows, _ = oqb._run_sql("""
         SELECT
-          CASE WHEN homeTeamName LIKE ? THEN awayTeamName ELSE homeTeamName END as opp,
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as wins,
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as losses,
+          CASE WHEN homeTeamName = ? THEN awayTeamName ELSE homeTeamName END as opp,
+          COUNT(CASE WHEN winner_team = ? THEN 1 END) as wins,
+          COUNT(CASE WHEN loser_team = ? THEN 1 END) as losses,
           COUNT(*) as games
         FROM games
-        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
+        WHERE (homeTeamName = ? OR awayTeamName = ?)
           AND status IN ('2','3') AND stageIndex='1'
         GROUP BY opp HAVING games >= 4
         ORDER BY CAST(wins AS FLOAT)/CAST(games AS FLOAT) ASC LIMIT 1
-    """, (pat, pat, pat, pat, pat, pat, pat))
+    """, (canonical, canonical, canonical, canonical, canonical))
     return rows[0] if rows else None
 
 def _franchise_punching_bag(tn: str) -> Optional[dict]:
     """Franchise's best all-time record vs any opponent (min 4 games)."""
-    pat = f"%{tn}%"
-    rows = _safe_sql("""
+    canonical = oqb.resolve_team(tn) or tn
+    rows, _ = oqb._run_sql("""
         SELECT
-          CASE WHEN homeTeamName LIKE ? THEN awayTeamName ELSE homeTeamName END as opp,
-          SUM(CASE WHEN
-            (homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT))
-          THEN 1 ELSE 0 END) as wins,
+          CASE WHEN homeTeamName = ? THEN awayTeamName ELSE homeTeamName END as opp,
+          COUNT(CASE WHEN winner_team = ? THEN 1 END) as wins,
           COUNT(*) as games
         FROM games
-        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
+        WHERE (homeTeamName = ? OR awayTeamName = ?)
           AND status IN ('2','3') AND stageIndex='1'
         GROUP BY opp HAVING games >= 4
         ORDER BY CAST(wins AS FLOAT)/CAST(games AS FLOAT) DESC LIMIT 1
-    """, (pat, pat, pat, pat, pat))
+    """, (canonical, canonical, canonical, canonical))
     return rows[0] if rows else None
 
 def _franchise_signature_moments(tn: str) -> tuple[Optional[dict], Optional[dict]]:
     """(biggest_win, worst_loss) all-time."""
-    pat = f"%{tn}%"
-    big_w = _safe_sql("""
+    canonical = oqb.resolve_team(tn) or tn
+    big_w, _ = oqb._run_sql("""
         SELECT homeTeamName,awayTeamName,homeScore,awayScore,
                ABS(CAST(homeScore AS INT)-CAST(awayScore AS INT)) as margin,
                seasonIndex,weekIndex
         FROM games
-        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
+        WHERE (homeTeamName = ? OR awayTeamName = ?)
           AND status IN ('2','3') AND stageIndex='1'
-          AND ((homeTeamName LIKE ? AND CAST(homeScore AS INT)>CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)>CAST(homeScore AS INT)))
+          AND winner_team = ?
         ORDER BY margin DESC LIMIT 1
-    """, (pat, pat, pat, pat))
-    worst_l = _safe_sql("""
+    """, (canonical, canonical, canonical))
+    worst_l, _ = oqb._run_sql("""
         SELECT homeTeamName,awayTeamName,homeScore,awayScore,
                ABS(CAST(homeScore AS INT)-CAST(awayScore AS INT)) as margin,
                seasonIndex,weekIndex
         FROM games
-        WHERE (homeTeamName LIKE ? OR awayTeamName LIKE ?)
+        WHERE (homeTeamName = ? OR awayTeamName = ?)
           AND status IN ('2','3') AND stageIndex='1'
-          AND ((homeTeamName LIKE ? AND CAST(homeScore AS INT)<CAST(awayScore AS INT))
-            OR (awayTeamName LIKE ? AND CAST(awayScore AS INT)<CAST(homeScore AS INT)))
+          AND loser_team = ?
         ORDER BY margin DESC LIMIT 1
-    """, (pat, pat, pat, pat))
+    """, (canonical, canonical, canonical))
     return (big_w[0] if big_w else None), (worst_l[0] if worst_l else None)
 
 
@@ -1631,106 +1598,37 @@ def _build_player_leaders_embed(
     Returns (embed, player_name_list).
     player_name_list feeds into PlayerDrillView's select menu for Hot/Cold drill-down.
 
-    FIX: df_offense / df_defense only have rosterId + stat columns.
-    We join with df_players to get fullName, teamName, pos.
+    Uses QueryBuilder for domain-aware stat aggregation with position group filtering.
     """
     try:
-        import pandas as pd
+        pos_group = _POS_GROUP_MAP.get(position, [position])
 
-        # ── Select the right stats table ──────────────────────────────────────
-        df_stats = dm.df_defense if position in ("DL", "LB", "DB") else dm.df_offense
+        # Determine sort: INTs and Drops sort ascending (worst = most)
+        sort_mode = "worst" if stat_label in ("INTs", "Drops") else "best"
 
-        if df_stats is None or df_stats.empty:
-            return (
-                discord.Embed(title=f"🎯 {position} Leaders", description="No stat data available. Run `/wittsync` first.", color=C_NEUTRAL),
-                [],
-            )
-
-        if stat_col not in df_stats.columns:
-            available = ", ".join(df_stats.columns[:10].tolist())
-            return (
-                discord.Embed(
-                    title=f"🎯 {position} {stat_label} Leaders",
-                    description=f"Column `{stat_col}` not found.\nAvailable: `{available}`",
-                    color=C_NEUTRAL,
-                ),
-                [],
-            )
-
-        # ── Build player lookup from df_players ───────────────────────────────
-        if dm.df_players is None or dm.df_players.empty:
-            return (
-                discord.Embed(title=f"🎯 {position} Leaders", description="No roster data. Run `/wittsync` first.", color=C_NEUTRAL),
-                [],
-            )
-
-        # Identify the join key — MaddenStats exports use rosterId
-        stats_id_col   = next((c for c in ("rosterId", "playerid", "player_id", "id") if c in df_stats.columns), None)
-        players_id_col = next((c for c in ("rosterId", "playerid", "player_id", "id") if c in dm.df_players.columns), None)
-
-        if not stats_id_col or not players_id_col:
-            return (
-                discord.Embed(title="❌ Schema Error", description=f"Cannot join stats to roster. Stats key: `{stats_id_col}`, Players key: `{players_id_col}`", color=C_RED),
-                [],
-            )
-
-        # Build a lightweight lookup: rosterId → {firstName, lastName, teamName, pos}
-        name_a = next((c for c in ("firstName", "first_name") if c in dm.df_players.columns), None)
-        name_b = next((c for c in ("lastName",  "last_name")  if c in dm.df_players.columns), None)
-        full_col = next((c for c in ("fullName", "displayName") if c in dm.df_players.columns), None)
-        pos_col  = next((c for c in ("pos", "position") if c in dm.df_players.columns), None)
-        team_col = next((c for c in ("teamName", "team", "displayName") if c in dm.df_players.columns), None)
-
-        keep_cols = [players_id_col]
-        if name_a: keep_cols.append(name_a)
-        if name_b: keep_cols.append(name_b)
-        if full_col and full_col != players_id_col: keep_cols.append(full_col)
-        if pos_col:  keep_cols.append(pos_col)
-        if team_col and team_col not in keep_cols: keep_cols.append(team_col)
-
-        roster = dm.df_players[keep_cols].drop_duplicates(subset=[players_id_col]).copy()
-
-        # Build fullName if not present
-        if full_col not in roster.columns and name_a and name_b:
-            roster["_fullName"] = (
-                roster[name_a].fillna("").str.strip() + " " +
-                roster[name_b].fillna("").str.strip()
-            ).str.strip()
-            full_col = "_fullName"
-        elif full_col not in roster.columns:
-            roster["_fullName"] = roster[players_id_col].astype(str)
-            full_col = "_fullName"
-
-        # ── Join stats + roster ───────────────────────────────────────────────
-        df_merged = df_stats.merge(roster, left_on=stats_id_col, right_on=players_id_col, how="left")
-
-        # ── Filter by position group ──────────────────────────────────────────
-        valid_pos = _POS_GROUP_MAP.get(position, [position])
-        if pos_col and pos_col in df_merged.columns:
-            df_merged = df_merged[df_merged[pos_col].isin(valid_pos)].copy()
-
-        if df_merged.empty:
-            return (
-                discord.Embed(
-                    title=f"🎯 {position} {stat_label} Leaders",
-                    description=f"No players found for position group **{position}** (`{', '.join(valid_pos)}`).\nCheck position names in the export.",
-                    color=C_NEUTRAL,
-                ),
-                [],
-            )
-
-        # ── Aggregate by player (sum across games) ────────────────────────────
-        df_merged[stat_col] = pd.to_numeric(df_merged[stat_col], errors="coerce").fillna(0)
-        group_keys = [full_col] + ([team_col] if team_col and team_col in df_merged.columns else []) + ([pos_col] if pos_col and pos_col in df_merged.columns else [])
-        group_keys = list(dict.fromkeys(group_keys))  # dedupe
-
-        agg = (
-            df_merged.groupby(group_keys, dropna=False)[stat_col]
-            .sum()
-            .reset_index()
-            .sort_values(stat_col, ascending=(stat_label in ("INTs", "Drops")))
-            .head(10)
+        rows, err = oqb.stat_leaders(
+            stat_col, sort=sort_mode, limit=10, pos_group=pos_group,
         )
+
+        if err:
+            return (
+                discord.Embed(
+                    title=f"🎯 {position} {stat_label} Leaders",
+                    description=f"Query error: `{err}`",
+                    color=C_NEUTRAL,
+                ),
+                [],
+            )
+
+        if not rows:
+            return (
+                discord.Embed(
+                    title=f"🎯 {position} {stat_label} Leaders",
+                    description="No stat data available. Run `/wittsync` first.",
+                    color=C_NEUTRAL,
+                ),
+                [],
+            )
 
         embed = discord.Embed(
             title=f"🎯 {position} — {stat_label} Leaders",
@@ -1740,13 +1638,16 @@ def _build_player_leaders_embed(
         )
 
         lines, player_names = [], []
-        for i, (_, row) in enumerate(agg.iterrows(), 1):
-            name = str(row.get(full_col, "?")).strip() or "?"
-            team = str(row.get(team_col, "?")).strip() if team_col and team_col in row else "?"
-            pos  = str(row.get(pos_col,  position)).strip() if pos_col and pos_col in row else position
-            val  = row[stat_col]
-            fmt  = f"{val:.1f}" if isinstance(val, float) and val != int(val) else f"{int(val)}"
-            lines.append(f"{_rank_emoji(i)} **{name}** ({pos}, {team}) — **{fmt}** {stat_label}")
+        for i, row in enumerate(rows, 1):
+            name = str(row.get("player_name", "?")).strip() or "?"
+            team = str(row.get("teamName", "?")).strip()
+            val = row.get("stat_value", 0)
+            try:
+                val_f = float(val)
+                fmt = f"{val_f:.1f}" if val_f != int(val_f) else f"{int(val_f)}"
+            except (ValueError, TypeError):
+                fmt = str(val)
+            lines.append(f"{_rank_emoji(i)} **{name}** ({position}, {team}) — **{fmt}** {stat_label}")
             if name and name != "?":
                 player_names.append(name)
 
@@ -2379,13 +2280,9 @@ def _build_alltime_embed() -> discord.Embed:
         timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
 
-    if not _HISTORY_OK:
-        embed.description = "⚠️ History database not available."
-        return embed
-
     try:
         # All-time win leaders
-        rows, _ = run_sql("""
+        rows, _ = oqb._run_sql("""
             SELECT winner_user, COUNT(*) AS wins
             FROM games
             WHERE status IN ('2','3') AND stageIndex='1'
@@ -2399,7 +2296,7 @@ def _build_alltime_embed() -> discord.Embed:
             embed.add_field(name="🏆 All-Time Win Leaders", value="\n".join(lines), inline=True)
 
         # All-time loss leaders (most losses = most games played usually)
-        rows2, _ = run_sql("""
+        rows2, _ = oqb._run_sql("""
             SELECT loser_user, COUNT(*) AS losses
             FROM games
             WHERE status IN ('2','3') AND stageIndex='1'
@@ -2412,37 +2309,21 @@ def _build_alltime_embed() -> discord.Embed:
             lines2 = [f"{_rank_emoji(i)} **{r['loser_user']}** — {r['losses']} losses" for i, r in enumerate(rows2, 1)]
             embed.add_field(name="💀 Most Losses", value="\n".join(lines2), inline=True)
 
-        # Highest scoring game ever
-        rows3, _ = run_sql("""
-            SELECT homeTeamName, awayTeamName, homeScore, awayScore,
-                   (CAST(homeScore AS INTEGER) + CAST(awayScore AS INTEGER)) AS total,
-                   seasonIndex, weekIndex
-            FROM games
-            WHERE status IN ('2','3') AND stageIndex='1'
-            ORDER BY total DESC
-            LIMIT 1
-        """)
+        # Highest scoring game ever — use QueryBuilder Layer 1
+        rows3, _ = oqb.game_extremes("highest", limit=1)
         if rows3:
             r = rows3[0]
             embed.add_field(
                 name="💥 Highest Scoring Game",
                 value=(
                     f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
-                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['total']} total pts"
+                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['total_pts']} total pts"
                 ),
                 inline=False,
             )
 
-        # Biggest blowout
-        rows4, _ = run_sql("""
-            SELECT homeTeamName, awayTeamName, homeScore, awayScore,
-                   ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin,
-                   seasonIndex, weekIndex
-            FROM games
-            WHERE status IN ('2','3') AND stageIndex='1'
-            ORDER BY margin DESC
-            LIMIT 1
-        """)
+        # Biggest blowout — use QueryBuilder Layer 1
+        rows4, _ = oqb.game_extremes("blowout", limit=1)
         if rows4:
             r = rows4[0]
             embed.add_field(
@@ -2454,17 +2335,8 @@ def _build_alltime_embed() -> discord.Embed:
                 inline=True,
             )
 
-        # Closest game ever
-        rows5, _ = run_sql("""
-            SELECT homeTeamName, awayTeamName, homeScore, awayScore,
-                   ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin,
-                   seasonIndex, weekIndex
-            FROM games
-            WHERE status IN ('2','3') AND stageIndex='1'
-              AND CAST(homeScore AS INTEGER) > 0
-            ORDER BY margin ASC
-            LIMIT 1
-        """)
+        # Closest game ever — use QueryBuilder Layer 1
+        rows5, _ = oqb.game_extremes("closest", limit=1)
         if rows5:
             r = rows5[0]
             embed.add_field(
@@ -2477,7 +2349,7 @@ def _build_alltime_embed() -> discord.Embed:
             )
 
         # Most active owners (games played)
-        rows6, _ = run_sql("""
+        rows6, _ = oqb._run_sql("""
             SELECT owner, COUNT(*) AS games FROM (
                 SELECT homeUser AS owner FROM games WHERE status IN ('2','3') AND stageIndex='1'
                 UNION ALL
@@ -3388,11 +3260,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
             )
             return
 
-        if not _HISTORY_OK:
-            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
-            return
-
-        rows, _ = run_sql("""
+        rows, _ = oqb._run_sql("""
             SELECT winner_user, loser_user, winner_team, loser_team,
                    homeScore, awayScore, weekIndex
             FROM games

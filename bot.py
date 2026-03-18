@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.23.0"  # Code review Phase 2: dead code cleanup, render pipeline, shared card utils, Oracle fixes
+ATLAS_VERSION = "2.24.0"  # Oracle v3 wiring: QueryBuilder integration for stat leaders, franchise SQL, all-time records
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
