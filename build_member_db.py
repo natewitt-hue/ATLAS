@@ -1103,6 +1103,11 @@ def build_member_table(db_path: str = DB_PATH):
             )
         """)
 
+        # Commit the CREATE TABLE, then use EXCLUSIVE transaction to prevent
+        # race conditions between the DELETE (stale row cleanup) and INSERT (upsert).
+        conn.commit()
+        conn.execute("BEGIN EXCLUSIVE")
+
         # Clear stale rows where a discord_id moved to a new username.
         # Without this, ON CONFLICT(discord_username) can try to set a discord_id
         # that another row already owns, violating the UNIQUE constraint.

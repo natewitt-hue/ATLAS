@@ -86,6 +86,9 @@ FREE_SPIN_OUTCOME_TABLE = [
     (1.000, 25.0, "3match_mega",   "💎 LEGENDARY! 25x!!"),
 ]
 
+for _tbl in (SLOTS_OUTCOME_TABLE, FREE_SPIN_OUTCOME_TABLE):
+    assert abs(_tbl[-1][0] - 1.0) < 1e-9, "RTP table final cumulative probability must be 1.0"
+
 
 def _roll_outcome(table=None) -> tuple[float, str, str]:
     """Roll an outcome tier. Returns (multiplier, visual_type, message)."""

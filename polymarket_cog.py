@@ -523,9 +523,21 @@ def extract_prices(market: dict) -> dict:
 
         if isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
             try:
-                yes_price = float(outcome_prices[0])
-                no_price = float(outcome_prices[1])
-            except (ValueError, TypeError):
+                outcomes = market.get("outcomes")
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except (json.JSONDecodeError, TypeError):
+                        outcomes = None
+                if isinstance(outcomes, list) and "Yes" in outcomes:
+                    yes_idx = outcomes.index("Yes")
+                    no_idx = outcomes.index("No") if "No" in outcomes else (1 - yes_idx)
+                    yes_price = float(outcome_prices[yes_idx])
+                    no_price = float(outcome_prices[no_idx])
+                else:
+                    yes_price = float(outcome_prices[0])
+                    no_price = float(outcome_prices[1])
+            except (ValueError, TypeError, IndexError):
                 pass
 
     return {
@@ -750,47 +762,49 @@ class WagerModal(discord.ui.Modal):
         payout      = PAYOUT_SCALE * quantity
         user_id     = interaction.user.id
 
-        # Atomic debit + contract creation in single transaction
-        now = datetime.now(timezone.utc).isoformat()
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("BEGIN IMMEDIATE")
+        # Per-user lock prevents double-spend across concurrent bets
+        async with flow_wallet.get_user_lock(user_id):
+            # Atomic debit + contract creation in single transaction
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("BEGIN IMMEDIATE")
 
-                # Check balance and debit atomically
-                balance = await flow_wallet.get_balance(user_id, con=db)
-                if balance < cost_bucks:
-                    await interaction.response.send_message(
-                        f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
-                        ephemeral=True,
+                    # Check balance and debit atomically
+                    balance = await flow_wallet.get_balance(user_id, con=db)
+                    if balance < cost_bucks:
+                        await interaction.response.send_message(
+                            f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
+                            ephemeral=True,
+                        )
+                        return
+
+                    await flow_wallet.debit(
+                        user_id, cost_bucks, "PREDICTION",
+                        description="prediction market bet",
+                        con=db,
                     )
-                    return
 
-                await flow_wallet.debit(
-                    user_id, cost_bucks, "PREDICTION",
-                    description="prediction market bet",
-                    con=db,
+                    # Write contract in same transaction
+                    await db.execute("""
+                        INSERT INTO prediction_contracts
+                            (user_id, market_id, slug, side, buy_price,
+                             quantity, cost_bucks, potential_payout, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                    """, (
+                        user_id, self.market_id, self.slug,
+                        self.side, self.price,
+                        quantity, cost_bucks, payout, now,
+                    ))
+                    await db.commit()
+            except flow_wallet.InsufficientFundsError as e:
+                await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+                return
+            except Exception as e:
+                await interaction.response.send_message(
+                    f"❌ Failed to place bet: {e}", ephemeral=True
                 )
-
-                # Write contract in same transaction
-                await db.execute("""
-                    INSERT INTO prediction_contracts
-                        (user_id, market_id, slug, side, buy_price,
-                         quantity, cost_bucks, potential_payout, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-                """, (
-                    user_id, self.market_id, self.slug,
-                    self.side, self.price,
-                    quantity, cost_bucks, payout, now,
-                ))
-                await db.commit()
-        except flow_wallet.InsufficientFundsError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Failed to place bet: {e}", ephemeral=True
-            )
-            return
+                return
 
         new_bal = balance - cost_bucks
         color = 0x2ECC71 if self.side == "YES" else 0xE74C3C
@@ -2917,6 +2931,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         name="markets",
         description="Browse curated prediction markets."
     )
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     @app_commands.describe(
         view="How to sort markets (default: curated)",
         category="Filter by category",

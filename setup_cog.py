@@ -297,15 +297,22 @@ async def _provision_channels(guild: discord.Guild) -> dict:
                 results["failed"].append((config_key, str(e)))
                 print(f"[SETUP]   FAILED: {config_key} — {e}")
 
-    # ── Migration: remove orphaned real_sportsbook config ─────────────────
+    # ── Migration: remove orphaned real_sportsbook config (one-time) ─────
     try:
         with sqlite3.connect(DB_PATH) as con:
-            deleted = con.execute(
-                "DELETE FROM server_config WHERE config_key = 'real_sportsbook'"
-            ).rowcount
-            if deleted:
+            row = con.execute(
+                "SELECT channel_id FROM server_config WHERE config_key='_migration_v2'"
+            ).fetchone()
+            if not row:
+                deleted = con.execute(
+                    "DELETE FROM server_config WHERE config_key = 'real_sportsbook'"
+                ).rowcount
+                if deleted:
+                    print(f"[SETUP]   Migration: removed orphaned real_sportsbook config entry")
+                con.execute(
+                    "INSERT INTO server_config (config_key, channel_id, guild_id) VALUES ('_migration_v2', 0, 0)"
+                )
                 con.commit()
-                print(f"[SETUP]   Migration: removed orphaned real_sportsbook config entry")
     except Exception as e:
         print(f"[SETUP]   Migration cleanup note: {e}")
 

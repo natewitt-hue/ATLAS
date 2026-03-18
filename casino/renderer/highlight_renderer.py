@@ -20,7 +20,7 @@ Usage:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from atlas_html_engine import render_card, wrap_card, esc
 
@@ -29,7 +29,7 @@ from atlas_html_engine import render_card, wrap_card, esc
 
 def _now_ts() -> str:
     """Return a human-readable UTC timestamp for the card footer."""
-    return datetime.utcnow().strftime("%b %d, %Y · %H:%M UTC")
+    return datetime.now(timezone.utc).strftime("%b %d, %Y · %H:%M UTC")
 
 
 def _commentary_html(commentary: str) -> str:

@@ -244,7 +244,7 @@ def _find_player(name: str, team_id: int | None = None) -> tuple[dict | None, li
 
     scored.sort(key=lambda x: x[0], reverse=True)
     if not scored or scored[0][0] < 0.45:
-        return None, []
+        return None, [p for _, p in scored[:3]]
 
     best  = scored[0][1]
     close = [p for s, p in scored[1:5] if s >= 0.60]
@@ -294,6 +294,9 @@ def _parse_picks(raw: str, team_id: int) -> tuple[list[dict], list[str]]:
 
         if rnd < 1 or rnd > 7:
             errors.append(f"`{token}` — round must be 1–7")
+            continue
+        if season > current_season + 3:
+            errors.append(f"`{token}` — season S{season} is too far in the future")
             continue
 
         picks.append({
@@ -696,7 +699,7 @@ async def _evaluate_and_post(
 
     # ── RED band = auto-decline (no buttons, no save) ────────────────────────
     if result.band == "RED":
-        trade_id = str(uuid.uuid4())[:8].upper()
+        trade_id = str(uuid.uuid4())[:12].upper()
         ai_text = await _get_ai_commentary(result, _team_label(team_a), _team_label(team_b))
 
         # OVR delta
@@ -775,7 +778,7 @@ async def _evaluate_and_post(
     ai_text = await _get_ai_commentary(result, _team_label(team_a), _team_label(team_b))
 
     # Build trade record
-    trade_id = str(uuid.uuid4())[:8].upper()
+    trade_id = str(uuid.uuid4())[:12].upper()
     trade = {
         "id":            trade_id,
         "original_id":   original_trade_id,
@@ -1675,6 +1678,7 @@ class TradeCenterCog(commands.Cog):
         name="trade",
         description="Open the TSL Trade Center — pick a conference, then select teams.",
     )
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     async def trade(self, interaction: discord.Interaction):
         """Conference-button trade flow.  AFC/NFC → 16-team dropdown → picker."""
         if dm.df_teams.empty or not dm.get_players():

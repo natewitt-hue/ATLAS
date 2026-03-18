@@ -2,6 +2,7 @@
 awards_cog.py — ATLAS Echo · Anonymous Awards & Voting System
 """
 import json
+import logging
 import os
 import uuid
 import discord
@@ -9,6 +10,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from permissions import ADMIN_USER_IDS
+
+log = logging.getLogger("awards")
 
 # ── Poll persistence ──────────────────────────────────────────────────────────
 _POLLS_PATH = os.path.join(os.path.dirname(__file__), "polls_state.json")
@@ -18,8 +21,8 @@ def _load_polls() -> dict:
         try:
             with open(_POLLS_PATH, "r") as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"[awards_cog] Poll load error: {e}")
+        except Exception:
+            log.exception("Poll load error")
     return {}
 
 def _save_polls() -> None:
@@ -28,8 +31,8 @@ def _save_polls() -> None:
         with open(tmp, "w") as f:
             json.dump(_polls, f, indent=2)
         os.replace(tmp, _POLLS_PATH)
-    except Exception as e:
-        print(f"[awards_cog] Poll save error: {e}")
+    except Exception:
+        log.exception("Poll save error")
 
 _polls: dict = _load_polls()
 

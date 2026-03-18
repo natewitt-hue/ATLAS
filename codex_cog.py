@@ -489,14 +489,16 @@ async def gemini_sql(
     conv_context: str = "",
 ) -> str | None:
     """Ask Gemini to generate SQL. Non-blocking via run_in_executor."""
+    _sanitize = lambda s: re.sub(r"['\";\\]", "", s)
     alias_block = ""
     if alias_map:
-        lines = [f"  '{nick}' → use username '{user}' in SQL" for nick, user in alias_map.items()]
+        lines = [f"  '{_sanitize(nick)}' → use username '{_sanitize(user)}' in SQL" for nick, user in alias_map.items()]
         alias_block = "\nRESOLVED NAME ALIASES (use these exact values in WHERE clauses):\n" + "\n".join(lines) + "\n"
 
+    safe_users = [_sanitize(u) for u in KNOWN_USERS]
     known_users_block = (
         "\nVALID homeUser/awayUser VALUES (exact strings stored in the database):\n"
-        + ", ".join(f"'{u}'" for u in KNOWN_USERS)
+        + ", ".join(f"'{u}'" for u in safe_users)
         + "\nOnly use these exact strings in WHERE clauses involving homeUser or awayUser.\n"
     )
 

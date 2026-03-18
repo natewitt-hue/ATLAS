@@ -141,16 +141,17 @@ def _get_active_positions(user_id: int) -> dict:
 
 
 def _get_leaderboard_rank(user_id: int) -> tuple[int, int]:
-    # NOTE: Could use SQL RANK() window function for O(1) lookup instead of
-    # fetching all rows, but user count is small (~31 owners) so linear scan is fine.
     with sqlite3.connect(DB_PATH) as con:
-        rows = con.execute(
-            "SELECT discord_id FROM users_table ORDER BY balance DESC"
-        ).fetchall()
-    total = len(rows)
-    for i, (did,) in enumerate(rows, 1):
-        if did == user_id:
-            return i, total
+        row = con.execute(
+            "SELECT rank, total FROM ("
+            "  SELECT discord_id, RANK() OVER (ORDER BY balance DESC) AS rank, "
+            "  COUNT(*) OVER () AS total FROM users_table"
+            ") WHERE discord_id = ?",
+            (user_id,),
+        ).fetchone()
+    if row:
+        return row[0], row[1]
+    total = con.execute("SELECT COUNT(*) FROM users_table").fetchone()[0]
     return total, total
 
 
@@ -514,6 +515,8 @@ async def build_my_bets_card(user_id: int) -> bytes:
             potential = _payout_calc(wager, c_odds)
             legs_html = ""
             for leg in legs:
+                if not isinstance(leg, dict):
+                    continue
                 leg_pick = leg.get("pick", "?")
                 # Check if individual leg is graded
                 leg_status = leg.get("status", "Pending")
