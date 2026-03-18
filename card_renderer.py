@@ -40,6 +40,7 @@ import base64
 from pathlib import Path
 
 from atlas_html_engine import render_card as engine_render_card, wrap_card, esc
+from atlas_style_tokens import Tokens
 
 
 def _esc(text) -> str:
@@ -201,12 +202,12 @@ def _build_html(data: dict) -> str:
     assets_a_html = "".join(_player_card_html(p) for p in players_a[:4])
     assets_a_html += "".join(_pick_card_html(pk) for pk in picks_a[:4])
     if not assets_a_html:
-        assets_a_html = '<div style="font-size:12px;color:#555;padding:8px;">No assets</div>'
+        assets_a_html = '<div style="font-size:12px;color:var(--text-dim);padding:8px;">No assets</div>'
 
     assets_b_html = "".join(_player_card_html(p) for p in players_b[:4])
     assets_b_html += "".join(_pick_card_html(pk) for pk in picks_b[:4])
     if not assets_b_html:
-        assets_b_html = '<div style="font-size:12px;color:#555;padding:8px;">No assets</div>'
+        assets_b_html = '<div style="font-size:12px;color:var(--text-dim);padding:8px;">No assets</div>'
 
     # ── Valuation (FIXED direction: team sending LESS = beneficiary) ─────────
     val_a = data.get("side_a_value", 0)
@@ -260,6 +261,7 @@ def _build_html(data: dict) -> str:
 <meta charset="UTF-8">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
+  {Tokens.to_css_vars()}
 
   @font-face {{
     font-family: 'Bank Gothic';
@@ -274,7 +276,7 @@ def _build_html(data: dict) -> str:
   body {{
     width: 700px;
     background: transparent;
-    font-family: 'Outfit', sans-serif;
+    font-family: var(--font-display), sans-serif;
     color: #fff;
     padding: 0;
   }}
@@ -292,13 +294,13 @@ def _build_html(data: dict) -> str:
     background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
     pointer-events: none; z-index: 1;
   }}
-  .inner {{ position: relative; z-index: 2; background: #111; }}
+  .inner {{ position: relative; z-index: 2; background: var(--bg); }}
 
   /* Status bar */
   .sbar {{ height: 5px; }}
-  .sbar.green  {{ background: linear-gradient(90deg, #4ADE80, #22C55E, #4ADE80); }}
+  .sbar.green  {{ background: linear-gradient(90deg, var(--win), var(--win-dark), var(--win)); }}
   .sbar.yellow {{ background: linear-gradient(90deg, #EAB308, #FACC15, #EAB308); }}
-  .sbar.red    {{ background: linear-gradient(90deg, #F87171, #EF4444, #F87171); }}
+  .sbar.red    {{ background: linear-gradient(90deg, var(--loss), var(--loss-dark), var(--loss)); }}
 
   .sep      {{ height: 1px; background: rgba(255,255,255,0.04); margin: 0 36px; }}
   .sep-gold {{ height: 1px; background: linear-gradient(90deg, transparent, rgba(212,175,55,0.2) 15%, rgba(212,175,55,0.2) 85%, transparent); }}
@@ -314,7 +316,7 @@ def _build_html(data: dict) -> str:
     overflow: hidden;
     flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    background: #0a0a0a;
+    background: var(--bg-deep);
     border: 1px solid rgba(212,175,55,0.15);
   }}
   .hdr-text {{ flex: 1; }}
@@ -337,7 +339,7 @@ def _build_html(data: dict) -> str:
   .hdr-badge {{
     padding: 8px 18px;
     border-radius: 24px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.1em;
@@ -360,8 +362,8 @@ def _build_html(data: dict) -> str:
     letter-spacing: 0.04em;
   }}
   .team-owner {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 12px; color: #555; font-weight: 600;
+    font-family: var(--font-mono), monospace;
+    font-size: 12px; color: var(--text-dim); font-weight: 600;
     margin-top: 2px;
   }}
   .vs-divider {{
@@ -406,7 +408,7 @@ def _build_html(data: dict) -> str:
   .assets-col:last-child  {{ border-radius: 0 16px 16px 0; }}
   .assets-header {{
     font-weight: 700; font-size: 11px;
-    color: #D4AF37; opacity: 0.55;
+    color: var(--gold); opacity: 0.55;
     letter-spacing: 0.18em;
     margin-bottom: 12px;
     text-transform: uppercase;
@@ -424,7 +426,7 @@ def _build_html(data: dict) -> str:
     margin-bottom: 8px;
   }}
   .player-ovr {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-weight: 800; font-size: 28px;
     color: #fff;
     min-width: 44px; text-align: center;
@@ -436,8 +438,8 @@ def _build_html(data: dict) -> str:
     line-height: 1.3;
   }}
   .player-meta {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: #555; font-weight: 500;
+    font-family: var(--font-mono), monospace;
+    font-size: 11px; color: var(--text-dim); font-weight: 500;
     margin-top: 2px;
   }}
   .dev-badge {{
@@ -452,8 +454,8 @@ def _build_html(data: dict) -> str:
     margin-top: 4px;
   }}
   .dev-xf     {{ background: rgba(168,85,247,0.1); border: 1px solid rgba(168,85,247,0.25); color: #C084FC; }}
-  .dev-ss     {{ background: rgba(212,175,55,0.08); border: 1px solid rgba(212,175,55,0.2);  color: #D4AF37; }}
-  .dev-star   {{ background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); color: #888; }}
+  .dev-ss     {{ background: rgba(212,175,55,0.08); border: 1px solid rgba(212,175,55,0.2);  color: var(--gold); }}
+  .dev-star   {{ background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); color: var(--text-muted); }}
   .dev-normal {{ display: none; }}
 
   /* Pick card */
@@ -468,7 +470,7 @@ def _build_html(data: dict) -> str:
     margin-bottom: 6px;
   }}
   .pick-icon {{ font-size: 16px; }}
-  .pick-label {{ font-size: 13px; font-weight: 600; color: #888; }}
+  .pick-label {{ font-size: 13px; font-weight: 600; color: var(--text-muted); }}
 
   /* ── TRADE HEALTH ── */
   .health-section {{
@@ -476,7 +478,7 @@ def _build_html(data: dict) -> str:
   }}
   .health-title {{
     font-weight: 700; font-size: 11px;
-    color: #D4AF37; opacity: 0.55;
+    color: var(--gold); opacity: 0.55;
     letter-spacing: 0.18em;
     margin-bottom: 14px;
     text-transform: uppercase;
@@ -488,21 +490,21 @@ def _build_html(data: dict) -> str:
     margin-bottom: 6px;
   }}
   .health-team {{
-    font-size: 14px; color: #888;
+    font-size: 14px; color: var(--text-muted);
     font-weight: 600;
   }}
   .health-label {{
-    font-size: 10px; color: #555;
+    font-size: 10px; color: var(--text-dim);
     letter-spacing: 0.1em; font-weight: 600;
     text-transform: uppercase;
     margin-left: 6px;
   }}
   .health-pts {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-weight: 800; font-size: 18px;
     color: #fff;
   }}
-  .health-pts.winner {{ color: #D4AF37; }}
+  .health-pts.winner {{ color: var(--gold); }}
 
   /* Fairness bar */
   .fairness-bar-wrap {{ margin: 14px 0 8px; }}
@@ -512,8 +514,8 @@ def _build_html(data: dict) -> str:
     margin-bottom: 4px;
   }}
   .fl-team {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: #555; font-weight: 600;
+    font-family: var(--font-mono), monospace;
+    font-size: 11px; color: var(--text-dim); font-weight: 600;
   }}
   .fairness-bar {{
     height: 6px;
@@ -523,7 +525,7 @@ def _build_html(data: dict) -> str:
     background: rgba(255,255,255,0.03);
   }}
   .fb-a {{
-    background: linear-gradient(90deg, #D4AF37, #F0D060);
+    background: linear-gradient(90deg, var(--gold), var(--gold-bright));
     height: 100%;
   }}
   .fb-b {{
@@ -536,11 +538,11 @@ def _build_html(data: dict) -> str:
     text-align: center;
     margin-top: 10px;
     font-size: 13px;
-    color: #888;
+    color: var(--text-muted);
   }}
-  .favors-line strong {{ color: #D4AF37; font-weight: 700; }}
+  .favors-line strong {{ color: var(--gold); font-weight: 700; }}
   .favors-line .pct {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-weight: 700;
   }}
 
@@ -566,18 +568,18 @@ def _build_html(data: dict) -> str:
     text-transform: uppercase;
   }}
   .metric-value {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-weight: 800; font-size: 18px;
     line-height: 1.2;
   }}
   .metric-sub {{
-    font-size: 10px; color: #444;
+    font-size: 10px; color: var(--text-dim);
     margin-top: 4px;
     letter-spacing: 0.04em;
   }}
-  .mv-green  {{ color: #4ADE80; }}
+  .mv-green  {{ color: var(--win); }}
   .mv-yellow {{ color: #EAB308; }}
-  .mv-red    {{ color: #F87171; }}
+  .mv-red    {{ color: var(--loss); }}
   .mv-white  {{ color: #fff; }}
 
   /* ── FLAGS ── */
@@ -586,14 +588,14 @@ def _build_html(data: dict) -> str:
   }}
   .flags-title {{
     font-weight: 700; font-size: 11px;
-    color: #D4AF37; opacity: 0.45;
+    color: var(--gold); opacity: 0.45;
     letter-spacing: 0.18em;
     margin-bottom: 8px;
     text-transform: uppercase;
   }}
   .flag-item {{
     font-size: 12px;
-    color: #F87171;
+    color: var(--loss);
     padding: 3px 0 3px 14px;
     position: relative;
     line-height: 1.5;
@@ -602,7 +604,7 @@ def _build_html(data: dict) -> str:
     content: '›';
     position: absolute;
     left: 0;
-    color: #F87171;
+    color: var(--loss);
     font-weight: 700;
   }}
 
@@ -612,7 +614,7 @@ def _build_html(data: dict) -> str:
   }}
   .verdict-title {{
     font-weight: 700; font-size: 11px;
-    color: #D4AF37; opacity: 0.45;
+    color: var(--gold); opacity: 0.45;
     letter-spacing: 0.18em;
     margin-bottom: 10px;
     text-transform: uppercase;
@@ -635,7 +637,7 @@ def _build_html(data: dict) -> str:
     margin-top: 20px;
   }}
   .foot-txt {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-size: 11px; color: #262626; font-weight: 600;
     letter-spacing: 0.05em;
   }}
