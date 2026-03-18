@@ -13,6 +13,7 @@ DB_DIR      = "faiss_lore_db"
 INDEX_FILE  = os.path.join(DB_DIR, "lore_index.faiss")
 META_FILE   = os.path.join(DB_DIR, "lore_metadata.pkl")
 MODEL_NAME  = "all-MiniLM-L6-v2"
+HF_TOKEN    = os.environ.get("HF_TOKEN")
 
 MUST_INDEX_KEYWORDS = ["trade", "beef", "drama", "witt", "diddy", "cheese", "commish", "scam", "robbed"]
 
@@ -24,7 +25,7 @@ _index_lock = threading.Lock()
 
 
 def _load_model():
-    return SentenceTransformer(MODEL_NAME)
+    return SentenceTransformer(MODEL_NAME, token=HF_TOKEN)
 
 
 def _ensure_loaded():
