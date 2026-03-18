@@ -571,6 +571,130 @@ async def build_stats_card(user_id: int) -> bytes:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  MATCH DETAIL CARD
+# ═════════════════════════════════════════════════════════════════════════════
+
+_MATCH_DETAIL_CSS = """\
+.matchup-hero { text-align: center; padding: 8px 20px 4px; }
+.matchup-teams { font-family: 'Outfit'; font-weight: 800; font-size: 24px; color: var(--text-primary); letter-spacing: 1px; }
+.matchup-teams .at { color: var(--gold); margin: 0 8px; font-size: 18px; }
+.matchup-sub { font-family: 'Outfit'; font-weight: 600; font-size: 12px; color: var(--text-muted); letter-spacing: 1px; margin-top: 2px; }
+
+.status-badge { font-family: 'JetBrains Mono'; font-weight: 700; font-size: 11px; letter-spacing: 1px; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
+.status-badge.open { color: var(--win); background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.35); }
+.status-badge.locked { color: var(--loss); background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.35); }
+
+.odds-section { padding: 0 20px 16px; }
+.odds-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+.odds-col-header { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; text-align: center; padding-bottom: 8px; }
+.odds-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px 8px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
+.odds-team { font-family: 'Outfit'; font-weight: 700; font-size: 12px; color: var(--text-sub); letter-spacing: 0.5px; margin-bottom: 4px; }
+.odds-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 22px; color: var(--text-primary); }
+.odds-value.fav { color: var(--win); }
+.odds-value.dog { color: var(--loss); }
+.odds-juice { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+
+.match-footer { text-align: center; padding: 0 20px 14px; }
+.match-footer span { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 10px; color: var(--text-dim); letter-spacing: 0.5px; }
+"""
+
+
+async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
+    """
+    Render match detail card as PNG.
+    `game` is a dict from _build_game_lines().
+    """
+    away = esc(game["away"])
+    home = esc(game["home"])
+    week = game.get("bet_week", "")
+    status_class = "loss" if locked else "win"
+    badge_class = "locked" if locked else "open"
+    badge_text = "\u25cf LOCKED" if locked else "\u25cf OPEN"
+    admin_note = " \u00b7 LINE ADJUSTED" if game.get("_overridden") else ""
+
+    # Moneyline color: negative = favorite (green), positive = underdog (red)
+    away_ml_class = "fav" if game["away_ml_val"] < 0 else "dog"
+    home_ml_class = "fav" if game["home_ml_val"] < 0 else "dog"
+
+    body = f"""<style>{_MATCH_DETAIL_CSS}</style>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">\U0001f3df\ufe0f</div>
+    <div class="game-title-group">
+      <div class="game-title">MATCH DETAIL</div>
+      <div class="game-subtitle">WEEK {esc(str(week))} \u00b7 TSL</div>
+    </div>
+  </div>
+  <div class="status-badge {badge_class}">{badge_text}</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Matchup Hero -->
+<div class="matchup-hero">
+  <div class="matchup-teams">
+    {away} <span class="at">@</span> {home}
+  </div>
+  <div class="matchup-sub">{away} {esc(game['away_spread'])} \u00b7 O/U {game['ou_line']}{admin_note}</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Odds Grid -->
+<div class="odds-section">
+  <div class="odds-grid">
+    <!-- Column Headers -->
+    <div class="odds-col-header">Moneyline</div>
+    <div class="odds-col-header">Spread</div>
+    <div class="odds-col-header">Total</div>
+
+    <!-- Away Row -->
+    <div class="odds-cell">
+      <div class="odds-team">{away}</div>
+      <div class="odds-value {away_ml_class}">{esc(game['away_ml'])}</div>
+    </div>
+    <div class="odds-cell">
+      <div class="odds-team">{away}</div>
+      <div class="odds-value">{esc(game['away_spread'])}</div>
+      <div class="odds-juice">(-110)</div>
+    </div>
+    <div class="odds-cell">
+      <div class="odds-team">Over</div>
+      <div class="odds-value">{game['ou_line']}</div>
+      <div class="odds-juice">(-110)</div>
+    </div>
+
+    <!-- Home Row -->
+    <div class="odds-cell">
+      <div class="odds-team">{home}</div>
+      <div class="odds-value {home_ml_class}">{esc(game['home_ml'])}</div>
+    </div>
+    <div class="odds-cell">
+      <div class="odds-team">{home}</div>
+      <div class="odds-value">{esc(game['home_spread'])}</div>
+      <div class="odds-juice">(-110)</div>
+    </div>
+    <div class="odds-cell">
+      <div class="odds-team">Under</div>
+      <div class="odds-value">{game['ou_line']}</div>
+      <div class="odds-juice">(-110)</div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="match-footer">
+  <span>ATLAS SPORTSBOOK \u00b7 ELO-POWERED ODDS</span>
+</div>
+"""
+
+    full_html = wrap_card(body, status_class=status_class)
+    return await render_card(full_html)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  DISCORD HELPERS
 # ═════════════════════════════════════════════════════════════════════════════
 
