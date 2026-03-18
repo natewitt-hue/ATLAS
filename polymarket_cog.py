@@ -1571,6 +1571,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         upserted = 0
 
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=15000")
             for event in events:
                 event_id = str(event.get("id", ""))
                 event_category = extract_category_from_event(event)
@@ -1638,7 +1640,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     ))
                     upserted += 1
 
-            await db.commit()
+                # Commit per-event to avoid holding write lock for entire batch
+                await db.commit()
 
             # Purge any stale sports markets that pre-date the filter
             blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)

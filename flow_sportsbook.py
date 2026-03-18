@@ -1522,7 +1522,10 @@ class SportsbookHubView(discord.ui.View):
                        style=discord.ButtonStyle.primary,
                        custom_id="atlas:sportsbook:tsl", row=0)
     async def tsl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            return
         try:
             ui_games = await _load_tsl_week_games()
         except ValueError as e:
@@ -1687,7 +1690,10 @@ class SportsbookHubView(discord.ui.View):
     # ── Internal: real sport drill-down ────────────────────────────────────
 
     async def _show_real_sport(self, interaction: discord.Interaction, sport_key: str):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            return
         try:
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             async with aiosqlite.connect(DB_PATH) as db:

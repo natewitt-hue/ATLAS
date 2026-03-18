@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.22.0"  # Rewire My Bets, Wallet, Leaderboard to HTML/PNG card renderers
+ATLAS_VERSION = "2.22.1"  # Fix interaction 404s, flow_live guild_id NULL, DB lock spiral
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

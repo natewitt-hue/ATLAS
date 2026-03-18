@@ -70,6 +70,23 @@ SPORT_SEASONS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _db_connect():
+    """Open an aiosqlite connection with WAL + busy_timeout for contention safety."""
+    db = _db_connect()
+    return _WalConnection(db)
+
+class _WalConnection:
+    """Wrapper that sets WAL + busy_timeout on __aenter__."""
+    def __init__(self, db):
+        self._db = db
+    async def __aenter__(self):
+        conn = await self._db.__aenter__()
+        await conn.execute("PRAGMA busy_timeout=15000")
+        return conn
+    async def __aexit__(self, *args):
+        return await self._db.__aexit__(*args)
+
+
 def _american_to_str(odds: int) -> str:
     """Format American odds as string (+150 / -110)."""
     return f"+{odds}" if odds > 0 else str(odds)
@@ -91,7 +108,7 @@ def _profit_calc(wager: int, odds: int) -> int:
 async def _get_max_bet() -> int:
     """Read per-event max wager from sportsbook_settings, default 5000."""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             async with db.execute(
                 "SELECT value FROM sportsbook_settings WHERE key = 'max_bet_real'"
             ) as cur:
@@ -124,7 +141,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
     async def _setup_tables(self):
         """Create real sportsbook tables if they don't exist."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS real_events (
                     event_id       TEXT PRIMARY KEY,
@@ -209,7 +226,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         """Lock events where commence_time <= now."""
         now = datetime.now(timezone.utc).isoformat()
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with _db_connect() as db:
                 await db.execute(
                     "UPDATE real_events SET locked = 1 "
                     "WHERE locked = 0 AND completed = 0 AND commence_time <= ?",
@@ -252,7 +269,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         sport_title = SUPPORTED_SPORTS.get(sport_key, sport_key)
         upserted = 0
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             for ev in events:
                 event_id = ev.get("id", "")
                 home = ev.get("home_team", "")
@@ -311,7 +328,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
         graded_total = 0
         # Hoist DB connection outside the loop to avoid reconnecting per-event
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             for sport_key, events in all_scores.items():
                 for ev in events:
                     event_id = ev.get("id", "")
@@ -361,7 +378,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     async def _grade_event(self, event_id: str, home_team: str, away_team: str,
                            home_score: int, away_score: int) -> int:
         """Grade all pending bets for a completed event. Returns count graded."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             async with db.execute(
                 "SELECT bet_id, discord_id, bet_type, pick, odds, line, wager_amount "
                 "FROM real_bets WHERE event_id = ? AND status = 'Pending'",
@@ -382,7 +399,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
             ref_key = f"REAL_BET_{bet_id}_{result.lower()}"
 
             # Atomic: credit + status update in single transaction
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with _db_connect() as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
                     # Check if already graded (idempotency)
@@ -490,7 +507,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
     async def status_impl(self, interaction: discord.Interaction):
         """Show sync status, API quota, pending bet count."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             async with db.execute(
                 "SELECT COUNT(*) FROM real_events WHERE completed = 0"
             ) as cur:
@@ -526,7 +543,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
     async def lock_impl(self, interaction: discord.Interaction, event_id: str):
         """Manually lock an event."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             await db.execute(
                 "UPDATE real_events SET locked = 1 WHERE event_id = ?",
                 (event_id,),
@@ -538,7 +555,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
     async def void_impl(self, interaction: discord.Interaction, event_id: str):
         """Void an event and refund all pending bets."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
                 async with db.execute(
@@ -663,7 +680,7 @@ class EventListView(discord.ui.View):
             return await interaction.followup.send("Event not found.", ephemeral=True)
 
         # Fetch odds for this event
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT market, outcome_name, price, point "
@@ -884,7 +901,7 @@ class RealBetModal(discord.ui.Modal):
             )
 
         # Re-check event is still open
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             async with db.execute(
                 "SELECT locked, completed, commence_time "
                 "FROM real_events WHERE event_id = ?",
@@ -924,7 +941,7 @@ class RealBetModal(discord.ui.Modal):
 
         # Insert bet
         now = datetime.now(timezone.utc).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             await db.execute(
                 "INSERT INTO real_bets "
                 "(discord_id, event_id, sport_key, bet_type, pick, odds, line, wager_amount, created_at) "

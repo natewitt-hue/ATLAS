@@ -190,9 +190,14 @@ class SessionTracker:
 
     def _persist(self, session: PlayerSession):
         import json, sqlite3
+        if not session.guild_id:
+            log.debug("Skipping persist for %s — no guild_id", session.discord_id)
+            return
         try:
             d = session.to_dict()
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect("flow_economy.db", timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
             conn.execute("""
                 INSERT OR REPLACE INTO flow_live_sessions
                 (discord_id, guild_id, started_at, last_activity,
@@ -214,9 +219,13 @@ class SessionTracker:
             log.exception("Failed to persist session for %s", session.discord_id)
 
     def _delete_persisted(self, discord_id: int, guild_id: int):
+        if not guild_id:
+            return
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect("flow_economy.db", timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
             conn.execute(
                 "DELETE FROM flow_live_sessions WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, guild_id),

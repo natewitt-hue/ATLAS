@@ -623,18 +623,30 @@ class EconomyCog(commands.Cog):
         description="ATLAS Flow Economy hub — your complete financial command center.",
     )
     async def flow_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return  # Interaction expired before we could defer
+
         uid = interaction.user.id
 
-        view = FlowHubView(interaction.client, uid)
-        png = await view.render_current()
-        file = discord.File(io.BytesIO(png), filename="flow.png")
+        try:
+            view = FlowHubView(interaction.client, uid)
+            png = await view.render_current()
+            file = discord.File(io.BytesIO(png), filename="flow.png")
 
-        embed = discord.Embed(color=0xD4AF37)
-        embed.set_image(url="attachment://flow.png")
-        embed.set_footer(text="ATLAS Flow Economy")
+            embed = discord.Embed(color=0xD4AF37)
+            embed.set_image(url="attachment://flow.png")
+            embed.set_footer(text="ATLAS Flow Economy")
 
-        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+            await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+        except discord.NotFound:
+            return  # Interaction expired during render
+        except Exception as e:
+            try:
+                await interaction.followup.send(f"❌ Error loading Flow Hub: `{e}`", ephemeral=True)
+            except discord.NotFound:
+                pass
 
     # ── _impl methods (called by hub buttons and commish_cog) ─────────
 
