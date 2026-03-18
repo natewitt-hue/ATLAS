@@ -160,24 +160,6 @@ class CasinoHubModal(discord.ui.Modal):
             await play_coinflip(interaction, pick, wager)
 
 
-class CoinPickView(discord.ui.View):
-    """Heads or Tails picker for hub coinflip."""
-
-    def __init__(self, wager: int):
-        super().__init__(timeout=30)
-        self.wager = wager
-
-    @discord.ui.button(label="Heads 🌕", style=discord.ButtonStyle.primary)
-    async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.stop()
-        await play_coinflip(interaction, "heads", self.wager)
-
-    @discord.ui.button(label="Tails 🌑", style=discord.ButtonStyle.secondary)
-    async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.stop()
-        await play_coinflip(interaction, "tails", self.wager)
-
-
 class CasinoHubView(discord.ui.View):
     """Main casino lobby buttons."""
 

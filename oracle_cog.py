@@ -2696,7 +2696,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
             except Exception:
                 pass
 
-        embed.set_footer(text="Regular season only · All 6 seasons · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+        embed.set_footer(text=f"Regular season only · All {dm.CURRENT_SEASON} seasons · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 

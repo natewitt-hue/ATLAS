@@ -474,7 +474,7 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     # worst_col: efficiency metric to use for "worst" queries (None = use primary)
     stat_map = {
         'pass': ('passYds', 'passTDs', 'offensive_stats', 'QB', 'passerRating'),
-        'rush': ('rushYds', 'rushTDs', 'offensive_stats', 'HB', None),
+        'rush': ('rushYds', 'rushTDs', 'offensive_stats', None, None),
         'receiv': ('recYds', 'recTDs', 'offensive_stats', None, None),
         'tackl': ('defTotalTackles', None, 'defensive_stats', None, None),
         'sack': ('defSacks', None, 'defensive_stats', None, None),

@@ -19,8 +19,6 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-
 import io
 import logging
 
@@ -36,9 +34,6 @@ from casino.casino_db import (
     process_wager, check_achievements,
 )
 from casino.renderer.casino_html_renderer import render_crash_card
-
-if TYPE_CHECKING:
-    pass
 
 GAME_TYPE     = "crash"
 LOBBY_SECS    = 60     # seconds to wait for more players after first bet

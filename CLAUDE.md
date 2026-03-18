@@ -77,10 +77,12 @@ build_member_db              →  tsl_members table (identity registry)
 | **Sentinel** | Rule enforcement, blowout monitor, compliance | `sentinel_cog.py` |
 | **Oracle** | Analytics, stats, power rankings, profiles | `oracle_cog.py` (class: StatsHubCog) |
 | **Genesis** | Trades, roster, dev traits, draft | `genesis_cog.py` |
-| **Flow** | Economy, sportsbook, casino | `flow_sportsbook.py`, `casino/`, `economy_cog.py` |
-| **Codex** | History, records, NL→SQL→NL via Gemini | `codex_cog.py` |
+| **Flow** | Economy, sportsbook, casino | `flow_sportsbook.py`, `casino/`, `economy_cog.py`, `flow_live_cog.py` |
+| **Codex** | History, records, NL→SQL→NL via Gemini | `codex_cog.py`, `codex_intents.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
 | **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_html_engine.py` |
+| **Boss** | Visual admin hub | `boss_cog.py` |
+| **RealSports** | Real-money odds integration | `real_sportsbook_cog.py`, `odds_api_client.py` |
 
 ### Rendering Stack
 
@@ -101,7 +103,7 @@ All card renders use a single pipeline:
 Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` → PNG bytes
 Width: 480px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 
-**Quarantined (do not import):** `QUARANTINE/atlas_card_renderer.py` (Pillow hub card renderer, replaced), `QUARANTINE/card_renderer.py` (legacy Pillow casino renderer, superseded by HTML v6)
+**Quarantined (do not import):** `QUARANTINE/atlas_card_renderer.py` (Pillow hub card renderer, replaced), `QUARANTINE/card_renderer.py` (legacy Pillow casino renderer, superseded by HTML v6), `QUARANTINE/commish_cog.py` (flat admin commands, replaced by boss_cog visual hub)
 
 ### Cog Load Order (order matters)
 
@@ -117,8 +119,10 @@ Width: 480px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 | 8 | `awards_cog` | Awards & voting |
 | 9 | `codex_cog` | Historical AI queries |
 | 10 | `polymarket_cog` | Prediction markets |
-| 11 | `economy_cog` | Balance ops, payouts, stipends |
-| 12 | `commish_cog` | Unified admin commands |
+| 11 | `economy_cog` | Balance ops, payouts, stipends, Flow Hub |
+| 12 | `flow_live_cog` | Live session tracking, pulse dashboard |
+| 13 | `real_sportsbook_cog` | Real-money sportsbook odds (Odds API) |
+| 14 | `boss_cog` | Visual admin hub (replaced commish_cog) |
 
 ### Databases
 

@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.22.0"  # Code review: fix commish delegations, DM crash, play-again UX, bet grading, vote persistence
+ATLAS_VERSION = "2.23.0"  # Code review Phase 2: dead code cleanup, render pipeline, shared card utils, Oracle fixes
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

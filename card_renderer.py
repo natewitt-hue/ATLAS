@@ -43,7 +43,6 @@ from atlas_html_engine import render_card as engine_render_card, wrap_card, esc
 
 
 def _esc(text) -> str:
-    """Escape user-controlled text for safe HTML embedding."""
     return esc(text)
 
 # ── Genesis icon loader (base64 for inline HTML) ─────────────────────────────
@@ -104,37 +103,6 @@ def _team_abbrev(name: str) -> str:
 def _team_logo_url(name: str) -> str:
     abbrev = _team_abbrev(name)
     return f"https://a.espncdn.com/i/teamlogos/nfl/500/{abbrev}.png" if abbrev else ""
-
-
-# ── Browser singleton ────────────────────────────────────────────────────────
-
-_browser = None
-_pw_context_manager = None  # The async_playwright() context manager
-_pw_instance = None         # The actual playwright instance (returned by __aenter__)
-
-async def _get_browser():
-    global _browser, _pw_context_manager, _pw_instance
-    if _browser is None or not _browser.is_connected():
-        from playwright.async_api import async_playwright
-        _pw_context_manager = async_playwright()
-        _pw_instance = await _pw_context_manager.__aenter__()
-        _browser = await _pw_instance.chromium.launch(headless=True)
-    return _browser
-
-
-async def close_browser():
-    """Call on bot shutdown to clean up."""
-    global _browser, _pw_context_manager, _pw_instance
-    if _browser:
-        await _browser.close()
-        _browser = None
-    if _pw_context_manager:
-        try:
-            await _pw_context_manager.__aexit__(None, None, None)
-        except Exception:
-            pass
-        _pw_context_manager = None
-        _pw_instance = None
 
 
 # ── HTML builders ────────────────────────────────────────────────────────────

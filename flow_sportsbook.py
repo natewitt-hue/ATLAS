@@ -2005,6 +2005,25 @@ class SportsbookCog(commands.Cog):
         embed.set_footer(text="TSL Sportsbook — Pending bets only")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    async def _parlay_cart_impl(self, interaction: discord.Interaction):
+        """Show the user's parlay cart (delegation target for Flow Hub)."""
+        uid = interaction.user.id
+        cart = _get_cart(uid)
+        if not cart:
+            return await interaction.response.send_message(
+                "Your parlay cart is empty. Add legs from the Sportsbook!", ephemeral=True
+            )
+        combined = _combine_parlay_odds([l["odds"] for l in cart])
+        lines = [f"**{i+1}.** {l['matchup']} — {l['pick']} ({l['odds']:+d})" for i, l in enumerate(cart)]
+        embed = discord.Embed(
+            title="🎰 Parlay Cart",
+            description="\n".join(lines),
+            color=TSL_GOLD,
+        )
+        embed.set_footer(text=f"{len(cart)} leg(s) · Combined odds: {combined:+d}")
+        view = ParlayCartView(uid, cart, combined)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     async def _bethistory_impl(self, interaction: discord.Interaction, weeks: int = 99):
         await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id

@@ -78,22 +78,21 @@ def _truncate_for_embed(text: str, limit: int = _EMBED_DESC_LIMIT) -> str:
         return text
     return text[:limit - 3] + "..."
 
-ATLAS_PERSONA = """
-You are ATLAS — the official AI intelligence system for The Simulation League (TSL).
-You speak with authority, confidence, and sharp wit. You know TSL inside and out.
-Use football slang, stat callouts, and dramatic flair. Never be boring.
-Keep responses under 400 words unless asked for full breakdowns.
-"""
+_PERSONA_FALLBACK = (
+    "You are ATLAS — the official AI intelligence system for The Simulation League (TSL). "
+    "You speak with authority, confidence, and sharp wit. You know TSL inside and out. "
+    "Use football slang, stat callouts, and dramatic flair. Never be boring. "
+    "Keep responses under 400 words unless asked for full breakdowns."
+)
 
 # ── Echo persona loader — analytical register for answer generation ───────────
-# Defined after ATLAS_PERSONA so the fallback can reference it safely.
 try:
     from echo_loader import get_persona as _get_persona
     def _answer_persona() -> str:
         return _get_persona("analytical")
 except ImportError:
     def _answer_persona() -> str:
-        return ATLAS_PERSONA
+        return _PERSONA_FALLBACK
 
 # ── Conversation Memory ──────────────────────────────────────────────────────
 CONV_MAX_TURNS   = 5        # Max Q&A pairs to inject as context

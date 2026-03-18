@@ -3,7 +3,7 @@ ledger_renderer.py — ATLAS Universal Ledger Slip Renderer (V2)
 ─────────────────────────────────────────────────────────────────────────────
 Playwright HTML → PNG renderer for the #ledger channel.
 Supports casino game results (4-col) and general transactions (3-col).
-Reuses the browser singleton from card_renderer.py.
+Uses the unified wrap_card() shell from atlas_html_engine.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from atlas_html_engine import render_card as _engine_render_card, esc, _font_face_css
+from atlas_html_engine import render_card as _engine_render_card, wrap_card, esc
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
 GAME_INFO = {
@@ -36,26 +36,14 @@ SOURCE_INFO = {
 
 BIG_THRESHOLD = 500
 
-# ── Shared CSS ────────────────────────────────────────────────────────────────
+# ── Ledger-specific CSS (prepended to body HTML) ─────────────────────────────
+# This overrides the shared card CSS where the ledger design differs,
+# and adds ledger-only classes. Playwright handles <style> in body fine.
 
-def _css() -> str:
-    return _font_face_css() + """
-* { margin: 0; padding: 0; box-sizing: border-box; }"""
-
-
-_CSS_BODY = """\
-body {
-  background: transparent;
-  font-family: 'Outfit', sans-serif;
-  display: flex;
-  justify-content: center;
-  padding: 0;
-}
+_LEDGER_CSS = """\
+<style>
 .card {
   width: 700px;
-  border-radius: 12px;
-  overflow: hidden;
-  position: relative;
   background: #111111;
   border: 1px solid rgba(212,175,55,0.25);
 }
@@ -68,6 +56,7 @@ body {
     radial-gradient(ellipse at 90% 90%, rgba(212,175,55,0.04) 0%, transparent 50%);
   pointer-events: none;
   z-index: 1;
+  opacity: 1;
 }
 .card::after {
   content: '';
@@ -80,16 +69,12 @@ body {
 }
 .card > * { position: relative; z-index: 3; }
 
-/* Status bar */
-.status-bar { height: 5px; width: 100%; }
-.status-bar.win    { background: linear-gradient(90deg, #22C55E, #16A34A, #22C55E); }
-.status-bar.loss   { background: linear-gradient(90deg, #EF4444, #DC2626, #EF4444); }
-.status-bar.push   { background: linear-gradient(90deg, #F59E0B, #D97706, #F59E0B); }
+/* Status bar — ledger-specific classes */
 .status-bar.credit { background: linear-gradient(90deg, #22C55E, #16A34A, #22C55E); }
 .status-bar.debit  { background: linear-gradient(90deg, #EF4444, #DC2626, #EF4444); }
 .status-bar.neutral{ background: linear-gradient(90deg, #D4AF37, #B8962E, #D4AF37); }
 
-/* Header */
+/* Header — ledger layout (space-between) */
 .header {
   display: flex; align-items: center;
   justify-content: space-between;
@@ -187,12 +172,8 @@ body {
 
 /* Description row */
 .desc-row { padding: 6px 20px 2px; font-size: 13px; color: #aaa; }
+</style>
 """
-
-
-def _esc(text: str) -> str:
-    """HTML-escape user-controlled text."""
-    return esc(text)
 
 
 def _pl_color(value: int) -> str:
@@ -227,7 +208,7 @@ def _build_casino_html(
     new_balance: int,
     txn_id: Optional[int] = None,
 ) -> str:
-    """Build HTML for a casino game ledger slip (4-column)."""
+    """Build full HTML for a casino game ledger slip (4-column)."""
     game = GAME_INFO.get(game_type, {"label": game_type.upper(), "icon": "\u2B22"})
     pl = payout - wager
     is_big = wager >= BIG_THRESHOLD
@@ -248,28 +229,24 @@ def _build_casino_html(
             hl_text = f"HIGH ROLLER LOSS \u2014 {wager:,} BUCKS GONE"
         else:
             hl_text = f"HIGH STAKES PUSH \u2014 {wager:,} BUCKS RETURNED"
-        highlight_html = f'<div class="highlight-bar {outcome}">{_esc(hl_text)}</div>'
+        highlight_html = f'<div class="highlight-bar {outcome}">{esc(hl_text)}</div>'
 
     payout_color = "green" if payout > 0 and outcome == "win" else ""
 
-    return f"""\
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>{_css()}{_CSS_BODY}</style></head>
-<body>
-<div class="card">
-  <div class="status-bar {outcome}"></div>
+    body = f"""\
+{_LEDGER_CSS}
   <div class="header">
     <div class="header-left">
-      <div class="source-icon casino">{_esc(game["icon"])}</div>
-      <span class="game-label">{_esc(game["label"])}</span>
+      <div class="source-icon casino">{esc(game["icon"])}</div>
+      <span class="game-label">{esc(game["label"])}</span>
     </div>
-    <div class="badge {outcome}">{_esc(outcome.upper())} {_esc(mult_str)}</div>
+    <div class="badge {outcome}">{esc(outcome.upper())} {esc(mult_str)}</div>
   </div>
   <div class="divider"></div>
   <div class="data-grid">
     <div class="data-cell">
       <div class="data-label">Player</div>
-      <div class="data-value">{_esc(player_name)}</div>
+      <div class="data-value">{esc(player_name)}</div>
     </div>
     <div class="data-cell">
       <div class="data-label">Wager</div>
@@ -289,12 +266,12 @@ def _build_casino_html(
   <div class="footer">
     <div class="footer-left">
       <span class="footer-balance">BAL: {new_balance:,}</span>
-      <span class="footer-txn">{_esc(txn_str)}</span>
+      <span class="footer-txn">{esc(txn_str)}</span>
     </div>
-    <span class="footer-time">{_esc(time_str)}</span>
-  </div>
-</div>
-</body></html>"""
+    <span class="footer-time">{esc(time_str)}</span>
+  </div>"""
+
+    return wrap_card(body, status_class=outcome)
 
 
 def _build_transaction_html(
@@ -305,7 +282,7 @@ def _build_transaction_html(
     description: str = "",
     txn_id: Optional[int] = None,
 ) -> str:
-    """Build HTML for a non-casino transaction slip (3-column + description)."""
+    """Build full HTML for a non-casino transaction slip (3-column + description)."""
     info = SOURCE_INFO.get(source, SOURCE_INFO.get("ADMIN"))
     assert info is not None
 
@@ -321,18 +298,14 @@ def _build_transaction_html(
 
     desc_html = ""
     if description:
-        desc_html = f'<div class="desc-row">{_esc(description)}</div>'
+        desc_html = f'<div class="desc-row">{esc(description)}</div>'
 
-    return f"""\
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>{_css()}{_CSS_BODY}</style></head>
-<body>
-<div class="card">
-  <div class="status-bar {status_class}"></div>
+    body = f"""\
+{_LEDGER_CSS}
   <div class="header">
     <div class="header-left">
-      <div class="source-icon {info['css_class']}">{_esc(info["icon"])}</div>
-      <span class="game-label">{_esc(info["label"])}</span>
+      <div class="source-icon {info['css_class']}">{esc(info["icon"])}</div>
+      <span class="game-label">{esc(info["label"])}</span>
     </div>
     <div class="badge {badge_class}">{_format_amount(amount)}</div>
   </div>
@@ -341,10 +314,10 @@ def _build_transaction_html(
   <div class="data-grid-3">
     <div class="data-cell">
       <div class="data-label">Player</div>
-      <div class="data-value">{_esc(player_name)}</div>
+      <div class="data-value">{esc(player_name)}</div>
     </div>
     <div class="data-cell">
-      <div class="data-label">{_esc(amount_label)}</div>
+      <div class="data-label">{esc(amount_label)}</div>
       <div class="data-value {_amount_color(amount)}">{_format_amount(amount)}</div>
     </div>
     <div class="data-cell">
@@ -356,12 +329,12 @@ def _build_transaction_html(
   <div class="footer">
     <div class="footer-left">
       <span class="footer-balance">BAL: {balance_after:,}</span>
-      <span class="footer-txn">{_esc(txn_str)}</span>
+      <span class="footer-txn">{esc(txn_str)}</span>
     </div>
-    <span class="footer-time">{_esc(time_str)}</span>
-  </div>
-</div>
-</body></html>"""
+    <span class="footer-time">{esc(time_str)}</span>
+  </div>"""
+
+    return wrap_card(body, status_class=status_class)
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
