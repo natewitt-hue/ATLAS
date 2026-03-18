@@ -771,12 +771,17 @@ def trades(
     if season:
         q.filter(season=season)
     if user:
-        # Look up teams this user has owned and filter by those team names
+        # Look up teams this user has owned and filter by ANY of those team names
         tenure_rows, _ = owner_history(user=user)
         if tenure_rows:
-            teams = {r["teamName"] for r in tenure_rows}
+            teams = list({r["teamName"] for r in tenure_rows})
+            placeholders = " OR ".join(
+                "(team1Name = ? OR team2Name = ?)" for _ in teams
+            )
+            team_params = []
             for t in teams:
-                q.where("(team1Name = ? OR team2Name = ?)", t, t)
+                team_params.extend([t, t])
+            q.where(f"({placeholders})", *team_params)
     return q.execute()
 
 
