@@ -911,10 +911,11 @@ async def deduct_wager(discord_id: int, wager: int) -> int:
     Returns new balance.
     Raises InsufficientFundsError if balance is too low.
     """
-    return await flow_wallet.debit(
-        discord_id, wager, "CASINO",
-        description="casino wager",
-    )
+    async with flow_wallet.get_user_lock(discord_id):
+        return await flow_wallet.debit(
+            discord_id, wager, "CASINO",
+            description="casino wager",
+        )
 
 
 async def refund_wager(discord_id: int, amount: int) -> int:

@@ -83,6 +83,7 @@ SPREAD_CAP        = 21.0      # max absolute spread value (Madden has wider marg
 OU_FLOOR          = 35.0      # minimum O/U total
 OU_CEILING        = 99.5      # maximum O/U total (Madden games can hit 90+)
 _DB_TIMEOUT       = 10
+MAX_PAYOUT        = 10_000_000  # sanity cap — no single payout should exceed 10M
 
 # Elo system constants
 ELO_INITIAL       = 1500
@@ -922,25 +923,26 @@ async def _run_autograde(bot) -> None:
     def _grade_sync():
         results = []
         pending_events = []
-        try:
-            with _db_con() as con:
-                ungraded = con.execute(
-                    "SELECT DISTINCT week FROM bets_table "
-                    "WHERE status NOT IN ('Won','Lost','Push','Cancelled') AND week <= ?",
-                    (dm.CURRENT_WEEK,)
-                ).fetchall()
-            if not ungraded:
-                return results, pending_events
+        with _db_con() as con:
+            ungraded = con.execute(
+                "SELECT DISTINCT week FROM bets_table "
+                "WHERE status NOT IN ('Won','Lost','Push','Cancelled') AND week <= ?",
+                (dm.CURRENT_WEEK,)
+            ).fetchall()
+        if not ungraded:
+            return results, pending_events
 
-            for (week,) in ungraded:
-                scores     = _build_score_lookup(week)
-                real_games = len([k for k in scores if k != "__fuzzy__"])
-                if real_games == 0:
-                    continue
+        failed_weeks = []
+        for (week,) in ungraded:
+            scores     = _build_score_lookup(week)
+            real_games = len([k for k in scores if k != "__fuzzy__"])
+            if real_games == 0:
+                continue
 
-                settled = wins = losses = pushes = 0
-                total_paid = 0
+            settled = wins = losses = pushes = 0
+            total_paid = 0
 
+            try:
                 with _db_con() as con:
                     con.execute("BEGIN IMMEDIATE")
                     pending = con.execute(
@@ -965,6 +967,9 @@ async def _run_autograde(bot) -> None:
                             continue
                         if res == "Won":
                             payout = _payout_calc(amt, int(odds))
+                            if payout < 0 or payout > MAX_PAYOUT:
+                                log.error(f"[AUTO-GRADE] Insane payout ${payout:,.2f} for bet {bid} — SKIPPING")
+                                continue
                             _update_balance(uid, payout, con)
                             total_paid += payout - amt
                             wins += 1
@@ -1035,6 +1040,9 @@ async def _run_autograde(bot) -> None:
 
                         if all_won:
                             payout = _payout_calc(amt, c_odds)
+                            if payout < 0 or payout > MAX_PAYOUT:
+                                log.error(f"[AUTO-GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — SKIPPING")
+                                continue
                             _update_balance(uid, payout, con)
                             total_paid += payout - amt
                             con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
@@ -1063,7 +1071,6 @@ async def _run_autograde(bot) -> None:
                                 "bet_id": pid,
                             })
                         elif any_pushed:
-                            # One leg pushed, rest won → return wager (standard parlay push rule)
                             _update_balance(uid, amt, con)
                             con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
                             pushes += 1
@@ -1084,8 +1091,15 @@ async def _run_autograde(bot) -> None:
                         "wins": wins, "losses": losses, "pushes": pushes,
                         "total_paid": total_paid,
                     })
-        except Exception as e:
-            log.warning(f"[AUTO-GRADE] Error: {e}")
+            except Exception:
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
+                log.exception(f"[AUTO-GRADE] ROLLBACK — week {week}")
+                failed_weeks.append(week)
+        if failed_weeks:
+            log.warning(f"[AUTO-GRADE] Failed weeks: {failed_weeks}")
         return results, pending_events
 
     loop = asyncio.get_running_loop()
@@ -1164,27 +1178,29 @@ class BetSlipModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Minimum bet is **${MIN_BET}**.", ephemeral=True)
 
-        # Atomic balance check + debit inside single transaction
-        try:
-            with _db_con() as con:
-                con.execute("BEGIN IMMEDIATE")
-                new_bal = flow_wallet.update_balance_sync(
-                    interaction.user.id, -amt, source="TSL_BET", con=con,
+        # Per-user lock prevents double-spend across concurrent bets
+        async with flow_wallet.get_user_lock(interaction.user.id):
+            # Atomic balance check + debit inside single transaction
+            try:
+                with _db_con() as con:
+                    con.execute("BEGIN IMMEDIATE")
+                    new_bal = flow_wallet.update_balance_sync(
+                        interaction.user.id, -amt, source="TSL_BET", con=con,
+                    )
+                    safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
+                    con.execute(
+                        "INSERT INTO bets_table "
+                        "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (int(interaction.user.id), int(self.bet_week), self.matchup_key,
+                         self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
+                    )
+                    con.commit()
+            except flow_wallet.InsufficientFundsError:
+                balance = _get_balance(interaction.user.id)
+                return await interaction.response.send_message(
+                    f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True
                 )
-                safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
-                con.execute(
-                    "INSERT INTO bets_table "
-                    "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (int(interaction.user.id), int(self.bet_week), self.matchup_key,
-                     self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
-                )
-                con.commit()
-        except flow_wallet.InsufficientFundsError:
-            balance = _get_balance(interaction.user.id)
-            return await interaction.response.send_message(
-                f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True
-            )
 
         profit  = _payout_calc(amt, self.odds) - amt
 
@@ -1236,27 +1252,29 @@ class ParlayWagerModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
 
-        # Atomic balance check + debit inside single transaction
-        parlay_id = str(uuid.uuid4())[:8].upper()
-        try:
-            with _db_con() as con:
-                con.execute("BEGIN IMMEDIATE")
-                flow_wallet.update_balance_sync(
-                    interaction.user.id, -amt, source="TSL_BET", con=con,
+        # Per-user lock prevents double-spend across concurrent bets
+        async with flow_wallet.get_user_lock(interaction.user.id):
+            # Atomic balance check + debit inside single transaction
+            parlay_id = str(uuid.uuid4())[:8].upper()
+            try:
+                with _db_con() as con:
+                    con.execute("BEGIN IMMEDIATE")
+                    flow_wallet.update_balance_sync(
+                        interaction.user.id, -amt, source="TSL_BET", con=con,
+                    )
+                    con.execute(
+                        "INSERT INTO parlays_table "
+                        "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
+                        (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
+                         json.dumps(self.legs), int(self.combined_odds), int(amt))
+                    )
+                    con.commit()
+            except flow_wallet.InsufficientFundsError:
+                balance = _get_balance(interaction.user.id)
+                return await interaction.response.send_message(
+                    f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
                 )
-                con.execute(
-                    "INSERT INTO parlays_table "
-                    "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
-                    (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
-                     json.dumps(self.legs), int(self.combined_odds), int(amt))
-                )
-                con.commit()
-        except flow_wallet.InsufficientFundsError:
-            balance = _get_balance(interaction.user.id)
-            return await interaction.response.send_message(
-                f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
-            )
 
         potential = _payout_calc(amt, self.combined_odds) - amt
         embed = discord.Embed(title="🎰 Parlay Confirmed!", color=TSL_GOLD)
@@ -1315,32 +1333,34 @@ class PropBetModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
 
-        # Atomic: verify prop open + balance check + debit in single transaction
-        try:
-            with _db_con() as con:
-                con.execute("BEGIN IMMEDIATE")
-                prop = con.execute(
-                    "SELECT status FROM prop_bets WHERE prop_id=?", (self.prop_id,)
-                ).fetchone()
-                if not prop or prop[0] != 'Open':
-                    con.rollback()
-                    return await interaction.response.send_message(
-                        "❌ This prop bet is no longer open.", ephemeral=True
+        # Per-user lock prevents double-spend across concurrent bets
+        async with flow_wallet.get_user_lock(interaction.user.id):
+            # Atomic: verify prop open + balance check + debit in single transaction
+            try:
+                with _db_con() as con:
+                    con.execute("BEGIN IMMEDIATE")
+                    prop = con.execute(
+                        "SELECT status FROM prop_bets WHERE prop_id=?", (self.prop_id,)
+                    ).fetchone()
+                    if not prop or prop[0] != 'Open':
+                        con.rollback()
+                        return await interaction.response.send_message(
+                            "❌ This prop bet is no longer open.", ephemeral=True
+                        )
+                    new_bal = flow_wallet.update_balance_sync(
+                        interaction.user.id, -amt, source="TSL_BET", con=con,
                     )
-                new_bal = flow_wallet.update_balance_sync(
-                    interaction.user.id, -amt, source="TSL_BET", con=con,
+                    con.execute(
+                        "INSERT INTO prop_wagers (prop_id, discord_id, pick, wager_amount, odds) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (self.prop_id, int(interaction.user.id), self.pick, int(amt), int(self.odds))
+                    )
+                    con.commit()
+            except flow_wallet.InsufficientFundsError:
+                balance = _get_balance(interaction.user.id)
+                return await interaction.response.send_message(
+                    f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
                 )
-                con.execute(
-                    "INSERT INTO prop_wagers (prop_id, discord_id, pick, wager_amount, odds) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (self.prop_id, int(interaction.user.id), self.pick, int(amt), int(self.odds))
-                )
-                con.commit()
-        except flow_wallet.InsufficientFundsError:
-            balance = _get_balance(interaction.user.id)
-            return await interaction.response.send_message(
-                f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
-            )
 
         profit = _payout_calc(amt, self.odds) - amt
         embed = discord.Embed(title="✅ Prop Bet Confirmed", color=TSL_GOLD)
@@ -2155,6 +2175,9 @@ class SportsbookCog(commands.Cog):
                     continue
                 if res == "Won":
                     payout = _payout_calc(amt, int(odds))
+                    if payout < 0 or payout > MAX_PAYOUT:
+                        log.error(f"[GRADE] Insane payout ${payout:,.2f} for bet {bid} — SKIPPING")
+                        continue
                     _update_balance(uid, payout, con)
                     total_paid += payout - amt
                     wins += 1
@@ -2204,6 +2227,9 @@ class SportsbookCog(commands.Cog):
                     continue
                 if all_won:
                     payout = _payout_calc(amt, c_odds)
+                    if payout < 0 or payout > MAX_PAYOUT:
+                        log.error(f"[GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — SKIPPING")
+                        continue
                     _update_balance(uid, payout, con)
                     total_paid += payout - amt
                     con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))

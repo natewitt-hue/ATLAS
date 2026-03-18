@@ -750,47 +750,49 @@ class WagerModal(discord.ui.Modal):
         payout      = PAYOUT_SCALE * quantity
         user_id     = interaction.user.id
 
-        # Atomic debit + contract creation in single transaction
-        now = datetime.now(timezone.utc).isoformat()
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("BEGIN IMMEDIATE")
+        # Per-user lock prevents double-spend across concurrent bets
+        async with flow_wallet.get_user_lock(user_id):
+            # Atomic debit + contract creation in single transaction
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("BEGIN IMMEDIATE")
 
-                # Check balance and debit atomically
-                balance = await flow_wallet.get_balance(user_id, con=db)
-                if balance < cost_bucks:
-                    await interaction.response.send_message(
-                        f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
-                        ephemeral=True,
+                    # Check balance and debit atomically
+                    balance = await flow_wallet.get_balance(user_id, con=db)
+                    if balance < cost_bucks:
+                        await interaction.response.send_message(
+                            f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
+                            ephemeral=True,
+                        )
+                        return
+
+                    await flow_wallet.debit(
+                        user_id, cost_bucks, "PREDICTION",
+                        description="prediction market bet",
+                        con=db,
                     )
-                    return
 
-                await flow_wallet.debit(
-                    user_id, cost_bucks, "PREDICTION",
-                    description="prediction market bet",
-                    con=db,
+                    # Write contract in same transaction
+                    await db.execute("""
+                        INSERT INTO prediction_contracts
+                            (user_id, market_id, slug, side, buy_price,
+                             quantity, cost_bucks, potential_payout, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                    """, (
+                        user_id, self.market_id, self.slug,
+                        self.side, self.price,
+                        quantity, cost_bucks, payout, now,
+                    ))
+                    await db.commit()
+            except flow_wallet.InsufficientFundsError as e:
+                await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+                return
+            except Exception as e:
+                await interaction.response.send_message(
+                    f"❌ Failed to place bet: {e}", ephemeral=True
                 )
-
-                # Write contract in same transaction
-                await db.execute("""
-                    INSERT INTO prediction_contracts
-                        (user_id, market_id, slug, side, buy_price,
-                         quantity, cost_bucks, potential_payout, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-                """, (
-                    user_id, self.market_id, self.slug,
-                    self.side, self.price,
-                    quantity, cost_bucks, payout, now,
-                ))
-                await db.commit()
-        except flow_wallet.InsufficientFundsError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Failed to place bet: {e}", ephemeral=True
-            )
-            return
+                return
 
         new_bal = balance - cost_bucks
         color = 0x2ECC71 if self.side == "YES" else 0xE74C3C

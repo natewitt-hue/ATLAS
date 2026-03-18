@@ -15,12 +15,23 @@ Sync wrappers provided for flow_sportsbook.py (sync sqlite3 pattern).
 =========================================================
 """
 
+import asyncio
 import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
+
+# -- Per-user asyncio locks to serialize balance operations ------------------
+_user_locks: dict[int, asyncio.Lock] = {}
+
+
+def get_user_lock(uid: int) -> asyncio.Lock:
+    """Get or create a per-user asyncio lock to serialize balance operations."""
+    if uid not in _user_locks:
+        _user_locks[uid] = asyncio.Lock()
+    return _user_locks[uid]
 
 # -- DB Path -----------------------------------------------------------------
 _DIR = os.path.dirname(os.path.abspath(__file__))

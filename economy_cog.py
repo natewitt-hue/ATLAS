@@ -95,27 +95,28 @@ async def admin_give(discord_id: int, amount: int, admin_id: int,
     """Give money to a user. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
     ref_key = f"ADMIN_GIVE_{discord_id}_{int(datetime.now(timezone.utc).timestamp())}"
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            # flow_wallet.get_balance and .credit both honor the `con` param:
-            # when passed, they use the caller's connection without committing.
-            old_balance = await flow_wallet.get_balance(discord_id, con=db)
-            new_balance = await flow_wallet.credit(
-                discord_id, amount, "ADMIN",
-                description=reason or "admin give",
-                reference_key=ref_key,
-                con=db,
-            )
-            await db.execute("""
-                INSERT INTO economy_log
-                    (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
-                VALUES (?,?,?,?,?,?,?,?)
-            """, (discord_id, "give", amount, old_balance, new_balance, reason, admin_id, now))
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+    async with flow_wallet.get_user_lock(discord_id):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                # flow_wallet.get_balance and .credit both honor the `con` param:
+                # when passed, they use the caller's connection without committing.
+                old_balance = await flow_wallet.get_balance(discord_id, con=db)
+                new_balance = await flow_wallet.credit(
+                    discord_id, amount, "ADMIN",
+                    description=reason or "admin give",
+                    reference_key=ref_key,
+                    con=db,
+                )
+                await db.execute("""
+                    INSERT INTO economy_log
+                        (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (discord_id, "give", amount, old_balance, new_balance, reason, admin_id, now))
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
     return old_balance, new_balance
 
 
@@ -123,28 +124,29 @@ async def admin_take(discord_id: int, amount: int, admin_id: int,
                      reason: str = "") -> tuple[int, int]:
     """Take money from a user. Floors at 0. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            old_balance = await flow_wallet.get_balance(discord_id, con=db)
-            actual_take = min(amount, old_balance)  # floor at 0
-            if actual_take > 0:
-                new_balance = await flow_wallet.debit(
-                    discord_id, actual_take, "ADMIN",
-                    description=reason or "admin take",
-                    con=db,
-                )
-            else:
-                new_balance = old_balance
-            await db.execute("""
-                INSERT INTO economy_log
-                    (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
-                VALUES (?,?,?,?,?,?,?,?)
-            """, (discord_id, "take", amount, old_balance, new_balance, reason, admin_id, now))
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+    async with flow_wallet.get_user_lock(discord_id):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                old_balance = await flow_wallet.get_balance(discord_id, con=db)
+                actual_take = min(amount, old_balance)  # floor at 0
+                if actual_take > 0:
+                    new_balance = await flow_wallet.debit(
+                        discord_id, actual_take, "ADMIN",
+                        description=reason or "admin take",
+                        con=db,
+                    )
+                else:
+                    new_balance = old_balance
+                await db.execute("""
+                    INSERT INTO economy_log
+                        (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (discord_id, "take", amount, old_balance, new_balance, reason, admin_id, now))
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
     return old_balance, new_balance
 
 
@@ -153,23 +155,24 @@ async def admin_set(discord_id: int, amount: int, admin_id: int,
     """Set exact balance. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
     new_amount = max(0, amount)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            old_balance, new_balance = await flow_wallet.set_balance(
-                discord_id, new_amount, "ADMIN",
-                description=reason or "admin set",
-                con=db,
-            )
-            await db.execute("""
-                INSERT INTO economy_log
-                    (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
-                VALUES (?,?,?,?,?,?,?,?)
-            """, (discord_id, "set", amount, old_balance, new_balance, reason, admin_id, now))
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+    async with flow_wallet.get_user_lock(discord_id):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                old_balance, new_balance = await flow_wallet.set_balance(
+                    discord_id, new_amount, "ADMIN",
+                    description=reason or "admin set",
+                    con=db,
+                )
+                await db.execute("""
+                    INSERT INTO economy_log
+                        (discord_id, action, amount, old_balance, new_balance, reason, admin_id, logged_at)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (discord_id, "set", amount, old_balance, new_balance, reason, admin_id, now))
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
     return old_balance, new_balance
 
 
