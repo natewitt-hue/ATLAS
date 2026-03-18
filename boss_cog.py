@@ -308,6 +308,26 @@ class SBPanelView(discord.ui.View):
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_unlockall_impl(interaction)
 
+    @discord.ui.button(label="Sync All", emoji="\U0001f504", style=discord.ButtonStyle.secondary, row=1)
+    async def sync_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("SportsbookCog")
+        if not cog:
+            return await _send_cog_error(interaction, "Sportsbook")
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        from datetime import datetime, timezone
+        from real_sportsbook_cog import SPORT_SEASONS
+        now = datetime.now(timezone.utc)
+        synced_sports = []
+        for sport_key, cfg in SPORT_SEASONS.items():
+            if now.month in cfg["months"]:
+                await cog._sync_odds(sport_key)
+                synced_sports.append(sport_key)
+        await cog._sync_scores()
+        await interaction.followup.send(
+            f"Synced odds for {len(synced_sports)} in-season sport(s) + scores.",
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=_home_embed(interaction), view=BossHubView(self.bot))

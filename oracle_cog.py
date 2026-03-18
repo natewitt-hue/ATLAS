@@ -43,6 +43,7 @@ import intelligence as ig
 
 from permissions import ADMIN_USER_IDS
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,6 +256,430 @@ def _get_gemini_client():
         return _GEMINI_CLIENT
     except Exception:
         return None
+
+# ── Anthropic Claude client (primary AI for Oracle v3) ────────────────────────
+_ANTHROPIC_CLIENT = None
+
+def _get_anthropic_client():
+    """Return the cached Anthropic client, creating it once if needed."""
+    global _ANTHROPIC_CLIENT
+    if _ANTHROPIC_CLIENT is not None:
+        return _ANTHROPIC_CLIENT
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        from anthropic import Anthropic
+        _ANTHROPIC_CLIENT = Anthropic(api_key=ANTHROPIC_API_KEY)
+        return _ANTHROPIC_CLIENT
+    except Exception:
+        return None
+
+# ── QueryBuilder import (Oracle v3 domain-aware SQL) ──────────────────────────
+_QB_OK = False
+try:
+    import oracle_query_builder as qb
+    _QB_OK = True
+except ImportError:
+    print("[oracle_cog] oracle_query_builder not available — Claude query routing disabled")
+
+# ── Claude-powered Oracle v3 functions ────────────────────────────────────────
+
+# Tool definitions for Claude — maps to QueryBuilder Layer 1 functions
+_ORACLE_TOOLS = [
+    {
+        "name": "stat_leaders",
+        "description": "Get player stat leaders/rankings. Use for questions like 'who leads in passing yards', 'top rushers', 'most sacks', 'worst passer rating'. Supports 39 stats including passYds, passTDs, rushYds, rushTDs, recYds, recTDs, defSacks, defInts, defTotalTackles, passerRating, etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stat": {"type": "string", "description": "Stat name (e.g. passYds, rushTDs, defSacks, passerRating)"},
+                "season": {"type": "integer", "description": "Season number (omit for all-time)"},
+                "sort": {"type": "string", "enum": ["best", "worst"], "description": "Sort direction. 'best' = most/highest, 'worst' = least/lowest"},
+                "limit": {"type": "integer", "description": "Number of results (default 10)"},
+            },
+            "required": ["stat"],
+        },
+    },
+    {
+        "name": "team_stat_leaders",
+        "description": "Get team stat rankings. Use for 'best rushing team', 'worst defense', 'most points scored by team'. Stats: totalYds, passYds, rushYds, ptsFor, ptsAgainst, totalYdsAgainst, sacks, takeaways, etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stat": {"type": "string", "description": "Team stat name"},
+                "season": {"type": "integer", "description": "Season number (omit for all-time)"},
+                "sort": {"type": "string", "enum": ["best", "worst"]},
+                "limit": {"type": "integer"},
+            },
+            "required": ["stat"],
+        },
+    },
+    {
+        "name": "h2h",
+        "description": "Head-to-head record between two owners. Use for 'record between X and Y', 'how many times has X beaten Y'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user1": {"type": "string", "description": "First owner's DB username"},
+                "user2": {"type": "string", "description": "Second owner's DB username"},
+                "season": {"type": "integer", "description": "Season number (omit for all-time)"},
+            },
+            "required": ["user1", "user2"],
+        },
+    },
+    {
+        "name": "owner_record",
+        "description": "Win/loss record for an owner. Use for 'what is X's record', 'how many wins does X have'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "Owner's DB username"},
+                "season": {"type": "integer", "description": "Season number (omit for all-time)"},
+            },
+            "required": ["user"],
+        },
+    },
+    {
+        "name": "standings",
+        "description": "Current season standings. Use for 'standings', 'who is in first place', 'AFC East standings'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "division": {"type": "string", "description": "Division name (e.g. 'AFC East', 'NFC West')"},
+                "conference": {"type": "string", "description": "Conference (AFC or NFC)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "recent_games",
+        "description": "Recent games for an owner, optionally vs a specific opponent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "Owner's DB username"},
+                "limit": {"type": "integer", "description": "Number of games (default 5)"},
+                "opponent": {"type": "string", "description": "Opponent's DB username (optional)"},
+            },
+            "required": ["user"],
+        },
+    },
+    {
+        "name": "roster",
+        "description": "Current team roster with player ratings. Use for 'show me the Ravens roster', 'best WRs on the Chiefs'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "team": {"type": "string", "description": "Team name (e.g. 'Ravens', 'Chiefs')"},
+                "pos": {"type": "string", "description": "Position filter (e.g. 'QB', 'WR', 'HB')"},
+                "sort_by": {"type": "string", "description": "Sort column (default playerBestOvr)"},
+            },
+            "required": ["team"],
+        },
+    },
+    {
+        "name": "trades",
+        "description": "Trade history. Use for 'recent trades', 'trades involving the Ravens', 'what has X traded'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "team": {"type": "string", "description": "Team name"},
+                "season": {"type": "integer", "description": "Season number"},
+                "user": {"type": "string", "description": "Owner's DB username"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "draft_picks",
+        "description": "Draft history. Use for 'who did X draft', 'first round picks season 5'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "team": {"type": "string", "description": "Team name"},
+                "season": {"type": "integer", "description": "Season number"},
+                "round": {"type": "integer", "description": "Draft round (1-7)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "game_extremes",
+        "description": "Record-setting games. Use for 'biggest blowout', 'closest game', 'highest scoring game'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["blowout", "closest", "highest", "lowest"], "description": "Type of extreme"},
+                "season": {"type": "integer", "description": "Season number (omit for all-time)"},
+                "limit": {"type": "integer", "description": "Number of results (default 5)"},
+            },
+            "required": ["type"],
+        },
+    },
+    {
+        "name": "streak",
+        "description": "Current win/loss streak for an owner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "Owner's DB username"},
+            },
+            "required": ["user"],
+        },
+    },
+    {
+        "name": "owner_history",
+        "description": "Ownership tenure history — who owned what team in which season.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "Owner's DB username"},
+                "team": {"type": "string", "description": "Team name"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "abilities",
+        "description": "Player abilities (X-Factor, Superstar). Use for 'what abilities does X have', 'X-Factor players on Ravens'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "team": {"type": "string", "description": "Team name"},
+                "player": {"type": "string", "description": "Player name"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "career_trajectory",
+        "description": "How an owner's stat has changed across seasons. Use for 'show me X's passing yards over the years'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "Owner's DB username"},
+                "stat": {"type": "string", "description": "Stat name"},
+            },
+            "required": ["user", "stat"],
+        },
+    },
+    {
+        "name": "free_agents",
+        "description": "Available free agents. Use for 'best free agent QBs', 'free agents over 80 OVR'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pos": {"type": "string", "description": "Position filter"},
+                "min_ovr": {"type": "integer", "description": "Minimum overall rating"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "team_record_query",
+        "description": "Win/loss record for a team (not owner). Use for 'Ravens record this season'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "team": {"type": "string", "description": "Team name"},
+                "season": {"type": "integer", "description": "Season number"},
+            },
+            "required": ["team"],
+        },
+    },
+]
+
+# Dispatch map: tool name → QueryBuilder function
+def _dispatch_tool(name: str, args: dict) -> tuple[list[dict], str | None]:
+    """Execute a QueryBuilder Layer 1 function by tool name."""
+    fn_map = {
+        "stat_leaders": qb.stat_leaders,
+        "team_stat_leaders": qb.team_stat_leaders,
+        "h2h": qb.h2h,
+        "owner_record": qb.owner_record,
+        "standings": qb.standings,
+        "recent_games": qb.recent_games,
+        "roster": qb.roster,
+        "trades": qb.trades,
+        "draft_picks": qb.draft_picks,
+        "game_extremes": qb.game_extremes,
+        "streak": qb.streak,
+        "owner_history": qb.owner_history,
+        "abilities": qb.abilities,
+        "career_trajectory": qb.career_trajectory,
+        "free_agents": qb.free_agents,
+        "team_record_query": qb.team_record_query,
+    }
+    fn = fn_map.get(name)
+    if not fn:
+        return [], f"Unknown tool: {name}"
+    try:
+        return fn(**args)
+    except Exception as e:
+        return [], str(e)
+
+
+def _build_oracle_system_prompt(caller_db: str | None = None, conv_context: str = "", affinity: str = "") -> str:
+    """Build the system prompt for Claude Oracle queries."""
+    from echo_loader import get_persona
+    persona = get_persona("analytical")
+
+    known_users = ""
+    try:
+        from build_member_db import get_alias_map
+        alias_map = get_alias_map()
+        known_users = ", ".join(sorted(set(alias_map.values())))
+    except Exception:
+        pass
+
+    caller_block = ""
+    if caller_db:
+        caller_block = (
+            f"\nThe person asking is TSL owner with db_username='{caller_db}'. "
+            f"When they say 'me', 'my', or 'I', use '{caller_db}' as the user parameter.\n"
+        )
+
+    return f"""{persona}
+
+You are ATLAS Oracle — the intelligence system for The Simulation League (TSL), a Madden NFL sim league.
+You have access to tools that query the TSL database. Use them to answer questions about stats, records, rosters, trades, and league history.
+
+CURRENT CONTEXT:
+- Current season: {dm.CURRENT_SEASON}
+- Current week: {dm.CURRENT_WEEK}
+{caller_block}
+KNOWN TSL OWNERS (use these exact db_usernames in tool calls):
+{known_users}
+
+IMPORTANT RULES:
+- Always resolve owner names to their db_username before calling tools. Common nicknames: 'Witt'/'TheWitt', 'JT'/'jtcurrent32', 'Killa'/'KillaE94', etc.
+- Use resolve_team for team names — e.g. 'Baltimore' → 'Ravens'
+- For 'this season', use season={dm.CURRENT_SEASON}
+- For 'all time' / 'career', omit the season parameter
+- Call the most appropriate tool for each question. If unsure, try stat_leaders or owner_record.
+- If a tool returns an error, explain what happened — don't silently fail.
+{conv_context}{affinity}"""
+
+
+async def _claude_query(question: str, caller_db: str | None = None,
+                        conv_context: str = "", affinity: str = "") -> tuple[str, list[dict], str]:
+    """
+    Route a TSL question through Claude → QueryBuilder tools → Claude answer.
+    Returns (answer_text, rows, tool_used).
+    """
+    client = _get_anthropic_client()
+    if not client:
+        return "⚠️ ATLAS AI is offline — ANTHROPIC_API_KEY not configured.", [], ""
+
+    system = _build_oracle_system_prompt(caller_db, conv_context, affinity)
+
+    # Resolve names in the question
+    annotated = question
+    alias_map = {}
+    if resolve_names_in_question:
+        annotated, alias_map = resolve_names_in_question(question)
+
+    loop = asyncio.get_running_loop()
+
+    # Step 1: Claude picks tools
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            system=system,
+            tools=_ORACLE_TOOLS,
+            messages=[{"role": "user", "content": annotated}],
+        ),
+    )
+
+    # Step 2: Execute tool calls and collect results
+    all_rows = []
+    tool_used = ""
+    tool_results = []
+
+    for block in response.content:
+        if block.type == "tool_use":
+            tool_used = block.name
+            rows, error = _dispatch_tool(block.name, block.input)
+            all_rows.extend(rows)
+            result_text = json.dumps(rows[:30], indent=2) if rows else f"Error: {error}" if error else "No results found."
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_text,
+            })
+
+    # If Claude didn't use any tools, return its text directly
+    if not tool_results:
+        text_parts = [b.text for b in response.content if hasattr(b, "text")]
+        return " ".join(text_parts) or "ATLAS couldn't figure out how to answer that. Try rephrasing.", [], ""
+
+    # Step 3: Send tool results back for Claude to synthesize an answer
+    answer_response = await loop.run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=800,
+            system=system,
+            tools=_ORACLE_TOOLS,
+            messages=[
+                {"role": "user", "content": annotated},
+                {"role": "assistant", "content": response.content},
+                {"role": "user", "content": tool_results},
+            ],
+        ),
+    )
+
+    text_parts = [b.text for b in answer_response.content if hasattr(b, "text")]
+    answer = " ".join(text_parts) or "ATLAS pulled the data but couldn't formulate a response."
+
+    return answer, all_rows, tool_used
+
+
+async def _claude_blurb(prompt: str, max_tokens: int = 120) -> str:
+    """Short AI-generated text blurb via Claude. Replaces _ai_blurb for non-query uses."""
+    client = _get_anthropic_client()
+    if not client:
+        return ""
+    try:
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+        )
+        text_parts = [b.text for b in response.content if hasattr(b, "text")]
+        return " ".join(text_parts).strip()
+    except Exception:
+        return ""
+
+
+async def _claude_chat(question: str, system_prompt: str, context: str = "") -> str:
+    """General Claude chat for non-TSL modes (Open Intel, Sports Intel, Strategy)."""
+    client = _get_anthropic_client()
+    if not client:
+        return "⚠️ ATLAS AI is offline — ANTHROPIC_API_KEY not configured."
+    try:
+        content = f"{context}\n\n{question}" if context else question
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=800,
+                system=system_prompt,
+                messages=[{"role": "user", "content": content}],
+            ),
+        )
+        text_parts = [b.text for b in response.content if hasattr(b, "text")]
+        return " ".join(text_parts).strip() or "ATLAS couldn't pull a response on that one."
+    except Exception as e:
+        return f"ATLAS hit an error: {e}"
+
 
 # ── Color palette ─────────────────────────────────────────────────────────────
 C_HOT     = discord.Color.from_rgb(255, 87,  51)   # fire orange

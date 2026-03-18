@@ -23,6 +23,7 @@ v3 changes:
 
 import io
 import os
+import shutil
 import sqlite3
 import csv
 import time
@@ -345,11 +346,23 @@ def sync_tsl_db(
         conn.commit()
         conn.close()
 
-        # ── Atomic swap ───────────────────────────────────────────────────────
-        if os.path.exists(DB_PATH):
-            os.replace(tmp_path, DB_PATH)
-        else:
-            os.rename(tmp_path, DB_PATH)
+        # ── Atomic swap (with retry for Windows file locking) ────────────────
+        swapped = False
+        for attempt in range(3):
+            try:
+                if os.path.exists(DB_PATH):
+                    os.replace(tmp_path, DB_PATH)
+                else:
+                    os.rename(tmp_path, DB_PATH)
+                swapped = True
+                break
+            except PermissionError:
+                if attempt < 2:
+                    time.sleep(1)
+        if not swapped:
+            # Fallback: copy over + remove tmp
+            shutil.copy2(tmp_path, DB_PATH)
+            os.remove(tmp_path)
 
         elapsed = round(time.time() - start, 1)
         result["success"]  = True

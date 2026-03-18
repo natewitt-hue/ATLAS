@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.21.1"  # Fix startup: missing tsl_members table guard + DB lock timeouts
+ATLAS_VERSION = "2.22.0"  # Oracle v3 Claude integration, manual sportsbook sync, Windows DB lock fix
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

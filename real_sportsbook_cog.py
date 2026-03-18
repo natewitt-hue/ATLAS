@@ -179,15 +179,17 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
     async def cog_load(self):
         await self._setup_tables()
-        self.sync_scores_task.start()
+        # Odds/scores sync is manual-only (via /boss Sportsbook → Sync All)
+        # to avoid burning API quota during frequent dev restarts.
         self.lock_started_games.start()
-        self.sync_odds_task.start()
         self._ready = True
 
     async def cog_unload(self):
-        self.sync_scores_task.cancel()
+        if self.sync_scores_task.is_running():
+            self.sync_scores_task.cancel()
         self.lock_started_games.cancel()
-        self.sync_odds_task.cancel()
+        if self.sync_odds_task.is_running():
+            self.sync_odds_task.cancel()
         await self.client.close()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

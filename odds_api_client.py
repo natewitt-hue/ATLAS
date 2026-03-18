@@ -359,7 +359,7 @@ class OddsAPIClient:
             if not data or not isinstance(data, dict):
                 continue
 
-            for event in data.get("events", []):
+            for event in (data.get("events") or []):
                 event_id = event.get("event_id", "")
                 if not event_id or event_id in seen_ids:
                     continue
@@ -420,7 +420,7 @@ class OddsAPIClient:
             if not data or not isinstance(data, dict):
                 continue
 
-            for event in data.get("events", []):
+            for event in (data.get("events") or []):
                 event_id = event.get("event_id", "")
                 if not event_id or event_id in seen_ids:
                     continue
