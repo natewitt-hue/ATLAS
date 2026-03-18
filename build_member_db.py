@@ -1525,6 +1525,14 @@ def discover_guild_members(members: list[dict], db_path: str = DB_PATH) -> dict:
     conn.row_factory = sqlite3.Row
 
     try:
+        # Bail out gracefully if the member registry hasn't been built yet
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tsl_members'"
+        ).fetchone()
+        if not table_exists:
+            conn.close()
+            return {"known": 0, "new": 0, "updated": 0, "new_members": []}
+
         known_ids = {
             row["discord_id"]
             for row in conn.execute("SELECT discord_id FROM tsl_members WHERE discord_id IS NOT NULL").fetchall()

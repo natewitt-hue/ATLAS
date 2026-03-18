@@ -89,7 +89,7 @@ _CASINO_BRIDGE = {
 
 def _ensure_table() -> None:
     """Create server_config table if it doesn't exist."""
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=30) as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS server_config (
                 config_key  TEXT PRIMARY KEY,
@@ -111,7 +111,7 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
         channel = bot.get_channel(ch_id)
     """
     try:
-        with sqlite3.connect(DB_PATH) as con:
+        with sqlite3.connect(DB_PATH, timeout=30) as con:
             con.execute("""
                 CREATE TABLE IF NOT EXISTS server_config (
                     config_key  TEXT PRIMARY KEY,
@@ -137,7 +137,7 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
 
 def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
     _ensure_table()
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=30) as con:
         con.execute("""
             INSERT INTO server_config (config_key, channel_id, guild_id)
             VALUES (?, ?, ?)
@@ -149,7 +149,7 @@ def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
 
 def _clear_guild_config(guild_id: int) -> int:
     """Delete all server_config rows for a guild. Returns count deleted."""
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=30) as con:
         cur = con.execute("DELETE FROM server_config WHERE guild_id=?", (guild_id,))
         con.commit()
         return cur.rowcount
