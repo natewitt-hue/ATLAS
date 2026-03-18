@@ -120,6 +120,7 @@ from discord.ext import commands
 from discord.ext import tasks
 from google import genai
 from google.genai import types
+import anthropic
 from dotenv import load_dotenv
 
 import data_manager as dm
@@ -163,7 +164,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.22.1"  # Fix interaction 404s, flow_live guild_id NULL, DB lock spiral
+ATLAS_VERSION = "2.23.0"  # Migrate Oracle/Codex from Gemini to Claude API
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -173,6 +174,7 @@ from permissions import ADMIN_USER_IDS
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 intents       = discord.Intents.all()
 bot           = commands.Bot(command_prefix="!", intents=intents)
 

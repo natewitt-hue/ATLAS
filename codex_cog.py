@@ -1,6 +1,6 @@
 """
-codex_cog.py v1.4  ─  ATLAS Historical Intelligence (Codex Module)
-Uses Gemini to convert natural language questions → SQL → natural language answers
+codex_cog.py v2.0  ─  ATLAS Historical Intelligence (Codex Module)
+Uses Claude to convert natural language questions → SQL → natural language answers
 against the TSL SQLite database.
 
 Commands:
@@ -9,24 +9,7 @@ Commands:
   /h2h          <user1> <user2>  Head-to-head record
   /season_recap <season>         Full season recap
 
-v1.3 fixes:
-  - FIX: Docstring corrected — file is codex_cog.py (was still saying history_cog.py).
-  - FIX: Gemini client uses os.getenv (was os.environ — crashed on missing key).
-  - FIX: /season_recap uses dm.CURRENT_SEASON instead of hardcoded 6.
-
-v1.4 fixes:
-  - ADD:  /ask_debug admin command — referenced in /ask error messages since v1.3
-          but never implemented in this file. Migrated from history_cog.py.
-  - FIX:  Class renamed HistoryCog → CodexCog. setup() was instantiating
-          HistoryCog(bot) which still worked only because the name matched the
-          class in this file — confusing and fragile.
-  - FIX:  ATLAS_PERSONA replaced with get_persona("analytical") from echo_loader
-          for all three Gemini answer calls. Falls back to inline stub if echo_loader
-          unavailable. DB_SCHEMA SQL-generation prompt intentionally unchanged.
-  - FIX:  All three embed footers corrected "Oracle Module" → "Codex Module".
-  - FIX:  /h2h footer season range now dynamic via dm.CURRENT_SEASON.
-  - FIX:  DB_SCHEMA season comment now dynamic so Gemini always sees correct
-          current season number instead of hardcoded '6'.
+v2.0 — Migrated from Google Gemini to Anthropic Claude API.
 """
 
 import asyncio
@@ -40,7 +23,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from google import genai
+import anthropic
 from difflib import get_close_matches
 
 import data_manager as dm
@@ -64,6 +47,12 @@ except ImportError:
     detect_intent = None
     check_self_reference_collision = None
     get_h2h_sql_and_params = None
+
+try:
+    from oracle_memory import init_memory_tables, store_memory, log_query
+    _oracle_memory_available = True
+except ImportError:
+    _oracle_memory_available = False
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DB_PATH   = os.path.join(os.path.dirname(__file__), "tsl_history.db")
@@ -211,6 +200,23 @@ def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str
             print(f"[CodexCog] Conversation persist error: {e}")
     except Exception as e:
         print(f"[CodexCog] Conversation persist error: {e}")
+
+    # Also store in oracle_memory for permanent FTS-searchable history
+    if _oracle_memory_available:
+        try:
+            store_memory(
+                db_path=DB_PATH,
+                discord_id=discord_id,
+                message_id=None,
+                question=question,
+                sql_query=sql,
+                answer=answer,
+                tier=3,  # Default to tier 3; caller can override
+                intent=None,
+                entities=None,
+            )
+        except Exception:
+            pass
 
 
 def _build_conversation_block(discord_id: int) -> str:
@@ -474,7 +480,7 @@ def run_sql(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
 
 
 def extract_sql(text: str) -> str | None:
-    """Pull SQL out of Gemini's response."""
+    """Pull SQL out of the AI response."""
     match = re.search(r"```(?:sql)?\s*(SELECT.+?)```", text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
@@ -484,11 +490,51 @@ def extract_sql(text: str) -> str | None:
     return None
 
 
+# ── Claude API helpers ────────────────────────────────────────────────────────
+_CLAUDE_CLIENT = None
+_CLAUDE_MODEL = "claude-sonnet-4-20250514"
+
+
+def _get_claude_client():
+    """Return the cached Anthropic client, creating it once if needed."""
+    global _CLAUDE_CLIENT
+    if _CLAUDE_CLIENT is not None:
+        return _CLAUDE_CLIENT
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    _CLAUDE_CLIENT = anthropic.Anthropic(api_key=api_key)
+    return _CLAUDE_CLIENT
+
+
+async def _claude_call(system: str, prompt: str, max_tokens: int = 1024, temperature: float = 0.2) -> str:
+    """Non-blocking Claude API call via run_in_executor."""
+    client = _get_claude_client()
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY not configured")
+    loop = asyncio.get_running_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model=_CLAUDE_MODEL,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        ),
+    )
+    return response.content[0].text.strip()
+
+
 async def gemini_sql(
-    question: str, client, alias_map: dict | None = None,
+    question: str, client=None, alias_map: dict | None = None,
     conv_context: str = "",
 ) -> str | None:
-    """Ask Gemini to generate SQL. Non-blocking via run_in_executor."""
+    """Ask Claude to generate SQL. Non-blocking via run_in_executor.
+
+    The `client` parameter is kept for backward compatibility but ignored —
+    we always use the module-level Claude client.
+    """
     alias_block = ""
     if alias_map:
         lines = [f"  '{nick}' → use username '{user}' in SQL" for nick, user in alias_map.items()]
@@ -502,10 +548,13 @@ async def gemini_sql(
 
     conv_block = f"\n{conv_context}\n" if conv_context else ""
 
-    prompt = f"""You are a SQLite expert for The Simulation League (TSL) Madden franchise database.
-Your job: convert natural-language questions into a single correct SQLite SELECT query.
+    system = (
+        "You are a SQLite expert for The Simulation League (TSL) Madden franchise database. "
+        "Your job: convert natural-language questions into a single correct SQLite SELECT query. "
+        "Return ONLY the raw SQL query — no markdown, no explanation, no code fences."
+    )
 
-{_get_db_schema()}
+    prompt = f"""{_get_db_schema()}
 {known_users_block}{alias_block}{conv_block}
 
 RULES:
@@ -549,19 +598,21 @@ Now generate a query for this question:
 "{question}"
 """
 
-    def _call():
-        return client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None, _call)
-    return extract_sql(response.text)
+    try:
+        text = await _claude_call(system, prompt, max_tokens=512, temperature=0.1)
+        return extract_sql(text)
+    except Exception:
+        return None
 
 
 async def gemini_answer(
-    question: str, sql: str, rows: list[dict], client,
+    question: str, sql: str, rows: list[dict], client=None,
     conv_context: str = "",
 ) -> str:
-    """Format SQL results into natural language. Non-blocking via run_in_executor."""
+    """Format SQL results into natural language via Claude. Non-blocking.
+
+    The `client` parameter is kept for backward compatibility but ignored.
+    """
     results_str = json.dumps(rows, indent=2)
     if len(results_str) > MAX_CHARS:
         results_str = results_str[:MAX_CHARS] + "\n... (truncated)"
@@ -575,8 +626,9 @@ async def gemini_answer(
 
     conv_block = f"\n{conv_context}\n" if conv_context else ""
 
-    prompt = f"""{_answer_persona()}
-{conv_block}
+    system = _answer_persona()
+
+    prompt = f"""{conv_block}
 A TSL member asked: "{question}"
 
 Query results ({len(rows)} rows):
@@ -594,12 +646,7 @@ RESPONSE GUIDELINES:
 - Use sports language and dramatic flair — make numbers tell a story.
 """
 
-    def _call():
-        return client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None, _call)
-    return response.text.strip()
+    return await _claude_call(system, prompt, max_tokens=1024, temperature=0.7)
 
 
 # ── Cog ──────────────────────────────────────────────────────────────────────
@@ -607,11 +654,18 @@ RESPONSE GUIDELINES:
 class CodexCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot  = bot
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("[CodexCog] ⚠️  GEMINI_API_KEY not set — /ask, /h2h, /season_recap will fail.")
-        self.gemini = genai.Client(api_key=api_key) if api_key else None
+        self.claude = _get_claude_client()
+        if not self.claude:
+            print("[CodexCog] ⚠️  ANTHROPIC_API_KEY not set — /ask, /h2h, /season_recap will fail.")
+        # Keep self.gemini as alias for backward compat (oracle_cog passes it)
+        self.gemini = self.claude
         _init_conversation_db()
+        if _oracle_memory_available:
+            try:
+                init_memory_tables(DB_PATH)
+                print("[CodexCog] oracle_memory tables ready")
+            except Exception as e:
+                print(f"[CodexCog] oracle_memory init error: {e}")
 
     # ── /ask ─────────────────────────────────────────────────────────────────
     @app_commands.command(
@@ -623,8 +677,8 @@ class CodexCog(commands.Cog):
     async def ask(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(thinking=True)
 
-        if not self.gemini:
-            await interaction.followup.send("❌ ATLAS AI is offline — GEMINI_API_KEY not configured.")
+        if not self.claude:
+            await interaction.followup.send("❌ ATLAS AI is offline — ANTHROPIC_API_KEY not configured.")
             return
 
         try:
@@ -667,7 +721,7 @@ class CodexCog(commands.Cog):
             intent_result = None
             if detect_intent:
                 intent_result = await detect_intent(
-                    question, caller_db, alias_map, self.gemini
+                    question, caller_db, alias_map, self.claude
                 )
 
             # ── 5. Tier 1/2: Deterministic SQL ────────────────────
@@ -676,7 +730,7 @@ class CodexCog(commands.Cog):
                 if not error:
                     answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
                     answer = await gemini_answer(
-                        question, intent_result.sql, rows, self.gemini,
+                        question, intent_result.sql, rows,
                         conv_context=answer_context,
                     )
                     _add_conversation_turn(interaction.user.id, question, intent_result.sql, answer)
@@ -705,9 +759,9 @@ class CodexCog(commands.Cog):
                     await interaction.followup.send(embed=embed)
                     return
 
-            # ── 6. Tier 3: Existing NL→SQL pipeline (unchanged) ───
+            # ── 6. Tier 3: NL→SQL pipeline via Claude ──────────────
             sql = await gemini_sql(
-                annotated_question, self.gemini, alias_map,
+                annotated_question, alias_map=alias_map,
                 conv_context=conv_block,
             )
             if not sql:
@@ -720,6 +774,10 @@ class CodexCog(commands.Cog):
             rows, error = run_sql(sql)
             if error:
                 # Self-correct once with TEXT casting reminder
+                fix_system = (
+                    "You are a SQLite expert. Fix the broken SQL query. "
+                    "Return ONLY the corrected SQL, no explanation."
+                )
                 fix_prompt = (
                     f"This SQLite query for a Madden database failed:\n{sql}\n\n"
                     f"Error: {error}\n\n"
@@ -728,12 +786,11 @@ class CodexCog(commands.Cog):
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                     f"Schema:\n{_get_db_schema()}"
                 )
-                def _fix():
-                    return self.gemini.models.generate_content(
-                        model="gemini-2.0-flash", contents=fix_prompt
-                    )
-                fix_response = await asyncio.get_running_loop().run_in_executor(None, _fix)
-                sql = extract_sql(fix_response.text) or sql
+                try:
+                    fix_text = await _claude_call(fix_system, fix_prompt, max_tokens=512, temperature=0.1)
+                    sql = extract_sql(fix_text) or sql
+                except Exception:
+                    pass
                 rows, error = run_sql(sql)
                 if error:
                     await interaction.followup.send(
@@ -747,7 +804,7 @@ class CodexCog(commands.Cog):
 
             answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
             answer = await gemini_answer(
-                question, sql, rows, self.gemini,
+                question, sql, rows,
                 conv_context=answer_context,
             )
 
@@ -792,8 +849,8 @@ class CodexCog(commands.Cog):
         """Core ask_debug logic — shared by /commish askdebug and deprecated /ask_debug."""
         await interaction.response.defer(thinking=True, ephemeral=True)
 
-        if not self.gemini:
-            await interaction.followup.send("❌ ATLAS AI is offline — GEMINI_API_KEY not configured.")
+        if not self.claude:
+            await interaction.followup.send("❌ ATLAS AI is offline — ANTHROPIC_API_KEY not configured.")
             return
 
         try:
@@ -810,7 +867,7 @@ class CodexCog(commands.Cog):
                 f"When the question uses 'me', 'my', or 'I', use '{caller_db}' in SQL WHERE clauses.]"
             )
             annotated_question, alias_map = resolve_names_in_question(f"{caller_context} {question}")
-            sql = await gemini_sql(annotated_question, self.gemini, alias_map)
+            sql = await gemini_sql(annotated_question, alias_map=alias_map)
             if not sql:
                 await interaction.followup.send("❌ No SQL generated.")
                 return
@@ -852,8 +909,8 @@ class CodexCog(commands.Cog):
         """Head-to-head record — used by oracle HubView H2H modal."""
         await interaction.response.defer(thinking=True)
 
-        if not self.gemini:
-            await interaction.followup.send("ATLAS AI is offline — GEMINI_API_KEY not configured.")
+        if not self.claude:
+            await interaction.followup.send("ATLAS AI is offline — ANTHROPIC_API_KEY not configured.")
             return
 
         u1 = fuzzy_resolve_user(owner1)
@@ -900,22 +957,16 @@ class CodexCog(commands.Cog):
         total_u2    = sum(int(r['u2_wins'] or 0) for r in rows)
         total_games = sum(int(r['games_played'] or 0) for r in rows)
 
-        summary_prompt = f"""{_answer_persona()}
-
-Head-to-head data for {u1} vs {u2} in TSL (regular season only):
-- {u1} all-time wins: {total_u1}
-- {u2} all-time wins: {total_u2}
-- Total games played: {total_games}
-- Season breakdown: {json.dumps([dict(r) for r in rows], indent=2)}
-
-Write a punchy 3-4 sentence rivalry summary. Call out the dominant party if clear,
-note any sweep seasons, and make it entertaining.
-"""
-        def _call():
-            return self.gemini.models.generate_content(model="gemini-2.0-flash", contents=summary_prompt)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, _call)
-        summary = response.text.strip()
+        summary_prompt = (
+            f"Head-to-head data for {u1} vs {u2} in TSL (regular season only):\n"
+            f"- {u1} all-time wins: {total_u1}\n"
+            f"- {u2} all-time wins: {total_u2}\n"
+            f"- Total games played: {total_games}\n"
+            f"- Season breakdown: {json.dumps([dict(r) for r in rows], indent=2)}\n\n"
+            f"Write a punchy 3-4 sentence rivalry summary. Call out the dominant party if clear, "
+            f"note any sweep seasons, and make it entertaining."
+        )
+        summary = await _claude_call(_answer_persona(), summary_prompt, max_tokens=512, temperature=0.7)
 
         embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=0xC9962A)
         embed.set_author(
@@ -967,26 +1018,20 @@ note any sweep seasons, and make it entertaining.
         leaderboard = sorted(wins.keys(), key=lambda u: wins[u], reverse=True)[:5]
         top_str = "\n".join([f"{u}: {wins[u]}W-{losses[u]}L" for u in leaderboard])
 
-        prompt = f"""{_answer_persona()}
-
-Season {season} TSL regular season data:
-- Total games played: {len(rows)}
-- Top 5 records:
-{top_str}
-- All game results: {json.dumps(rows[:40], indent=2)}
-
-Write a vivid Season {season} recap. Highlight who dominated, any upsets or notable
-storylines from the records, and tease the playoff picture.
-Keep it under 350 words.
-"""
-        def _call():
-            return self.gemini.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, _call)
+        recap_prompt = (
+            f"Season {season} TSL regular season data:\n"
+            f"- Total games played: {len(rows)}\n"
+            f"- Top 5 records:\n{top_str}\n"
+            f"- All game results: {json.dumps(rows[:40], indent=2)}\n\n"
+            f"Write a vivid Season {season} recap. Highlight who dominated, any upsets or notable "
+            f"storylines from the records, and tease the playoff picture. "
+            f"Keep it under 350 words."
+        )
+        recap_text = await _claude_call(_answer_persona(), recap_prompt, max_tokens=1024, temperature=0.7)
 
         embed = discord.Embed(
             title=f"TSL Season {season} Recap",
-            description=_truncate_for_embed(response.text.strip()),
+            description=_truncate_for_embed(recap_text),
             color=0xC9962A
         )
         embed.set_author(
