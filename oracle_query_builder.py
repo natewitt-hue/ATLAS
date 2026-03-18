@@ -413,7 +413,7 @@ _KNOWN_COLUMNS = {
     "firstName", "lastName", "age", "playerBestOvr", "dev", "isFA", "isOnIR",
     "jerseyNum", "college", "yearsPro", "capHit",
     # standings
-    "totalWins", "totalLosses", "divisionName", "conferenceName", "seed", "winPct",
+    "totalWins", "totalLosses", "totalTies", "divisionName", "conferenceName", "seed", "winPct",
     # player_draft_map
     "drafting_team", "drafting_season", "draftRound", "draftPick", "was_traded",
     # owner_tenure
@@ -434,9 +434,11 @@ def _validate_where_clause(clause: str) -> None:
     for d in dangerous:
         if d in upper:
             raise ValueError(f"Unsafe SQL pattern in WHERE clause: {d}")
-    # Validate that any identifiers (non-operator, non-keyword tokens) are known columns
+    # Strip string literals before identifier validation so quoted values
+    # (e.g. 'approved', 'accepted') are not mistaken for column names.
     import re
-    identifiers = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', clause)
+    stripped = re.sub(r"'[^']*'", "''", clause)
+    identifiers = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', stripped)
     safe_keywords = {"IN", "NOT", "LIKE", "BETWEEN", "IS", "NULL", "AND", "OR",
                      "CAST", "AS", "INTEGER", "REAL", "TEXT", "ABS", "COUNT"}
     for ident in identifiers:
@@ -513,3 +515,384 @@ def resolve_user(name: str) -> str | None:
         return None
     except (ImportError, Exception):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Layer 1: High-Level Domain Functions
+# ---------------------------------------------------------------------------
+
+def stat_leaders(
+    stat: str,
+    season: int | None = None,
+    sort: str = "best",
+    limit: int = 10,
+) -> tuple[list[dict], str | None]:
+    """Player stat leaders with full domain rules (sort, efficiency, min games, pos)."""
+    sd = STAT_DEFS.get(stat) or resolve_stat_keyword(stat)
+    if sd is None:
+        return [], f"Unknown stat: {stat}"
+    q = Query(sd.table).stat(stat).sort(sort).limit(limit)
+    if season is not None:
+        q.filter(season=season)
+    else:
+        q.filter(stage="regular")
+    return q.execute()
+
+
+def team_stat_leaders(
+    stat: str,
+    season: int | None = None,
+    sort: str = "best",
+    limit: int = 10,
+) -> tuple[list[dict], str | None]:
+    """Team stat leaders. Domain-aware: defense sort inverted."""
+    sd = STAT_DEFS.get(stat)
+    if sd is None:
+        return [], f"Unknown stat: {stat}"
+
+    if sd.table == "standings":
+        # Standings is pre-aggregated — direct query
+        q = Query("standings").select("teamName", f"CAST({sd.column} AS INTEGER) AS stat_value")
+        sort_dir = _resolve_sort_direction(sd, sort)
+        q.sort_by(sd.column, sort_dir)
+    else:
+        # team_stats needs aggregation per team
+        cast_type = "REAL" if sd.agg == "AVG" else "INTEGER"
+        q = (Query("team_stats")
+             .select("teamName",
+                     f"{sd.agg}(CAST({sd.column} AS {cast_type})) AS stat_value")
+             .group_by("teamName"))
+        if season is not None:
+            q.filter(season=season)
+        else:
+            q.filter(stage="regular")
+        sort_dir = _resolve_sort_direction(sd, sort)
+        q.sort_by("stat_value", sort_dir)
+
+    q.limit(limit)
+    return q.execute()
+
+
+def h2h(
+    user1: str,
+    user2: str,
+    season: int | None = None,
+) -> tuple[list[dict], str | None]:
+    """Head-to-head record between two owners."""
+    sql = """
+        SELECT winner_user, COUNT(*) as wins
+        FROM games
+        WHERE status IN ('2','3')
+          AND ((homeUser = ? AND awayUser = ?) OR (homeUser = ? AND awayUser = ?))
+    """
+    params = [user1, user2, user2, user1]
+    if season is not None:
+        sql += " AND seasonIndex = ?"
+        params.append(str(season))
+    sql += " GROUP BY winner_user"
+    return _run_sql(sql, tuple(params))
+
+
+def owner_record(
+    user: str,
+    season: int | None = None,
+) -> tuple[list[dict], str | None]:
+    """Win/loss record for an owner, optionally filtered by season."""
+    sql = """
+        SELECT
+            COUNT(CASE WHEN winner_user = ? THEN 1 END) as total_wins,
+            COUNT(CASE WHEN loser_user = ? THEN 1 END) as total_losses
+        FROM games
+        WHERE status IN ('2','3')
+          AND (homeUser = ? OR awayUser = ?)
+          AND stageIndex = '1'
+    """
+    params = [user, user, user, user]
+    if season is not None:
+        sql += " AND seasonIndex = ?"
+        params.append(str(season))
+    return _run_sql(sql, tuple(params))
+
+
+def team_record_query(
+    team: str,
+    season: int | None = None,
+) -> tuple[list[dict], str | None]:
+    """Win/loss record for a team (by nickName), optionally by season."""
+    canonical = resolve_team(team) or team
+    sql = """
+        SELECT
+            COUNT(CASE WHEN winner_team = ? THEN 1 END) as total_wins,
+            COUNT(CASE WHEN loser_team = ? THEN 1 END) as total_losses
+        FROM games
+        WHERE status IN ('2','3')
+          AND (homeTeamName = ? OR awayTeamName = ?)
+          AND stageIndex = '1'
+    """
+    params = [canonical, canonical, canonical, canonical]
+    if season is not None:
+        sql += " AND seasonIndex = ?"
+        params.append(str(season))
+    return _run_sql(sql, tuple(params))
+
+
+def streak(user: str) -> tuple[list[dict], str | None]:
+    """Current win/loss streak for an owner."""
+    sql = """
+        SELECT winner_user, loser_user, homeTeamName, awayTeamName,
+               homeScore, awayScore, seasonIndex, weekIndex
+        FROM games
+        WHERE status IN ('2','3')
+          AND (homeUser = ? OR awayUser = ?)
+        ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC
+        LIMIT 20
+    """
+    return _run_sql(sql, (user, user))
+
+
+def standings(
+    division: str | None = None,
+    conference: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Current standings, optionally filtered by division or conference."""
+    q = (Query("standings")
+         .select("teamName", "totalWins", "totalLosses", "totalTies",
+                 "divisionName", "conferenceName", "seed", "winPct")
+         .sort_by("CAST(seed AS INTEGER)", "ASC"))
+    if division:
+        q.where("divisionName = ?", division)
+    if conference:
+        q.where("conferenceName = ?", conference)
+    return q.execute()
+
+
+def recent_games(
+    user: str,
+    limit: int = 5,
+    opponent: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Recent games for an owner, optionally filtered by opponent."""
+    q = (Query("games")
+         .select("seasonIndex", "weekIndex", "homeTeamName", "awayTeamName",
+                 "homeScore", "awayScore", "homeUser", "awayUser",
+                 "winner_user", "loser_user")
+         .where("(homeUser = ? OR awayUser = ?)", user, user)
+         .sort_by("CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER)", "DESC")
+         .limit(limit))
+    if opponent:
+        q.where("(homeUser = ? OR awayUser = ?)", opponent, opponent)
+    return q.execute()
+
+
+def roster(
+    team: str,
+    pos: str | None = None,
+    sort_by: str = "playerBestOvr",
+) -> tuple[list[dict], str | None]:
+    """Team roster from players table."""
+    canonical = resolve_team(team) or team
+    q = (Query("players")
+         .select("firstName", "lastName", "pos", "playerBestOvr", "age",
+                 "dev", "teamName")
+         .where("teamName = ?", canonical)
+         .sort_by(sort_by, "DESC"))
+    if pos:
+        q.where("pos = ?", pos)
+    return q.execute()
+
+
+def free_agents(
+    pos: str | None = None,
+    min_ovr: int | None = None,
+) -> tuple[list[dict], str | None]:
+    """Free agents, optionally filtered by position."""
+    q = (Query("players")
+         .select("firstName", "lastName", "pos", "playerBestOvr", "age", "dev")
+         .where("isFA = '1'")
+         .sort_by("playerBestOvr", "DESC")
+         .limit(25))
+    if pos:
+        q.where("pos = ?", pos)
+    if min_ovr:
+        q.where("CAST(playerBestOvr AS INTEGER) >= ?", str(min_ovr))
+    return q.execute()
+
+
+def draft_picks(
+    team: str | None = None,
+    season: int | None = None,
+    round: int | None = None,
+) -> tuple[list[dict], str | None]:
+    """Draft history from player_draft_map."""
+    q = (Query("player_draft_map")
+         .select("extendedName", "drafting_team", "drafting_season",
+                 "draftRound", "draftPick", "pos", "playerBestOvr", "dev")
+         .sort_by("draftRound", "ASC"))
+    if team:
+        canonical = resolve_team(team) or team
+        q.where("drafting_team = ?", canonical)
+    if season:
+        q.where("drafting_season = ?", str(season))
+    if round:
+        # draftRound mapping: 2=R1, 3=R2, ..., 8=R7
+        q.where("draftRound = ?", str(round + 1))
+    return q.execute()
+
+
+def owner_history(
+    user: str | None = None,
+    team: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Owner tenure history."""
+    q = (Query("owner_tenure")
+         .select("teamName", "userName", "seasonIndex", "games_played")
+         .sort_by("CAST(seasonIndex AS INTEGER)", "ASC"))
+    if user:
+        q.where("userName = ?", user)
+    if team:
+        canonical = resolve_team(team) or team
+        q.where("teamName = ?", canonical)
+    return q.execute()
+
+
+def trades(
+    team: str | None = None,
+    season: int | None = None,
+    user: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Trade history."""
+    q = (Query("trades")
+         .select("team1Name", "team2Name", "team1Sent", "team2Sent",
+                 "seasonIndex", "weekIndex", "status")
+         .where("status IN ('approved', 'accepted')"))
+    if team:
+        canonical = resolve_team(team) or team
+        q.where("(team1Name = ? OR team2Name = ?)", canonical, canonical)
+    if season:
+        q.filter(season=season)
+    if user:
+        # Look up teams this user has owned and filter by those team names
+        tenure_rows, _ = owner_history(user=user)
+        if tenure_rows:
+            teams = {r["teamName"] for r in tenure_rows}
+            for t in teams:
+                q.where("(team1Name = ? OR team2Name = ?)", t, t)
+    return q.execute()
+
+
+def game_extremes(
+    type: str,
+    season: int | None = None,
+    limit: int = 5,
+) -> tuple[list[dict], str | None]:
+    """Game records: blowout, closest, highest scoring, lowest scoring."""
+    base_cols = ("seasonIndex", "weekIndex", "homeTeamName", "awayTeamName",
+                 "homeScore", "awayScore", "homeUser", "awayUser")
+    q = Query("games").select(*base_cols)
+
+    if type == "blowout":
+        q.select("ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin")
+        q.sort_by("margin", "DESC")
+    elif type == "closest":
+        q.select("ABS(CAST(homeScore AS INTEGER) - CAST(awayScore AS INTEGER)) AS margin")
+        q.sort_by("margin", "ASC")
+    elif type == "highest":
+        q.select("(CAST(homeScore AS INTEGER) + CAST(awayScore AS INTEGER)) AS total_pts")
+        q.sort_by("total_pts", "DESC")
+    elif type == "lowest":
+        q.select("(CAST(homeScore AS INTEGER) + CAST(awayScore AS INTEGER)) AS total_pts")
+        q.sort_by("total_pts", "ASC")
+    else:
+        return [], f"Unknown extreme type: {type}"
+
+    if season:
+        q.filter(season=season)
+
+    q.limit(limit)
+    return q.execute()
+
+
+def abilities(
+    team: str | None = None,
+    player: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Player abilities (X-Factor, Superstar, etc.)."""
+    q = Query("player_abilities").select("firstName", "lastName", "teamName",
+                                          "title", "description")
+    if team:
+        canonical = resolve_team(team) or team
+        q.where("teamName = ?", canonical)
+    if player:
+        q.where("(firstName || ' ' || lastName) LIKE ?", f"%{player}%")
+    return q.execute()
+
+
+# Cross-season analysis functions
+def compare_seasons(
+    stat: str,
+    user_or_team: str,
+    season1: int,
+    season2: int,
+) -> tuple[list[dict], str | None]:
+    """Compare a stat between two seasons for a user or team."""
+    rows1, err1 = stat_leaders(stat, season=season1, sort="best", limit=50)
+    rows2, err2 = stat_leaders(stat, season=season2, sort="best", limit=50)
+    if err1 or err2:
+        return [], err1 or err2
+    return rows1 + rows2, None
+
+
+def improvement_leaders(
+    stat: str,
+    season1: int,
+    season2: int,
+    limit: int = 10,
+) -> tuple[list[dict], str | None]:
+    """Players/teams who improved most in a stat between two seasons."""
+    rows1, err1 = stat_leaders(stat, season=season1, sort="best", limit=50)
+    rows2, err2 = stat_leaders(stat, season=season2, sort="best", limit=50)
+    if err1 or err2:
+        return [], err1 or err2
+    s1_map = {r.get("player_name", ""): r.get("stat_value", 0) for r in rows1}
+    deltas = []
+    for r in rows2:
+        name = r.get("player_name", "")
+        if name in s1_map:
+            try:
+                delta = float(r.get("stat_value", 0)) - float(s1_map[name])
+                deltas.append({**r, "prev_value": s1_map[name], "delta": delta})
+            except (ValueError, TypeError):
+                pass
+    deltas.sort(key=lambda x: x.get("delta", 0), reverse=True)
+    return deltas[:limit], None
+
+
+def career_trajectory(
+    user: str,
+    stat: str,
+) -> tuple[list[dict], str | None]:
+    """Stat per season over an owner's career."""
+    sd = STAT_DEFS.get(stat) or resolve_stat_keyword(stat)
+    if sd is None:
+        return [], f"Unknown stat: {stat}"
+
+    cast_type = "REAL" if sd.agg == "AVG" else "INTEGER"
+    pos_clause = ""
+    params = [user, user]
+    if sd.pos:
+        pos_clause = "AND pos = ?"
+        params.append(sd.pos)
+
+    sql = f"""
+        SELECT seasonIndex,
+               {sd.agg}(CAST({sd.column} AS {cast_type})) AS stat_value,
+               COUNT(*) AS games_played
+        FROM {sd.table}
+        WHERE (teamName IN (SELECT teamName FROM owner_tenure WHERE userName = ?))
+          AND seasonIndex IN (SELECT CAST(seasonIndex AS TEXT) FROM owner_tenure WHERE userName = ?)
+          AND stageIndex = '1'
+          {pos_clause}
+        GROUP BY seasonIndex
+        ORDER BY CAST(seasonIndex AS INTEGER) ASC
+    """
+    return _run_sql(sql, tuple(params))

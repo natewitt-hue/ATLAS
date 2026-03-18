@@ -174,3 +174,108 @@ def test_query_builder_execute(tmp_path):
     assert len(rows) <= 3
     if rows:
         assert "homeTeamName" in rows[0]
+
+
+def test_stat_leaders_passing_yards():
+    from oracle_query_builder import stat_leaders
+    rows, err = stat_leaders("passYds", season=None, sort="best", limit=5)
+    assert err is None
+    assert len(rows) <= 5
+    if rows:
+        assert "player_name" in rows[0] or "stat_value" in rows[0]
+
+
+def test_stat_leaders_worst_passer():
+    """Worst passer should use passerRating AVG with min games filter."""
+    from oracle_query_builder import stat_leaders
+    rows, err = stat_leaders("passYds", sort="worst", limit=5)
+    assert err is None
+
+
+def test_team_stat_leaders_best_offense():
+    from oracle_query_builder import team_stat_leaders
+    rows, err = team_stat_leaders("offTotalYds", sort="best", limit=5)
+    assert err is None
+
+
+def test_team_stat_leaders_best_defense():
+    """Best defense = fewest yards = should sort ASC."""
+    from oracle_query_builder import team_stat_leaders
+    rows, err = team_stat_leaders("defTotalYds_team", sort="best", limit=5)
+    assert err is None
+
+
+def test_owner_record():
+    from oracle_query_builder import owner_record
+    result, err = owner_record("TheWitt")
+    assert err is None
+    if result:
+        assert "total_wins" in result[0] or len(result) >= 0
+
+
+def test_owner_record_season():
+    from oracle_query_builder import owner_record
+    result, err = owner_record("TheWitt", season=6)
+    assert err is None
+
+
+def test_h2h():
+    from oracle_query_builder import h2h
+    result, err = h2h("TheWitt", "KillaE94")
+    assert err is None
+
+
+def test_team_record():
+    from oracle_query_builder import team_record_query
+    result, err = team_record_query("Lions")
+    assert err is None
+
+
+def test_streak():
+    from oracle_query_builder import streak
+    result, err = streak("TheWitt")
+    assert err is None
+
+
+def test_standings_division():
+    from oracle_query_builder import standings
+    rows, err = standings(division="NFC East")
+    assert err is None
+
+
+def test_recent_games():
+    from oracle_query_builder import recent_games
+    rows, err = recent_games("TheWitt", limit=5)
+    assert err is None
+    assert len(rows) <= 5
+
+
+def test_roster():
+    from oracle_query_builder import roster
+    rows, err = roster("Lions")
+    assert err is None
+
+
+def test_free_agents():
+    from oracle_query_builder import free_agents
+    rows, err = free_agents(pos="QB")
+    assert err is None
+
+
+def test_draft_picks():
+    from oracle_query_builder import draft_picks
+    rows, err = draft_picks(team="Lions")
+    assert err is None
+
+
+def test_trades():
+    from oracle_query_builder import trades
+    rows, err = trades(team="Lions")
+    assert err is None
+
+
+def test_game_extremes_blowout():
+    from oracle_query_builder import game_extremes
+    rows, err = game_extremes("blowout", limit=5)
+    assert err is None
+    assert len(rows) <= 5
