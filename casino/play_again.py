@@ -84,23 +84,18 @@ class PlayAgainView(discord.ui.View):
             )
         self._used = True
 
-        # Disable buttons immediately for visual feedback before async work
-        self.btn_play.disabled = True
-        self.btn_double.disabled = True
-        await interaction.message.edit(view=self)
-
+        # Check balance before passing to game callback (which handles its own defer)
         bal = await get_balance(self.user_id)
         if bal < self.wager:
             self._used = False
-            self.btn_play.disabled = False
-            self.btn_double.disabled = False
-            await interaction.message.edit(view=self)
             return await interaction.response.send_message(
                 f"❌ Not enough Bucks — need **${self.wager:,}**, have **${bal:,}**.",
                 ephemeral=True,
             )
 
+        # Disable buttons for visual feedback
         self._disable_all()
+        await interaction.message.edit(view=None)
         await self.replay_callback(interaction)
 
     async def _on_double(self, interaction: discord.Interaction) -> None:
@@ -115,21 +110,14 @@ class PlayAgainView(discord.ui.View):
             )
         self._used = True
 
-        # Disable buttons immediately for visual feedback before async work
-        self.btn_play.disabled = True
-        self.btn_double.disabled = True
-        await interaction.message.edit(view=self)
-
         # Cap at player's max bet tier
         max_bet = await get_max_bet(self.user_id)
         actual_wager = min(self.double_wager, max_bet)
 
+        # Check balance before passing to game callback (which handles its own defer)
         bal = await get_balance(self.user_id)
         if bal < actual_wager:
             self._used = False
-            self.btn_play.disabled = False
-            self.btn_double.disabled = False
-            await interaction.message.edit(view=self)
             return await interaction.response.send_message(
                 f"❌ Not enough Bucks — need **${actual_wager:,}**, have **${bal:,}**.",
                 ephemeral=True,

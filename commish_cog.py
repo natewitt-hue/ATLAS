@@ -503,14 +503,14 @@ class CommishCog(commands.Cog):
 
     @commish.command(name="tradelist", description="List recent pending trades.")
     async def tradelist(self, interaction: discord.Interaction):
-        cog = self._get("GenesisHubCog")
+        cog = self._get("TradeCenterCog")
         if not cog:
             return await interaction.response.send_message("Genesis not loaded.", ephemeral=True)
         await cog._tradelist_impl(interaction)
 
     @commish.command(name="runlottery", description="Run the weighted draft lottery draw.")
     async def runlottery(self, interaction: discord.Interaction):
-        cog = self._get("GenesisHubCog")
+        cog = self._get("ParityCog")
         if not cog:
             return await interaction.response.send_message("Genesis not loaded.", ephemeral=True)
         await cog._runlottery_impl(interaction)
@@ -518,7 +518,7 @@ class CommishCog(commands.Cog):
     @commish.command(name="orphan", description="Set or clear orphan franchise flag for a team.")
     @app_commands.describe(team="Team name", flag="True to set orphan, False to clear")
     async def orphan(self, interaction: discord.Interaction, team: str, flag: bool):
-        cog = self._get("GenesisHubCog")
+        cog = self._get("ParityCog")
         if not cog:
             return await interaction.response.send_message("Genesis not loaded.", ephemeral=True)
         await cog._orphanfranchise_impl(interaction, team, flag)
@@ -526,21 +526,21 @@ class CommishCog(commands.Cog):
     @commish.command(name="caseview", description="View a complaint case by ID.")
     @app_commands.describe(case_id="The complaint case ID")
     async def caseview(self, interaction: discord.Interaction, case_id: str):
-        cog = self._get("SentinelHubCog")
+        cog = self._get("ComplaintCog")
         if not cog:
             return await interaction.response.send_message("Sentinel not loaded.", ephemeral=True)
         await cog.caseview_impl(interaction, case_id)
 
     @commish.command(name="caselist", description="List all open/pending complaints.")
     async def caselist(self, interaction: discord.Interaction):
-        cog = self._get("SentinelHubCog")
+        cog = self._get("ComplaintCog")
         if not cog:
             return await interaction.response.send_message("Sentinel not loaded.", ephemeral=True)
         await cog.caselist_impl(interaction)
 
     @commish.command(name="forcehistory", description="View force request stats for this session.")
     async def forcehistory(self, interaction: discord.Interaction):
-        cog = self._get("SentinelHubCog")
+        cog = self._get("ForceRequestCog")
         if not cog:
             return await interaction.response.send_message("Sentinel not loaded.", ephemeral=True)
         await cog.forcehistory_impl(interaction)
@@ -548,7 +548,7 @@ class CommishCog(commands.Cog):
     @commish.command(name="positionapprove", description="Approve a pending position change.")
     @app_commands.describe(log_id="Log ID from the pending request")
     async def positionapprove(self, interaction: discord.Interaction, log_id: str):
-        cog = self._get("SentinelHubCog")
+        cog = self._get("PositionChangeCog")
         if not cog:
             return await interaction.response.send_message("Sentinel not loaded.", ephemeral=True)
         await cog.positionchangeapprove_impl(interaction, log_id)
@@ -557,7 +557,7 @@ class CommishCog(commands.Cog):
     @app_commands.describe(log_id="Log ID from the pending request", reason="Reason for denial")
     async def positiondeny(self, interaction: discord.Interaction, log_id: str,
                            reason: str = "No reason provided."):
-        cog = self._get("SentinelHubCog")
+        cog = self._get("PositionChangeCog")
         if not cog:
             return await interaction.response.send_message("Sentinel not loaded.", ephemeral=True)
         await cog.positionchangedeny_impl(interaction, log_id, reason)

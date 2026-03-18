@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.21.2"  # Add HF_TOKEN auth for HuggingFace Hub model downloads
+ATLAS_VERSION = "2.22.0"  # Code review: fix commish delegations, DM crash, play-again UX, bet grading, vote persistence
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -488,7 +488,8 @@ async def on_message(message: discord.Message):
         user_input = re.sub(r'<@!?\d+>', '', message.content).strip()
         async with message.channel.typing():
             try:
-                persona_type = infer_context(channel_name=message.channel.name)
+                channel_name = getattr(message.channel, "name", None) or "general"
+                persona_type = infer_context(channel_name=channel_name)
 
                 # ── Affinity lookup ────────────────────────────────
                 affinity_instruction = ""

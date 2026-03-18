@@ -104,4 +104,8 @@ class AwardsCog(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(AwardsCog(bot))
+    # Re-register persistent VoteViews for all open polls so buttons survive restarts
+    for poll_id, poll in _polls.items():
+        if poll.get("open", False):
+            bot.add_view(VoteView(poll_id, poll["options"]))
     print("ATLAS: Awards Engine loaded.")

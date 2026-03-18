@@ -2130,6 +2130,7 @@ class SportsbookCog(commands.Cog):
         bet_log    = []
 
         with _db_con() as con:
+            con.execute("BEGIN IMMEDIATE")
             pending = con.execute(
                 "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
                 "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
