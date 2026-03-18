@@ -279,3 +279,30 @@ def test_game_extremes_blowout():
     rows, err = game_extremes("blowout", limit=5)
     assert err is None
     assert len(rows) <= 5
+
+
+def test_querybuilder_matches_tier1_sort_directions():
+    """Verify QueryBuilder domain guards match Tier 1 regex sort logic."""
+    from oracle_query_builder import Query
+
+    # "top 5 passers" → DESC (best offense)
+    q = Query("offensive_stats").stat("passYds").sort("best")
+    sql, _ = q.build()
+    assert "DESC" in sql, "Best passers should sort DESC"
+
+    # "worst passer" → efficiency metric (passerRating AVG, ASC, min games)
+    q = Query("offensive_stats").stat("passYds").sort("worst")
+    sql, _ = q.build()
+    assert "passerRating" in sql, "Worst passer should use efficiency metric"
+    assert "ASC" in sql, "Worst should sort ASC"
+    assert "HAVING COUNT(*)" in sql, "Worst should have min games filter"
+
+    # "best defense" → ASC (fewest yards = best)
+    q = Query("team_stats").stat("defTotalYds_team").sort("best")
+    sql, _ = q.build()
+    assert "ASC" in sql, "Best defense should sort ASC (fewest yards)"
+
+    # "worst defense" → DESC (most yards = worst)
+    q = Query("team_stats").stat("defTotalYds_team").sort("worst")
+    sql, _ = q.build()
+    assert "DESC" in sql, "Worst defense should sort DESC (most yards)"
