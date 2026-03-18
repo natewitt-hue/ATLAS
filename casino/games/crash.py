@@ -40,11 +40,12 @@ from casino.renderer.casino_html_renderer import render_crash_card
 if TYPE_CHECKING:
     pass
 
-GAME_TYPE     = "crash"
-LOBBY_SECS    = 60     # seconds to wait for more players after first bet
-COOLDOWN_SECS = 30     # seconds between rounds
-TICK_SECS     = 2.0    # embed update interval during round
-LMS_BONUS_PCT = 0.10   # Last Man Standing bonus (10%)
+GAME_TYPE           = "crash"
+LOBBY_SECS          = 60     # seconds to wait for more players after first bet
+COOLDOWN_SECS       = 30     # seconds between rounds
+TICK_SECS           = 2.0    # embed update interval during round
+LMS_BONUS_PCT       = 0.10   # Last Man Standing bonus (10%)
+MAX_CRASH_MULTIPLIER = 1000.0
 
 # ── Active round registry: channel_id → CrashRound ───────────────────────────
 active_rounds:     dict[int, "CrashRound"] = {}
@@ -351,7 +352,7 @@ class CrashView(discord.ui.View):
                 "❌ The round isn't running yet or has already crashed!", ephemeral=True
             )
 
-        mult   = self.round_obj.current_mult
+        mult   = min(self.round_obj.current_mult, MAX_CRASH_MULTIPLIER)
 
         # Set cashed_out BEFORE await to prevent TOCTOU double-cashout
         player.cashed_out   = True

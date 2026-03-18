@@ -122,7 +122,18 @@ def _load_state():
             print(f"[complaint_cog] State load error: {e}")
 
 
+def _prune_resolved_complaints():
+    cutoff = (dt.now(timezone.utc) - datetime.timedelta(days=30)).isoformat()
+    to_remove = [
+        cid for cid, c in _complaints.items()
+        if c.get("verdict") not in (None, "pending") and c.get("submitted_at", "") < cutoff
+    ]
+    for cid in to_remove:
+        del _complaints[cid]
+
+
 def _save_complaint_state():
+    _prune_resolved_complaints()
     try:
         tmp = STATE_PATH + ".tmp"
         with open(tmp, "w") as f:

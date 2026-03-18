@@ -910,7 +910,16 @@ async def deduct_wager(discord_id: int, wager: int) -> int:
     Deduct wager from balance at bet placement time.
     Returns new balance.
     Raises InsufficientFundsError if balance is too low.
+    Raises ValueError if wager exceeds tier limit.
     """
+    balance = await flow_wallet.get_balance(discord_id)
+    max_bet = CASINO_MAX_BET
+    for threshold, limit, _ in BET_TIERS:
+        if balance >= threshold:
+            max_bet = limit
+            break
+    if wager > max_bet:
+        raise ValueError(f"Wager ${wager:,} exceeds your tier limit of ${max_bet:,}")
     async with flow_wallet.get_user_lock(discord_id):
         return await flow_wallet.debit(
             discord_id, wager, "CASINO",

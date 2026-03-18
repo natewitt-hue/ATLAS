@@ -523,9 +523,21 @@ def extract_prices(market: dict) -> dict:
 
         if isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
             try:
-                yes_price = float(outcome_prices[0])
-                no_price = float(outcome_prices[1])
-            except (ValueError, TypeError):
+                outcomes = market.get("outcomes")
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except (json.JSONDecodeError, TypeError):
+                        outcomes = None
+                if isinstance(outcomes, list) and "Yes" in outcomes:
+                    yes_idx = outcomes.index("Yes")
+                    no_idx = outcomes.index("No") if "No" in outcomes else (1 - yes_idx)
+                    yes_price = float(outcome_prices[yes_idx])
+                    no_price = float(outcome_prices[no_idx])
+                else:
+                    yes_price = float(outcome_prices[0])
+                    no_price = float(outcome_prices[1])
+            except (ValueError, TypeError, IndexError):
                 pass
 
     return {

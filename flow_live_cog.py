@@ -190,6 +190,7 @@ class SessionTracker:
 
     def _persist(self, session: PlayerSession):
         import json, sqlite3
+        conn = None
         try:
             d = session.to_dict()
             conn = sqlite3.connect("flow_economy.db", timeout=10)
@@ -207,11 +208,17 @@ class SessionTracker:
                 json.dumps(d["games_by_type"]), json.dumps(d["events"]),
             ))
             conn.commit()
-            conn.close()
         except sqlite3.OperationalError:
+            if conn:
+                conn.rollback()
             log.warning("DB locked during session persist for %s — will retry next event", session.discord_id)
         except Exception:
+            if conn:
+                conn.rollback()
             log.exception("Failed to persist session for %s", session.discord_id)
+        finally:
+            if conn:
+                conn.close()
 
     def _delete_persisted(self, discord_id: int, guild_id: int):
         try:
@@ -739,13 +746,18 @@ class FlowLiveCog(commands.Cog):
     async def _update_pulse_impl(self, guild):
         await self._update_pulse(guild)
 
-    async def _test_highlight_impl(self, guild, channel):
+    async def _test_highlight_impl(self, guild, channel, interaction=None):
         """Post a test highlight card."""
+        if interaction and not interaction.response.is_done():
+            await interaction.response.defer(thinking=True)
         from casino.renderer.highlight_renderer import render_jackpot_card
         import io
         png_bytes = await render_jackpot_card("TestPlayer", 5000, 50.0)
         file = discord.File(io.BytesIO(png_bytes), filename="test_highlight.png")
-        await channel.send(file=file)
+        if interaction:
+            await interaction.followup.send(file=file)
+        else:
+            await channel.send(file=file)
 
     async def _session_dump_impl(self, guild) -> str:
         sessions = self.sessions.get_all_active(guild.id)

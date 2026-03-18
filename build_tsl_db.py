@@ -246,10 +246,8 @@ def _build_derived_tables(conn: sqlite3.Connection):
     print(f"  [DERIVED] owner_tenure: {ot_count} records")
 
     # ── player_draft_map ──────────────────────────────────────────────────────
-    # ⚠️ Name matching uses firstName || ' ' || lastName vs extendedName.
-    # If extendedName uses abbreviated format (e.g., "T.Hill" vs "Tyreek Hill"),
-    # the JOIN fails silently and falls through to p.teamName (current team).
-    # Consider adding rosterId-based matching if the stats tables include it.
+    # Uses rosterId-based matching against stats tables (preferred over name
+    # matching which fails on abbreviated names like "T.Hill" vs "Tyreek Hill").
     conn.execute("DROP TABLE IF EXISTS player_draft_map")
     conn.execute("""
         CREATE TABLE player_draft_map (
@@ -285,13 +283,13 @@ def _build_derived_tables(conn: sqlite3.Connection):
                       != p.teamName THEN 1 ELSE 0 END AS was_traded
         FROM players p
         LEFT JOIN (
-            SELECT extendedName, teamName, MIN(CAST(seasonIndex AS INTEGER)) AS seasonIndex
-            FROM offensive_stats GROUP BY extendedName
-        ) first_off ON p.firstName || ' ' || p.lastName = first_off.extendedName
+            SELECT rosterId, teamName, MIN(CAST(seasonIndex AS INTEGER)) AS seasonIndex
+            FROM offensive_stats GROUP BY rosterId
+        ) first_off ON p.rosterId = first_off.rosterId
         LEFT JOIN (
-            SELECT extendedName, teamName, MIN(CAST(seasonIndex AS INTEGER)) AS seasonIndex
-            FROM defensive_stats GROUP BY extendedName
-        ) first_def ON p.firstName || ' ' || p.lastName = first_def.extendedName
+            SELECT rosterId, teamName, MIN(CAST(seasonIndex AS INTEGER)) AS seasonIndex
+            FROM defensive_stats GROUP BY rosterId
+        ) first_def ON p.rosterId = first_def.rosterId
     """)
     conn.commit()
     pdm_count = conn.execute("SELECT COUNT(*) FROM player_draft_map").fetchone()[0]

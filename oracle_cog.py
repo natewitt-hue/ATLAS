@@ -2431,7 +2431,7 @@ async def _build_team_card_snapshot(
     if recent:
         dots, score_lines, win_log = [], [], []
         for g in recent:
-            is_home   = team_name.lower() in str(g.get("home", "")).lower()
+            is_home   = team_name.lower() == str(g.get("home", "")).lower()
             my_score  = int(g.get("home_score", 0) if is_home else g.get("away_score", 0))
             opp_score = int(g.get("away_score", 0) if is_home else g.get("home_score", 0))
             opp_name  = str(g.get("away", "?") if is_home else g.get("home", "?"))
@@ -2661,7 +2661,7 @@ def _build_team_card_scouting(team_name: str) -> discord.Embed:
     if recent:
         diffs, wins_l5 = [], []
         for g in recent:
-            is_home   = team_name.lower() in str(g.get("home", "")).lower()
+            is_home   = team_name.lower() == str(g.get("home", "")).lower()
             my_s      = int(g.get("home_score", 0) if is_home else g.get("away_score", 0))
             opp_s     = int(g.get("away_score", 0) if is_home else g.get("home_score", 0))
             wins_l5.append(my_s > opp_s)

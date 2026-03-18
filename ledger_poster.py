@@ -8,7 +8,7 @@ Centralized utility for posting transaction audit lines to the #ledger channel.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -64,7 +64,7 @@ def _get_display_name(channel, discord_id: int) -> str:
 
 def _timestamp() -> str:
     """Return a short datetime string, e.g. 'Mar 16 14:32'."""
-    return datetime.utcnow().strftime("%b %d %H:%M")
+    return datetime.now(timezone.utc).strftime("%b %d %H:%M")
 
 
 async def post_casino_result(

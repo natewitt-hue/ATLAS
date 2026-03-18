@@ -866,12 +866,13 @@ class FlowHubView(discord.ui.View):
         self._rebuild_buttons()
 
         try:
+            await interaction.response.defer()
             png = await self.render_current()
             file = discord.File(io.BytesIO(png), filename="flow.png")
             embed = discord.Embed(color=0xD4AF37)
             embed.set_image(url="attachment://flow.png")
             embed.set_footer(text="ATLAS Flow Economy")
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 attachments=[file], embed=embed, view=self,
             )
         except discord.NotFound:

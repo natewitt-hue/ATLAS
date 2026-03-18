@@ -295,6 +295,9 @@ def _parse_picks(raw: str, team_id: int) -> tuple[list[dict], list[str]]:
         if rnd < 1 or rnd > 7:
             errors.append(f"`{token}` — round must be 1–7")
             continue
+        if season > current_season + 3:
+            errors.append(f"`{token}` — season S{season} is too far in the future")
+            continue
 
         picks.append({
             "round":   rnd,
@@ -696,7 +699,7 @@ async def _evaluate_and_post(
 
     # ── RED band = auto-decline (no buttons, no save) ────────────────────────
     if result.band == "RED":
-        trade_id = str(uuid.uuid4())[:8].upper()
+        trade_id = str(uuid.uuid4())[:12].upper()
         ai_text = await _get_ai_commentary(result, _team_label(team_a), _team_label(team_b))
 
         # OVR delta
@@ -775,7 +778,7 @@ async def _evaluate_and_post(
     ai_text = await _get_ai_commentary(result, _team_label(team_a), _team_label(team_b))
 
     # Build trade record
-    trade_id = str(uuid.uuid4())[:8].upper()
+    trade_id = str(uuid.uuid4())[:12].upper()
     trade = {
         "id":            trade_id,
         "original_id":   original_trade_id,
