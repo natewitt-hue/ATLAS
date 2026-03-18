@@ -163,11 +163,12 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.19.6"  # Smart worst-player queries: efficiency metrics + min games threshold
+ATLAS_VERSION = "2.20.0"  # Oracle v3 Phase 1: QueryBuilder API, memory schema, Anthropic SDK
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
-DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
+DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
+GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")
+ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 from permissions import ADMIN_USER_IDS
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
 
@@ -731,6 +732,8 @@ if __name__ == "__main__":
         raise RuntimeError("DISCORD_TOKEN is not set in .env — bot cannot start.")
     if not GEMINI_API_KEY:
         print("⚠️  WARNING: GEMINI_API_KEY is not set — /ask and ATLAS AI responses will fail.")
+    if not ANTHROPIC_API_KEY:
+        print("⚠️  WARNING: ANTHROPIC_API_KEY not set — Oracle v3 agent will be unavailable")
 
     export_code_snapshot()
 
