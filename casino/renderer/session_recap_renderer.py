@@ -264,14 +264,14 @@ def _build_session_recap_html(
   gap: 2px;
 }}
 .player-name {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 800;
   font-size: 20px;
   color: var(--text-primary);
   letter-spacing: 0.5px;
 }}
 .session-sub {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 10px;
   color: var(--text-muted);
@@ -285,7 +285,7 @@ def _build_session_recap_html(
   gap: 4px;
 }}
 .duration-badge {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 11px;
   color: var(--gold);
@@ -303,7 +303,7 @@ def _build_session_recap_html(
   padding: 12px 20px 8px;
 }}
 .hero-pnl-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 11px;
   color: var(--gold-dim);
@@ -312,7 +312,7 @@ def _build_session_recap_html(
   margin-bottom: 4px;
 }}
 .hero-pnl-value {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 48px;
   letter-spacing: -1px;
@@ -327,7 +327,7 @@ def _build_session_recap_html(
 .data-grid {{ padding: 8px 20px 10px; }}
 /* Section label */
 .section-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold-dim);
@@ -353,13 +353,13 @@ def _build_session_recap_html(
 }}
 .game-pill-icon {{ font-size: 14px; }}
 .game-pill-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 12px;
   color: var(--text-sub);
 }}
 .game-pill-count {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 11px;
   color: var(--gold);
@@ -382,14 +382,14 @@ def _build_session_recap_html(
 }}
 .hl-icon {{ font-size: 15px; flex-shrink: 0; }}
 .hl-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 13px;
   color: var(--text-sub);
   flex: 1;
 }}
 .hl-note {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold);
@@ -399,7 +399,7 @@ def _build_session_recap_html(
   letter-spacing: 0.5px;
 }}
 .hl-amount {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 14px;
   flex-shrink: 0;
@@ -409,7 +409,7 @@ def _build_session_recap_html(
 .hl-amount.amber {{ color: var(--push); }}
 /* Best streak note */
 .best-streak-note {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 10px;
   color: var(--gold-dim);
@@ -417,7 +417,7 @@ def _build_session_recap_html(
 }}
 /* Commentary line */
 .commentary-line {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 12px;
   color: var(--text-muted);
@@ -434,7 +434,7 @@ def _build_session_recap_html(
   padding: 0 20px 10px;
 }}
 .win-rate-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold-dim);
@@ -452,10 +452,10 @@ def _build_session_recap_html(
 .win-rate-bar-fill {{
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, #4ADE80, #22C55E);
+  background: linear-gradient(90deg, var(--win), var(--win-dark));
 }}
 .win-rate-pct {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 11px;
   color: var(--win);

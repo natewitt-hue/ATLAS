@@ -175,7 +175,7 @@ _SHARED_CSS = """\
 
 body {
   background: transparent;
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   color: #fff;
   padding: 0;
 }
@@ -204,12 +204,12 @@ body {
 
 /* Status bar */
 .status-bar { height: 5px; width: 100%; }
-.status-bar.win      { background: linear-gradient(90deg, #4ADE80, #22C55E, #4ADE80); }
-.status-bar.loss     { background: linear-gradient(90deg, #F87171, #EF4444, #F87171); }
-.status-bar.push     { background: linear-gradient(90deg, #FBBF24, #D97706, #FBBF24); }
-.status-bar.jackpot  { background: linear-gradient(90deg, #D4AF37, #FFDA50, #D4AF37); }
-.status-bar.blackjack{ background: linear-gradient(90deg, #D4AF37, #FFDA50, #D4AF37); }
-.status-bar.near_miss{ background: linear-gradient(90deg, #F59E0B, #FBBF24, #F59E0B); }
+.status-bar.win      { background: linear-gradient(90deg, var(--win), var(--win-dark), var(--win)); }
+.status-bar.loss     { background: linear-gradient(90deg, var(--loss), var(--loss-dark), var(--loss)); }
+.status-bar.push     { background: linear-gradient(90deg, var(--push), var(--push-dark), var(--push)); }
+.status-bar.jackpot  { background: linear-gradient(90deg, var(--gold), var(--gold-light), var(--gold)); }
+.status-bar.blackjack{ background: linear-gradient(90deg, var(--gold), var(--gold-light), var(--gold)); }
+.status-bar.near_miss{ background: linear-gradient(90deg, #F59E0B, var(--push), #F59E0B); }
 
 /* Header */
 .header {
@@ -234,7 +234,7 @@ body {
 }
 .game-title-group { display: flex; flex-direction: column; }
 .game-title {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 800;
   font-size: 20px;
   color: var(--text-primary);
@@ -242,14 +242,14 @@ body {
   line-height: 1.2;
 }
 .game-subtitle {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 11px;
   color: var(--text-sub);
   letter-spacing: 0.5px;
 }
 .txn-id {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 9px;
   color: var(--text-dim);
@@ -259,7 +259,7 @@ body {
 /* Center username */
 .header-center { display: flex; align-items: center; justify-content: center; flex: 1; }
 .username-badge {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 15px;
   color: var(--text-primary);
@@ -274,44 +274,44 @@ body {
 .result-badge {
   padding: 5px 14px;
   border-radius: 8px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 13px;
   letter-spacing: 0.5px;
   white-space: nowrap;
 }
-.result-badge.win     { background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.35); color: #4ADE80; }
-.result-badge.loss    { background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.35); color: #F87171; }
-.result-badge.push    { background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.35); color: #FBBF24; }
-.result-badge.jackpot { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
-.result-badge.blackjack { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
-.result-badge.active  { background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.3); color: #D4AF37; }
-.result-badge.near_miss { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #FBBF24; }
+.result-badge.win     { background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.35); color: var(--win); }
+.result-badge.loss    { background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.35); color: var(--loss); }
+.result-badge.push    { background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.35); color: var(--push); }
+.result-badge.jackpot { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: var(--gold-light); }
+.result-badge.blackjack { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: var(--gold-light); }
+.result-badge.active  { background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.3); color: var(--gold); }
+.result-badge.near_miss { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: var(--push); }
 
 /* Streak badge */
 .streak-badge {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 10px; border-radius: 12px;
-  font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 11px;
+  font-family: var(--font-mono), monospace; font-weight: 700; font-size: 11px;
   letter-spacing: 0.5px; margin-left: 6px;
 }
 .streak-badge.hot { background: rgba(251,146,60,0.15); border: 1px solid rgba(251,146,60,0.35); color: #FB923C; }
-.streak-badge.fire { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.35); color: #F87171; }
-.streak-badge.legendary { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: #FFDA50; }
+.streak-badge.fire { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.35); color: var(--loss); }
+.streak-badge.legendary { background: rgba(212,175,55,0.15); border: 1px solid rgba(212,175,55,0.4); color: var(--gold-light); }
 .streak-badge.cold { background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.3); color: #60A5FA; }
 
 /* Near-miss banner */
 .near-miss-banner {
   text-align: center; padding: 6px 20px;
-  font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 14px;
-  color: #FBBF24; background: rgba(245,158,11,0.08); letter-spacing: 0.5px;
+  font-family: var(--font-display), sans-serif; font-weight: 700; font-size: 14px;
+  color: var(--push); background: rgba(245,158,11,0.08); letter-spacing: 0.5px;
 }
 
 /* Jackpot footer */
 .jackpot-footer {
   display: flex; align-items: center; justify-content: center; gap: 16px;
   padding: 6px 20px 10px;
-  font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 10px;
+  font-family: var(--font-mono), monospace; font-weight: 600; font-size: 10px;
   color: var(--text-dim); letter-spacing: 0.5px;
 }
 .jackpot-footer .jp-tier { color: var(--gold-dim); }
@@ -330,10 +330,10 @@ body {
   border-bottom: 1px solid rgba(0,0,0,0.3); border-right: 1px solid rgba(0,0,0,0.2);
 }
 .data-label {
-  font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 12px;
+  font-family: var(--font-display), sans-serif; font-weight: 700; font-size: 12px;
   color: var(--gold-dim); letter-spacing: 1.5px; margin-bottom: 4px; text-transform: uppercase;
 }
-.data-value { font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 18px; color: var(--text-primary); }
+.data-value { font-family: var(--font-mono), monospace; font-weight: 800; font-size: 18px; color: var(--text-primary); }
 .data-value.green { color: var(--win); }
 .data-value.red   { color: var(--loss); }
 .data-value.amber { color: var(--push); }
@@ -341,7 +341,7 @@ body {
 
 /* Footer */
 .footer { display: flex; align-items: center; justify-content: center; padding: 10px 20px 14px; }
-.footer-balance { font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 20px; }
+.footer-balance { font-family: var(--font-mono), monospace; font-weight: 800; font-size: 20px; }
 .footer-balance .label { color: var(--gold); }
 .footer-balance .amount { color: var(--text-primary); }
 """

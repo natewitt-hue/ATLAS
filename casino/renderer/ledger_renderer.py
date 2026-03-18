@@ -44,7 +44,7 @@ _LEDGER_CSS = """\
 <style>
 .card {
   width: 700px;
-  background: #111111;
+  background: var(--bg);
   border: 1px solid rgba(212,175,55,0.25);
 }
 .card::before {
@@ -70,9 +70,9 @@ _LEDGER_CSS = """\
 .card > * { position: relative; z-index: 3; }
 
 /* Status bar — ledger-specific classes */
-.status-bar.credit { background: linear-gradient(90deg, #22C55E, #16A34A, #22C55E); }
-.status-bar.debit  { background: linear-gradient(90deg, #EF4444, #DC2626, #EF4444); }
-.status-bar.neutral{ background: linear-gradient(90deg, #D4AF37, #B8962E, #D4AF37); }
+.status-bar.credit { background: linear-gradient(90deg, var(--win-dark), #16A34A, var(--win-dark)); }
+.status-bar.debit  { background: linear-gradient(90deg, var(--loss-dark), #DC2626, var(--loss-dark)); }
+.status-bar.neutral{ background: linear-gradient(90deg, var(--gold), #B8962E, var(--gold)); }
 
 /* Header — ledger layout (space-between) */
 .header {
@@ -86,27 +86,27 @@ _LEDGER_CSS = """\
   display: flex; align-items: center; justify-content: center;
   font-size: 14px; font-weight: 700;
 }
-.source-icon.casino     { background: rgba(212,175,55,0.2); color: #D4AF37; }
+.source-icon.casino     { background: rgba(212,175,55,0.2); color: var(--gold); }
 .source-icon.sportsbook { background: rgba(26,115,232,0.2); color: #5B9CF5; }
-.source-icon.admin      { background: rgba(239,68,68,0.2); color: #EF4444; }
-.source-icon.stipend    { background: rgba(34,197,94,0.2); color: #22C55E; }
+.source-icon.admin      { background: rgba(239,68,68,0.2); color: var(--loss-dark); }
+.source-icon.stipend    { background: rgba(34,197,94,0.2); color: var(--win-dark); }
 .source-icon.prediction { background: rgba(168,85,247,0.2); color: #A855F7; }
 
 .game-label {
-  font-weight: 700; font-size: 18px; color: #e8e0d0; letter-spacing: 1.5px;
+  font-weight: 700; font-size: 18px; color: var(--text-primary); letter-spacing: 1.5px;
 }
 
 /* Badge */
 .badge {
   padding: 4px 12px; border-radius: 6px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700; font-size: 13px; letter-spacing: 0.5px;
 }
-.badge.win    { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: #4ADE80; }
-.badge.loss   { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #F87171; }
-.badge.push   { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #FBBF24; }
-.badge.credit { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: #4ADE80; }
-.badge.debit  { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #F87171; }
+.badge.win    { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: var(--win); }
+.badge.loss   { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: var(--loss); }
+.badge.push   { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: var(--push); }
+.badge.credit { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: var(--win); }
+.badge.debit  { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: var(--loss); }
 
 /* Divider */
 .divider {
@@ -131,16 +131,16 @@ _LEDGER_CSS = """\
   border-right: 1px solid rgba(0,0,0,0.2);
 }
 .data-label {
-  font-weight: 600; font-size: 10px; color: #8C7324;
+  font-weight: 600; font-size: 10px; color: var(--gold-dim);
   letter-spacing: 1.5px; margin-bottom: 4px; text-transform: uppercase;
 }
 .data-value {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 700; font-size: 16px; color: #e8e0d0;
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 16px; color: var(--text-primary);
 }
-.data-value.green { color: #4ADE80; }
-.data-value.red   { color: #F87171; }
-.data-value.amber { color: #FBBF24; }
+.data-value.green { color: var(--win); }
+.data-value.red   { color: var(--loss); }
+.data-value.amber { color: var(--push); }
 
 /* Footer */
 .footer {
@@ -149,16 +149,16 @@ _LEDGER_CSS = """\
 }
 .footer-left { display: flex; align-items: center; gap: 16px; }
 .footer-balance {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700; font-size: 12px; color: #DCDCE6;
 }
 .footer-txn {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 400; font-size: 10px; color: #555;
+  font-family: var(--font-mono), monospace;
+  font-weight: 400; font-size: 10px; color: var(--text-dim);
 }
 .footer-time {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 400; font-size: 11px; color: #8C7324;
+  font-family: var(--font-mono), monospace;
+  font-weight: 400; font-size: 11px; color: var(--gold-dim);
 }
 
 /* Highlight bar */
@@ -166,9 +166,9 @@ _LEDGER_CSS = """\
   margin: 0 20px 8px; padding: 6px 14px; border-radius: 6px;
   font-weight: 700; font-size: 12px; letter-spacing: 1px; text-align: center;
 }
-.highlight-bar.win  { background: rgba(34,197,94,0.08); color: #4ADE80; border: 1px solid rgba(34,197,94,0.15); }
-.highlight-bar.loss { background: rgba(239,68,68,0.08); color: #F87171; border: 1px solid rgba(239,68,68,0.15); }
-.highlight-bar.push { background: rgba(245,158,11,0.08); color: #FBBF24; border: 1px solid rgba(245,158,11,0.15); }
+.highlight-bar.win  { background: rgba(34,197,94,0.08); color: var(--win); border: 1px solid rgba(34,197,94,0.15); }
+.highlight-bar.loss { background: rgba(239,68,68,0.08); color: var(--loss); border: 1px solid rgba(239,68,68,0.15); }
+.highlight-bar.push { background: rgba(245,158,11,0.08); color: var(--push); border: 1px solid rgba(245,158,11,0.15); }
 
 /* Description row */
 .desc-row { padding: 6px 20px 2px; font-size: 13px; color: #aaa; }

@@ -62,7 +62,7 @@ def _prediction_css() -> str:
 .market-list-row:last-child { border-bottom: none; }
 
 .market-index {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 13px;
   color: var(--text-dim);
@@ -75,7 +75,7 @@ def _prediction_css() -> str:
   display: inline-block;
   padding: 2px 8px;
   border-radius: 4px;
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: #fff;
@@ -86,7 +86,7 @@ def _prediction_css() -> str:
 }
 
 .market-title-text {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 13px;
   color: var(--text-primary);
@@ -99,7 +99,7 @@ def _prediction_css() -> str:
 }
 
 .odds-pill {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 12px;
   display: flex;
@@ -129,7 +129,7 @@ def _prediction_css() -> str:
 }
 
 .market-question {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 16px;
   color: var(--text-primary);
@@ -151,10 +151,10 @@ def _prediction_css() -> str:
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 12px;
-  color: #111;
+  color: var(--bg);
   min-width: 40px;
 }
 
@@ -163,10 +163,10 @@ def _prediction_css() -> str:
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 12px;
-  color: #111;
+  color: var(--bg);
   min-width: 40px;
 }
 
@@ -197,7 +197,7 @@ def _prediction_css() -> str:
 }
 
 .price-side {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 11px;
   letter-spacing: 1.5px;
@@ -209,7 +209,7 @@ def _prediction_css() -> str:
 .price-side.no  { color: var(--loss); }
 
 .price-value {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 26px;
   color: var(--text-primary);
@@ -218,7 +218,7 @@ def _prediction_css() -> str:
 }
 
 .price-profit {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 12px;
 }
@@ -230,7 +230,7 @@ def _prediction_css() -> str:
   display: flex;
   justify-content: space-between;
   padding: 4px 20px 12px;
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 11px;
   color: var(--text-muted);
@@ -241,7 +241,7 @@ def _prediction_css() -> str:
   display: inline-block;
   padding: 3px 10px;
   border-radius: 5px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 11px;
   color: #fff;
@@ -266,7 +266,7 @@ def _prediction_css() -> str:
 }
 
 .bet-market-title {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 13px;
   color: var(--text-sub);
@@ -293,7 +293,7 @@ def _prediction_css() -> str:
 }
 
 .bet-info-label {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold-dim);
@@ -303,7 +303,7 @@ def _prediction_css() -> str:
 }
 
 .bet-info-value {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 16px;
   color: var(--text-primary);
@@ -323,7 +323,7 @@ def _prediction_css() -> str:
 .portfolio-row:last-child { border-bottom: none; }
 
 .portfolio-title {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 12px;
   color: var(--text-primary);
@@ -334,7 +334,7 @@ def _prediction_css() -> str:
 }
 
 .portfolio-side {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 11px;
   padding: 2px 6px;
@@ -353,7 +353,7 @@ def _prediction_css() -> str:
 }
 
 .portfolio-qty {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 12px;
   color: var(--text-muted);
@@ -363,7 +363,7 @@ def _prediction_css() -> str:
 }
 
 .portfolio-cost {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 13px;
   color: var(--text-primary);
@@ -383,7 +383,7 @@ def _prediction_css() -> str:
 }
 
 .portfolio-stat-label {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold-dim);
@@ -393,7 +393,7 @@ def _prediction_css() -> str:
 }
 
 .portfolio-stat-value {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 18px;
   color: var(--text-primary);
@@ -405,7 +405,7 @@ def _prediction_css() -> str:
 }
 
 .resolution-result {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 28px;
   text-align: center;
@@ -425,7 +425,7 @@ def _prediction_css() -> str:
 .winners-row:last-child { border-bottom: none; }
 
 .winner-rank {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 12px;
   color: var(--gold);
@@ -434,7 +434,7 @@ def _prediction_css() -> str:
 }
 
 .winner-name {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 13px;
   color: var(--text-primary);
@@ -442,7 +442,7 @@ def _prediction_css() -> str:
 }
 
 .winner-payout {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 14px;
   color: var(--win);
@@ -533,12 +533,12 @@ def _build_market_list_html(
     if not markets:
         rows_html = """
         <div style="padding: 24px 20px; text-align: center; color: var(--text-muted);
-                    font-family: 'Outfit', sans-serif; font-size: 14px;">
+                    font-family: var(--font-display), sans-serif; font-size: 14px;">
           No markets found. Try a different category.
         </div>"""
 
     filter_html = f"""
-    <div style="padding: 6px 20px 2px; font-family: 'Outfit', sans-serif;
+    <div style="padding: 6px 20px 2px; font-family: var(--font-display), sans-serif;
                 font-weight: 600; font-size: 10px; color: var(--text-dim);
                 letter-spacing: 1px; text-transform: uppercase;">
       {esc(filter_label)}
@@ -786,7 +786,7 @@ async def render_portfolio_card(
     if not positions:
         rows_html = """
         <div style="padding: 20px; text-align: center; color: var(--text-muted);
-                    font-family: 'Outfit', sans-serif; font-size: 13px;">
+                    font-family: var(--font-display), sans-serif; font-size: 13px;">
           No open positions
         </div>"""
 
@@ -950,12 +950,12 @@ def _build_curated_list_html(
     if not markets:
         rows_html = """
         <div style="padding: 24px 20px; text-align: center; color: var(--text-muted);
-                    font-family: 'Outfit', sans-serif; font-size: 14px;">
+                    font-family: var(--font-display), sans-serif; font-size: 14px;">
           No curated markets available. Check back soon.
         </div>"""
 
     filter_html = f"""
-    <div style="padding: 6px 20px 2px; font-family: 'Outfit', sans-serif;
+    <div style="padding: 6px 20px 2px; font-family: var(--font-display), sans-serif;
                 font-weight: 600; font-size: 10px; color: var(--text-dim);
                 letter-spacing: 1px; text-transform: uppercase;">
       {esc(filter_label)}
@@ -994,7 +994,7 @@ def _curated_css() -> str:
   position: absolute;
   right: 0;
   top: -14px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 9px;
   color: var(--text-dim);
@@ -1009,17 +1009,17 @@ def _curated_css() -> str:
   display: inline-block;
   padding: 3px 10px;
   border-radius: 4px;
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 800;
   font-size: 10px;
   letter-spacing: 1.5px;
   text-transform: uppercase;
-  color: #111;
+  color: var(--bg);
   background: var(--gold);
   margin-bottom: 8px;
 }
 .spotlight-title {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 16px;
   color: var(--text-primary);
@@ -1027,7 +1027,7 @@ def _curated_css() -> str:
   margin-bottom: 8px;
 }
 .spotlight-analysis {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 400;
   font-size: 12px;
   color: var(--text-sub);
@@ -1044,7 +1044,7 @@ def _curated_css() -> str:
 }
 .supporting-row:last-child { border-bottom: none; }
 .supporting-hook {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 400;
   font-size: 11px;
   color: var(--text-muted);
@@ -1061,14 +1061,14 @@ def _curated_css() -> str:
   padding: 4px 0;
 }
 .leaderboard-name {
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 12px;
   color: var(--text-primary);
   flex: 1;
 }
 .leaderboard-stat {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 12px;
   color: var(--win);
@@ -1079,7 +1079,7 @@ def _curated_css() -> str:
   padding: 14px 20px;
 }
 .alert-direction {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 28px;
   text-align: center;
@@ -1093,7 +1093,7 @@ def _curated_css() -> str:
   align-items: center;
   gap: 12px;
   margin-bottom: 12px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 18px;
 }
@@ -1102,7 +1102,7 @@ def _curated_css() -> str:
 .alert-new { color: var(--text-primary); }
 .alert-holders {
   text-align: center;
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 11px;
   color: var(--text-muted);
@@ -1159,7 +1159,7 @@ async def render_daily_drop_card(
     sp_sentiment_html = ""
     if sp_sentiment.get("total", 0) > 0:
         sp_sentiment_html = f"""
-        <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px;
+        <div style="font-family: var(--font-mono), monospace; font-size: 10px;
                     color: var(--text-muted); margin-top: 4px;">
           {esc(sp_sentiment.get('label', ''))}
         </div>"""
@@ -1227,7 +1227,7 @@ async def render_daily_drop_card(
 
         lb_html = f"""
         <div class="gold-divider"></div>
-        <div style="padding: 4px 20px 2px; font-family: 'Outfit', sans-serif;
+        <div style="padding: 4px 20px 2px; font-family: var(--font-display), sans-serif;
                     font-weight: 700; font-size: 10px; color: var(--gold-dim);
                     letter-spacing: 1.2px; text-transform: uppercase;">
           TOP PREDICTORS THIS WEEK
@@ -1239,7 +1239,7 @@ async def render_daily_drop_card(
     <div class="gold-divider"></div>
     {spotlight_html}
     <div class="gold-divider"></div>
-    <div style="padding: 4px 20px 2px; font-family: 'Outfit', sans-serif;
+    <div style="padding: 4px 20px 2px; font-family: var(--font-display), sans-serif;
                 font-weight: 700; font-size: 10px; color: var(--gold-dim);
                 letter-spacing: 1.2px; text-transform: uppercase;">
       ALSO WORTH WATCHING

@@ -140,7 +140,7 @@ def _build_blackjack_html(
       padding: 16px 20px 8px;
     }
     .bj-label {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 14px;
       color: var(--gold);
@@ -157,7 +157,7 @@ def _build_blackjack_html(
       border-radius: 50%;
       background: rgba(255,255,255,0.06);
       border: 1px solid rgba(255,255,255,0.1);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 16px;
       color: var(--text-primary);
@@ -181,7 +181,7 @@ def _build_blackjack_html(
     }
     .result-banner {
       text-align: center;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 28px;
       padding: 12px 0;
@@ -378,7 +378,7 @@ def _build_slots_html(
       font-size: 64px;
     }
     .slot-unknown {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-size: 48px;
       font-weight: 800;
       color: #333;
@@ -394,7 +394,7 @@ def _build_slots_html(
     }
     .slots-result {
       text-align: center;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 18px;
       padding: 0 20px 12px;
@@ -553,7 +553,7 @@ def _build_crash_html(
             if h < 2.0:
                 pill_color = "#FCA5A5"
             elif h < 10.0:
-                pill_color = "#4ADE80"
+                pill_color = "var(--win)"
             else:
                 pill_color = "#FFDA50"
             glow_class = "current-pill" if is_current else ""
@@ -621,7 +621,7 @@ def _build_crash_html(
       background: var(--gold);
     }
     .gauge-label {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 13px;
       color: var(--gold);
@@ -684,14 +684,14 @@ def _build_crash_html(
       gap: 4px;
     }
     .mult-value {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 64px;
       line-height: 1;
       letter-spacing: -2px;
     }
     .mult-sub {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 14px;
       letter-spacing: 2px;
@@ -705,7 +705,7 @@ def _build_crash_html(
       background: rgba(74,222,128,0.12);
       border: 1px solid rgba(74,222,128,0.3);
       color: var(--win);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
       font-size: 13px;
     }
@@ -719,7 +719,7 @@ def _build_crash_html(
       flex-wrap: wrap;
     }
     .history-pill {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
       font-size: 13px;
       padding: 3px 10px;
@@ -740,7 +740,7 @@ def _build_crash_html(
       padding: 12px 20px;
     }
     .live-stat {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
       font-size: 14px;
       color: var(--text-muted);
@@ -931,14 +931,14 @@ def _build_coinflip_html(
       border: 4px solid {coin_rim};
       box-shadow: 0 8px 24px rgba(0,0,0,0.4), inset 0 2px 4px rgba(255,255,255,0.3);
       transform: perspective(400px) rotateX(10deg);
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 56px;
       color: rgba(0,0,0,0.25);
     }}
     .coin-result {{
       text-align: center;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 22px;
       color: var(--text-primary);
@@ -953,7 +953,7 @@ def _build_coinflip_html(
       margin-top: 8px;
     }}
     .pick-text {{
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-size: 14px;
       color: var(--text-muted);
     }}
@@ -973,19 +973,19 @@ def _build_coinflip_html(
       text-align: center;
     }}
     .pvp-name {{
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 16px;
     }}
     .pvp-pick {{
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
       font-size: 12px;
       margin-top: 2px;
       opacity: 0.7;
     }}
     .pvp-vs {{
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 14px;
       color: var(--text-dim);
@@ -1155,7 +1155,7 @@ def _build_scratch_html(
         );
     }
     .tile-mystery {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 42px;
       color: var(--gold-dim);
@@ -1181,7 +1181,7 @@ def _build_scratch_html(
       box-shadow: 0 0 20px rgba(212,175,55,0.35), inset 0 2px 8px rgba(0,0,0,0.4), inset 0 -1px 3px rgba(255,218,80,0.06);
     }
     .tile-value {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 32px;
       color: var(--text-primary);
@@ -1191,7 +1191,7 @@ def _build_scratch_html(
       color: var(--gold-light);
     }
     .tile-label {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 11px;
       color: var(--gold-dim);
@@ -1201,7 +1201,7 @@ def _build_scratch_html(
     .scratch-result {
       text-align: center;
       padding: 8px 20px 14px;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 14px;
     }

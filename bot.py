@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.24.1"  # Style token migration: trade card, highlight, pulse renderers use CSS vars
+ATLAS_VERSION = "2.25.0"  # Complete style token migration: all renderers use CSS vars for fonts and colors
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

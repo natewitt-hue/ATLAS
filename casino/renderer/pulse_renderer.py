@@ -134,7 +134,7 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
     if not highlights:
         return (
             '<div style="padding:10px 0;text-align:center;color:#9a9280;'
-            'font-size:12px;font-family:\'JetBrains Mono\',monospace;">'
+            'font-size:12px;font-family:var(--font-mono),monospace;">'
             "No recent activity</div>"
         )
     rows = []

@@ -132,17 +132,17 @@ def _get_total_won(user_id: int) -> int:
 
 _SPORTSBOOK_CSS = """\
 .hero-section { padding: 20px; text-align: center; }
-.hero-label { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
-.hero-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
-.hero-delta { font-family: 'JetBrains Mono'; font-weight: 600; font-size: var(--font-sm); margin-top: 4px; }
+.hero-label { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
+.hero-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
+.hero-delta { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-sm); margin-top: 4px; }
 .hero-delta.positive { color: var(--win); }
 .hero-delta.negative { color: var(--loss); }
 
 .sparkline-section { padding: 0 20px 12px; text-align: center; }
-.sparkline-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
+.sparkline-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
 
 .ticker-section { padding: 4px 20px 12px; text-align: center; }
-.ticker-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; margin-bottom: 6px; }
+.ticker-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; margin-bottom: 6px; }
 .ticker-dots { display: flex; justify-content: center; gap: 6px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; }
 .dot.win { background: var(--win); }
@@ -151,19 +151,19 @@ _SPORTSBOOK_CSS = """\
 
 .info-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
 .info-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px; }
-.info-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
-.info-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: 4px; }
+.info-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
+.info-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: 4px; }
 .info-value.green { color: var(--win); }
-.info-sub { font-family: 'Outfit'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.info-sub { font-family: var(--font-display); font-weight: 600; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
 .sport-footer { display: flex; justify-content: center; gap: 8px; padding: 8px 20px 14px; }
-.sport-pill { font-family: 'Outfit'; font-weight: 700; font-size: 10px; letter-spacing: 1px; padding: 4px 12px; border-radius: 12px; color: var(--text-dim); background: rgba(255,255,255,0.03); }
+.sport-pill { font-family: var(--font-display); font-weight: 700; font-size: 10px; letter-spacing: 1px; padding: 4px 12px; border-radius: 12px; color: var(--text-dim); background: rgba(255,255,255,0.03); }
 .sport-pill.active { color: var(--gold); background: rgba(212,175,55,0.12); border: 1px solid rgba(212,175,55,0.25); }
 
 .stat-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
 .stat-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.stat-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
-.stat-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
+.stat-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
+.stat-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
 .stat-value.green { color: var(--win); }
 .stat-value.red { color: var(--loss); }
 .stat-value.gold { color: var(--gold); }
