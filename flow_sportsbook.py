@@ -57,6 +57,7 @@ import flow_wallet
 from odds_api_client import SUPPORTED_SPORTS as REAL_SPORTS
 from real_sportsbook_cog import EventListView, SPORT_EMOJI
 from sportsbook_cards import build_sportsbook_card, build_stats_card, card_to_file
+from flow_cards import build_my_bets_card, build_leaderboard_card, card_to_file as flow_card_to_file
 from db_migration_snapshots import setup_snapshots_table, take_daily_snapshot, backfill_from_bets
 import logging
 
@@ -1944,66 +1945,15 @@ class SportsbookCog(commands.Cog):
     async def _mybets_impl(self, interaction: discord.Interaction):
         if not interaction.response.is_done():
             await interaction.response.defer(thinking=True, ephemeral=True)
-        uid     = interaction.user.id
-        balance = _get_balance(uid)
-
-        with _db_con() as con:
-            straight = con.execute(
-                "SELECT matchup, bet_type, pick, wager_amount, odds, line, status, week "
-                "FROM bets_table WHERE discord_id=? AND status='Pending' ORDER BY bet_id DESC",
-                (uid,)
-            ).fetchall()
-            parlays = con.execute(
-                "SELECT parlay_id, week, legs, combined_odds, wager_amount, status "
-                "FROM parlays_table WHERE discord_id=? AND status='Pending' ORDER BY rowid DESC",
-                (uid,)
-            ).fetchall()
-
-        embed = discord.Embed(
-            title=f"📋  {interaction.user.display_name}'s Active Bets", color=TSL_GOLD
-        )
-        embed.add_field(name="💰 Balance", value=f"**${balance:,}**",                        inline=True)
-        embed.add_field(name="🎯 Pending", value=f"**{len(straight) + len(parlays)}** bets", inline=True)
-
-        if not straight and not parlays:
-            embed.description = "_No pending bets. Hit `/sportsbook` to place some!_"
-        else:
-            if straight:
-                lines = []
-                for b in straight[:8]:
-                    matchup, btype, pick, amt, odds, line, status, week = b
-                    profit = _payout_calc(amt, odds) - amt
-                    lines.append(
-                        f"**{pick}** ({btype}) @ {_american_to_str(int(odds))} | "
-                        f"${amt:,} → +${profit:,} | W{week}"
-                    )
-                embed.add_field(name="🎯 Straight Bets", value="\n".join(lines), inline=False)
-            if parlays:
-                lines = []
-                for p in parlays[:4]:
-                    pid, week, legs_json, c_odds, amt, status = p
-                    try:
-                        legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
-                    except Exception:
-                        legs = []
-                    potential = _payout_calc(amt, c_odds) - amt
-                    picks = ", ".join(l["pick"] for l in legs) if legs else "—"
-                    lines.append(
-                        f"`{pid}` — {len(legs)} legs ({picks[:40]}) | ${amt:,} → +${potential:,}"
-                    )
-                embed.add_field(name="🎰 Parlays", value="\n".join(lines), inline=False)
-
-        cart = _get_cart(uid)
-        if cart:
-            combined = _combine_parlay_odds([l["odds"] for l in cart])
-            embed.add_field(
-                name="🛒 Parlay Cart",
-                value=(f"{len(cart)} leg(s) in cart | Combined: {_american_to_str(combined)}\n"
-                       "Use **🎰+** buttons in `/sportsbook` to submit."),
-                inline=False
-            )
-        embed.set_footer(text="TSL Sportsbook — Pending bets only")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        uid = interaction.user.id
+        try:
+            png = await build_my_bets_card(uid)
+            file = flow_card_to_file(png, "my_bets.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://my_bets.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error rendering My Bets: `{e}`", ephemeral=True)
 
     async def _bethistory_impl(self, interaction: discord.Interaction, weeks: int = 99):
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -2063,32 +2013,23 @@ class SportsbookCog(commands.Cog):
 
     async def _leaderboard_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
-        with _db_con() as con:
-            users = con.execute(
-                "SELECT discord_id, balance, season_start_balance "
-                "FROM users_table ORDER BY balance DESC"
-            ).fetchall()
+        uid = interaction.user.id
 
-        if not users:
-            return await interaction.followup.send("No bettors found yet.", ephemeral=True)
+        def _resolve_name(discord_id: int) -> str:
+            if interaction.guild:
+                member = interaction.guild.get_member(discord_id)
+                if member:
+                    return member.display_name
+            return f"User …{str(discord_id)[-4:]}"
 
-        embed = discord.Embed(title="🏆  TSL SPORTSBOOK LEADERBOARD", color=TSL_GOLD)
-        embed.description = f"**Season {dm.CURRENT_SEASON} • Week {dm.CURRENT_WEEK}**\n"
-
-        medals = ["🥇", "🥈", "🥉"]
-        lines  = []
-        for i, (uid, balance, start) in enumerate(users[:15]):
-            pnl    = balance - (start or STARTING_BALANCE)
-            sign   = "+" if pnl >= 0 else ""
-            arrow  = "📈" if pnl >= 0 else "📉"
-            medal  = medals[i] if i < 3 else f"**#{i+1}**"
-            member = interaction.guild.get_member(uid) if interaction.guild else None
-            name   = member.display_name if member else f"<@{uid}>"
-            lines.append(f"{medal} {name}\n   💰 ${balance:,}  •  {arrow} {sign}${pnl:,}")
-
-        embed.description += "\n".join(lines)
-        embed.set_footer(text=f"Starting balance: ${STARTING_BALANCE:,} • Updated live")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            png = await build_leaderboard_card(uid, name_resolver=_resolve_name)
+            file = flow_card_to_file(png, "leaderboard.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://leaderboard.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error rendering leaderboard: `{e}`", ephemeral=True)
 
     async def _props_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)

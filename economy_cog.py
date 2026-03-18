@@ -639,64 +639,38 @@ class EconomyCog(commands.Cog):
     # ── _impl methods (called by hub buttons and commish_cog) ─────────
 
     async def _wallet_impl(self, interaction: discord.Interaction):
-        """Show wallet with balance and recent transactions."""
+        """Show wallet as HTML/PNG card."""
         uid = interaction.user.id
-        balance = await flow_wallet.get_balance(uid)
-        txns = await flow_wallet.get_transactions(uid, limit=10)
-
-        source_emoji = {
-            "TSL_BET": "\U0001f3c8",     # football
-            "CASINO": "\U0001f3b0",       # slot machine
-            "PREDICTION": "\U0001f52e",   # crystal ball
-            "REAL_BET": "\U0001f3c6",     # trophy
-            "STIPEND": "\U0001f4b5",      # dollar
-            "ADMIN": "\U0001f6e0",        # wrench
-        }
-
-        embed = discord.Embed(title="TSL Wallet", color=0xD4AF37)
-        embed.add_field(name="Balance", value=f"**${balance:,}**", inline=False)
-
-        if txns:
-            lines = []
-            for t in txns:
-                emoji = source_emoji.get(t["source"], "\U0001f4b0")
-                amt = t["amount"]
-                sign = "+" if amt >= 0 else ""
-                desc = t["description"][:30] if t["description"] else t["source"]
-                lines.append(f"{emoji} `{sign}{amt:,}` {desc}")
-            embed.add_field(
-                name="Recent Transactions",
-                value="\n".join(lines),
-                inline=False,
-            )
-        else:
-            embed.add_field(name="Recent Transactions", value="No transactions yet.", inline=False)
-
-        embed.set_footer(text="ATLAS Flow Economy")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            from flow_cards import build_wallet_card, card_to_file
+            png = await build_wallet_card(uid)
+            file = card_to_file(png, "wallet.png")
+            embed = discord.Embed(color=0xD4AF37)
+            embed.set_image(url="attachment://wallet.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error rendering wallet: `{e}`", ephemeral=True)
 
     async def _leaderboard_impl(self, interaction: discord.Interaction):
-        """Show TSL Bucks leaderboard."""
-        leaders = await flow_wallet.get_leaderboard(limit=15)
+        """Show leaderboard as HTML/PNG card."""
+        uid = interaction.user.id
 
-        if not leaders:
-            return await interaction.followup.send("No leaderboard data yet.", ephemeral=True)
+        def _resolve_name(discord_id: int) -> str:
+            if interaction.guild:
+                member = interaction.guild.get_member(discord_id)
+                if member:
+                    return member.display_name
+            return f"User …{str(discord_id)[-4:]}"
 
-        medals = ["\U0001f947", "\U0001f948", "\U0001f949"]  # gold, silver, bronze
-        lines = []
-        for i, entry in enumerate(leaders):
-            prefix = medals[i] if i < 3 else f"`{i+1}.`"
-            uid = entry["discord_id"]
-            bal = entry["balance"]
-            lines.append(f"{prefix} <@{uid}> -- **${bal:,}**")
-
-        embed = discord.Embed(
-            title="TSL Bucks Leaderboard",
-            description="\n".join(lines),
-            color=0xD4AF37,
-        )
-        embed.set_footer(text="ATLAS Flow Economy")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            from flow_cards import build_leaderboard_card, card_to_file
+            png = await build_leaderboard_card(uid, name_resolver=_resolve_name)
+            file = card_to_file(png, "leaderboard.png")
+            embed = discord.Embed(color=0xD4AF37)
+            embed.set_image(url="attachment://leaderboard.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error rendering leaderboard: `{e}`", ephemeral=True)
 
     # ── Economy Health (admin impl) ──────────────────────────────────────
 
