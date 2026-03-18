@@ -968,7 +968,9 @@ async def _run_autograde(bot) -> None:
                         if res == "Won":
                             payout = _payout_calc(amt, int(odds))
                             if payout < 0 or payout > MAX_PAYOUT:
-                                log.error(f"[AUTO-GRADE] Insane payout ${payout:,.2f} for bet {bid} — SKIPPING")
+                                log.error(f"[AUTO-GRADE] Insane payout ${payout:,.2f} for bet {bid} — CAPPING")
+                                con.execute("UPDATE bets_table SET status='Error' WHERE bet_id=?", (bid,))
+                                settled += 1
                                 continue
                             _update_balance(uid, payout, con)
                             total_paid += payout - amt
@@ -1041,7 +1043,9 @@ async def _run_autograde(bot) -> None:
                         if all_won:
                             payout = _payout_calc(amt, c_odds)
                             if payout < 0 or payout > MAX_PAYOUT:
-                                log.error(f"[AUTO-GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — SKIPPING")
+                                log.error(f"[AUTO-GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — CAPPING")
+                                con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (pid,))
+                                settled += 1
                                 continue
                             _update_balance(uid, payout, con)
                             total_paid += payout - amt
@@ -1766,36 +1770,16 @@ class SportsbookSelectView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         game = self.games[int(interaction.data["values"][0])]
-        locked_str = ("🔴 **LOCKED — Betting Closed**"
-                      if _is_locked(game["game_id"]) else "🟢 **OPEN — Place Your Bets**")
-        admin_note = " *(line adjusted)*" if game.get("_overridden") else ""
+        is_locked = _is_locked(game["game_id"])
 
-        embed = discord.Embed(
-            title=f"🏟️  {game['away']} @ {game['home']}",
-            color=TSL_RED if _is_locked(game["game_id"]) else TSL_GOLD
-        )
-        embed.add_field(
-            name="📊 Spread",
-            value=(f"`{game['away']}` **{game['away_spread']}** (-110)\n"
-                   f"`{game['home']}` **{game['home_spread']}** (-110)"),
-            inline=True
-        )
-        embed.add_field(
-            name="💰 Moneyline",
-            value=(f"`{game['away']}` **{game['away_ml']}**\n"
-                   f"`{game['home']}` **{game['home_ml']}**"),
-            inline=True
-        )
-        embed.add_field(
-            name="🎯 Over/Under",
-            value=f"**{game['ou_line']}** pts\nOver / Under (-110 each)",
-            inline=True
-        )
-        embed.add_field(name="Status", value=locked_str + admin_note, inline=False)
-        embed.set_footer(text="Click a bet button below  •  🎰+ adds to your parlay cart")
+        await interaction.response.defer(ephemeral=True)
 
-        await interaction.response.send_message(
-            embed=embed, view=GameCardViewWithParlay(game), ephemeral=True
+        from sportsbook_cards import build_match_detail_card, card_to_file
+        png = await build_match_detail_card(game, locked=is_locked)
+        file = card_to_file(png, f"match_{game['game_id']}.png")
+
+        await interaction.followup.send(
+            file=file, view=GameCardViewWithParlay(game), ephemeral=True
         )
 
 
@@ -2176,7 +2160,9 @@ class SportsbookCog(commands.Cog):
                 if res == "Won":
                     payout = _payout_calc(amt, int(odds))
                     if payout < 0 or payout > MAX_PAYOUT:
-                        log.error(f"[GRADE] Insane payout ${payout:,.2f} for bet {bid} — SKIPPING")
+                        log.error(f"[GRADE] Insane payout ${payout:,.2f} for bet {bid} — CAPPING")
+                        con.execute("UPDATE bets_table SET status='Error' WHERE bet_id=?", (bid,))
+                        settled += 1
                         continue
                     _update_balance(uid, payout, con)
                     total_paid += payout - amt
@@ -2228,7 +2214,9 @@ class SportsbookCog(commands.Cog):
                 if all_won:
                     payout = _payout_calc(amt, c_odds)
                     if payout < 0 or payout > MAX_PAYOUT:
-                        log.error(f"[GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — SKIPPING")
+                        log.error(f"[GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — CAPPING")
+                        con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (pid,))
+                        settled += 1
                         continue
                     _update_balance(uid, payout, con)
                     total_paid += payout - amt

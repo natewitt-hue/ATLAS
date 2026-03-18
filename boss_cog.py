@@ -878,6 +878,8 @@ class BossCasinoLimitsModal(discord.ui.Modal, title="Set Casino Limits"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("CasinoCog")
         if not cog:
             return await _send_cog_error(interaction, "Casino")
@@ -1122,6 +1124,8 @@ class EcoTransferFollowUpModal(discord.ui.Modal):
         self.member = member
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("EconomyCog")
         if not cog:
             return await _send_cog_error(interaction, "Economy")
@@ -1173,6 +1177,8 @@ class EcoRoleFollowUpModal(discord.ui.Modal):
         self.role = role
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("EconomyCog")
         if not cog:
             return await _send_cog_error(interaction, "Economy")
@@ -1355,6 +1361,8 @@ class MarketResolveFollowUpModal(discord.ui.Modal, title="Resolve Prediction Mar
         self.result = result
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("Polymarket")
         if not cog:
             return await _send_cog_error(interaction, "Polymarket")

@@ -1103,10 +1103,11 @@ def build_member_table(db_path: str = DB_PATH):
             )
         """)
 
-        # Commit the CREATE TABLE, then use EXCLUSIVE transaction to prevent
+        # Commit the CREATE TABLE, then use IMMEDIATE transaction to prevent
         # race conditions between the DELETE (stale row cleanup) and INSERT (upsert).
+        # IMMEDIATE (not EXCLUSIVE) allows concurrent readers while we hold the write lock.
         conn.commit()
-        conn.execute("BEGIN EXCLUSIVE")
+        conn.execute("BEGIN IMMEDIATE")
 
         # Clear stale rows where a discord_id moved to a new username.
         # Without this, ON CONFLICT(discord_username) can try to set a discord_id

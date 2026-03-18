@@ -26,9 +26,10 @@ log = logging.getLogger("casino.db")
 # -- Shared DB path (unified economy DB) --------------------------------------
 DB_PATH = flow_wallet.DB_PATH
 
-CASINO_MAX_BET    = 100
-CASINO_DAILY_MIN  = 25
-CASINO_DAILY_MAX  = 150
+CASINO_MAX_BET     = 100
+CASINO_DAILY_MIN   = 25
+CASINO_DAILY_MAX   = 150
+CASINO_MAX_PAYOUT  = 10_000_000  # sanity cap — matches sportsbook MAX_PAYOUT
 STARTING_BALANCE  = flow_wallet.STARTING_BALANCE
 
 # -- Jackpot configuration ----------------------------------------------------
@@ -828,7 +829,10 @@ async def process_wager(
                             payout += refund
                             cold_mercy = {"type": "loss_refund", "amount": refund}
 
-            # 4. Credit payout via flow_wallet
+            # 4. Credit payout via flow_wallet (with sanity cap)
+            if payout > CASINO_MAX_PAYOUT:
+                log.error(f"[CASINO] Insane payout ${payout:,.2f} for {game_type} — capping to ${CASINO_MAX_PAYOUT:,.2f}")
+                payout = CASINO_MAX_PAYOUT
             if payout > 0:
                 ref_key = f"CASINO_{game_type}_{discord_id}_{now}"
                 new_balance = await flow_wallet.credit(

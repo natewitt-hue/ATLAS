@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.0.0"  # Full code review: double-spend locks, SSRF/injection defense, permission guards, rate limiting
+ATLAS_VERSION = "3.0.1"  # Verification fixes: MAX_PAYOUT status update, market race guard, payout caps, modal permissions
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

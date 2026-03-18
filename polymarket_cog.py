@@ -50,6 +50,8 @@ import io
 
 log = logging.getLogger("polymarket_cog")
 
+PREDICTION_MAX_PAYOUT = 10_000_000  # sanity cap — matches sportsbook MAX_PAYOUT
+
 # ── Gemini AI Client (lazy singleton) ──
 _GEMINI_CLIENT = None
 
@@ -769,6 +771,17 @@ class WagerModal(discord.ui.Modal):
             try:
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("BEGIN IMMEDIATE")
+
+                    # Guard: market must still be active
+                    async with db.execute(
+                        "SELECT status FROM prediction_markets WHERE market_id = ?",
+                        (self.market_id,)
+                    ) as cur:
+                        mkt_row = await cur.fetchone()
+                    if not mkt_row or mkt_row[0] != 'active':
+                        await interaction.response.send_message(
+                            "This market is no longer active.", ephemeral=True)
+                        return
 
                     # Check balance and debit atomically
                     balance = await flow_wallet.get_balance(user_id, con=db)
@@ -2371,16 +2384,6 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
             counts = await self._resolve(market_id, result_upper)
 
-            # Mark market as auto-resolved
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "UPDATE prediction_markets "
-                    "SET resolved_by = 'auto', result = ? "
-                    "WHERE market_id = ?",
-                    (result, market_id)
-                )
-                await db.commit()
-
             title = mkt.get("question", "") or mkt.get("title", market_id)
             auto_resolved.append({
                 "market_id": market_id,
@@ -3297,13 +3300,16 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
 
-            # Fetch market title for event emission
+            # Guard: prevent double-resolution (TOCTOU between status check and here)
             async with db.execute(
-                "SELECT title FROM prediction_markets WHERE market_id = ?",
+                "SELECT title, resolved_by FROM prediction_markets WHERE market_id = ?",
                 (market_id,)
             ) as cur:
                 row = await cur.fetchone()
-                market_title = row[0] if row else market_id
+            if row and row[1] and row[1] != 'pending':
+                log.warning(f"_resolve({market_id}) — already resolved by {row[1]}, skipping")
+                return counts
+            market_title = row[0] if row else market_id
 
             async with db.execute(
                 "SELECT id, user_id, side, quantity, cost_bucks, potential_payout "
@@ -3327,6 +3333,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     )
                     counts["voided"] += 1
                 elif side == result:
+                    if payout > PREDICTION_MAX_PAYOUT:
+                        log.error(f"[PREDICTION] Insane payout ${payout:,.2f} for contract {cid} — capping to ${PREDICTION_MAX_PAYOUT:,.2f}")
+                        payout = PREDICTION_MAX_PAYOUT
                     await flow_wallet.credit(
                         int(user_id), payout, "PREDICTION",
                         description=f"prediction market won",
@@ -3350,8 +3359,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             # Mark market as resolved
             await db.execute(
                 "UPDATE prediction_markets "
-                "SET status='closed', resolved_by=? WHERE market_id=?",
-                (resolved_by, market_id)
+                "SET status='closed', resolved_by=?, result=? WHERE market_id=?",
+                (resolved_by, result, market_id)
             )
             await db.commit()
 
