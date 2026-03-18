@@ -2919,6 +2919,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         name="markets",
         description="Browse curated prediction markets."
     )
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     @app_commands.describe(
         view="How to sort markets (default: curated)",
         category="Filter by category",

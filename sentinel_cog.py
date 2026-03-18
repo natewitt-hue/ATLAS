@@ -41,6 +41,7 @@ import io
 import json
 import os
 import re
+import threading
 import traceback
 import uuid
 
@@ -638,15 +639,20 @@ def _results_channel_id() -> int | None:
 
 # ── Gemini client (lazy — avoids crash if GEMINI_API_KEY unset at import) ─────
 _sentinel_gemini = None
+_sentinel_gemini_lock = threading.Lock()
 
 def _get_sentinel_gemini():
     global _sentinel_gemini
-    if _sentinel_gemini is None:
+    if _sentinel_gemini is not None:
+        return _sentinel_gemini
+    with _sentinel_gemini_lock:
+        if _sentinel_gemini is not None:
+            return _sentinel_gemini
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY not set")
         _sentinel_gemini = genai.Client(api_key=api_key)
-    return _sentinel_gemini
+        return _sentinel_gemini
 
 
 # ── Ruling constants ──────────────────────────────────────────────────────────
@@ -1107,6 +1113,7 @@ class ForceRequestCog(commands.Cog):
         name="forcerequest",
         description="Submit a force win request. Attach screenshot(s) of your DMs with your opponent."
     )
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     @app_commands.describe(
         opponent="Your opponent's name or team (as it appears in Discord)",
         screenshot1="Screenshot of your DM conversation — required",
@@ -2451,6 +2458,7 @@ class FourthDown(commands.Cog):
         name="fourthdown",
         description="Upload a Madden screenshot and get an official TSL 4th down ruling."
     )
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     @app_commands.describe(screenshot="Your Madden game screenshot showing the 4th down situation")
     async def fourthdown(self, interaction: discord.Interaction, screenshot: discord.Attachment):
         await interaction.response.defer(thinking=True)

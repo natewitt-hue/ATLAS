@@ -36,6 +36,45 @@ DB_PATH   = os.path.join(os.path.dirname(__file__), "tsl_history.db")
 CSV_DIR   = os.path.dirname(__file__)
 API_BASE  = "https://mymadden.com/api/lg/tsl"
 
+_TABLE_SCHEMAS = {
+    "games": (
+        "homeTeamId TEXT, awayTeamId TEXT, homeTeamName TEXT, awayTeamName TEXT, "
+        "homeUser TEXT, awayUser TEXT, homeScore TEXT, awayScore TEXT, "
+        "weekIndex TEXT, seasonIndex TEXT, status TEXT, scheduleId TEXT, "
+        "winner_user TEXT, loser_user TEXT, winner_team TEXT, loser_team TEXT"
+    ),
+    "offensive_stats": (
+        "rosterId TEXT, extendedName TEXT, teamName TEXT, seasonIndex TEXT, "
+        "weekIndex TEXT, pos TEXT, passYds TEXT, passTDs TEXT, passInts TEXT, "
+        "rushYds TEXT, rushTDs TEXT, recYds TEXT, recTDs TEXT, receptions TEXT"
+    ),
+    "defensive_stats": (
+        "rosterId TEXT, extendedName TEXT, teamName TEXT, seasonIndex TEXT, "
+        "weekIndex TEXT, pos TEXT, defTotalTackles TEXT, defSacks TEXT, "
+        "defInts TEXT, defForcedFum TEXT"
+    ),
+    "standings": (
+        "teamId TEXT, teamName TEXT, totalWins TEXT, totalLosses TEXT, "
+        "totalTies TEXT, seasonIndex TEXT, divName TEXT, confName TEXT"
+    ),
+    "teams": (
+        "teamId TEXT, teamName TEXT, abbrName TEXT, userName TEXT, "
+        "divName TEXT, confName TEXT, ovrRating TEXT"
+    ),
+    "trades": (
+        "tradeId TEXT, seasonIndex TEXT, weekIndex TEXT"
+    ),
+    "players": (
+        "rosterId TEXT, firstName TEXT, lastName TEXT, teamName TEXT, "
+        "pos TEXT, age TEXT, playerBestOvr TEXT, dev TEXT, devTrait TEXT, "
+        "draftRound TEXT, draftPick TEXT, rookieYear TEXT"
+    ),
+    "player_abilities": (
+        "rosterId TEXT, firstName TEXT, lastName TEXT, teamName TEXT, "
+        "pos TEXT, abilityTitle TEXT"
+    ),
+}
+
 _HEADERS = {
     "Accept":           "application/json, text/plain, */*",
     "X-Requested-With": "XMLHttpRequest",
@@ -88,9 +127,14 @@ def _load_rows_into_table(conn: sqlite3.Connection, table_name: str,
                           rows: list[dict], transform=None) -> int:
     """Drop + recreate a table from a list of row dicts. Returns row count."""
     if not rows:
-        # Create an empty table so downstream queries don't crash with
-        # "no such table" when an API fetch times out / returns nothing.
-        conn.execute(f"CREATE TABLE IF NOT EXISTS [{table_name}] (placeholder TEXT)")
+        # Create an empty table with proper schema so downstream queries
+        # don't crash with missing columns or "no such table".
+        schema = _TABLE_SCHEMAS.get(table_name)
+        if schema:
+            conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+            conn.execute(f'CREATE TABLE "{table_name}" ({schema})')
+        else:
+            conn.execute(f'CREATE TABLE IF NOT EXISTS [{table_name}] (placeholder TEXT)')
         return 0
     if transform:
         rows = [transform(r) for r in rows if r is not None]

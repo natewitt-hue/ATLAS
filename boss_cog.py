@@ -29,6 +29,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from permissions import is_commissioner
 import data_manager as dm
 import roster
 
@@ -198,6 +199,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="Sportsbook", emoji="\U0001f4ca", style=discord.ButtonStyle.primary, row=0)
     async def sb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f4ca Sportsbook Admin", "Manage TSL sportsbook lines, bets, and props."),
             view=SBPanelView(self.bot),
@@ -205,6 +208,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="Casino", emoji="\U0001f3b0", style=discord.ButtonStyle.primary, row=0)
     async def casino(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f3b0 Casino Admin", "Open/close games, set limits, manage sessions."),
             view=CasinoPanelView(self.bot),
@@ -212,6 +217,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="Treasury", emoji="\U0001f4b0", style=discord.ButtonStyle.primary, row=0)
     async def treasury(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f4b0 Treasury Admin", "Manage TSL Bucks balances, stipends, and bulk operations."),
             view=TreasuryPanelView(self.bot),
@@ -219,6 +226,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="Roster", emoji="📋", style=discord.ButtonStyle.primary, row=0)
     async def roster(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("📋 Roster Admin", "Dev traits, ability audits, contracts, and team assignments."),
             view=RosterPanelView(self.bot),
@@ -226,6 +235,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="Markets", emoji="\U0001f4c8", style=discord.ButtonStyle.secondary, row=1)
     async def markets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f4c8 Markets Admin", "Prediction markets and real sportsbook management."),
             view=MarketsPanelView(self.bot),
@@ -233,6 +244,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="League", emoji="\U0001f3c8", style=discord.ButtonStyle.secondary, row=1)
     async def league(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f3c8 League Admin", "Trades, lottery, polls, and debug tools."),
             view=LeaguePanelView(self.bot),
@@ -240,6 +253,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="Compliance", emoji="\u2696\ufe0f", style=discord.ButtonStyle.secondary, row=1)
     async def compliance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\u2696\ufe0f Compliance Admin", "Cases, force requests, and position changes."),
             view=CompliancePanelView(self.bot),
@@ -247,6 +262,8 @@ class BossHubView(discord.ui.View):
 
     @discord.ui.button(label="FLOW Live", emoji="📡", style=discord.ButtonStyle.secondary, row=1)
     async def flow_live(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("📡 FLOW Live Admin", "Pulse dashboard, highlights, and session management."),
             view=FlowLivePanelView(self.bot),
@@ -275,6 +292,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="Lines & Locks", emoji="\U0001f4cf", style=discord.ButtonStyle.primary, row=0)
     async def lines(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f4cf Lines & Locks", "Set spreads, moneylines, O/U, and lock games."),
             view=SBLinesPanelView(self.bot),
@@ -282,6 +301,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="Bets & Props", emoji="\U0001f3b2", style=discord.ButtonStyle.primary, row=0)
     async def bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(
             embed=_panel_embed("\U0001f3b2 Bets & Props", "Grade bets, refund, balance adjustments, and prop management."),
             view=SBBetsPanelView(self.bot),
@@ -289,6 +310,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="Status", emoji="\U0001f4cb", style=discord.ButtonStyle.secondary, row=0)
     async def status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
@@ -296,6 +319,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="Lock All", emoji="\U0001f512", style=discord.ButtonStyle.danger, row=1)
     async def lockall(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
@@ -303,6 +328,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="Unlock All", emoji="\U0001f513", style=discord.ButtonStyle.success, row=1)
     async def unlockall(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
@@ -310,6 +337,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="Sync All", emoji="\U0001f504", style=discord.ButtonStyle.secondary, row=1)
     async def sync_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
@@ -330,6 +359,8 @@ class SBPanelView(discord.ui.View):
 
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.edit_message(embed=_home_embed(interaction), view=BossHubView(self.bot))
 
 
@@ -342,18 +373,24 @@ class SBLinesPanelView(discord.ui.View):
 
     @discord.ui.button(label="Set Spread", style=discord.ButtonStyle.primary, row=0)
     async def set_spread(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.send_message(
             "Select a matchup to set spread:", view=SBMatchupSelectView("spread"), ephemeral=True,
         )
 
     @discord.ui.button(label="Set ML", style=discord.ButtonStyle.primary, row=0)
     async def set_ml(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.send_message(
             "Select a matchup to set moneyline:", view=SBMatchupSelectView("ml"), ephemeral=True,
         )
 
     @discord.ui.button(label="Set O/U", style=discord.ButtonStyle.primary, row=0)
     async def set_ou(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.send_message(
             "Select a matchup to set O/U:", view=SBMatchupSelectView("ou"), ephemeral=True,
         )
@@ -2201,8 +2238,6 @@ class BossCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def boss_cmd(self, interaction: discord.Interaction):
         """Launch the Commissioner Control Room hub."""
-        # Permission check
-        from permissions import is_commissioner
         if not await is_commissioner(interaction):
             return await interaction.response.send_message(
                 "❌ This command is restricted to commissioners.", ephemeral=True,

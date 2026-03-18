@@ -244,7 +244,7 @@ def _find_player(name: str, team_id: int | None = None) -> tuple[dict | None, li
 
     scored.sort(key=lambda x: x[0], reverse=True)
     if not scored or scored[0][0] < 0.45:
-        return None, []
+        return None, [p for _, p in scored[:3]]
 
     best  = scored[0][1]
     close = [p for s, p in scored[1:5] if s >= 0.60]
@@ -1675,6 +1675,7 @@ class TradeCenterCog(commands.Cog):
         name="trade",
         description="Open the TSL Trade Center — pick a conference, then select teams.",
     )
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     async def trade(self, interaction: discord.Interaction):
         """Conference-button trade flow.  AFC/NFC → 16-team dropdown → picker."""
         if dm.df_teams.empty or not dm.get_players():

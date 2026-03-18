@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from collections import Counter
 from typing import Optional
 
@@ -242,20 +243,24 @@ ATLAS_GOLD = discord.Color.from_rgb(201, 150, 42)
 
 # ── Module-level cached Gemini client (avoids spinning up a new client per call)
 _GEMINI_CLIENT = None
+_gemini_lock = threading.Lock()
 
 def _get_gemini_client():
     """Return the cached Gemini client, creating it once if needed."""
     global _GEMINI_CLIENT
     if _GEMINI_CLIENT is not None:
         return _GEMINI_CLIENT
-    if not GEMINI_API_KEY:
-        return None
-    try:
-        from google import genai
-        _GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
-        return _GEMINI_CLIENT
-    except Exception:
-        return None
+    with _gemini_lock:
+        if _GEMINI_CLIENT is not None:
+            return _GEMINI_CLIENT
+        if not GEMINI_API_KEY:
+            return None
+        try:
+            from google import genai
+            _GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
+            return _GEMINI_CLIENT
+        except Exception:
+            return None
 
 # ── Anthropic Claude client (primary AI for Oracle v3) ────────────────────────
 _ANTHROPIC_CLIENT = None
@@ -4220,6 +4225,7 @@ class StatsHubCog(commands.Cog):
     # ── /oracle ────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="oracle", description="🔮 ATLAS Oracle Hub — Ask questions across 5 intelligence modes.")
+    @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     async def oracle(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title="🔮 ATLAS Oracle Hub",
