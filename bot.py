@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "2.20.0"  # Oracle v3 Phase 1: QueryBuilder API, memory schema, Anthropic SDK
+ATLAS_VERSION = "2.21.0"  # Flow Hub redesign: stateful tabbed dashboard with in-place card swapping
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

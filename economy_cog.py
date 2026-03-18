@@ -10,6 +10,7 @@ All commands are accessed through /commish eco <cmd> via commish_cog.py.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from datetime import datetime, timezone
@@ -625,16 +626,14 @@ class EconomyCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         uid = interaction.user.id
 
-        # Render the Flow Hub card (async HTML engine)
-        from flow_cards import build_flow_card, card_to_file
-        png = await build_flow_card(uid)
-        file = card_to_file(png, filename="flow.png")
+        view = FlowHubView(interaction.client, uid)
+        png = await view.render_current()
+        file = discord.File(io.BytesIO(png), filename="flow.png")
 
         embed = discord.Embed(color=0xD4AF37)
         embed.set_image(url="attachment://flow.png")
         embed.set_footer(text="ATLAS Flow Economy")
 
-        view = FlowHubView()
         await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
 
     # ── _impl methods (called by hub buttons and commish_cog) ─────────
@@ -734,120 +733,239 @@ class EconomyCog(commands.Cog):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  FLOW HUB VIEW — Unified navigation for the entire TSL economy
+#  FLOW HUB VIEW — Stateful tabbed economy dashboard
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Tab states
+_DASHBOARD    = "dashboard"
+_MY_BETS      = "my_bets"
+_PORTFOLIO    = "portfolio"
+_WALLET       = "wallet"
+_LEADERBOARD  = "leaderboard"
+
+# Row 1 tab definitions: (state, label, emoji)
+_TABS = [
+    (_DASHBOARD,   "Dashboard",   "\U0001f4ca"),
+    (_MY_BETS,     "My Bets",     "\U0001f4cb"),
+    (_PORTFOLIO,   "Portfolio",   "\U0001f4c8"),
+    (_WALLET,      "Wallet",      "\U0001f4b0"),
+    (_LEADERBOARD, "Leaderboard", "\U0001f3c6"),
+]
+
+# Row 2 contextual buttons per state: list of (label, emoji, callback_name, style)
+_CTX_BUTTONS = {
+    _DASHBOARD: [
+        ("Sportsbook", "\U0001f3c8", "_ctx_sportsbook", discord.ButtonStyle.success),
+        ("Casino",     "\U0001f3b0", "_ctx_casino",     discord.ButtonStyle.success),
+        ("Markets",    "\U0001f52e", "_ctx_markets",    discord.ButtonStyle.success),
+        ("Scratch",    "\U0001f39f", "_ctx_scratch",    discord.ButtonStyle.danger),
+    ],
+    _MY_BETS: [
+        ("Bet History", "\U0001f4c5", "_ctx_bet_history", discord.ButtonStyle.secondary),
+        ("Sportsbook",  "\U0001f3c8", "_ctx_sportsbook",  discord.ButtonStyle.success),
+        ("Parlay Cart", "\U0001f6d2", "_ctx_parlay_cart",  discord.ButtonStyle.secondary),
+    ],
+    _PORTFOLIO: [
+        ("Browse Markets", "\U0001f50d", "_ctx_browse_markets", discord.ButtonStyle.secondary),
+        ("Markets",        "\U0001f52e", "_ctx_markets",        discord.ButtonStyle.success),
+    ],
+    _WALLET: [],  # Eco Health added dynamically for admins
+    _LEADERBOARD: [
+        ("Sportsbook", "\U0001f3c8", "_ctx_sportsbook", discord.ButtonStyle.success),
+        ("Casino",     "\U0001f3b0", "_ctx_casino",     discord.ButtonStyle.success),
+        ("Markets",    "\U0001f52e", "_ctx_markets",    discord.ButtonStyle.success),
+    ],
+}
+
+
 class FlowHubView(discord.ui.View):
-    """Persistent 8-button hub for navigating all economy modules."""
+    """Stateful single-message dashboard with in-place card swapping."""
 
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self, bot, user_id: int, state: str = _DASHBOARD):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.user_id = user_id
+        self.state = state
+        self._rebuild_buttons()
 
-    # ── Row 0: Module hubs ────────────────────────────────────────────
+    def _rebuild_buttons(self):
+        """Clear and rebuild all buttons based on current state."""
+        self.clear_items()
 
-    @discord.ui.button(
-        label="Sportsbook", emoji="\U0001f4ca",
-        style=discord.ButtonStyle.primary, row=0,
-        custom_id="flow:sportsbook",
-    )
-    async def btn_sportsbook(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        cog = interaction.client.get_cog("SportsbookCog")
-        if cog:
-            await cog.sportsbook.callback(cog, interaction)
-        else:
-            await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
+        # Row 1: Tab buttons
+        for tab_state, label, emoji in _TABS:
+            style = (
+                discord.ButtonStyle.primary
+                if tab_state == self.state
+                else discord.ButtonStyle.secondary
+            )
+            btn = discord.ui.Button(label=label, emoji=emoji, style=style, row=0)
+            btn.callback = self._make_tab_callback(tab_state)
+            self.add_item(btn)
 
-    @discord.ui.button(
-        label="Casino", emoji="\U0001f3b0",
-        style=discord.ButtonStyle.primary, row=0,
-        custom_id="flow:casino",
-    )
-    async def btn_casino(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        cog = interaction.client.get_cog("CasinoCog")
-        if cog:
-            await cog.casino_hub.callback(cog, interaction)
-        else:
-            await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
+        # Row 2: Contextual buttons
+        ctx_defs = list(_CTX_BUTTONS.get(self.state, []))
 
-    @discord.ui.button(
-        label="Markets", emoji="\U0001f52e",
-        style=discord.ButtonStyle.primary, row=0,
-        custom_id="flow:markets",
-    )
-    async def btn_markets(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        cog = interaction.client.get_cog("Polymarket")
-        if cog:
-            await cog.markets_cmd.callback(cog, interaction)
-        else:
-            await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
+        # Add admin-only Eco Health button on Wallet tab
+        if self.state == _WALLET:
+            ctx_defs.append(
+                ("Eco Health", "\U0001f4ca", "_ctx_eco_health", discord.ButtonStyle.secondary)
+            )
 
-    @discord.ui.button(
-        label="Leaderboard", emoji="\U0001f3c6",
-        style=discord.ButtonStyle.secondary, row=0,
-        custom_id="flow:leaderboard",
-    )
-    async def btn_leaderboard(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        cog = interaction.client.get_cog("EconomyCog")
-        if cog:
-            await cog._leaderboard_impl(interaction)
-        else:
-            await interaction.followup.send("Economy module not loaded.", ephemeral=True)
+        for label, emoji, cb_name, style in ctx_defs:
+            btn = discord.ui.Button(label=label, emoji=emoji, style=style, row=1)
+            btn.callback = getattr(self, cb_name)
+            self.add_item(btn)
 
-    # ── Row 1: Quick actions ──────────────────────────────────────────
+    def _make_tab_callback(self, target_state: str):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                return await interaction.response.send_message(
+                    "This isn't your dashboard. Run `/flow` to open yours.",
+                    ephemeral=True,
+                )
+            if target_state == self.state:
+                # Already on this tab — ignore
+                try:
+                    await interaction.response.defer()
+                except discord.NotFound:
+                    pass
+                return
+            await self._swap_to(interaction, target_state)
+        return callback
 
-    @discord.ui.button(
-        label="My Bets", emoji="\U0001f4cb",
-        style=discord.ButtonStyle.secondary, row=1,
-        custom_id="flow:mybets",
-    )
-    async def btn_mybets(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        cog = interaction.client.get_cog("SportsbookCog")
-        if cog:
-            await interaction.response.defer(thinking=True, ephemeral=True)
-            await cog._mybets_impl(interaction)
-        else:
-            await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
+    def _resolve_name(self, discord_id: int) -> str:
+        """Resolve a Discord ID to a display name via the bot's user cache."""
+        user = self.bot.get_user(discord_id)
+        if user:
+            return user.display_name
+        return f"User …{str(discord_id)[-4:]}"
 
-    @discord.ui.button(
-        label="Portfolio", emoji="\U0001f4c1",
-        style=discord.ButtonStyle.secondary, row=1,
-        custom_id="flow:portfolio",
-    )
-    async def btn_portfolio(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        cog = interaction.client.get_cog("Polymarket")
-        if cog:
-            await cog.portfolio_cmd.callback(cog, interaction)
-        else:
-            await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
+    async def render_current(self) -> bytes:
+        """Render the card for the current state."""
+        from flow_cards import (
+            build_flow_card, build_my_bets_card,
+            build_portfolio_card, build_wallet_card,
+            build_leaderboard_card,
+        )
+        renderers = {
+            _DASHBOARD:   lambda: build_flow_card(self.user_id),
+            _MY_BETS:     lambda: build_my_bets_card(self.user_id),
+            _PORTFOLIO:   lambda: build_portfolio_card(self.user_id),
+            _WALLET:      lambda: build_wallet_card(self.user_id),
+            _LEADERBOARD: lambda: build_leaderboard_card(self.user_id, name_resolver=self._resolve_name),
+        }
+        return await renderers[self.state]()
 
-    @discord.ui.button(
-        label="Wallet", emoji="\U0001f4b0",
-        style=discord.ButtonStyle.secondary, row=1,
-        custom_id="flow:wallet",
-    )
-    async def btn_wallet(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        cog = interaction.client.get_cog("EconomyCog")
-        if cog:
-            await cog._wallet_impl(interaction)
-        else:
-            await interaction.followup.send("Economy module not loaded.", ephemeral=True)
+    async def _swap_to(self, interaction: discord.Interaction, new_state: str):
+        """Swap the card and update buttons for the new state."""
+        self.state = new_state
+        self._rebuild_buttons()
 
-    @discord.ui.button(
-        label="Scratch", emoji="\U0001f39f",
-        style=discord.ButtonStyle.success, row=1,
-        custom_id="flow:scratch",
-    )
-    async def btn_scratch(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        try:
+            png = await self.render_current()
+            file = discord.File(io.BytesIO(png), filename="flow.png")
+            embed = discord.Embed(color=0xD4AF37)
+            embed.set_image(url="attachment://flow.png")
+            embed.set_footer(text="ATLAS Flow Economy")
+            await interaction.response.edit_message(
+                attachments=[file], embed=embed, view=self,
+            )
+        except discord.NotFound:
+            return
+
+    # ── Row 2: Contextual action callbacks ────────────────────────────
+
+    async def _ctx_sportsbook(self, interaction: discord.Interaction):
+        try:
+            cog = self.bot.get_cog("SportsbookCog")
+            if cog:
+                await cog.sportsbook.callback(cog, interaction)
+            else:
+                await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
+        except discord.NotFound:
+            return
+
+    async def _ctx_casino(self, interaction: discord.Interaction):
+        try:
+            cog = self.bot.get_cog("CasinoCog")
+            if cog:
+                await cog.casino_hub.callback(cog, interaction)
+            else:
+                await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
+        except discord.NotFound:
+            return
+
+    async def _ctx_markets(self, interaction: discord.Interaction):
+        try:
+            cog = self.bot.get_cog("Polymarket")
+            if cog:
+                await cog.markets_cmd.callback(cog, interaction)
+            else:
+                await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
+        except discord.NotFound:
+            return
+
+    async def _ctx_scratch(self, interaction: discord.Interaction):
         try:
             from casino.games.slots import daily_scratch
             await daily_scratch(interaction)
+        except discord.NotFound:
+            return
         except Exception:
-            await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
+            try:
+                await interaction.response.send_message("Casino module not loaded.", ephemeral=True)
+            except discord.NotFound:
+                return
+
+    async def _ctx_bet_history(self, interaction: discord.Interaction):
+        try:
+            cog = self.bot.get_cog("SportsbookCog")
+            if cog:
+                await cog._bethistory_impl(interaction)
+            else:
+                await interaction.response.send_message("Sportsbook module not loaded.", ephemeral=True)
+        except discord.NotFound:
+            return
+
+    async def _ctx_parlay_cart(self, interaction: discord.Interaction):
+        try:
+            cog = self.bot.get_cog("SportsbookCog")
+            if cog and hasattr(cog, "_parlay_cart_impl"):
+                await cog._parlay_cart_impl(interaction)
+            else:
+                await interaction.response.send_message(
+                    "Open the Sportsbook to manage your parlay cart.", ephemeral=True
+                )
+        except discord.NotFound:
+            return
+
+    async def _ctx_browse_markets(self, interaction: discord.Interaction):
+        try:
+            cog = self.bot.get_cog("Polymarket")
+            if cog:
+                await cog.markets_cmd.callback(cog, interaction)
+            else:
+                await interaction.response.send_message("Markets module not loaded.", ephemeral=True)
+        except discord.NotFound:
+            return
+
+    async def _ctx_eco_health(self, interaction: discord.Interaction):
+        try:
+            from permissions import is_commissioner
+            if not await is_commissioner(interaction):
+                return await interaction.response.send_message(
+                    "Commissioner-only command.", ephemeral=True
+                )
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            cog = self.bot.get_cog("EconomyCog")
+            if cog:
+                await cog.eco_health_impl(interaction)
+            else:
+                await interaction.followup.send("Economy module not loaded.", ephemeral=True)
+        except discord.NotFound:
+            return
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EconomyCog(bot))
-    # Register persistent view so buttons work across restarts
-    bot.add_view(FlowHubView())
