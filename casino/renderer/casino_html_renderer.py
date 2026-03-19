@@ -253,13 +253,14 @@ async def render_blackjack_card(
 # Fallback emoji for when slot icon PNGs aren't available
 _SLOT_EMOJI_FALLBACK = {
     "shield": "🛡️", "crown": "👑", "trophy": "🏆",
-    "football": "🏈", "star": "⭐", "coin": "🪙",
+    "wild": "✦", "football": "🏈", "star": "⭐", "coin": "🪙",
 }
 
 _SLOT_TIER_COLORS = {
     "jackpot": "#FFDA50",
     "legend": "#D4AF37",
     "epic": "#C084FC",
+    "wild": "#F5E6C8",
     "rare": "#60A5FA",
     "common": "#e8e0d0",
     "base": "#888",
