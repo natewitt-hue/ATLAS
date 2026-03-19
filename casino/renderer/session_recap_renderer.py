@@ -256,7 +256,7 @@ def _build_session_recap_html(
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px 8px;
+  padding: 14px 20px var(--space-sm);
 }}
 .sr-header-left {{
   display: flex;
@@ -264,14 +264,14 @@ def _build_session_recap_html(
   gap: 2px;
 }}
 .player-name {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 800;
   font-size: 20px;
   color: var(--text-primary);
   letter-spacing: 0.5px;
 }}
 .session-sub {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 10px;
   color: var(--text-muted);
@@ -282,16 +282,16 @@ def _build_session_recap_html(
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 4px;
+  gap: var(--space-xs);
 }}
 .duration-badge {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
-  font-size: 11px;
+  font-size: var(--font-xs);
   color: var(--gold);
   background: rgba(212,175,55,0.1);
   border: 1px solid rgba(212,175,55,0.25);
-  border-radius: 8px;
+  border-radius: var(--border-radius);
   padding: 3px 10px;
   letter-spacing: 0.5px;
 }}
@@ -300,19 +300,19 @@ def _build_session_recap_html(
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 12px 20px 8px;
+  padding: var(--space-md) 20px var(--space-sm);
 }}
 .hero-pnl-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
-  font-size: 11px;
+  font-size: var(--font-xs);
   color: var(--gold-dim);
   letter-spacing: 2px;
   text-transform: uppercase;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-xs);
 }}
 .hero-pnl-value {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 48px;
   letter-spacing: -1px;
@@ -324,10 +324,10 @@ def _build_session_recap_html(
 /* Stats grid overrides */
 .data-grid.cols4 {{ grid-template-columns: repeat(4, 1fr); }}
 .data-grid.cols2 {{ grid-template-columns: repeat(2, 1fr); }}
-.data-grid {{ padding: 8px 20px 10px; }}
+.data-grid {{ padding: var(--space-sm) 20px 10px; }}
 /* Section label */
 .section-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold-dim);
@@ -340,33 +340,33 @@ def _build_session_recap_html(
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 0 20px 12px;
+  padding: 0 20px var(--space-md);
 }}
 .game-pill {{
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 12px;
+  padding: 5px var(--space-md);
   background: rgba(255,255,255,0.04);
   border-radius: 20px;
   border: 1px solid rgba(212,175,55,0.15);
 }}
 .game-pill-icon {{ font-size: 14px; }}
 .game-pill-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 12px;
   color: var(--text-sub);
 }}
 .game-pill-count {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
-  font-size: 11px;
+  font-size: var(--font-xs);
   color: var(--gold);
 }}
 /* Highlights block */
 .highlights-block {{
-  padding: 0 20px 12px;
+  padding: 0 20px var(--space-md);
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -374,32 +374,32 @@ def _build_session_recap_html(
 .highlight-row {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   background: rgba(255,255,255,0.025);
-  border-radius: 8px;
-  padding: 7px 12px;
+  border-radius: var(--border-radius);
+  padding: 7px var(--space-md);
   border-left: 2px solid rgba(212,175,55,0.2);
 }}
-.hl-icon {{ font-size: 15px; flex-shrink: 0; }}
+.hl-icon {{ font-size: var(--font-base); flex-shrink: 0; }}
 .hl-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-sub);
   flex: 1;
 }}
 .hl-note {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold);
   background: rgba(212,175,55,0.1);
-  border-radius: 4px;
+  border-radius: var(--border-radius-sm);
   padding: 2px 6px;
   letter-spacing: 0.5px;
 }}
 .hl-amount {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 800;
   font-size: 14px;
   flex-shrink: 0;
@@ -409,7 +409,7 @@ def _build_session_recap_html(
 .hl-amount.amber {{ color: var(--push); }}
 /* Best streak note */
 .best-streak-note {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 600;
   font-size: 10px;
   color: var(--gold-dim);
@@ -417,13 +417,13 @@ def _build_session_recap_html(
 }}
 /* Commentary line */
 .commentary-line {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 600;
   font-size: 12px;
   color: var(--text-muted);
   font-style: italic;
   text-align: center;
-  padding: 8px 24px 12px;
+  padding: var(--space-sm) var(--space-xl) var(--space-md);
   line-height: 1.4;
 }}
 /* Win rate bar */
@@ -434,7 +434,7 @@ def _build_session_recap_html(
   padding: 0 20px 10px;
 }}
 .win-rate-label {{
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   font-weight: 700;
   font-size: 10px;
   color: var(--gold-dim);
@@ -455,9 +455,9 @@ def _build_session_recap_html(
   background: linear-gradient(90deg, #4ADE80, #22C55E);
 }}
 .win-rate-pct {{
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700;
-  font-size: 11px;
+  font-size: var(--font-xs);
   color: var(--win);
   white-space: nowrap;
 }}

@@ -142,7 +142,7 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
     if not highlights:
         return (
             '<div style="padding:10px 0;text-align:center;color:#9a9280;'
-            'font-size:12px;font-family:\'JetBrains Mono\',monospace;">'
+            'font-size:12px;font-family:var(--font-mono),monospace;">'
             "No recent activity</div>"
         )
     rows = []
@@ -154,13 +154,13 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
         amount_color = "#F87171" if h.is_loss else "#4ADE80"
         rows.append(f"""
 <div style="display:grid;grid-template-columns:26px 1fr 84px 48px;align-items:center;
-    gap:6px;padding:6px 8px;border-radius:4px;{row_bg}margin-bottom:3px;">
-  <div style="font-size:16px;text-align:center;">{h.icon}</div>
-  <div style="font-size:13px;color:#c0b8a8;line-height:1.3;">{h.description_html}</div>
-  <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;
+    gap:6px;padding:6px var(--space-sm);border-radius:var(--border-radius-sm);{row_bg}margin-bottom:3px;">
+  <div style="font-size:var(--font-lg);text-align:center;">{h.icon}</div>
+  <div style="font-size:var(--font-sm);color:#c0b8a8;line-height:1.3;">{h.description_html}</div>
+  <div style="font-family:var(--font-mono),monospace;font-size:var(--font-sm);font-weight:700;
       color:{amount_color};text-align:right;">{esc(h.amount_html)}</div>
-  <div style="font-size:11px;color:#9a9280;text-align:right;
-      font-family:'JetBrains Mono',monospace;">{esc(h.time_ago)}</div>
+  <div style="font-size:var(--font-xs);color:#9a9280;text-align:right;
+      font-family:var(--font-mono),monospace;">{esc(h.time_ago)}</div>
 </div>""")
     return "\n".join(rows)
 
@@ -213,13 +213,13 @@ def _build_pulse_html(data: PulseData) -> str:
 
     # Predictions sub-line
     if data.pred_hot_title:
-        pred_title_html = f'<div style="font-size:14px;font-weight:600;color:#e8e0d0;margin-bottom:4px;">{esc(data.pred_hot_title)}</div>'
+        pred_title_html = f'<div style="font-size:14px;font-weight:600;color:#e8e0d0;margin-bottom:var(--space-xs);">{esc(data.pred_hot_title)}</div>'
         pred_sub = (
             f'YES {data.pred_yes_pct}% &middot; NO {data.pred_no_pct}%'
             f' &middot; ${data.pred_volume:,} volume'
         )
     else:
-        pred_title_html = '<div style="font-size:14px;font-weight:600;color:#9a9280;margin-bottom:4px;">No active markets</div>'
+        pred_title_html = '<div style="font-size:14px;font-weight:600;color:#9a9280;margin-bottom:var(--space-xs);">No active markets</div>'
         pred_sub = ""
 
     highlights_html = _highlight_rows_html(data.highlights)
@@ -235,34 +235,34 @@ def _build_pulse_html(data: PulseData) -> str:
 }}
 </style>
 
-  <div style="position:relative;z-index:2;padding:16px 18px;">
+  <div style="position:relative;z-index:2;padding:var(--space-lg) 18px;">
 
     <!-- ── Header ─────────────────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
       <div style="display:flex;align-items:center;gap:10px;">
         <!-- Zap icon pill -->
-        <div style="width:30px;height:30px;border-radius:8px;
+        <div style="width:30px;height:30px;border-radius:var(--border-radius);
             background:linear-gradient(135deg,#D4AF37,#FFDA50);
             display:flex;align-items:center;justify-content:center;
-            font-size:15px;">&#9889;</div>
+            font-size:var(--font-base);">&#9889;</div>
         <div>
           <div style="font-size:17px;font-weight:800;letter-spacing:1px;color:#e8e0d0;">FLOW PULSE</div>
-          <div style="font-size:10px;color:#9a9280;font-family:'JetBrains Mono',monospace;letter-spacing:1px;">LIVE ACTIVITY DASHBOARD</div>
+          <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;letter-spacing:1px;">LIVE ACTIVITY DASHBOARD</div>
         </div>
       </div>
       <!-- LIVE indicator -->
       <div style="display:flex;align-items:center;gap:6px;">
-        <div style="width:8px;height:8px;border-radius:50%;background:#4ADE80;
+        <div style="width:var(--space-sm);height:var(--space-sm);border-radius:50%;background:#4ADE80;
             box-shadow:0 0 6px #4ADE80;animation:pulse 2s infinite;"></div>
         <span style="font-size:12px;font-weight:700;color:#4ADE80;
-            font-family:'JetBrains Mono',monospace;letter-spacing:1px;">LIVE</span>
+            font-family:var(--font-mono),monospace;letter-spacing:1px;">LIVE</span>
       </div>
     </div>
 
     <!-- ── Progressive Jackpot Hero ───────────────────────────────── -->
     <div style="
         border-radius:10px;
-        padding:14px 16px;
+        padding:14px var(--space-lg);
         margin-bottom:10px;
         background:linear-gradient(135deg,rgba(212,175,55,0.12),rgba(212,175,55,0.05));
         border:1px solid rgba(212,175,55,0.25);
@@ -277,26 +277,26 @@ def _build_pulse_html(data: PulseData) -> str:
           background:linear-gradient(90deg,transparent,rgba(212,175,55,0.2),transparent);"></div>
 
       <div style="font-size:12px;font-weight:700;color:#D4AF37;letter-spacing:3px;
-          text-transform:uppercase;margin-bottom:4px;">Progressive Jackpot</div>
+          text-transform:uppercase;margin-bottom:var(--space-xs);">Progressive Jackpot</div>
       <div style="
-          font-family:'Outfit',sans-serif;
+          font-family:var(--font-display),sans-serif;
           font-size:40px;
           font-weight:800;
           background:linear-gradient(180deg,#FFDA50,#D4AF37);
           -webkit-background-clip:text;
           -webkit-text-fill-color:transparent;
           background-clip:text;
-          filter:drop-shadow(0 2px 8px rgba(212,175,55,0.4));
+          filter:drop-shadow(0 2px var(--space-sm) rgba(212,175,55,0.4));
           line-height:1.1;
           margin-bottom:6px;
       ">{jackpot_str}</div>
       <div style="font-size:12px;color:#b0a890;">{last_hit_line}</div>
-      <div style="font-size:11px;color:#9a9280;margin-top:2px;
-          font-family:'JetBrains Mono',monospace;">{jackpot_ago}</div>
+      <div style="font-size:var(--font-xs);color:#9a9280;margin-top:2px;
+          font-family:var(--font-mono),monospace;">{jackpot_ago}</div>
     </div>
 
-    <!-- ── 2×2 Game Grid (stacked pairs for mobile readability) ──── -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+    <!-- ── 2x2 Game Grid (stacked pairs for mobile readability) ──── -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-sm);margin-bottom:10px;">
 
       <!-- Blackjack -->
       <div style="
@@ -304,16 +304,16 @@ def _build_pulse_html(data: PulseData) -> str:
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #4ADE80;
-          padding:10px 12px;
+          padding:10px var(--space-md);
       ">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
           <div style="width:22px;height:22px;border-radius:6px;background:#4ADE80;
               display:flex;align-items:center;justify-content:center;font-size:12px;">&#127137;</div>
           <span style="font-size:14px;font-weight:700;color:#e8e0d0;">BLACKJACK</span>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;
-            color:#D4AF37;margin-bottom:4px;">{data.active_bj} active</div>
-        <div style="font-size:11px;color:#c0b8a8;margin-bottom:2px;">{bj_streak_line}</div>
+        <div style="font-family:var(--font-mono),monospace;font-size:20px;font-weight:700;
+            color:#D4AF37;margin-bottom:var(--space-xs);">{data.active_bj} active</div>
+        <div style="font-size:var(--font-xs);color:#c0b8a8;margin-bottom:2px;">{bj_streak_line}</div>
         <div style="font-size:10px;color:#9a9280;">{bj_players_line}</div>
       </div>
 
@@ -323,16 +323,16 @@ def _build_pulse_html(data: PulseData) -> str:
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #60A5FA;
-          padding:10px 12px;
+          padding:10px var(--space-md);
       ">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
           <div style="width:22px;height:22px;border-radius:6px;background:#60A5FA;
               display:flex;align-items:center;justify-content:center;font-size:12px;">&#127922;</div>
           <span style="font-size:14px;font-weight:700;color:#e8e0d0;">SLOTS</span>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;
-            color:#D4AF37;margin-bottom:4px;">{data.slots_spins_today:,} spins today</div>
-        <div style="font-size:11px;color:#c0b8a8;">{slots_sub}</div>
+        <div style="font-family:var(--font-mono),monospace;font-size:20px;font-weight:700;
+            color:#D4AF37;margin-bottom:var(--space-xs);">{data.slots_spins_today:,} spins today</div>
+        <div style="font-size:var(--font-xs);color:#c0b8a8;">{slots_sub}</div>
       </div>
 
       <!-- Sportsbook -->
@@ -341,7 +341,7 @@ def _build_pulse_html(data: PulseData) -> str:
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #D4AF37;
-          padding:10px 12px;
+          padding:10px var(--space-md);
       ">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
           <div style="display:flex;align-items:center;gap:6px;">
@@ -350,11 +350,11 @@ def _build_pulse_html(data: PulseData) -> str:
             <span style="font-size:14px;font-weight:700;color:#e8e0d0;">SPORTSBOOK</span>
           </div>
           <div style="font-size:9px;font-weight:700;color:#111;background:#D4AF37;
-              padding:2px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;">WK {data.sb_week}</div>
+              padding:2px 5px;border-radius:var(--border-radius-sm);font-family:var(--font-mono),monospace;">WK {data.sb_week}</div>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:700;
-            color:#D4AF37;margin-bottom:4px;">{data.sb_bets} bets &middot; ${data.sb_volume:,} vol</div>
-        <div style="font-size:11px;color:#c0b8a8;">{sb_sub}</div>
+        <div style="font-family:var(--font-mono),monospace;font-size:var(--font-lg);font-weight:700;
+            color:#D4AF37;margin-bottom:var(--space-xs);">{data.sb_bets} bets &middot; ${data.sb_volume:,} vol</div>
+        <div style="font-size:var(--font-xs);color:#c0b8a8;">{sb_sub}</div>
       </div>
 
       <!-- Predictions -->
@@ -363,7 +363,7 @@ def _build_pulse_html(data: PulseData) -> str:
           border-radius:10px;
           border:1px solid rgba(255,255,255,0.07);
           border-left:3px solid #F472B6;
-          padding:10px 12px;
+          padding:10px var(--space-md);
       ">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
           <div style="display:flex;align-items:center;gap:6px;">
@@ -372,21 +372,21 @@ def _build_pulse_html(data: PulseData) -> str:
             <span style="font-size:14px;font-weight:700;color:#e8e0d0;">PREDICTIONS</span>
           </div>
           <div style="font-size:9px;font-weight:700;color:#111;background:#F472B6;
-              padding:2px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;">{data.pred_open} OPEN</div>
+              padding:2px 5px;border-radius:var(--border-radius-sm);font-family:var(--font-mono),monospace;">{data.pred_open} OPEN</div>
         </div>
         {pred_title_html}
-        <div style="font-size:10px;color:#9a9280;font-family:'JetBrains Mono',monospace;">{pred_sub}</div>
+        <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;">{pred_sub}</div>
       </div>
 
     </div><!-- /game grid -->
 
     <!-- ── Divider ─────────────────────────────────────────────────── -->
     <div style="height:1px;background:linear-gradient(90deg,transparent,rgba(212,175,55,0.3),transparent);
-        margin:4px 0 10px;"></div>
+        margin:var(--space-xs) 0 10px;"></div>
 
     <!-- ── Recent Highlights ───────────────────────────────────────── -->
     <div style="margin-bottom:10px;">
-      <div style="font-size:11px;font-weight:600;color:#D4AF37;letter-spacing:1px;
+      <div style="font-size:var(--font-xs);font-weight:600;color:#D4AF37;letter-spacing:1px;
           text-transform:uppercase;margin-bottom:6px;">Recent Highlights</div>
       {highlights_html}
     </div>
@@ -394,11 +394,11 @@ def _build_pulse_html(data: PulseData) -> str:
     <!-- ── Footer ─────────────────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;
         padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">
-      <div style="font-size:10px;color:#a8a090;font-family:'JetBrains Mono',monospace;">
+      <div style="font-size:10px;color:#a8a090;font-family:var(--font-mono),monospace;">
         FLOW PULSE v1.1 &middot; Updates every 60s
       </div>
-      <div style="display:flex;gap:12px;">
-        <span style="font-size:10px;color:#4ADE80;font-family:'JetBrains Mono',monospace;">
+      <div style="display:flex;gap:var(--space-md);">
+        <span style="font-size:10px;color:#4ADE80;font-family:var(--font-mono),monospace;">
           Today: {footer_won} vol
         </span>
       </div>

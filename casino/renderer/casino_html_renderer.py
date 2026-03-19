@@ -138,16 +138,16 @@ def _build_blackjack_html(
     <style>
     /* Blackjack-specific styles */
     .bj-section {
-      padding: 16px 20px 8px;
+      padding: var(--space-lg) 20px var(--space-sm);
     }
     .bj-label {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 14px;
       color: var(--gold);
       letter-spacing: 2px;
       text-transform: uppercase;
-      margin-bottom: 4px;
+      margin-bottom: var(--space-xs);
     }
     .bj-score {
       display: inline-flex;
@@ -158,7 +158,7 @@ def _build_blackjack_html(
       border-radius: 50%;
       background: rgba(255,255,255,0.06);
       border: 1px solid rgba(255,255,255,0.1);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 16px;
       color: var(--text-primary);
@@ -167,13 +167,13 @@ def _build_blackjack_html(
     }
     .bj-cards {
       display: flex;
-      gap: 4px;
+      gap: var(--space-xs);
       padding: 10px 20px;
       justify-content: center;
     }
     .playing-card {
       flex-shrink: 0;
-      filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5));
+      filter: drop-shadow(0 var(--space-xs) var(--space-sm) rgba(0,0,0,0.5));
     }
     .playing-card img {
       width: 100px;
@@ -182,10 +182,10 @@ def _build_blackjack_html(
     }
     .result-banner {
       text-align: center;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 28px;
-      padding: 12px 0;
+      padding: var(--space-md) 0;
       letter-spacing: 1px;
     }
     </style>"""
@@ -357,8 +357,8 @@ def _build_slots_html(
     .reels-container {
       display: flex;
       justify-content: center;
-      gap: 16px;
-      padding: 24px 20px;
+      gap: var(--space-lg);
+      padding: var(--space-xl) 20px;
       position: relative;
     }
     .reel-window {
@@ -380,7 +380,7 @@ def _build_slots_html(
       font-size: 64px;
     }
     .slot-unknown {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-size: 48px;
       font-weight: 800;
       color: #333;
@@ -396,10 +396,10 @@ def _build_slots_html(
     }
     .slots-result {
       text-align: center;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
-      font-size: 18px;
-      padding: 0 20px 12px;
+      font-size: var(--font-lg);
+      padding: 0 20px var(--space-md);
       letter-spacing: 0.5px;
     }
     </style>"""
@@ -594,10 +594,10 @@ def _build_crash_html(
       position: relative;
     }
     .gauge-track {
-      width: 8px;
+      width: var(--space-sm);
       flex: 1;
       background: rgba(255,255,255,0.06);
-      border-radius: 4px;
+      border-radius: var(--border-radius-sm);
       position: relative;
       overflow: visible;
     }
@@ -606,7 +606,7 @@ def _build_crash_html(
       bottom: 0;
       left: 0;
       right: 0;
-      border-radius: 4px;
+      border-radius: var(--border-radius-sm);
       transition: height 0.3s ease;
     }
     .gauge-marker {
@@ -623,9 +623,9 @@ def _build_crash_html(
       background: var(--gold);
     }
     .gauge-label {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
-      font-size: 13px;
+      font-size: var(--font-sm);
       color: var(--gold);
       white-space: nowrap;
     }
@@ -655,9 +655,9 @@ def _build_crash_html(
       justify-content: center;
     }
     .rocket {
-      font-size: 56px;
+      font-size: var(--font-display-size);
       transform: rotate(-15deg);
-      filter: drop-shadow(0 0 12px rgba(212,175,55,0.5));
+      filter: drop-shadow(0 0 var(--space-md) rgba(212,175,55,0.5));
     }
     .explosion {
       width: 180px;
@@ -683,17 +683,17 @@ def _build_crash_html(
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 4px;
+      gap: var(--space-xs);
     }
     .mult-value {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 64px;
       line-height: 1;
       letter-spacing: -2px;
     }
     .mult-sub {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 14px;
       letter-spacing: 2px;
@@ -701,29 +701,29 @@ def _build_crash_html(
       opacity: 0.7;
     }
     .profit-pill {
-      margin-top: 8px;
-      padding: 4px 14px;
+      margin-top: var(--space-sm);
+      padding: var(--space-xs) 14px;
       border-radius: 20px;
       background: rgba(74,222,128,0.12);
       border: 1px solid rgba(74,222,128,0.3);
       color: var(--win);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
-      font-size: 13px;
+      font-size: var(--font-sm);
     }
 
     /* History */
     .history-row {
       display: flex;
       justify-content: center;
-      gap: 8px;
-      padding: 8px 20px 12px;
+      gap: var(--space-sm);
+      padding: var(--space-sm) 20px var(--space-md);
       flex-wrap: wrap;
     }
     .history-pill {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
-      font-size: 13px;
+      font-size: var(--font-sm);
       padding: 3px 10px;
       border-radius: 12px;
       background: rgba(255,255,255,0.04);
@@ -731,18 +731,18 @@ def _build_crash_html(
     .history-pill.current-pill {
       color: #fff !important;
       border: 1px solid currentColor;
-      box-shadow: 0 0 8px currentColor;
+      box-shadow: 0 0 var(--space-sm) currentColor;
     }
 
     /* Live info */
     .live-info {
       display: flex;
       justify-content: center;
-      gap: 24px;
-      padding: 12px 20px;
+      gap: var(--space-xl);
+      padding: var(--space-md) 20px;
     }
     .live-stat {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
       font-size: 14px;
       color: var(--text-muted);
@@ -920,7 +920,7 @@ def _build_coinflip_html(
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 24px 20px 16px;
+      padding: var(--space-xl) 20px var(--space-lg);
     }}
     .coin {{
       width: 140px;
@@ -931,31 +931,31 @@ def _build_coinflip_html(
       align-items: center;
       justify-content: center;
       border: 4px solid {coin_rim};
-      box-shadow: 0 8px 24px rgba(0,0,0,0.4), inset 0 2px 4px rgba(255,255,255,0.3);
+      box-shadow: 0 var(--space-sm) var(--space-xl) rgba(0,0,0,0.4), inset 0 2px var(--space-xs) rgba(255,255,255,0.3);
       transform: perspective(400px) rotateX(10deg);
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
-      font-size: 56px;
+      font-size: var(--font-display-size);
       color: rgba(0,0,0,0.25);
     }}
     .coin-result {{
       text-align: center;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 22px;
       color: var(--text-primary);
-      margin-top: 12px;
+      margin-top: var(--space-md);
       letter-spacing: 2px;
     }}
     .pick-display {{
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      margin-top: 8px;
+      gap: var(--space-sm);
+      margin-top: var(--space-sm);
     }}
     .pick-text {{
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-size: 14px;
       color: var(--text-muted);
     }}
@@ -968,26 +968,26 @@ def _build_coinflip_html(
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 24px;
-      margin-top: 12px;
+      gap: var(--space-xl);
+      margin-top: var(--space-md);
     }}
     .pvp-player {{
       text-align: center;
     }}
     .pvp-name {{
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 16px;
     }}
     .pvp-pick {{
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 700;
       font-size: 12px;
       margin-top: 2px;
       opacity: 0.7;
     }}
     .pvp-vs {{
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 800;
       font-size: 14px;
       color: var(--text-dim);
@@ -1122,7 +1122,7 @@ def _build_scratch_html(
       display: flex;
       justify-content: center;
       gap: 14px;
-      padding: 20px 24px 10px;
+      padding: 20px var(--space-xl) 10px;
     }
     .scratch-tile {
       width: 160px;
@@ -1138,28 +1138,28 @@ def _build_scratch_html(
     .scratch-tile.hidden {
       background: rgba(140,115,36,0.12);
       border: 2px solid var(--gold-dim);
-      box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), inset 0 -1px 2px rgba(255,255,255,0.03);
+      box-shadow: inset 0 2px var(--space-sm) rgba(0,0,0,0.5), inset 0 -1px 2px rgba(255,255,255,0.03);
       /* Cross-hatch pattern */
       background-image:
         repeating-linear-gradient(
           45deg,
           transparent,
-          transparent 8px,
-          rgba(212,175,55,0.06) 8px,
+          transparent var(--space-sm),
+          rgba(212,175,55,0.06) var(--space-sm),
           rgba(212,175,55,0.06) 9px
         ),
         repeating-linear-gradient(
           -45deg,
           transparent,
-          transparent 8px,
-          rgba(212,175,55,0.06) 8px,
+          transparent var(--space-sm),
+          rgba(212,175,55,0.06) var(--space-sm),
           rgba(212,175,55,0.06) 9px
         );
     }
     .tile-mystery {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
-      font-size: 42px;
+      font-size: var(--font-hero);
       color: var(--gold-dim);
       opacity: 0.5;
     }
@@ -1180,10 +1180,10 @@ def _build_scratch_html(
     }
     .scratch-tile.revealed.glow {
       border-color: var(--gold-light);
-      box-shadow: 0 0 20px rgba(212,175,55,0.35), inset 0 2px 8px rgba(0,0,0,0.4), inset 0 -1px 3px rgba(255,218,80,0.06);
+      box-shadow: 0 0 20px rgba(212,175,55,0.35), inset 0 2px var(--space-sm) rgba(0,0,0,0.4), inset 0 -1px 3px rgba(255,218,80,0.06);
     }
     .tile-value {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--font-mono), monospace;
       font-weight: 800;
       font-size: 32px;
       color: var(--text-primary);
@@ -1193,17 +1193,17 @@ def _build_scratch_html(
       color: var(--gold-light);
     }
     .tile-label {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
-      font-size: 11px;
+      font-size: var(--font-xs);
       color: var(--gold-dim);
       letter-spacing: 2px;
       margin-top: 6px;
     }
     .scratch-result {
       text-align: center;
-      padding: 8px 20px 14px;
-      font-family: 'Outfit', sans-serif;
+      padding: var(--space-sm) 20px 14px;
+      font-family: var(--font-display), sans-serif;
       font-weight: 700;
       font-size: 14px;
     }

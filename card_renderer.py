@@ -306,7 +306,7 @@ def _build_html(data: dict) -> str:
   body {{
     width: 700px;
     background: transparent;
-    font-family: 'Outfit', sans-serif;
+    font-family: var(--font-display), sans-serif;
     color: #fff;
     padding: 0;
   }}
@@ -338,7 +338,7 @@ def _build_html(data: dict) -> str:
   /* ── HEADER ── */
   .hdr {{
     display: flex; align-items: center;
-    padding: 24px 36px 20px; gap: 16px;
+    padding: var(--space-xl) 36px 20px; gap: var(--space-lg);
   }}
   .hdr-logo {{
     width: 56px; height: 56px;
@@ -362,14 +362,14 @@ def _build_html(data: dict) -> str:
     line-height: 1.1;
   }}
   .hdr-sub {{
-    font-weight: 700; font-size: 13px;
+    font-weight: 700; font-size: var(--font-sm);
     color: rgba(255, 255, 255, 0.7);
     letter-spacing: 0.16em; margin-top: 5px;
   }}
   .hdr-badge {{
-    padding: 8px 18px;
+    padding: var(--space-sm) 18px;
     border-radius: 24px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.1em;
@@ -383,7 +383,7 @@ def _build_html(data: dict) -> str:
   .matchup {{
     display: flex;
     align-items: center;
-    padding: 16px 36px;
+    padding: var(--space-lg) 36px;
   }}
   .team-side {{ flex: 1; }}
   .team-side.right {{ text-align: right; }}
@@ -392,13 +392,13 @@ def _build_html(data: dict) -> str:
     letter-spacing: 0.04em;
   }}
   .team-owner {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-size: 12px; color: #555; font-weight: 600;
     margin-top: 2px;
   }}
   .vs-divider {{
     font-size: 16px; color: rgba(212,175,55,0.3);
-    padding: 0 24px;
+    padding: 0 var(--space-xl);
     font-weight: 300;
   }}
   .team-logo {{
@@ -432,15 +432,15 @@ def _build_html(data: dict) -> str:
   .assets-col {{
     flex: 1;
     background: rgba(255,255,255,0.015);
-    padding: 16px 18px;
+    padding: var(--space-lg) 18px;
   }}
   .assets-col:first-child {{ border-radius: 16px 0 0 16px; }}
   .assets-col:last-child  {{ border-radius: 0 16px 16px 0; }}
   .assets-header {{
-    font-weight: 700; font-size: 11px;
+    font-weight: 700; font-size: var(--font-xs);
     color: #D4AF37; opacity: 0.55;
     letter-spacing: 0.18em;
-    margin-bottom: 12px;
+    margin-bottom: var(--space-md);
     text-transform: uppercase;
   }}
 
@@ -448,15 +448,15 @@ def _build_html(data: dict) -> str:
   .player-card {{
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
+    gap: var(--space-md);
+    padding: 10px var(--space-md);
     background: rgba(255,255,255,0.02);
     border: 1px solid rgba(255,255,255,0.04);
     border-radius: 10px;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-sm);
   }}
   .player-ovr {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-weight: 800; font-size: 28px;
     color: #fff;
     min-width: 44px; text-align: center;
@@ -468,20 +468,20 @@ def _build_html(data: dict) -> str:
     line-height: 1.3;
   }}
   .player-meta {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: #555; font-weight: 500;
+    font-family: var(--font-mono), monospace;
+    font-size: var(--font-xs); color: #555; font-weight: 500;
     margin-top: 2px;
   }}
   .dev-badge {{
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-xs);
     padding: 3px 10px;
     border-radius: 12px;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.08em;
-    margin-top: 4px;
+    margin-top: var(--space-xs);
   }}
   .dev-xf     {{ background: rgba(168,85,247,0.1); border: 1px solid rgba(168,85,247,0.25); color: #C084FC; }}
   .dev-ss     {{ background: rgba(212,175,55,0.08); border: 1px solid rgba(212,175,55,0.2);  color: #D4AF37; }}
@@ -493,21 +493,21 @@ def _build_html(data: dict) -> str:
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 12px;
+    padding: var(--space-sm) var(--space-md);
     background: rgba(255,255,255,0.015);
     border: 1px solid rgba(255,255,255,0.03);
-    border-radius: 8px;
+    border-radius: var(--border-radius);
     margin-bottom: 6px;
   }}
   .pick-icon {{ font-size: 16px; }}
-  .pick-label {{ font-size: 13px; font-weight: 600; color: #888; }}
+  .pick-label {{ font-size: var(--font-sm); font-weight: 600; color: #888; }}
 
   /* ── TRADE HEALTH ── */
   .health-section {{
-    padding: 20px 36px 16px;
+    padding: 20px 36px var(--space-lg);
   }}
   .health-title {{
-    font-weight: 700; font-size: 11px;
+    font-weight: 700; font-size: var(--font-xs);
     color: #D4AF37; opacity: 0.55;
     letter-spacing: 0.18em;
     margin-bottom: 14px;
@@ -530,22 +530,22 @@ def _build_html(data: dict) -> str:
     margin-left: 6px;
   }}
   .health-pts {{
-    font-family: 'JetBrains Mono', monospace;
-    font-weight: 800; font-size: 18px;
+    font-family: var(--font-mono), monospace;
+    font-weight: 800; font-size: var(--font-lg);
     color: #fff;
   }}
   .health-pts.winner {{ color: #D4AF37; }}
 
   /* Fairness bar */
-  .fairness-bar-wrap {{ margin: 14px 0 8px; }}
+  .fairness-bar-wrap {{ margin: 14px 0 var(--space-sm); }}
   .fairness-labels {{
     display: flex;
     justify-content: space-between;
-    margin-bottom: 4px;
+    margin-bottom: var(--space-xs);
   }}
   .fl-team {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: #555; font-weight: 600;
+    font-family: var(--font-mono), monospace;
+    font-size: var(--font-xs); color: #555; font-weight: 600;
   }}
   .fairness-bar {{
     height: 6px;
@@ -567,12 +567,12 @@ def _build_html(data: dict) -> str:
   .favors-line {{
     text-align: center;
     margin-top: 10px;
-    font-size: 13px;
+    font-size: var(--font-sm);
     color: #888;
   }}
   .favors-line strong {{ color: #D4AF37; font-weight: 700; }}
   .favors-line .pct {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono), monospace;
     font-weight: 700;
   }}
 
@@ -585,7 +585,7 @@ def _build_html(data: dict) -> str:
   .metric-cell {{
     flex: 1;
     background: rgba(255,255,255,0.02);
-    padding: 16px 14px;
+    padding: var(--space-lg) 14px;
     text-align: center;
   }}
   .metric-cell:first-child {{ border-radius: 16px 0 0 16px; }}
@@ -598,13 +598,13 @@ def _build_html(data: dict) -> str:
     text-transform: uppercase;
   }}
   .metric-value {{
-    font-family: 'JetBrains Mono', monospace;
-    font-weight: 800; font-size: 18px;
+    font-family: var(--font-mono), monospace;
+    font-weight: 800; font-size: var(--font-lg);
     line-height: 1.2;
   }}
   .metric-sub {{
     font-size: 10px; color: #444;
-    margin-top: 4px;
+    margin-top: var(--space-xs);
     letter-spacing: 0.04em;
   }}
   .mv-green  {{ color: #4ADE80; }}
@@ -617,10 +617,10 @@ def _build_html(data: dict) -> str:
     padding: 14px 36px;
   }}
   .flags-title {{
-    font-weight: 700; font-size: 11px;
+    font-weight: 700; font-size: var(--font-xs);
     color: #D4AF37; opacity: 0.45;
     letter-spacing: 0.18em;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-sm);
     text-transform: uppercase;
   }}
   .flag-item {{
@@ -640,22 +640,22 @@ def _build_html(data: dict) -> str:
 
   /* ── AI VERDICT ── */
   .verdict-section {{
-    padding: 16px 36px;
+    padding: var(--space-lg) 36px;
   }}
   .verdict-title {{
-    font-weight: 700; font-size: 11px;
+    font-weight: 700; font-size: var(--font-xs);
     color: #D4AF37; opacity: 0.45;
     letter-spacing: 0.18em;
     margin-bottom: 10px;
     text-transform: uppercase;
   }}
   .verdict-quote {{
-    font-size: 13px;
+    font-size: var(--font-sm);
     font-style: italic;
     color: #999;
     line-height: 1.7;
     border-left: 2px solid rgba(212,175,55,0.25);
-    padding-left: 16px;
+    padding-left: var(--space-lg);
   }}
 
   /* ── FOOTER ── */
@@ -667,8 +667,8 @@ def _build_html(data: dict) -> str:
     margin-top: 20px;
   }}
   .foot-txt {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: #262626; font-weight: 600;
+    font-family: var(--font-mono), monospace;
+    font-size: var(--font-xs); color: #262626; font-weight: 600;
     letter-spacing: 0.05em;
   }}
 </style>
@@ -712,7 +712,7 @@ def _build_html(data: dict) -> str:
       </div>
     </div>
 
-    <div style="height: 8px;"></div>
+    <div style="height: var(--space-sm);"></div>
 
     <!-- ASSETS -->
     <div class="assets-row">
@@ -726,7 +726,7 @@ def _build_html(data: dict) -> str:
       </div>
     </div>
 
-    <div style="height: 16px;"></div>
+    <div style="height: var(--space-lg);"></div>
 
     <!-- TRADE HEALTH -->
     <div class="health-section">
@@ -762,7 +762,7 @@ def _build_html(data: dict) -> str:
       </div>
     </div>
 
-    <div style="height: 8px;"></div>
+    <div style="height: var(--space-sm);"></div>
 
     <!-- METRICS ROW -->
     <div class="metrics-row">

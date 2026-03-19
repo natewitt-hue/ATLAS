@@ -46,14 +46,14 @@ def _css() -> str:
 _CSS_BODY = """\
 body {
   background: transparent;
-  font-family: 'Outfit', sans-serif;
+  font-family: var(--font-display), sans-serif;
   display: flex;
   justify-content: center;
   padding: 0;
 }
 .card {
   width: 700px;
-  border-radius: 12px;
+  border-radius: var(--space-md);
   overflow: hidden;
   position: relative;
   background: #111111;
@@ -108,14 +108,14 @@ body {
 .source-icon.prediction { background: rgba(168,85,247,0.2); color: #A855F7; }
 
 .game-label {
-  font-weight: 700; font-size: 18px; color: #e8e0d0; letter-spacing: 1.5px;
+  font-weight: 700; font-size: var(--font-lg); color: #e8e0d0; letter-spacing: 1.5px;
 }
 
 /* Badge */
 .badge {
-  padding: 4px 12px; border-radius: 6px;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 700; font-size: 13px; letter-spacing: 0.5px;
+  padding: var(--space-xs) var(--space-md); border-radius: 6px;
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: var(--font-sm); letter-spacing: 0.5px;
 }
 .badge.win    { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: #4ADE80; }
 .badge.loss   { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #F87171; }
@@ -132,14 +132,14 @@ body {
 /* Data grids */
 .data-grid {
   display: grid; grid-template-columns: repeat(4, 1fr);
-  gap: 8px; padding: 12px 20px;
+  gap: var(--space-sm); padding: var(--space-md) 20px;
 }
 .data-grid-3 {
   display: grid; grid-template-columns: repeat(3, 1fr);
-  gap: 8px; padding: 12px 20px;
+  gap: var(--space-sm); padding: var(--space-md) 20px;
 }
 .data-cell {
-  background: rgba(255,255,255,0.03); border-radius: 8px; padding: 10px 12px;
+  background: rgba(255,255,255,0.03); border-radius: var(--border-radius); padding: 10px var(--space-md);
   border-top: 1px solid rgba(255,255,255,0.06);
   border-left: 1px solid rgba(255,255,255,0.04);
   border-bottom: 1px solid rgba(0,0,0,0.3);
@@ -147,10 +147,10 @@ body {
 }
 .data-label {
   font-weight: 600; font-size: 10px; color: #8C7324;
-  letter-spacing: 1.5px; margin-bottom: 4px; text-transform: uppercase;
+  letter-spacing: 1.5px; margin-bottom: var(--space-xs); text-transform: uppercase;
 }
 .data-value {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700; font-size: 16px; color: #e8e0d0;
 }
 .data-value.green { color: #4ADE80; }
@@ -160,25 +160,25 @@ body {
 /* Footer */
 .footer {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 20px 12px;
+  padding: var(--space-sm) 20px var(--space-md);
 }
-.footer-left { display: flex; align-items: center; gap: 16px; }
+.footer-left { display: flex; align-items: center; gap: var(--space-lg); }
 .footer-balance {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 700; font-size: 12px; color: #DCDCE6;
 }
 .footer-txn {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono), monospace;
   font-weight: 400; font-size: 10px; color: #555;
 }
 .footer-time {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 400; font-size: 11px; color: #8C7324;
+  font-family: var(--font-mono), monospace;
+  font-weight: 400; font-size: var(--font-xs); color: #8C7324;
 }
 
 /* Highlight bar */
 .highlight-bar {
-  margin: 0 20px 8px; padding: 6px 14px; border-radius: 6px;
+  margin: 0 20px var(--space-sm); padding: 6px 14px; border-radius: 6px;
   font-weight: 700; font-size: 12px; letter-spacing: 1px; text-align: center;
 }
 .highlight-bar.win  { background: rgba(34,197,94,0.08); color: #4ADE80; border: 1px solid rgba(34,197,94,0.15); }
@@ -186,7 +186,7 @@ body {
 .highlight-bar.push { background: rgba(245,158,11,0.08); color: #FBBF24; border: 1px solid rgba(245,158,11,0.15); }
 
 /* Description row */
-.desc-row { padding: 6px 20px 2px; font-size: 13px; color: #aaa; }
+.desc-row { padding: 6px 20px 2px; font-size: var(--font-sm); color: #aaa; }
 """
 
 

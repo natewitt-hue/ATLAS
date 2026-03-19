@@ -38,9 +38,9 @@ def _commentary_html(commentary: str) -> str:
         return ""
     return f"""
 <div style="
-    margin:12px 0 0;
+    margin:var(--space-md) 0 0;
     padding:10px 14px;
-    border-radius:8px;
+    border-radius:var(--border-radius);
     background:rgba(255,255,255,0.03);
     border-left:3px solid rgba(212,175,55,0.5);
 ">
@@ -61,19 +61,19 @@ def _footer_html(player: str) -> str:
     align-items:center;
     justify-content:space-between;
     padding-top:10px;
-    margin-top:12px;
+    margin-top:var(--space-md);
     border-top:1px solid rgba(255,255,255,0.06);
 ">
   <div style="
       font-size:12px;
       font-weight:600;
       color:#FBBF24;
-      font-family:'Outfit',sans-serif;
+      font-family:var(--font-display),sans-serif;
   ">{esc(player)}</div>
   <div style="
-      font-size:11px;
+      font-size:var(--font-xs);
       color:#9a9280;
-      font-family:'JetBrains Mono',monospace;
+      font-family:var(--font-mono),monospace;
       letter-spacing:0.5px;
   ">{_now_ts()}</div>
 </div>"""
@@ -111,18 +111,18 @@ def _wrap_card(
   <div style="padding:18px 22px;">
 
     <!-- ── Header ──────────────────────────────────────────────────── -->
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:var(--space-lg);">
       <div style="
           width:36px;height:36px;border-radius:9px;
           background:{icon_bg};
           display:flex;align-items:center;justify-content:center;
-          font-size:18px;flex-shrink:0;
+          font-size:var(--font-lg);flex-shrink:0;
       ">{icon_emoji}</div>
       <div>
-        <div style="font-size:18px;font-weight:800;letter-spacing:1px;color:#e8e0d0;">
+        <div style="font-size:var(--font-lg);font-weight:800;letter-spacing:1px;color:#e8e0d0;">
           {esc(game_label)}
         </div>
-        <div style="font-size:10px;color:#9a9280;font-family:'JetBrains Mono',monospace;letter-spacing:1.5px;">
+        <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;letter-spacing:1.5px;">
           {esc(event_label)}
         </div>
       </div>
@@ -161,11 +161,11 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
   <div style="position:absolute;bottom:0;left:0;right:0;height:1px;
       background:linear-gradient(90deg,transparent,rgba(212,175,55,0.25),transparent);"></div>
 
-  <div style="font-size:11px;font-weight:700;color:#D4AF37;letter-spacing:4px;
-      text-transform:uppercase;margin-bottom:8px;">JACKPOT HIT</div>
+  <div style="font-size:var(--font-xs);font-weight:700;color:#D4AF37;letter-spacing:4px;
+      text-transform:uppercase;margin-bottom:var(--space-sm);">JACKPOT HIT</div>
 
   <div style="
-      font-family:'Outfit',sans-serif;
+      font-family:var(--font-display),sans-serif;
       font-size:58px;
       font-weight:800;
       background:linear-gradient(180deg,#FFDA50,#D4AF37);
@@ -179,18 +179,18 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
 
   <div style="
       display:inline-block;
-      padding:4px 14px;
+      padding:var(--space-xs) 14px;
       border-radius:20px;
       background:rgba(212,175,55,0.15);
       border:1px solid rgba(212,175,55,0.35);
-      font-family:'JetBrains Mono',monospace;
-      font-size:15px;
+      font-family:var(--font-mono),monospace;
+      font-size:var(--font-base);
       font-weight:700;
       color:#FFDA50;
       margin-bottom:10px;
   ">{esc(mult_str)} multiplier</div>
 
-  <div style="font-size:14px;color:#b0a890;margin-top:4px;">
+  <div style="font-size:14px;color:#b0a890;margin-top:var(--space-xs);">
     <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> hit the progressive jackpot
   </div>
 </div>"""
@@ -231,7 +231,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
     border:1px solid rgba(255,255,255,0.08);
 ">
   <!-- VS matchup row -->
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-md);">
 
     <!-- Winner -->
     <div style="flex:1;text-align:center;">
@@ -245,17 +245,17 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
           font-weight:700;
           color:#4ADE80;
           letter-spacing:1.5px;
-          margin-bottom:8px;
+          margin-bottom:var(--space-sm);
       ">WINNER</div>
       <div style="
-          font-size:24px;
+          font-size:var(--font-xl);
           font-weight:800;
           color:#e8e0d0;
           line-height:1.2;
           word-break:break-word;
       ">{esc(winner)}</div>
       <div style="
-          font-family:'JetBrains Mono',monospace;
+          font-family:var(--font-mono),monospace;
           font-size:20px;
           font-weight:700;
           color:#4ADE80;
@@ -271,7 +271,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
         background:rgba(255,255,255,0.06);
         border:1px solid rgba(255,255,255,0.12);
         display:flex;align-items:center;justify-content:center;
-        font-size:13px;font-weight:800;color:#9a9280;
+        font-size:var(--font-sm);font-weight:800;color:#9a9280;
     ">VS</div>
 
     <!-- Loser -->
@@ -286,17 +286,17 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
           font-weight:700;
           color:#F87171;
           letter-spacing:1.5px;
-          margin-bottom:8px;
+          margin-bottom:var(--space-sm);
       ">ELIMINATED</div>
       <div style="
-          font-size:24px;
+          font-size:var(--font-xl);
           font-weight:800;
           color:#9a9280;
           line-height:1.2;
           word-break:break-word;
       ">{esc(loser)}</div>
       <div style="
-          font-family:'JetBrains Mono',monospace;
+          font-family:var(--font-mono),monospace;
           font-size:20px;
           font-weight:700;
           color:#F87171;
@@ -308,15 +308,15 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
 
   <!-- Pot total -->
   <div style="
-      margin-top:16px;
+      margin-top:var(--space-lg);
       text-align:center;
-      padding:8px 14px;
-      border-radius:8px;
+      padding:var(--space-sm) 14px;
+      border-radius:var(--border-radius);
       background:rgba(212,175,55,0.07);
       border:1px solid rgba(212,175,55,0.15);
-      font-size:13px;
+      font-size:var(--font-sm);
       color:#b0a890;
-      font-family:'JetBrains Mono',monospace;
+      font-family:var(--font-mono),monospace;
   ">Pot: <span style="color:#D4AF37;font-weight:700;">{esc(amount_str)} each</span> &middot; Total moved: <span style="color:#D4AF37;font-weight:700;">{esc(f"${amount * 2:,}")}</span></div>
 
 </div>"""
@@ -369,38 +369,38 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
     border:1px solid rgba(255,255,255,0.08);
     text-align:center;
 ">
-  <div style="font-size:11px;font-weight:700;color:#F87171;letter-spacing:3px;
-      text-transform:uppercase;margin-bottom:12px;">Last Man Standing</div>
+  <div style="font-size:var(--font-xs);font-weight:700;color:#F87171;letter-spacing:3px;
+      text-transform:uppercase;margin-bottom:var(--space-md);">Last Man Standing</div>
 
   <!-- Big multiplier -->
   <div style="
-      font-family:'Outfit',sans-serif;
+      font-family:var(--font-display),sans-serif;
       font-size:72px;
       font-weight:800;
       color:{mult_color};
       filter:drop-shadow(0 2px 12px {mult_glow});
       line-height:1.0;
-      margin-bottom:4px;
+      margin-bottom:var(--space-xs);
   ">{esc(mult_str)}</div>
 
-  <div style="font-size:13px;color:#9a9280;font-family:'JetBrains Mono',monospace;
-      letter-spacing:1px;margin-bottom:16px;">CRASH MULTIPLIER</div>
+  <div style="font-size:var(--font-sm);color:#9a9280;font-family:var(--font-mono),monospace;
+      letter-spacing:1px;margin-bottom:var(--space-lg);">CRASH MULTIPLIER</div>
 
   <!-- Payout pill -->
   <div style="
       display:inline-block;
-      padding:8px 24px;
+      padding:var(--space-sm) var(--space-xl);
       border-radius:10px;
       background:rgba(74,222,128,0.12);
       border:1px solid rgba(74,222,128,0.3);
-      font-family:'JetBrains Mono',monospace;
+      font-family:var(--font-mono),monospace;
       font-size:22px;
       font-weight:800;
       color:#4ADE80;
   ">+{esc(payout_str)}</div>
 
   <div style="font-size:14px;color:#b0a890;margin-top:14px;">
-    <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> rode it out solo &mdash; last one alive
+    <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> rode it out solo — last one alive
   </div>
 </div>"""
 
@@ -459,27 +459,27 @@ def _build_prediction_html(
       color:#e8e0d0;
       line-height:1.35;
       margin-bottom:14px;
-      padding-bottom:12px;
+      padding-bottom:var(--space-md);
       border-bottom:1px solid rgba(255,255,255,0.07);
   ">{esc(title)}</div>
 
   <!-- Resolution row -->
-  <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+  <div style="display:flex;align-items:center;gap:var(--space-lg);margin-bottom:var(--space-lg);">
     <div style="
         padding:10px 22px;
         border-radius:10px;
         background:{res_bg};
         border:1px solid {res_border};
-        font-family:'JetBrains Mono',monospace;
+        font-family:var(--font-mono),monospace;
         font-size:26px;
         font-weight:800;
         color:{res_color};
         flex-shrink:0;
     ">{res_label}</div>
     <div>
-      <div style="font-size:11px;color:#9a9280;font-family:'JetBrains Mono',monospace;
+      <div style="font-size:var(--font-xs);color:#9a9280;font-family:var(--font-mono),monospace;
           letter-spacing:1px;margin-bottom:3px;">RESOLVED</div>
-      <div style="font-size:13px;color:#b0a890;">
+      <div style="font-size:var(--font-sm);color:#b0a890;">
         <span style="color:#e8e0d0;font-weight:600;">{esc(winner_text)}</span> share the pot
       </div>
     </div>
@@ -491,15 +491,15 @@ def _build_prediction_html(
       align-items:center;
       justify-content:space-between;
       padding:10px 14px;
-      border-radius:8px;
+      border-radius:var(--border-radius);
       background:rgba(212,175,55,0.07);
       border:1px solid rgba(212,175,55,0.18);
   ">
-    <div style="font-size:12px;color:#9a9280;font-family:'JetBrains Mono',monospace;letter-spacing:0.5px;">
+    <div style="font-size:12px;color:#9a9280;font-family:var(--font-mono),monospace;letter-spacing:0.5px;">
       TOTAL PAYOUT
     </div>
     <div style="
-        font-family:'JetBrains Mono',monospace;
+        font-family:var(--font-mono),monospace;
         font-size:20px;
         font-weight:800;
         color:#D4AF37;
@@ -552,7 +552,7 @@ def _build_parlay_html(
 ">
 
   <!-- Legs + odds row -->
-  <div style="display:flex;gap:10px;margin-bottom:16px;">
+  <div style="display:flex;gap:10px;margin-bottom:var(--space-lg);">
 
     <!-- Leg count -->
     <div style="
@@ -562,16 +562,16 @@ def _build_parlay_html(
         background:rgba(74,222,128,0.08);
         border:1px solid rgba(74,222,128,0.2);
     ">
-      <div style="font-size:11px;color:#9a9280;font-family:'JetBrains Mono',monospace;
-          letter-spacing:1px;margin-bottom:4px;">LEGS</div>
+      <div style="font-size:var(--font-xs);color:#9a9280;font-family:var(--font-mono),monospace;
+          letter-spacing:1px;margin-bottom:var(--space-xs);">LEGS</div>
       <div style="
-          font-family:'JetBrains Mono',monospace;
+          font-family:var(--font-mono),monospace;
           font-size:40px;
           font-weight:800;
           color:#4ADE80;
           line-height:1.0;
       ">{legs}</div>
-      <div style="font-size:11px;color:#9a9280;margin-top:4px;">ALL HIT</div>
+      <div style="font-size:var(--font-xs);color:#9a9280;margin-top:var(--space-xs);">ALL HIT</div>
     </div>
 
     <!-- Odds -->
@@ -582,16 +582,16 @@ def _build_parlay_html(
         background:rgba(212,175,55,0.08);
         border:1px solid rgba(212,175,55,0.2);
     ">
-      <div style="font-size:11px;color:#9a9280;font-family:'JetBrains Mono',monospace;
-          letter-spacing:1px;margin-bottom:4px;">ODDS</div>
+      <div style="font-size:var(--font-xs);color:#9a9280;font-family:var(--font-mono),monospace;
+          letter-spacing:1px;margin-bottom:var(--space-xs);">ODDS</div>
       <div style="
-          font-family:'JetBrains Mono',monospace;
+          font-family:var(--font-mono),monospace;
           font-size:32px;
           font-weight:800;
           color:#D4AF37;
           line-height:1.0;
       ">{esc(odds)}</div>
-      <div style="font-size:11px;color:#9a9280;margin-top:4px;">AMERICAN</div>
+      <div style="font-size:var(--font-xs);color:#9a9280;margin-top:var(--space-xs);">AMERICAN</div>
     </div>
 
   </div>
@@ -599,7 +599,7 @@ def _build_parlay_html(
   <!-- Payout hero -->
   <div style="
       text-align:center;
-      padding:16px;
+      padding:var(--space-lg);
       border-radius:10px;
       background:linear-gradient(135deg,rgba(74,222,128,0.12),rgba(74,222,128,0.04));
       border:1px solid rgba(74,222,128,0.25);
@@ -608,17 +608,17 @@ def _build_parlay_html(
   ">
     <div style="position:absolute;top:0;left:0;right:0;height:1px;
         background:linear-gradient(90deg,transparent,rgba(74,222,128,0.45),transparent);"></div>
-    <div style="font-size:11px;color:#9a9280;font-family:'JetBrains Mono',monospace;
+    <div style="font-size:var(--font-xs);color:#9a9280;font-family:var(--font-mono),monospace;
         letter-spacing:2px;margin-bottom:6px;">TOTAL PAYOUT</div>
     <div style="
-        font-family:'Outfit',sans-serif;
+        font-family:var(--font-display),sans-serif;
         font-size:46px;
         font-weight:800;
         color:#4ADE80;
-        filter:drop-shadow(0 2px 8px rgba(74,222,128,0.35));
+        filter:drop-shadow(0 2px var(--space-sm) rgba(74,222,128,0.35));
         line-height:1.0;
     ">+{esc(payout_str)}</div>
-    <div style="font-size:13px;color:#b0a890;margin-top:8px;">
+    <div style="font-size:var(--font-sm);color:#b0a890;margin-top:var(--space-sm);">
       <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> cashed a {legs}-leg parlay
     </div>
   </div>

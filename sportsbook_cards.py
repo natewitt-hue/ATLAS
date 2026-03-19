@@ -307,38 +307,38 @@ def _sparkline_svg(data: list[int], width: int = 440, height: int = 40) -> str:
 
 _SPORTSBOOK_CSS = """\
 .hero-section { padding: 20px; text-align: center; }
-.hero-label { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
-.hero-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
-.hero-delta { font-family: 'JetBrains Mono'; font-weight: 600; font-size: var(--font-sm); margin-top: 4px; }
+.hero-label { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
+.hero-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
+.hero-delta { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-sm); margin-top: var(--space-xs); }
 .hero-delta.positive { color: var(--win); }
 .hero-delta.negative { color: var(--loss); }
 
-.sparkline-section { padding: 0 20px 12px; text-align: center; }
-.sparkline-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
+.sparkline-section { padding: 0 20px var(--space-md); text-align: center; }
+.sparkline-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
 
-.ticker-section { padding: 4px 20px 12px; text-align: center; }
-.ticker-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; margin-bottom: 6px; }
+.ticker-section { padding: var(--space-xs) 20px var(--space-md); text-align: center; }
+.ticker-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; margin-bottom: 6px; }
 .ticker-dots { display: flex; justify-content: center; gap: 6px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; }
 .dot.win { background: var(--win); }
 .dot.loss { background: var(--loss); }
 .dot.push { background: var(--push); }
 
-.info-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
-.info-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px; }
-.info-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
-.info-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: 4px; }
+.info-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
+.info-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: var(--space-md); }
+.info-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
+.info-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: var(--space-xs); }
 .info-value.green { color: var(--win); }
-.info-sub { font-family: 'Outfit'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.info-sub { font-family: var(--font-display); font-weight: 600; font-size: var(--font-xs); color: var(--text-muted); margin-top: 2px; }
 
-.sport-footer { display: flex; justify-content: center; gap: 8px; padding: 8px 20px 14px; }
-.sport-pill { font-family: 'Outfit'; font-weight: 700; font-size: 10px; letter-spacing: 1px; padding: 4px 12px; border-radius: 12px; color: var(--text-dim); background: rgba(255,255,255,0.03); }
+.sport-footer { display: flex; justify-content: center; gap: var(--space-sm); padding: var(--space-sm) 20px 14px; }
+.sport-pill { font-family: var(--font-display); font-weight: 700; font-size: 10px; letter-spacing: 1px; padding: var(--space-xs) var(--space-md); border-radius: 12px; color: var(--text-dim); background: rgba(255,255,255,0.03); }
 .sport-pill.active { color: var(--gold); background: rgba(212,175,55,0.12); border: 1px solid rgba(212,175,55,0.25); }
 
-.stat-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
+.stat-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
 .stat-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.stat-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
-.stat-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
+.stat-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--space-xs); }
+.stat-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
 .stat-value.green { color: var(--win); }
 .stat-value.red { color: var(--loss); }
 .stat-value.gold { color: var(--gold); }
@@ -615,27 +615,27 @@ async def build_stats_card(user_id: int) -> bytes:
 # ═════════════════════════════════════════════════════════════════════════════
 
 _MATCH_DETAIL_CSS = """\
-.matchup-hero { text-align: center; padding: 8px 20px 4px; }
-.matchup-teams { font-family: 'Outfit'; font-weight: 800; font-size: 24px; color: var(--text-primary); letter-spacing: 1px; }
-.matchup-teams .at { color: var(--gold); margin: 0 8px; font-size: 18px; }
-.matchup-sub { font-family: 'Outfit'; font-weight: 600; font-size: 12px; color: var(--text-muted); letter-spacing: 1px; margin-top: 2px; }
+.matchup-hero { text-align: center; padding: var(--space-sm) 20px var(--space-xs); }
+.matchup-teams { font-family: var(--font-display); font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); letter-spacing: 1px; }
+.matchup-teams .at { color: var(--gold); margin: 0 var(--space-sm); font-size: var(--font-lg); }
+.matchup-sub { font-family: var(--font-display); font-weight: 600; font-size: 12px; color: var(--text-muted); letter-spacing: 1px; margin-top: 2px; }
 
-.status-badge { font-family: 'JetBrains Mono'; font-weight: 700; font-size: 11px; letter-spacing: 1px; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
+.status-badge { font-family: var(--font-mono); font-weight: 700; font-size: var(--font-xs); letter-spacing: 1px; padding: var(--space-xs) 10px; border-radius: 12px; text-transform: uppercase; }
 .status-badge.open { color: var(--win); background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.35); }
 .status-badge.locked { color: var(--loss); background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.35); }
 
-.odds-section { padding: 0 20px 16px; }
+.odds-section { padding: 0 20px var(--space-lg); }
 .odds-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
-.odds-col-header { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; text-align: center; padding-bottom: 8px; }
-.odds-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px 8px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.odds-team { font-family: 'Outfit'; font-weight: 700; font-size: 12px; color: var(--text-sub); letter-spacing: 0.5px; margin-bottom: 4px; }
-.odds-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 22px; color: var(--text-primary); }
+.odds-col-header { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; text-align: center; padding-bottom: var(--space-sm); }
+.odds-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: var(--space-md) var(--space-sm); text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
+.odds-team { font-family: var(--font-display); font-weight: 700; font-size: 12px; color: var(--text-sub); letter-spacing: 0.5px; margin-bottom: var(--space-xs); }
+.odds-value { font-family: var(--font-mono); font-weight: 800; font-size: 22px; color: var(--text-primary); }
 .odds-value.fav { color: var(--win); }
 .odds-value.dog { color: var(--loss); }
-.odds-juice { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+.odds-juice { font-family: var(--font-mono); font-weight: 600; font-size: 10px; color: var(--text-dim); margin-top: 2px; }
 
 .match-footer { text-align: center; padding: 0 20px 14px; }
-.match-footer span { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 10px; color: var(--text-dim); letter-spacing: 0.5px; }
+.match-footer span { font-family: var(--font-mono); font-weight: 600; font-size: 10px; color: var(--text-dim); letter-spacing: 0.5px; }
 """
 
 
@@ -880,23 +880,23 @@ async def build_real_match_detail_card(
 # ═════════════════════════════════════════════════════════════════════════════
 
 _BET_CONFIRM_CSS = """\
-.confirm-pick { text-align: center; padding: 12px 20px 4px; }
-.confirm-pick-name { font-family: 'Outfit'; font-weight: 800; font-size: 22px; color: var(--text-primary); letter-spacing: 0.5px; }
-.confirm-pick-detail { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+.confirm-pick { text-align: center; padding: var(--space-md) 20px var(--space-xs); }
+.confirm-pick-name { font-family: var(--font-display); font-weight: 800; font-size: 22px; color: var(--text-primary); letter-spacing: 0.5px; }
+.confirm-pick-detail { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-sm); color: var(--text-muted); margin-top: var(--space-xs); }
 
-.confirm-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px 16px; }
-.confirm-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px 8px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.confirm-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
-.confirm-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 20px; color: var(--text-primary); }
+.confirm-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px var(--space-lg); }
+.confirm-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: var(--space-md) var(--space-sm); text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
+.confirm-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--space-xs); }
+.confirm-value { font-family: var(--font-mono); font-weight: 800; font-size: 20px; color: var(--text-primary); }
 .confirm-value.green { color: var(--win); }
 .confirm-value.gold { color: var(--gold); }
 
-.parlay-legs { padding: 0 20px 8px; }
-.parlay-leg { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.parlay-legs { padding: 0 20px var(--space-sm); }
+.parlay-leg { display: flex; align-items: baseline; gap: var(--space-sm); padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
 .parlay-leg:last-child { border-bottom: none; }
-.leg-num { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 11px; color: var(--gold-dim); min-width: 18px; }
-.leg-pick { font-family: 'Outfit'; font-weight: 700; font-size: 13px; color: var(--text-primary); }
-.leg-info { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
+.leg-num { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-xs); color: var(--gold-dim); min-width: var(--font-lg); }
+.leg-pick { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--text-primary); }
+.leg-info { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-xs); color: var(--text-muted); margin-left: auto; white-space: nowrap; }
 """
 
 
@@ -1032,26 +1032,26 @@ async def build_parlay_confirm_card(
 # ═════════════════════════════════════════════════════════════════════════════
 
 _CASINO_HUB_CSS = """\
-.casino-balance { text-align: center; padding: 12px 20px 4px; }
-.casino-bal-label { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
-.casino-bal-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 40px; color: var(--text-primary); }
-.casino-bal-sub { font-family: 'Outfit'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.casino-balance { text-align: center; padding: var(--space-md) 20px var(--space-xs); }
+.casino-bal-label { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
+.casino-bal-value { font-family: var(--font-mono); font-weight: 800; font-size: 40px; color: var(--text-primary); }
+.casino-bal-sub { font-family: var(--font-display); font-weight: 600; font-size: var(--font-xs); color: var(--text-muted); margin-top: 2px; }
 
-.jackpot-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
+.jackpot-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
 .jackpot-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px 6px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.jackpot-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
+.jackpot-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--space-xs); }
 .jackpot-label.mini { color: #81d4fa; }
 .jackpot-label.major { color: var(--push); }
 .jackpot-label.grand { color: var(--gold-bright); }
-.jackpot-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
+.jackpot-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
 
-.game-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
-.game-tile { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px 12px; display: flex; align-items: center; gap: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
-.game-emoji { font-size: 18px; }
-.game-name { font-family: 'Outfit'; font-weight: 700; font-size: 13px; color: var(--text-primary); }
-.game-payout { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 10px; color: var(--text-dim); }
+.game-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
+.game-tile { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px var(--space-md); display: flex; align-items: center; gap: var(--space-sm); border-top: 1px solid rgba(255,255,255,0.06); }
+.game-emoji { font-size: var(--font-lg); }
+.game-name { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--text-primary); }
+.game-payout { font-family: var(--font-mono); font-weight: 600; font-size: 10px; color: var(--text-dim); }
 
-.streak-badge { font-family: 'JetBrains Mono'; font-weight: 700; font-size: 11px; letter-spacing: 1px; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
+.streak-badge { font-family: var(--font-mono); font-weight: 700; font-size: var(--font-xs); letter-spacing: 1px; padding: var(--space-xs) 10px; border-radius: 12px; text-transform: uppercase; }
 .streak-badge.hot { color: #fb923c; background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.35); }
 .streak-badge.cold { color: #7dd3fc; background: rgba(125,211,252,0.12); border: 1px solid rgba(125,211,252,0.35); }
 .streak-badge.neutral { color: var(--text-muted); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); }
@@ -1104,7 +1104,7 @@ async def build_casino_hub_card(
 <div class="gold-divider"></div>
 
 <div style="padding:0 20px 6px;">
-  <div style="font-family:'Outfit';font-weight:700;font-size:10px;color:var(--gold-dim);letter-spacing:1.5px;text-transform:uppercase;">JACKPOTS</div>
+  <div style="font-family:var(--font-display);font-weight:700;font-size:10px;color:var(--gold-dim);letter-spacing:1.5px;text-transform:uppercase;">JACKPOTS</div>
 </div>
 <div class="jackpot-grid">
   <div class="jackpot-cell">

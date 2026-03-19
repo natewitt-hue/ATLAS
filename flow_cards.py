@@ -192,28 +192,28 @@ def _sparkline_svg(data: list[int], width: int = 440, height: int = 40) -> str:
 
 _FLOW_CSS = """\
 .hero-section { padding: 20px; text-align: center; }
-.hero-label { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
-.hero-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
-.hero-delta { font-family: 'JetBrains Mono'; font-weight: 600; font-size: var(--font-sm); margin-top: 4px; }
+.hero-label { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
+.hero-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
+.hero-delta { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-sm); margin-top: var(--space-xs); }
 .hero-delta.positive { color: var(--win); }
 .hero-delta.negative { color: var(--loss); }
 
-.sparkline-section { padding: 0 20px 12px; text-align: center; }
-.sparkline-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
+.sparkline-section { padding: 0 20px var(--space-md); text-align: center; }
+.sparkline-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
 
-.stat-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
+.stat-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
 .stat-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.stat-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
-.stat-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
+.stat-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--space-xs); }
+.stat-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
 .stat-value.green { color: var(--win); }
 .stat-value.red { color: var(--loss); }
 .stat-value.gold { color: var(--gold); }
 
-.info-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
-.info-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px; }
-.info-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
-.info-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: 4px; }
-.info-sub { font-family: 'Outfit'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.info-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
+.info-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: var(--space-md); }
+.info-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
+.info-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: var(--space-xs); }
+.info-sub { font-family: var(--font-display); font-weight: 600; font-size: var(--font-xs); color: var(--text-muted); margin-top: 2px; }
 """
 
 # Status bar mapping: internal status → shared CSS class
@@ -369,36 +369,36 @@ def card_to_file(png_bytes: bytes, filename: str = "flow.png") -> discord.File:
 # ═════════════════════════════════════════════════════════════════════════════
 
 _TAB_CSS = """\
-.section-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; padding: 0 20px; margin-bottom: 6px; }
-.bet-row { padding: 8px 20px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.section-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; padding: 0 20px; margin-bottom: 6px; }
+.bet-row { padding: var(--space-sm) 20px; border-bottom: 1px solid rgba(255,255,255,0.04); }
 .bet-row:last-child { border-bottom: none; }
-.bet-team { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-base); color: var(--text-primary); }
-.bet-type { font-family: 'Outfit'; font-weight: 600; font-size: var(--font-sm); color: var(--text-muted); margin-left: 4px; }
-.bet-details { display: flex; justify-content: space-between; margin-top: 2px; font-family: 'JetBrains Mono'; font-size: var(--font-sm); }
+.bet-team { font-family: var(--font-display); font-weight: 700; font-size: var(--font-base); color: var(--text-primary); }
+.bet-type { font-family: var(--font-display); font-weight: 600; font-size: var(--font-sm); color: var(--text-muted); margin-left: var(--space-xs); }
+.bet-details { display: flex; justify-content: space-between; margin-top: 2px; font-family: var(--font-mono); font-size: var(--font-sm); }
 .bet-wager { color: var(--text-sub); }
 .bet-potential { color: var(--win); font-weight: 700; }
-.parlay-header { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-base); color: var(--text-primary); }
-.parlay-odds { font-family: 'JetBrains Mono'; font-weight: 700; color: var(--gold); }
-.parlay-legs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.parlay-leg { font-family: 'Outfit'; font-size: 11px; padding: 2px 6px; border-radius: 3px; }
+.parlay-header { font-family: var(--font-display); font-weight: 700; font-size: var(--font-base); color: var(--text-primary); }
+.parlay-odds { font-family: var(--font-mono); font-weight: 700; color: var(--gold); }
+.parlay-legs { display: flex; flex-wrap: wrap; gap: var(--space-xs); margin-top: var(--space-xs); }
+.parlay-leg { font-family: var(--font-display); font-size: var(--font-xs); padding: 2px 6px; border-radius: 3px; }
 .parlay-leg.won { background: rgba(74,222,128,0.15); color: var(--win); }
 .parlay-leg.lost { background: rgba(248,113,113,0.15); color: var(--loss); }
 .parlay-leg.pending { background: rgba(255,255,255,0.06); color: var(--text-muted); }
-.empty-state { text-align: center; padding: 24px 20px; font-family: 'Outfit'; font-weight: 600; font-size: var(--font-base); color: var(--text-muted); }
+.empty-state { text-align: center; padding: var(--space-xl) 20px; font-family: var(--font-display); font-weight: 600; font-size: var(--font-base); color: var(--text-muted); }
 
-.side-badge { display: inline-block; font-family: 'Outfit'; font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 3px; text-transform: uppercase; }
+.side-badge { display: inline-block; font-family: var(--font-display); font-weight: 700; font-size: var(--font-xs); padding: 2px var(--space-sm); border-radius: 3px; text-transform: uppercase; }
 .side-badge.yes { background: rgba(74,222,128,0.15); color: var(--win); }
 .side-badge.no { background: rgba(248,113,113,0.15); color: var(--loss); }
-.position-row { padding: 8px 20px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.position-row { padding: var(--space-sm) 20px; border-bottom: 1px solid rgba(255,255,255,0.04); }
 .position-row:last-child { border-bottom: none; }
-.position-title { font-family: 'Outfit'; font-weight: 600; font-size: var(--font-sm); color: var(--text-primary); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.position-meta { display: flex; justify-content: space-between; margin-top: 2px; font-family: 'JetBrains Mono'; font-size: var(--font-xs); }
+.position-title { font-family: var(--font-display); font-weight: 600; font-size: var(--font-sm); color: var(--text-primary); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.position-meta { display: flex; justify-content: space-between; margin-top: 2px; font-family: var(--font-mono); font-size: var(--font-xs); }
 .position-cost { color: var(--text-sub); }
 .position-payout { color: var(--win); font-weight: 700; }
 .status-dot { display: inline-block; font-size: 12px; margin-left: 6px; }
 
-.txn-table { width: 100%; padding: 0 12px; }
-.txn-row { display: flex; align-items: center; padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,0.03); gap: 8px; }
+.txn-table { width: 100%; padding: 0 var(--space-md); }
+.txn-row { display: flex; align-items: center; padding: 5px var(--space-sm); border-bottom: 1px solid rgba(255,255,255,0.03); gap: var(--space-sm); }
 .txn-row:last-child { border-bottom: none; }
 .txn-source { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
 .txn-source.casino { background: rgba(168,85,247,0.2); }
@@ -407,26 +407,26 @@ _TAB_CSS = """\
 .txn-source.admin { background: rgba(212,175,55,0.2); }
 .txn-source.stipend { background: rgba(45,212,191,0.2); }
 .txn-source.other { background: rgba(255,255,255,0.06); }
-.txn-desc { flex: 1; font-family: 'Outfit'; font-weight: 600; font-size: var(--font-xs); color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.txn-amount { font-family: 'JetBrains Mono'; font-weight: 700; font-size: var(--font-sm); min-width: 60px; text-align: right; }
+.txn-desc { flex: 1; font-family: var(--font-display); font-weight: 600; font-size: var(--font-xs); color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txn-amount { font-family: var(--font-mono); font-weight: 700; font-size: var(--font-sm); min-width: 60px; text-align: right; }
 .txn-amount.credit { color: var(--win); }
 .txn-amount.debit { color: var(--loss); }
-.txn-bal { font-family: 'JetBrains Mono'; font-weight: 600; font-size: var(--font-xs); color: var(--text-dim); min-width: 55px; text-align: right; }
+.txn-bal { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-xs); color: var(--text-dim); min-width: 55px; text-align: right; }
 
-.lb-table { width: 100%; padding: 0 16px; }
-.lb-header { display: flex; padding: 6px 8px; font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
-.lb-row { display: flex; padding: 7px 8px; border-bottom: 1px solid rgba(255,255,255,0.03); align-items: center; }
+.lb-table { width: 100%; padding: 0 var(--space-lg); }
+.lb-header { display: flex; padding: 6px var(--space-sm); font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
+.lb-row { display: flex; padding: 7px var(--space-sm); border-bottom: 1px solid rgba(255,255,255,0.03); align-items: center; }
 .lb-row:last-child { border-bottom: none; }
 .lb-row.viewer { background: rgba(212,175,55,0.08); border: 1px solid rgba(212,175,55,0.2); border-radius: var(--border-radius-sm); }
-.lb-rank { width: 36px; font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-sm); color: var(--text-sub); flex-shrink: 0; }
+.lb-rank { width: 36px; font-family: var(--font-mono); font-weight: 800; font-size: var(--font-sm); color: var(--text-sub); flex-shrink: 0; }
 .lb-rank.gold { color: var(--gold); }
-.lb-name { flex: 1; font-family: 'Outfit'; font-weight: 700; font-size: var(--font-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lb-stat { width: 60px; font-family: 'JetBrains Mono'; font-weight: 700; font-size: var(--font-xs); text-align: right; }
+.lb-name { flex: 1; font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-stat { width: 60px; font-family: var(--font-mono); font-weight: 700; font-size: var(--font-xs); text-align: right; }
 .lb-stat.green { color: var(--win); }
 .lb-stat.red { color: var(--loss); }
 .lb-stat.neutral { color: var(--text-sub); }
 
-.footer-text { text-align: center; padding: 8px 20px 14px; font-family: 'Outfit'; font-weight: 600; font-size: 10px; color: var(--text-dim); letter-spacing: 1px; }
+.footer-text { text-align: center; padding: var(--space-sm) 20px 14px; font-family: var(--font-display); font-weight: 600; font-size: 10px; color: var(--text-dim); letter-spacing: 1px; }
 """
 
 
@@ -434,18 +434,7 @@ _TAB_CSS = """\
 #  PAYOUT HELPER
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _payout_calc(wager: int, odds: int) -> int:
-    """Return total payout (wager + profit) from American odds."""
-    odds = int(odds)
-    if odds == 0:
-        return wager
-    if odds > 0:
-        return int(wager + wager * (odds / 100))
-    return int(wager + wager * (100 / abs(odds)))
-
-
-def _american_to_str(odds: int) -> str:
-    return f"+{odds}" if odds > 0 else str(odds)
+from odds_utils import american_to_str as _american_to_str, payout_calc as _payout_calc  # noqa: E402
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -505,7 +494,7 @@ async def build_my_bets_card(user_id: int) -> bytes:
 </div>\n'''
 
     if parlays:
-        bets_html += '<div class="section-label" style="margin-top:8px;">PARLAYS</div>\n'
+        bets_html += '<div class="section-label" style="margin-top:var(--space-sm);">PARLAYS</div>\n'
         for p in parlays[:4]:
             pid, week, legs_json, c_odds, wager, status = p
             try:
@@ -675,7 +664,7 @@ async def build_portfolio_card(user_id: int) -> bytes:
   </div>
 </div>
 
-<div class="hero-section" style="padding: 8px 20px 14px;">
+<div class="hero-section" style="padding: var(--space-sm) 20px 14px;">
   <div class="stat-label">BALANCE</div>
   <div class="stat-value">${balance:,}</div>
 </div>
@@ -874,7 +863,7 @@ async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
         roi_cls = "lb-stat green" if roi >= 0 else "lb-stat red"
         wr = entry["win_rate"]
         wr_cls = "lb-stat green" if wr >= 50 else ("lb-stat red" if wr > 0 else "lb-stat neutral")
-        rows_html += f'''<div style="padding: 4px 8px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.08);"></div>
+        rows_html += f'''<div style="padding: var(--space-xs) var(--space-sm); margin-top: var(--space-xs); border-top: 1px solid rgba(255,255,255,0.08);"></div>
 <div class="lb-row viewer">
   <span class="lb-rank gold">#{viewer_rank}</span>
   <span class="lb-name">▶ YOU</span>
