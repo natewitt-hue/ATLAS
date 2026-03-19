@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.4.0"  # Oracle/Codex post-migration hardening — generate_synthesis(), schema accuracy fixes
+ATLAS_VERSION = "3.4.1"  # Downgrade 9 AI calls from Sonnet→Haiku (SQL gen, answers, flair — ~12x cost reduction)
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

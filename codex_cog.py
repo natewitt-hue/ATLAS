@@ -431,7 +431,7 @@ Now generate a query for this question:
 "{question}"
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, temperature=0.05)
+    result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, temperature=0.05)
     return extract_sql(result.text)
 
 
@@ -473,7 +473,7 @@ RESPONSE GUIDELINES:
 - Use sports language and dramatic flair — make numbers tell a story.
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+    result = await atlas_ai.generate(prompt, tier=Tier.HAIKU)
     return result.text.strip()
 
 
@@ -594,7 +594,7 @@ class CodexCog(commands.Cog):
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                     f"Schema:\n{_get_db_schema()}"
                 )
-                fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.SONNET, temperature=0.02)
+                fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.HAIKU, temperature=0.02)
                 sql = extract_sql(fix_result.text) or sql
                 rows, error = run_sql(sql)
                 if error:
@@ -765,7 +765,7 @@ Head-to-head data for {u1} vs {u2} in TSL (regular season only):
 Write a punchy 3-4 sentence rivalry summary. Call out the dominant party if clear,
 note any sweep seasons, and make it entertaining.
 """
-        result = await atlas_ai.generate(summary_prompt, tier=Tier.SONNET)
+        result = await atlas_ai.generate(summary_prompt, tier=Tier.HAIKU)
         summary = result.text.strip()
 
         embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=AtlasColors.TSL_GOLD)
@@ -830,7 +830,7 @@ Write a vivid Season {season} recap. Highlight who dominated, any upsets or nota
 storylines from the records, and tease the playoff picture.
 Keep it under 350 words.
 """
-        result = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU)
 
         embed = discord.Embed(
             title=f"TSL Season {season} Recap",

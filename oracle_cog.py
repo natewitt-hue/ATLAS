@@ -593,7 +593,7 @@ async def _claude_query(question: str, caller_db: str | None = None,
 async def _claude_blurb(prompt: str, max_tokens: int = 120) -> str:
     """Short AI-generated text blurb via Claude. Replaces _ai_blurb for non-query uses."""
     try:
-        result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=max_tokens)
+        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=max_tokens)
         return result.text
     except Exception:
         return ""
@@ -3026,7 +3026,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
                     f"{u1} all-time wins: {total_u1}. {u2} all-time wins: {total_u2}. "
                     f"{total_games} total games. Make it entertaining and use football slang."
                 )
-                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=300)
+                flair = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=300)
                 embed.add_field(name="🎙️ ATLAS Echo", value=flair.text[:900], inline=False)
             except Exception:
                 pass
@@ -3155,7 +3155,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                         f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                         f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
                     )
-                    fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.SONNET, max_tokens=500, temperature=0.02)
+                    fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.HAIKU, max_tokens=500, temperature=0.02)
                     sql = extract_sql(fix_result.text) or sql
                     rows, error = run_sql(sql)
                     if error:
@@ -3328,7 +3328,7 @@ Generate a SQLite SELECT query to answer this scouting question:
 "{q}"
 """
 
-            sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.SONNET, max_tokens=500)
+            sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.HAIKU, max_tokens=500)
             sql = extract_sql(sql_result.text)
             if not sql:
                 await interaction.followup.send(
@@ -3367,7 +3367,7 @@ RESPONSE GUIDELINES:
 - Keep it under 300 words. Make it feel like a real scouting report.
 """
 
-            answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.SONNET, max_tokens=400)
+            answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.HAIKU, max_tokens=400)
             answer = answer_result.text or "No scouting data found."
 
             embed = discord.Embed(
@@ -3683,7 +3683,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
                     f"Highlight who dominated, any notable storylines, and tease the playoff picture. "
                     f"Keep it punchy and entertaining."
                 )
-                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=300)
+                flair = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=300)
                 embed.add_field(
                     name="🎙️ ATLAS Echo",
                     value=flair.text[:900],
