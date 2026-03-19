@@ -21,7 +21,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 import discord
 
-from atlas_html_engine import render_card, wrap_card, esc
+from atlas_html_engine import render_card, wrap_card, esc, icon_pill
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -288,7 +288,7 @@ async def build_flow_card(user_id: int) -> bytes:
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f4b0</div>
+    <div class="game-icon-pill">{icon_pill("wallet", "\U0001f4b0")}</div>
     <div class="game-title-group">
       <div class="game-title">ATLAS FLOW</div>
       <div class="game-subtitle">ECONOMY HUB</div>
@@ -547,7 +547,7 @@ async def build_my_bets_card(user_id: int) -> bytes:
 
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f4cb</div>
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f4cb")}</div>
     <div class="game-title-group">
       <div class="game-title">MY BETS</div>
       <div class="game-subtitle">ACTIVE POSITIONS</div>
@@ -650,7 +650,7 @@ async def build_portfolio_card(user_id: int) -> bytes:
 
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f4c8</div>
+    <div class="game-icon-pill">{icon_pill("predictions", "\U0001f4c8")}</div>
     <div class="game-title-group">
       <div class="game-title">PORTFOLIO</div>
       <div class="game-subtitle">{open_count} OPEN POSITION{'S' if open_count != 1 else ''}</div>
@@ -750,7 +750,7 @@ async def build_wallet_card(user_id: int) -> bytes:
 
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f4b0</div>
+    <div class="game-icon-pill">{icon_pill("wallet", "\U0001f4b0")}</div>
     <div class="game-title-group">
       <div class="game-title">WALLET</div>
       <div class="game-subtitle">TRANSACTION LEDGER</div>
@@ -887,7 +887,7 @@ async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
 
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f3c6</div>
+    <div class="game-icon-pill">{icon_pill("leaderboard", "\U0001f3c6")}</div>
     <div class="game-title-group">
       <div class="game-title">LEADERBOARD</div>
       <div class="game-subtitle">TSL FLOW RANKINGS</div>

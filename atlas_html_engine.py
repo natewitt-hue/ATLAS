@@ -188,6 +188,17 @@ def achievement_icon_src(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Icon pill helper (public API)
+# ---------------------------------------------------------------------------
+def icon_pill(name: str, fallback: str = "") -> str:
+    """Return <img> tag for a game icon, or fallback emoji if icon not found."""
+    src = game_icon_src(name)
+    if src:
+        return f'<img src="{src}">'
+    return fallback
+
+
+# ---------------------------------------------------------------------------
 # HTML escape helper (public API)
 # ---------------------------------------------------------------------------
 def esc(text) -> str:
@@ -259,6 +270,11 @@ body {
   background: rgba(212,175,55,0.15);
   color: var(--gold);
   flex-shrink: 0;
+  overflow: hidden;
+}
+.game-icon-pill img {
+  width: 100%; height: 100%;
+  object-fit: cover; border-radius: 8px;
 }
 .game-title-group { display: flex; flex-direction: column; }
 .game-title {
