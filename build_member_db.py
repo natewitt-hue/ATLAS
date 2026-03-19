@@ -1080,8 +1080,14 @@ def build_member_table(db_path: str = DB_PATH):
     runtime team assignments (set via /commish assign) survive bot restarts.
     Seed data fills empty fields but never overwrites a runtime team assignment.
     """
+    return _build_member_table_core(db_path)
+
+
+def _build_member_table_core(db_path: str):
+    """Core member table build — separated for retry wrapper."""
     with _build_lock:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
         cur  = conn.cursor()
 
         cur.execute("""
@@ -1175,7 +1181,7 @@ def sync_db_usernames_from_teams(db_path: str = DB_PATH) -> dict:
     This runs automatically on every startup/sync so new members self-populate
     without manual registry edits.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     cur  = conn.cursor()
 
     # Check teams table exists
@@ -1242,7 +1248,7 @@ def validate_db_usernames(db_path: str = DB_PATH) -> list[dict]:
     Returns list of members whose db_username appears in ZERO games — likely wrong.
     Run this after sync to surface bad entries early.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     cur = conn.cursor()
     tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
     if "games" not in tables:
@@ -1278,7 +1284,7 @@ def get_db_username_for_discord_id(discord_id: int | str, db_path: str = DB_PATH
     Used in /ask to map interaction.user.id → exact DB username for 'me/my/I' queries.
     Returns None if not found or db_username is NULL.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     row  = conn.execute(
         "SELECT db_username FROM tsl_members WHERE discord_id = ?",
         (str(discord_id),)
@@ -1301,7 +1307,7 @@ def resolve_db_username(discord_id: int | str, db_path: str = DB_PATH) -> str | 
 
     This replaces the old get_db_username_for_discord_id() as the primary resolver.
     """
-    conn = sqlite3.connect(db_path, timeout=5)
+    conn = sqlite3.connect(db_path, timeout=10)
     sid = str(discord_id)
 
     # Step 1: Check cached db_username
@@ -1392,7 +1398,7 @@ def get_known_users(db_path: str = DB_PATH) -> list[str]:
     Return list of all db_usernames for use as KNOWN_USERS in history_cog.
     Includes both current and historical members who have DB records.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     rows = conn.execute(
         "SELECT db_username FROM tsl_members WHERE db_username IS NOT NULL"
     ).fetchall()
@@ -1413,7 +1419,7 @@ def get_alias_map(db_path: str = DB_PATH) -> dict[str, str]:
     Also dynamically resolves members with a team but NULL db_username
     by looking up teams.userName — so the alias map is never stale.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
 
     # Standard aliases for members with known db_username
     rows = conn.execute("""
@@ -1462,7 +1468,7 @@ def get_username_to_nick_map(db_path: str = DB_PATH) -> dict[str, str]:
     Used for ring lookups and display name resolution.
     Only includes members with both a db_username and a nickname.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     rows = conn.execute(
         "SELECT db_username, nickname FROM tsl_members WHERE db_username IS NOT NULL AND nickname IS NOT NULL"
     ).fetchall()
@@ -1472,7 +1478,7 @@ def get_username_to_nick_map(db_path: str = DB_PATH) -> dict[str, str]:
 
 def get_active_members(db_path: str = DB_PATH) -> list[dict]:
     """Return all active members as dicts."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM tsl_members WHERE active=1 ORDER BY status DESC, discord_username"
@@ -1486,7 +1492,7 @@ def upsert_member(member: dict, db_path: str = DB_PATH):
     Add or update a single member record.
     member dict must contain discord_username at minimum.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.execute("""
         INSERT INTO tsl_members
             (discord_id, discord_username, db_username, nickname, display_name,
@@ -1586,7 +1592,7 @@ if __name__ == "__main__":
     print()
 
     # Print items needing verification
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     needs = conn.execute(
         "SELECT discord_username, db_username, notes FROM tsl_members WHERE notes LIKE '%VERIFY%'"
     ).fetchall()

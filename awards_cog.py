@@ -8,6 +8,7 @@ import uuid
 import discord
 from discord import app_commands
 from discord.ext import commands
+from atlas_colors import AtlasColors
 
 from permissions import ADMIN_USER_IDS
 
@@ -81,7 +82,7 @@ class AwardsCog(commands.Cog):
         _polls[poll_id] = {"title": title, "options": options, "votes": {}, "open": True}
         _save_polls()
 
-        embed = discord.Embed(title=f"🗳️ {title}", description="Select your choice from the dropdown below. Votes are blind.", color=discord.Color.gold())
+        embed = discord.Embed(title=f"🗳️ {title}", description="Select your choice from the dropdown below. Votes are blind.", color=AtlasColors.TSL_GOLD)
         view = VoteView(poll_id, options)
 
         await interaction.response.send_message(f"Poll created: {title}", ephemeral=True)
@@ -101,7 +102,7 @@ class AwardsCog(commands.Cog):
 
         results = "\n".join([f"**{opt}**: {tally.get(opt, 0)} votes" for opt in _polls[poll_id]["options"]])
 
-        embed = discord.Embed(title=f"Final Results: {_polls[poll_id]['title']}", description=results, color=discord.Color.green())
+        embed = discord.Embed(title=f"Final Results: {_polls[poll_id]['title']}", description=results, color=AtlasColors.SUCCESS)
         await interaction.response.send_message(embed=embed)
 
 

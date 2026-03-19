@@ -67,7 +67,8 @@ POS_GROUPS: dict[str, list[str]] = {
     "K / P":       ["K", "P"],
 }
 
-TSL_GOLD  = 0xD4AF37
+from atlas_colors import AtlasColors
+TSL_GOLD  = AtlasColors.TSL_GOLD.value
 TSL_BLACK = 0x1A1A1A
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

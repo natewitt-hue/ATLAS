@@ -6,6 +6,7 @@ session recaps. Consumes events from flow_events.py.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import defaultdict
@@ -493,6 +494,7 @@ class FlowLiveCog(commands.Cog):
     @pulse_loop.before_loop
     async def before_pulse_loop(self):
         await self.bot.wait_until_ready()
+        await asyncio.sleep(10)  # Let startup DB ops finish before first pulse
 
     @tasks.loop(seconds=30)
     async def session_reaper(self):
@@ -731,10 +733,10 @@ class FlowLiveCog(commands.Cog):
             await channel.send(file=file)
 
     async def _get_flow_live_channel(self, guild_id: int):
-        """Resolve #flow-live channel via setup_cog."""
+        """Resolve #flow-live channel via setup_cog (async-safe)."""
         try:
-            from setup_cog import get_channel_id
-            ch_id = get_channel_id("flow_live", guild_id)
+            from setup_cog import get_channel_id_async
+            ch_id = await get_channel_id_async("flow_live", guild_id)
             if ch_id:
                 return self.bot.get_channel(ch_id)
         except Exception:

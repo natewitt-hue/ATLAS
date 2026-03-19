@@ -16,6 +16,7 @@ Register in bot.py setup_hook():
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -26,6 +27,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from atlas_colors import AtlasColors
 
 log = logging.getLogger(__name__)
 
@@ -87,9 +89,15 @@ _CASINO_BRIDGE = {
 
 # ── DB Helpers ────────────────────────────────────────────────────────────────
 
+# In-memory cache for channel IDs — avoids repeated DB hits for values
+# that change only when a channel is explicitly reconfigured.
+_channel_cache: dict[str, int] = {}
+
+
 def _ensure_table() -> None:
-    """Create server_config table if it doesn't exist."""
+    """Create server_config table if it doesn't exist. Also enables WAL."""
     with sqlite3.connect(DB_PATH, timeout=30) as con:
+        con.execute("PRAGMA journal_mode=WAL")
         con.execute("""
             CREATE TABLE IF NOT EXISTS server_config (
                 config_key  TEXT PRIMARY KEY,
@@ -110,8 +118,14 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
         ch_id = get_channel_id("admin_chat")
         channel = bot.get_channel(ch_id)
     """
+    cache_key = f"{key}:{guild_id or 0}"
+    cached = _channel_cache.get(cache_key)
+    if cached is not None:
+        return cached
     try:
         with sqlite3.connect(DB_PATH, timeout=30) as con:
+            # Ensure table exists — sync_tsl_db's atomic swap can destroy it,
+            # and the table preservation step may not always succeed.
             con.execute("""
                 CREATE TABLE IF NOT EXISTS server_config (
                     config_key  TEXT PRIMARY KEY,
@@ -129,10 +143,23 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
                     "SELECT channel_id FROM server_config WHERE config_key=? LIMIT 1",
                     (key,)
                 ).fetchone()
-            return row[0] if row else None
+            result = row[0] if row else None
+            if result is not None:
+                _channel_cache[cache_key] = result
+            return result
     except Exception:
         log.error("Failed to read channel config for key=%s guild_id=%s", key, guild_id, exc_info=True)
         return None
+
+
+async def get_channel_id_async(key: str, guild_id: Optional[int] = None) -> Optional[int]:
+    """Async-safe wrapper — checks cache first, then uses executor for DB fallback."""
+    cache_key = f"{key}:{guild_id or 0}"
+    cached = _channel_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, get_channel_id, key, guild_id)
 
 
 def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
@@ -145,6 +172,8 @@ def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
                                                    guild_id=excluded.guild_id
         """, (key, channel_id, guild_id))
         con.commit()
+    # Invalidate cache for this key
+    _channel_cache.pop(f"{key}:{guild_id}", None)
 
 
 def _clear_guild_config(guild_id: int) -> int:
@@ -152,7 +181,12 @@ def _clear_guild_config(guild_id: int) -> int:
     with sqlite3.connect(DB_PATH, timeout=30) as con:
         cur = con.execute("DELETE FROM server_config WHERE guild_id=?", (guild_id,))
         con.commit()
-        return cur.rowcount
+        count = cur.rowcount
+    # Invalidate all cached entries for this guild
+    stale = [k for k in _channel_cache if k.endswith(f":{guild_id}")]
+    for k in stale:
+        _channel_cache.pop(k, None)
+    return count
 
 
 # ── Permission Builders ───────────────────────────────────────────────────────
@@ -299,7 +333,7 @@ async def _provision_channels(guild: discord.Guild) -> dict:
 
     # ── Migration: remove orphaned real_sportsbook config (one-time) ─────
     try:
-        with sqlite3.connect(DB_PATH) as con:
+        with sqlite3.connect(DB_PATH, timeout=10) as con:
             row = con.execute(
                 "SELECT channel_id FROM server_config WHERE config_key='_migration_v2'"
             ).fetchone()
@@ -348,7 +382,7 @@ async def _post_receipt(guild: discord.Guild, results: dict) -> None:
             f"All channel IDs are stored in `tsl_history.db → server_config`.\n"
             f"Renaming channels will **not** break routing — IDs are static."
         ),
-        color=0x00C851
+        color=AtlasColors.SUCCESS
     )
 
     if results["found"]:
@@ -431,7 +465,7 @@ class SetupChoiceView(discord.ui.View):
 
         embed = discord.Embed(
             title="ATLAS Setup — Channel Remap Complete",
-            color=0x00C851
+            color=AtlasColors.SUCCESS
         )
 
         if results["found"]:
@@ -462,7 +496,7 @@ class SetupChoiceView(discord.ui.View):
 
             embed = discord.Embed(
                 title="ATLAS Setup — Full Provisioning Complete",
-                color=0x00C851
+                color=AtlasColors.SUCCESS
             )
 
             if results["found"]:
@@ -515,7 +549,7 @@ class SetupChoiceView(discord.ui.View):
         embed = discord.Embed(
             title="ATLAS Cleanup Complete",
             description=f"Deleted **{deleted}** channels/categories.\nCleared **{cleared}** config entries.\n\nRun `/setup` again to create fresh ATLAS channels.",
-            color=0xFF4444
+            color=AtlasColors.ERROR
         )
         self.stop()
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -527,7 +561,7 @@ class SetupChoiceView(discord.ui.View):
 
 def _ensure_discovery_tables() -> None:
     """Create guild_registry, guild_roles, and guild_emojis tables."""
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS guild_registry (
                 guild_id      INTEGER PRIMARY KEY,
@@ -585,7 +619,7 @@ async def auto_discover(guild: discord.Guild) -> None:
 
     # ── 1. CHANNELS — match by name, skip already-configured keys ────────
     existing_keys: set[str] = set()
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
         rows = con.execute(
             "SELECT config_key FROM server_config WHERE guild_id=?", (gid,)
         ).fetchall()
@@ -633,7 +667,7 @@ async def auto_discover(guild: discord.Guild) -> None:
 
     # ── 2. PERMISSION AUDIT — check bot perms in configured channels ─────
     perm_ok, perm_warn = 0, 0
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
         cfg_rows = con.execute(
             "SELECT config_key, channel_id FROM server_config WHERE guild_id=?", (gid,)
         ).fetchall()
@@ -665,7 +699,7 @@ async def auto_discover(guild: discord.Guild) -> None:
 
     # ── 3. ROLES — cache all roles, identify key roles ───────────────────
     key_roles = {"commissioner": None, "tsl owner": None}
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
         # Clear stale roles for this guild, then insert fresh
         con.execute("DELETE FROM guild_roles WHERE guild_id=?", (gid,))
         role_cache_local: dict[str, int] = {}
@@ -696,7 +730,7 @@ async def auto_discover(guild: discord.Guild) -> None:
     banner_url = str(guild.banner.url) if guild.banner else None
     human_count = sum(1 for m in guild.members if not m.bot)
 
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
         con.execute("""
             INSERT INTO guild_registry (guild_id, guild_name, owner_id, member_count,
                                         boost_level, icon_url, banner_url, discovered_at, updated_at)
@@ -735,7 +769,7 @@ async def auto_discover(guild: discord.Guild) -> None:
             elif owner_role and owner_role in m.roles:
                 new_status = "League Owner"
             if new_status:
-                with sqlite3.connect(DB_PATH) as con:
+                with sqlite3.connect(DB_PATH, timeout=10) as con:
                     cur = con.execute(
                         "UPDATE tsl_members SET status=? WHERE discord_id=? AND status != ?",
                         (new_status, str(m.id), new_status),
@@ -751,7 +785,7 @@ async def auto_discover(guild: discord.Guild) -> None:
 
     # ── 7. EMOJIS — cache custom emojis ──────────────────────────────────
     emoji_count = 0
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=10) as con:
         con.execute("DELETE FROM guild_emojis WHERE guild_id=?", (gid,))
         for emoji in guild.emojis:
             con.execute(
@@ -811,7 +845,7 @@ class SetupCog(commands.Cog):
                 "**Create New** — Creates any missing channels under ATLAS categories "
                 "with proper permissions. Existing channels are kept."
             ),
-            color=0xC9962A
+            color=AtlasColors.TSL_GOLD
         )
         embed.set_footer(text="Channel IDs are stored statically — renaming channels won't break routing.")
 

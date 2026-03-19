@@ -27,6 +27,7 @@ import typing
 import discord
 from discord import app_commands
 from discord.ext import commands
+from atlas_colors import AtlasColors
 
 import aiosqlite
 
@@ -231,7 +232,7 @@ class CasinoHubView(discord.ui.View):
 
         embed = discord.Embed(
             title = f"🎰 {interaction.user.display_name}'s Casino Stats",
-            color = discord.Color.from_rgb(212, 175, 55),
+            color = AtlasColors.CASINO,
         )
         embed.add_field(name="Balance", value=f"**${balance:,}**", inline=False)
 
@@ -315,43 +316,27 @@ class CasinoCog(commands.Cog):
         streak = await db.get_streak(uid)
         jackpots = await db.get_jackpot_pools()
 
-        # Jackpot display
-        jp_lines = []
+        # Build jackpot dict for card
+        jp_dict = {}
         for t in ("mini", "major", "grand"):
             if t in jackpots:
-                jp_lines.append(f"**{t.capitalize()}**: ${jackpots[t]['pool']:,}")
-        jp_display = " | ".join(jp_lines) if jp_lines else "Pools loading..."
+                jp_dict[t] = jackpots[t]["pool"]
 
-        # Streak display
-        streak_display = ""
-        if streak["type"] == "win" and streak["len"] >= 3:
-            bonus = db.get_streak_bonus(streak)
-            label = bonus["label"] if bonus else "Hot"
-            streak_display = f"\n🔥 **{label}** — {streak['len']} win streak (+{int(bonus['pct']*100)}% payout boost)" if bonus else ""
-        elif streak["type"] == "loss" and streak["len"] >= 5:
-            streak_display = f"\n❄️ Cold streak — {streak['len']} losses (mercy active)"
+        # Build streak dict for card
+        streak_dict = {
+            "count": streak.get("len", 0),
+            "type": streak.get("type", ""),
+        }
 
-        embed = discord.Embed(
-            title       = "🎰 Welcome to the TSL Casino",
-            description = (
-                "**The Sim League — Gold Standard Gaming**\n\n"
-                "Pick a game below to get started.\n\n"
-                "🃏 **Blackjack** — Beat the dealer (6:5 BJ payout)\n"
-                "🎰 **Slots** — Controlled-RTP TSL machine (up to 25x + free spins)\n"
-                "🚀 **Crash** — Shared multiplier — cash out before it crashes\n"
-                "🪙 **Coin Flip** — 1.95x payout\n"
-                "🎟️ **Daily Scratch** — Free daily card (streak bonus!)\n"
-                + streak_display
-            ),
-            color = discord.Color.from_rgb(212, 175, 55),
+        from sportsbook_cards import build_casino_hub_card, card_to_file
+        png = await build_casino_hub_card(
+            balance=balance, max_bet=max_bet, tier_name=tier["name"],
+            streak=streak_dict, jackpots=jp_dict,
         )
-        embed.add_field(name="Your Balance", value=f"**${balance:,}**", inline=True)
-        embed.add_field(name="Max Bet",      value=f"${max_bet:,} ({tier['name']})", inline=True)
-        embed.add_field(name="💎 Jackpots",  value=jp_display, inline=False)
-        embed.set_footer(text="TSL Casino • The Sim League • Madden Gold Standard")
+        file = card_to_file(png, "casino_hub.png")
 
         view = CasinoHubView()
-        msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        msg = await interaction.followup.send(file=file, view=view, ephemeral=True)
         view.message = msg
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -409,7 +394,7 @@ class CasinoCog(commands.Cog):
         is_open = await db.is_casino_open()
         jackpots = await db.get_jackpot_pools()
 
-        embed = discord.Embed(title="🎰 TSL Casino Status", color=discord.Color.teal())
+        embed = discord.Embed(title="🎰 TSL Casino Status", color=AtlasColors.CASINO)
         embed.add_field(name="Casino Open",    value="✅ Yes" if is_open else "🔴 No", inline=True)
         embed.add_field(name="Total P&L",      value=f"${report['total_pl']:+,}",   inline=True)
         embed.add_field(name="Unique Players", value=str(report["unique_players"]),        inline=True)
@@ -485,7 +470,7 @@ class CasinoCog(commands.Cog):
 
         embed  = discord.Embed(
             title = "📊 TSL Casino — House P&L Report",
-            color = discord.Color.teal(),
+            color = AtlasColors.CASINO,
         )
         embed.add_field(name="Total P&L",      value=f"**${report['total_pl']:+,}**", inline=False)
         embed.add_field(name="Unique Players", value=str(report["unique_players"]),          inline=True)
@@ -551,7 +536,7 @@ class CasinoCog(commands.Cog):
         """View current jackpot pools."""
         await interaction.response.defer(thinking=True, ephemeral=True)
         jackpots = await db.get_jackpot_pools()
-        embed = discord.Embed(title="💎 Jackpot Pools", color=discord.Color.gold())
+        embed = discord.Embed(title="💎 Jackpot Pools", color=AtlasColors.TSL_GOLD)
         for t in ("mini", "major", "grand"):
             if t in jackpots:
                 jp = jackpots[t]

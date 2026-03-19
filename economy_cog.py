@@ -21,6 +21,7 @@ import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from atlas_colors import AtlasColors
 
 # -- Database ------------------------------------------------------------------
 import flow_wallet
@@ -291,7 +292,7 @@ class EconomyCog(commands.Cog):
                     embed = discord.Embed(
                         title="💰 Economy",
                         description=message,
-                        color=0xD4AF37,
+                        color=AtlasColors.ECONOMY,
                         timestamp=datetime.now(timezone.utc),
                     )
                     await ch.send(embed=embed)
@@ -397,7 +398,7 @@ class EconomyCog(commands.Cog):
                 f"**{member.display_name}**: {old:,} → **{new:,} TSL Bucks** (+{amount:,})\n"
                 f"Reason: *{reason}*"
             ),
-            color=0x22C55E,
+            color=AtlasColors.SUCCESS,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -425,7 +426,7 @@ class EconomyCog(commands.Cog):
                 f"**{member.display_name}**: {old:,} → **{new:,} TSL Bucks** (-{taken:,})\n"
                 f"Reason: *{reason}*"
             ),
-            color=0xEF4444,
+            color=AtlasColors.ERROR,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -453,7 +454,7 @@ class EconomyCog(commands.Cog):
                 f"**{member.display_name}**: {old:,} → **{new:,} TSL Bucks**\n"
                 f"Reason: *{reason}*"
             ),
-            color=0xD4AF37,
+            color=AtlasColors.ECONOMY,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -463,7 +464,7 @@ class EconomyCog(commands.Cog):
         embed = discord.Embed(
             title=f"💰 {member.display_name}",
             description=f"**Balance:** {bal:,} TSL Bucks",
-            color=0xD4AF37,
+            color=AtlasColors.ECONOMY,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -493,7 +494,7 @@ class EconomyCog(commands.Cog):
                 f"member{'s' if len(members) != 1 else ''} with {role.mention}.\n"
                 f"Reason: *{reason}*"
             ),
-            color=0x22C55E,
+            color=AtlasColors.SUCCESS,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -521,7 +522,7 @@ class EconomyCog(commands.Cog):
                 f"member{'s' if len(members) != 1 else ''} with {role.mention}.\n"
                 f"Reason: *{reason}*"
             ),
-            color=0xEF4444,
+            color=AtlasColors.ERROR,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -553,7 +554,7 @@ class EconomyCog(commands.Cog):
                 f"Reason: *{reason}*\n\n"
                 f"*Payments will begin within 1 hour.*"
             ),
-            color=0xD4AF37,
+            color=AtlasColors.ECONOMY,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -583,7 +584,7 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(
             title="📋 Active Stipends",
-            color=0xD4AF37,
+            color=AtlasColors.ECONOMY,
         )
         for s in stipends:
             sign = f"+{s['amount']:,}" if s['amount'] >= 0 else f"{s['amount']:,}"
@@ -633,7 +634,7 @@ class EconomyCog(commands.Cog):
         png = await view.render_current()
         file = discord.File(io.BytesIO(png), filename="flow.png")
 
-        embed = discord.Embed(color=0xD4AF37)
+        embed = discord.Embed(color=AtlasColors.ECONOMY)
         embed.set_image(url="attachment://flow.png")
         embed.set_footer(text="ATLAS Flow Economy")
 
@@ -656,7 +657,7 @@ class EconomyCog(commands.Cog):
             "ADMIN": "\U0001f6e0",        # wrench
         }
 
-        embed = discord.Embed(title="TSL Wallet", color=0xD4AF37)
+        embed = discord.Embed(title="TSL Wallet", color=AtlasColors.ECONOMY)
         embed.add_field(name="Balance", value=f"**${balance:,}**", inline=False)
 
         if txns:
@@ -696,7 +697,7 @@ class EconomyCog(commands.Cog):
         embed = discord.Embed(
             title="TSL Bucks Leaderboard",
             description="\n".join(lines),
-            color=0xD4AF37,
+            color=AtlasColors.ECONOMY,
         )
         embed.set_footer(text="ATLAS Flow Economy")
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -721,7 +722,7 @@ class EconomyCog(commands.Cog):
             ) as cur:
                 net_week = (await cur.fetchone())[0]
 
-        embed = discord.Embed(title="Economy Health", color=0xD4AF37)
+        embed = discord.Embed(title="Economy Health", color=AtlasColors.ECONOMY)
         embed.add_field(name="Total Supply", value=f"${total_supply:,}", inline=True)
         embed.add_field(name="Active Users", value=str(user_count), inline=True)
         embed.add_field(name="Net Flow (7d)", value=f"${net_week:+,}", inline=True)
@@ -869,7 +870,7 @@ class FlowHubView(discord.ui.View):
             await interaction.response.defer()
             png = await self.render_current()
             file = discord.File(io.BytesIO(png), filename="flow.png")
-            embed = discord.Embed(color=0xD4AF37)
+            embed = discord.Embed(color=AtlasColors.ECONOMY)
             embed.set_image(url="attachment://flow.png")
             embed.set_footer(text="ATLAS Flow Economy")
             await interaction.edit_original_response(

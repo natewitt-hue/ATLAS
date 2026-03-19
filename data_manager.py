@@ -444,7 +444,10 @@ def load_all() -> None:
 
     if len(all_scores_raw) <= 16:
         all_scores_raw = []
-        for w_idx in range(0, _l_week):
+        # _l_week is 1-based; weekIndex is 0-based.  range(0, _l_week) loads
+        # up to weekIndex (_l_week-1), which is the current week.  We add +1
+        # so the sportsbook can show next-week games for betting.
+        for w_idx in range(0, _l_week + 1):
             resp = _get(f"/games/scores/{_l_season}/{_l_stage}/{w_idx}")
             chunk = resp.get("data", []) if isinstance(resp, dict) else (resp or [])
             all_scores_raw.extend(chunk)

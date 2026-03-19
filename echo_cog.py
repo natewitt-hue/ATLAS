@@ -16,6 +16,7 @@ import os
 import discord
 from discord import app_commands
 from discord.ext import commands
+from atlas_colors import AtlasColors
 
 from echo_loader import load_all_personas, reload_personas, get_persona_status
 
@@ -49,7 +50,7 @@ class EchoCog(commands.Cog):
 
             embed = discord.Embed(
                 title="ATLAS Echo - Voice Rebuild Complete",
-                color=discord.Color.from_rgb(201, 150, 42)
+                color=AtlasColors.TSL_GOLD
             )
             embed.add_field(
                 name="Personas Generated",
@@ -84,7 +85,7 @@ class EchoCog(commands.Cog):
 
         embed = discord.Embed(
             title="ATLAS Echo - Persona Status",
-            color=discord.Color.from_rgb(30, 144, 255)
+            color=AtlasColors.TSL_BLUE
         )
 
         status_lines = []

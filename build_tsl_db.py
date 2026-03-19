@@ -383,10 +383,61 @@ def sync_tsl_db(
         # ── Add indexes ───────────────────────────────────────────────────────
         _add_indexes(conn)
 
+        # ── Preserve non-API tables from the old DB ─────────────────────────
+        # Other modules (setup_cog, build_member_db, codex_cog) store config
+        # and state tables in tsl_history.db. The atomic swap would destroy
+        # them, so we copy them into the new DB before swapping.
+        _PRESERVE_TABLES = [
+            "server_config", "guild_registry", "guild_roles", "guild_emojis",
+            "tsl_members", "conversation_history", "balance_snapshots",
+        ]
+        if os.path.exists(DB_PATH):
+            try:
+                conn.execute("ATTACH DATABASE ? AS old_db", (DB_PATH,))
+                old_tables = {
+                    r[0] for r in conn.execute(
+                        "SELECT name FROM old_db.sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                for tbl in _PRESERVE_TABLES:
+                    if tbl in old_tables:
+                        # Copy schema then data
+                        schema_row = conn.execute(
+                            "SELECT sql FROM old_db.sqlite_master WHERE type='table' AND name=?",
+                            (tbl,)
+                        ).fetchone()
+                        if schema_row and schema_row[0]:
+                            conn.execute(schema_row[0])
+                            conn.execute(f"INSERT INTO main.{tbl} SELECT * FROM old_db.{tbl}")
+                conn.commit()
+                conn.execute("DETACH DATABASE old_db")
+            except Exception as e:
+                log.warning("[TSL-DB] Could not preserve non-API tables: %s", e)
+
         # Ensure all data is flushed to disk before the atomic swap
         conn.execute("PRAGMA synchronous = FULL")
         conn.commit()
         conn.close()
+
+        # Clean up temp DB journal files before swap
+        for suffix in ("-wal", "-shm", "-journal"):
+            tmp_jrnl = tmp_path + suffix
+            if os.path.exists(tmp_jrnl):
+                try:
+                    os.remove(tmp_jrnl)
+                except OSError:
+                    pass
+
+        # Clean stale WAL/SHM from the OLD db BEFORE swapping, so new
+        # connections never see orphaned WAL files referencing the wrong
+        # db structure (which triggers WAL recovery + exclusive locks).
+        for suffix in ("-wal", "-shm", "-journal"):
+            stale = DB_PATH + suffix
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except OSError as e:
+                    log.warning("[TSL-DB] Could not remove stale %s: %s", stale, e)
 
         # ── Atomic swap (with retry for Windows file locking) ────────────────
         swapped = False
@@ -426,6 +477,17 @@ def sync_tsl_db(
                 os.remove(DB_PATH + ".tmp")
             except Exception:
                 pass
+
+    # Enable WAL mode for concurrent read/write access (best-effort,
+    # outside try block so a lock here doesn't mark the rebuild as failed).
+    # Note: explicit close() required — sqlite3's `with` only commits, it
+    # does NOT close the connection, which would leak a shared lock.
+    try:
+        wal_conn = sqlite3.connect(DB_PATH, timeout=10)
+        wal_conn.execute("PRAGMA journal_mode=WAL")
+        wal_conn.close()
+    except Exception:
+        pass  # WAL will be set by _ensure_table() on first access
 
     result["elapsed"] = round(time.time() - start, 1)
     return result

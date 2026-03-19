@@ -37,7 +37,8 @@ log = logging.getLogger("real_sportsbook")
 
 MIN_BET = 50
 DEFAULT_MAX_BET = 5000
-TSL_GOLD = 0xC8A951
+from atlas_colors import AtlasColors
+TSL_GOLD = AtlasColors.TSL_GOLD.value
 
 # Sport-specific emoji
 SPORT_EMOJI = {
@@ -70,22 +71,7 @@ SPORT_SEASONS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _american_to_str(odds: int) -> str:
-    """Format American odds as string (+150 / -110)."""
-    return f"+{odds}" if odds > 0 else str(odds)
-
-
-def _payout_calc(wager: int, odds: int) -> int:
-    """Calculate total payout (wager + profit) from American odds."""
-    if odds > 0:
-        return wager + int(wager * odds / 100)
-    else:
-        return wager + int(wager * 100 / abs(odds))
-
-
-def _profit_calc(wager: int, odds: int) -> int:
-    """Calculate profit only from American odds."""
-    return _payout_calc(wager, odds) - wager
+from odds_utils import american_to_str as _american_to_str, payout_calc as _payout_calc, profit_calc as _profit_calc  # noqa: E402
 
 
 async def _get_max_bet() -> int:
@@ -681,8 +667,13 @@ class EventListView(discord.ui.View):
             )
 
         view = BetTypeView(self.cog, event, odds_rows)
-        embed = view.build_embed()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+        from sportsbook_cards import build_real_match_detail_card, card_to_file
+        png = await build_real_match_detail_card(
+            event, odds_rows, sport_key=self.sport_key
+        )
+        file = card_to_file(png, f"match_{event_id}.png")
+        await interaction.followup.send(file=file, view=view, ephemeral=True)
 
 
 class BetTypeView(discord.ui.View):
@@ -939,18 +930,18 @@ class RealBetModal(discord.ui.Modal):
         profit = _profit_calc(amt, self.odds)
         matchup = f"{self.event['away_team']} @ {self.event['home_team']}"
 
-        embed = discord.Embed(title="Bet Confirmed", color=TSL_GOLD)
-        embed.add_field(name="Game", value=matchup, inline=False)
-        embed.add_field(name="Pick", value=f"**{self.pick}**", inline=True)
-        embed.add_field(name="Type", value=self.bet_type, inline=True)
-        embed.add_field(name="Odds", value=_american_to_str(self.odds), inline=True)
-        if self.line is not None:
-            embed.add_field(name="Line", value=f"{self.line:+g}", inline=True)
-        embed.add_field(name="Risk", value=f"**${amt:,}**", inline=True)
-        embed.add_field(name="To Win", value=f"**${profit:,}**", inline=True)
-        embed.add_field(name="Balance", value=f"${new_balance:,}", inline=True)
-        embed.set_footer(text="ATLAS Real Sportsbook")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Parse sport label for card
+        sport_label = self.event.get("sport_key", "").split("_")[-1].upper() or "SPORTS"
+
+        await interaction.response.defer(ephemeral=True)
+        from sportsbook_cards import build_bet_confirm_card, card_to_file
+        png = await build_bet_confirm_card(
+            pick=self.pick, bet_type=self.bet_type, odds=self.odds,
+            risk=amt, to_win=profit, balance=new_balance,
+            matchup=matchup, line=self.line, source=sport_label,
+        )
+        file = card_to_file(png, "bet_confirm.png")
+        await interaction.followup.send(file=file, ephemeral=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
