@@ -452,6 +452,120 @@ async def generate_with_tools(
     raise RuntimeError("No AI provider configured")
 
 
+async def generate_synthesis(
+    messages: list[dict],
+    tool_result_content: list[dict],
+    *,
+    system: str = "",
+    tools: list[dict] | None = None,
+    tier: Tier = Tier.SONNET,
+    max_tokens: int = 800,
+) -> AIResult:
+    """Synthesize an answer from tool-use results (multi-turn continuation).
+
+    Claude path: sends full multi-turn conversation (user → assistant w/ tool_use
+    → user w/ tool_results) for synthesis.
+    Gemini fallback: flattens tool results into a single prompt.
+
+    Parameters
+    ----------
+    messages : list[dict]
+        The conversation so far, e.g.:
+        [{"role": "user", "content": "..."}, {"role": "assistant", "content": <content_blocks>}]
+    tool_result_content : list[dict]
+        Tool result blocks, e.g.:
+        [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]
+    """
+    loop = asyncio.get_running_loop()
+
+    claude = _get_claude()
+    if claude:
+        try:
+            def _do_synthesis():
+                model = _CLAUDE_MODELS[tier]
+                # Serialize _raw_content blocks if they're SDK objects
+                serialized_messages = []
+                for msg in messages:
+                    content = msg.get("content")
+                    if isinstance(content, list) and content and hasattr(content[0], "type"):
+                        # SDK ContentBlock objects — convert to dicts
+                        blocks = []
+                        for b in content:
+                            if b.type == "text":
+                                blocks.append({"type": "text", "text": b.text})
+                            elif b.type == "tool_use":
+                                blocks.append({
+                                    "type": "tool_use",
+                                    "id": b.id,
+                                    "name": b.name,
+                                    "input": b.input,
+                                })
+                        serialized_messages.append({"role": msg["role"], "content": blocks})
+                    else:
+                        serialized_messages.append(msg)
+
+                # Append tool results as the next user turn
+                full_messages = serialized_messages + [
+                    {"role": "user", "content": tool_result_content}
+                ]
+
+                kwargs = {"model": model, "max_tokens": max_tokens, "messages": full_messages}
+                if system:
+                    kwargs["system"] = system
+                if tools:
+                    kwargs["tools"] = tools
+
+                response = claude.messages.create(**kwargs)
+                text_parts = [b.text for b in response.content if hasattr(b, "text")]
+                return AIResult(
+                    text=" ".join(text_parts).strip(),
+                    provider="claude",
+                    model=model,
+                    _raw_content=list(response.content),
+                )
+
+            result = await loop.run_in_executor(None, _do_synthesis)
+            return result
+        except Exception as e:
+            log.warning(f"[atlas_ai] Claude synthesis failed ({e}), falling back to Gemini")
+
+    # Gemini fallback: flatten tool results into a single prompt
+    gemini = _get_gemini()
+    if gemini:
+        try:
+            # Build a flat prompt from the conversation + results
+            parts = []
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, str):
+                    parts.append(f"{msg['role'].upper()}: {content}")
+                elif isinstance(content, list):
+                    for b in content:
+                        if hasattr(b, "text") and b.text:
+                            parts.append(f"ASSISTANT: {b.text}")
+                        elif hasattr(b, "name"):
+                            parts.append(f"TOOL CALL: {b.name}({json.dumps(getattr(b, 'input', {}))})")
+                        elif isinstance(b, dict) and b.get("type") == "text":
+                            parts.append(f"ASSISTANT: {b['text']}")
+            for tr in tool_result_content:
+                parts.append(f"TOOL RESULT ({tr.get('tool_use_id', '?')}): {tr.get('content', '')}")
+            parts.append("Based on the above tool results, provide a concise answer to the user's question.")
+            flat_prompt = "\n\n".join(parts)
+
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_gemini(gemini, flat_prompt, system, tier,
+                                     max_tokens, None, False),
+            )
+            result.fallback_used = True
+            return result
+        except Exception as e2:
+            log.error(f"[atlas_ai] Gemini synthesis fallback also failed: {e2}")
+            raise
+
+    raise RuntimeError("No AI provider configured")
+
+
 async def generate_with_search(
     prompt: str,
     *,

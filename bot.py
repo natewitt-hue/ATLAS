@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.3.0"  # Centralized AI provider — atlas_ai.py with Claude primary + Gemini fallback
+ATLAS_VERSION = "3.4.0"  # Oracle/Codex post-migration hardening — generate_synthesis(), schema accuracy fixes
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

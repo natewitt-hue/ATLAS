@@ -109,6 +109,23 @@ TABLE: games
          winner_user/loser_user are pre-computed from scores.
          To find games involving a user: WHERE homeUser='X' OR awayUser='X'
          Head-to-head: WHERE (homeUser='A' AND awayUser='B') OR (homeUser='B' AND awayUser='A')
+         NOTE: Overtime is NOT trackable — the API stores final scores only (no isOvertime flag).
+               Completed games always have a winner; tied final scores don't exist.
+  Win percentage pattern (avoids duplicate owners from home/away split):
+    SELECT u AS owner,
+      SUM(CASE WHEN winner_user=u THEN 1 ELSE 0 END) AS wins,
+      COUNT(*) AS total_games
+    FROM (
+      SELECT homeUser AS u, winner_user FROM games WHERE status IN ('2','3') AND homeUser != ''
+      UNION ALL
+      SELECT awayUser AS u, winner_user FROM games WHERE status IN ('2','3') AND awayUser != ''
+    ) GROUP BY u HAVING COUNT(*) >= 20 ORDER BY CAST(wins AS REAL)/total_games DESC
+  Single-team records (e.g. "most points by one team in a game"):
+    SELECT teamName, CAST(score AS INTEGER) AS pts, seasonIndex, weekIndex FROM (
+      SELECT homeTeamName AS teamName, homeScore AS score, seasonIndex, weekIndex FROM games WHERE status IN ('2','3')
+      UNION ALL
+      SELECT awayTeamName AS teamName, awayScore AS score, seasonIndex, weekIndex FROM games WHERE status IN ('2','3')
+    ) ORDER BY pts DESC LIMIT 1
 
 TABLE: teams
   Columns: teamId, cityName, abbrName, nickName, displayName, logoId,
@@ -169,8 +186,10 @@ TABLE: trades  (all trade history)
          team1Sent/team2Sent contain comma-separated asset descriptions with values.
 
 TABLE: players  (current roster snapshot)
+  *** CRITICAL: This table does NOT have a fullName column. Use firstName, lastName instead. ***
+  *** To display full name: (firstName || ' ' || lastName) AS fullName ***
   Columns: rosterId, firstName, lastName, age, height, weight, pos, jerseyNum,
-           college, yearsPro, dev, teamId, teamName, isFA, isOnIR,
+           college, yearsPro, dev, devTrait, teamId, teamName, isFA, isOnIR,
            playerBestOvr, capHit, contractSalary, contractYearsLeft,
            speedRating, strengthRating, agilityRating, awareRating, catchRating,
            routeRunShortRating, routeRunMedRating, routeRunDeepRating,
@@ -179,8 +198,12 @@ TABLE: players  (current roster snapshot)
            tackleRating, hitPowerRating, pursuitRating, playRecRating, manCoverRating,
            zoneCoverRating, pressRating, blockSheddingRating, runBlockRating,
            passBlockRating, impactBlockRating, kickPowerRating, kickAccuracyRating
-  Notes: dev values: 'Normal', 'Star', 'Superstar', 'XFactor'
+  Notes: dev values: 'Normal', 'Star', 'Superstar', 'Superstar X-Factor'
+         devTrait column: '0'=Normal, '1'=Star, '2'=Superstar, '3'=Superstar X-Factor
+         For X-Factor queries: use dev='Superstar X-Factor' OR devTrait='3'
          isFA='1' means free agent. teamName='Free Agent' for unsigned players.
+         WARNING: 800+ players have teamName='Free Agent' but isFA='0' (reserve pool).
+                  For active roster queries, ALWAYS exclude: WHERE teamName != 'Free Agent'
 
 TABLE: player_abilities  (X-Factor/Superstar abilities)
   Columns: rosterId, firstName, lastName, teamName, title, description,
@@ -204,6 +227,7 @@ TABLE: player_draft_map  ← USE THIS for any draft history queries
          DO NOT use players.teamName for draft queries.
          draftRound: 2=R1, 3=R2, 4=R3, 5=R4, 6=R5, 7=R6, 8=R7
          was_traded=1 means player was later moved from their drafting team.
+         dev values: 'Normal', 'Star', 'Superstar', 'Superstar X-Factor' (same as players table)
 
 COMMON JOINS:
 - team_stats JOIN games ON team_stats.gameId = games.id
@@ -344,7 +368,7 @@ async def gemini_sql(
     question: str, alias_map: dict | None = None,
     conv_context: str = "",
 ) -> str | None:
-    """Ask Gemini to generate SQL. Non-blocking via run_in_executor."""
+    """Ask AI to generate SQL. Non-blocking via run_in_executor."""
     _sanitize = lambda s: re.sub(r"['\";\\]", "", s)
     alias_block = ""
     if alias_map:
@@ -415,7 +439,7 @@ async def gemini_answer(
     question: str, sql: str, rows: list[dict],
     conv_context: str = "",
 ) -> str:
-    """Format SQL results into natural language. Non-blocking via run_in_executor."""
+    """Format SQL results into natural language via AI. Non-blocking via run_in_executor."""
     results_str = json.dumps(rows, indent=2)
     if len(results_str) > MAX_CHARS:
         results_str = results_str[:MAX_CHARS] + "\n... (truncated)"
@@ -445,6 +469,7 @@ RESPONSE GUIDELINES:
 - If data seems incomplete or unexpected, acknowledge it but still give the best answer.
 - NEVER repeat the SQL query or mention databases/tables — just deliver the answer.
 - NEVER invent stats or outcomes that are not in the results above.
+- ALWAYS use third person — refer to players/owners by name, never "I", "me", "my", "we".
 - Use sports language and dramatic flair — make numbers tell a story.
 """
 

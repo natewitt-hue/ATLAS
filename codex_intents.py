@@ -2,10 +2,10 @@
 codex_intents.py — Intent Detection Layer for ATLAS Codex
 ─────────────────────────────────────────────────────────────────────────────
 Three-tier query pipeline that intercepts known question patterns with
-deterministic SQL before falling through to Gemini NL→SQL.
+deterministic SQL before falling through to AI-powered NL→SQL.
 
 Tier 1: Regex pre-flight (instant, 100% reliable)
-Tier 2: Gemini structured classification (flexible, ~1s)
+Tier 2: AI structured classification (flexible, ~1s)
 Tier 3: Existing gemini_sql() pipeline (unchanged fallback)
 
 Public API:
@@ -18,11 +18,14 @@ Public API:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 
 import atlas_ai
 from atlas_ai import Tier
+
+log = logging.getLogger("codex_intents")
 
 try:
     import data_manager as dm
@@ -1376,13 +1379,8 @@ async def _classify_gemini(
     )
 
     try:
-        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU)
+        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, json_mode=True)
         text = result.text.strip()
-
-        # Strip markdown fences if present
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
 
         data = json.loads(text)
         intent = data.get("intent", "unknown")
@@ -1395,7 +1393,8 @@ async def _classify_gemini(
         # Build IntentResult from classified intent
         return _build_from_classification(intent, params, caller_db, resolved_names)
 
-    except Exception:
+    except Exception as e:
+        log.warning(f"[codex_intents] Tier 2 classification failed: {e}")
         return IntentResult(intent="unknown", tier=3)
 
 
@@ -1405,7 +1404,7 @@ def _build_from_classification(
     caller_db: str | None,
     resolved_names: dict[str, str],
 ) -> IntentResult:
-    """Build IntentResult from Gemini classification output."""
+    """Build IntentResult from AI classification output."""
 
     if intent == "h2h_record":
         o1 = _resolve_name(params.get("owner1", ""), resolved_names) or params.get("owner1", caller_db)

@@ -189,7 +189,7 @@ class AnalyticsNav(discord.ui.View):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-# ── Optional codex pipeline (SQL + Gemini NL queries) ────────────────────────
+# ── Optional codex pipeline (SQL + AI-powered NL queries) ─────────────────────
 # Module-scope defaults so names are always bound (Pyright safety)
 run_sql = None
 fuzzy_resolve_user = None
@@ -573,29 +573,19 @@ async def _claude_query(question: str, caller_db: str | None = None,
     if not tool_results:
         return result.text or "ATLAS couldn't figure out how to answer that. Try rephrasing.", [], ""
 
-    # Step 3: Send tool results back for Claude to synthesize an answer
-    # Build the multi-turn conversation for the synthesis call
-    loop = asyncio.get_running_loop()
-    claude = atlas_ai._get_claude()
-    if claude:
-        answer_response = await loop.run_in_executor(
-            None,
-            lambda: claude.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=800,
-                system=system,
-                tools=_ORACLE_TOOLS,
-                messages=[
-                    {"role": "user", "content": annotated},
-                    {"role": "assistant", "content": result._raw_content},
-                    {"role": "user", "content": tool_results},
-                ],
-            ),
-        )
-        text_parts = [b.text for b in answer_response.content if hasattr(b, "text")]
-        answer = " ".join(text_parts) or "ATLAS pulled the data but couldn't formulate a response."
-    else:
-        answer = result.text or "ATLAS pulled the data but couldn't formulate a response."
+    # Step 3: Send tool results back for AI to synthesize an answer
+    synthesis = await atlas_ai.generate_synthesis(
+        messages=[
+            {"role": "user", "content": annotated},
+            {"role": "assistant", "content": result._raw_content},
+        ],
+        tool_result_content=tool_results,
+        system=system,
+        tools=_ORACLE_TOOLS,
+        tier=Tier.SONNET,
+        max_tokens=800,
+    )
+    answer = synthesis.text or "ATLAS pulled the data but couldn't formulate a response."
 
     return answer, all_rows, tool_used
 
@@ -3036,7 +3026,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
                     f"{u1} all-time wins: {total_u1}. {u2} all-time wins: {total_u2}. "
                     f"{total_games} total games. Make it entertaining and use football slang."
                 )
-                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=300)
                 embed.add_field(name="🎙️ ATLAS Echo", value=flair.text[:900], inline=False)
             except Exception:
                 pass
@@ -3085,7 +3075,7 @@ class OracleHubView(discord.ui.View):
 
 
 class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
-    """TSL League mode: natural language → SQL → Gemini answer against tsl_history.db."""
+    """TSL League mode: natural language → SQL → AI-powered answer against tsl_history.db."""
 
     question = discord.ui.TextInput(
         label="Your TSL Question",
@@ -3096,7 +3086,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # CRITICAL: Immediate defer — Gemini always takes > 3 sec
+        # CRITICAL: Immediate defer — AI calls always take > 3 sec
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         if not _HISTORY_OK:
@@ -3165,7 +3155,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                         f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                         f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
                     )
-                    fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.SONNET, temperature=0.02)
+                    fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.SONNET, max_tokens=500, temperature=0.02)
                     sql = extract_sql(fix_result.text) or sql
                     rows, error = run_sql(sql)
                     if error:
@@ -3315,7 +3305,10 @@ TABLE: players (current roster snapshot — {dm.CURRENT_SEASON})
            tackleRating, hitPowerRating, pursuitRating, playRecRating, manCoverRating,
            zoneCoverRating, pressRating, blockSheddingRating, runBlockRating,
            passBlockRating, impactBlockRating, kickPowerRating, kickAccuracyRating
-  Notes: dev values: 'Normal', 'Star', 'Superstar', 'XFactor'. isFA='1' = free agent.
+  Notes: dev values: 'Normal', 'Star', 'Superstar', 'Superstar X-Factor'. isFA='1' = free agent.
+         devTrait column: '0'=Normal, '1'=Star, '2'=Superstar, '3'=Superstar X-Factor
+         WARNING: players has firstName/lastName (NOT fullName). Use firstName || ' ' || lastName.
+         WARNING: 800+ players have teamName='Free Agent' but isFA='0'. Exclude with: WHERE teamName != 'Free Agent'
 
 TABLE: player_abilities (X-Factor/Superstar abilities)
   Columns: rosterId, firstName, lastName, teamName, title, description,
@@ -3335,7 +3328,7 @@ Generate a SQLite SELECT query to answer this scouting question:
 "{q}"
 """
 
-            sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.SONNET)
+            sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.SONNET, max_tokens=500)
             sql = extract_sql(sql_result.text)
             if not sql:
                 await interaction.followup.send(
@@ -3374,7 +3367,7 @@ RESPONSE GUIDELINES:
 - Keep it under 300 words. Make it feel like a real scouting report.
 """
 
-            answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.SONNET)
+            answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.SONNET, max_tokens=400)
             answer = answer_result.text or "No scouting data found."
 
             embed = discord.Embed(
@@ -3690,7 +3683,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
                     f"Highlight who dominated, any notable storylines, and tease the playoff picture. "
                     f"Keep it punchy and entertaining."
                 )
-                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=300)
                 embed.add_field(
                     name="🎙️ ATLAS Echo",
                     value=flair.text[:900],
