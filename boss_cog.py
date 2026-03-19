@@ -43,8 +43,10 @@ except ImportError:
 
 log = logging.getLogger("atlas.boss")
 
-COMMISH_COLOR = discord.Color(0x202124)
-GOLD = discord.Color(0xC9962A)
+from atlas_colors import AtlasColors
+
+COMMISH_COLOR = AtlasColors.COMMISH
+GOLD = AtlasColors.TSL_GOLD
 
 VALID_CASINO_GAMES = ("blackjack", "crash", "slots", "coinflip")
 VALID_INTERVALS = ("daily", "weekly", "biweekly", "monthly")
@@ -1560,7 +1562,7 @@ class BossDevAuditModal(discord.ui.Modal, title="📊 Dev Traits"):
 
             embed = discord.Embed(
                 title=f"📊 Dev Traits — {'League-Wide' if not team_filter else team_filter}",
-                color=discord.Color.gold(),
+                color=AtlasColors.TSL_GOLD,
                 description=f"Season {dm.CURRENT_SEASON}",
             )
             for dev in sorted(by_dev.keys(), key=lambda d: dev_order.get(d, 9)):
@@ -1602,7 +1604,7 @@ class BossContractCheckModal(discord.ui.Modal, title="📋 Contract Check"):
 
             embed = discord.Embed(
                 title=f"📋 Contract Check — {len(matches)} result(s)",
-                color=discord.Color.blurple(),
+                color=AtlasColors.INFO,
             )
             for p in matches[:5]:
                 name   = f"{p.get('firstName','')} {p.get('lastName','')}".strip()
@@ -1811,7 +1813,7 @@ class BossAbilityReassignModal(discord.ui.Modal, title="🔄 Ability Reassignmen
 
 def _boss_build_player_ability_embed(result) -> discord.Embed:
     """Rich embed for a single player ability audit result."""
-    color = discord.Color.green() if result.is_clean else discord.Color.red()
+    color = AtlasColors.SUCCESS if result.is_clean else AtlasColors.ERROR
     embed = discord.Embed(
         title=f"{'✅' if result.is_clean else '🚨'} {result.name}",
         color=color,
@@ -1867,7 +1869,7 @@ def _boss_build_team_ability_embeds(team_results, team_name: str) -> list[discor
 
     summary = discord.Embed(
         title=f"🏈 {team_name} — Ability Audit",
-        color=discord.Color.red() if violations else discord.Color.green(),
+        color=AtlasColors.ERROR if violations else AtlasColors.SUCCESS,
         description=(
             f"**{len(team_results)}** players audited  |  "
             f"**{clean_count}** clean  |  "
@@ -1906,7 +1908,7 @@ def _boss_build_team_ability_embeds(team_results, team_name: str) -> list[discor
 def _boss_build_league_ability_embed(summary: dict, top_violations) -> discord.Embed:
     """High-level league-wide ability audit embed."""
     clean_pct = int(100 * summary["cleanPlayers"] / max(summary["totalPlayersAudited"], 1))
-    color = discord.Color.green() if summary["violations"] == 0 else discord.Color.orange()
+    color = AtlasColors.SUCCESS if summary["violations"] == 0 else AtlasColors.WARNING
 
     embed = discord.Embed(
         title="🛡️ TSL Full League Ability Audit",
@@ -1940,7 +1942,7 @@ def _boss_build_league_ability_embed(summary: dict, top_violations) -> discord.E
 def _boss_build_reassignment_summary_embed(summary: dict) -> discord.Embed:
     """High-level league-wide reassignment summary embed."""
     has_changes = summary["playersWithSwaps"] > 0 or summary["playersUnresolved"] > 0
-    color = discord.Color.orange() if has_changes else discord.Color.green()
+    color = AtlasColors.WARNING if has_changes else AtlasColors.SUCCESS
 
     embed = discord.Embed(
         title=f"🔄 TSL Ability Reassignment — Season {dm.CURRENT_SEASON}",
@@ -2011,7 +2013,7 @@ def _boss_build_reassignment_team_embeds(changed_results) -> list[discord.Embed]
             suffix = f" (pt. {part_num})" if part_num > 1 else ""
             e = discord.Embed(
                 title=f"🏈 {team_name} — Ability Reassignment{suffix}",
-                color=discord.Color.orange(),
+                color=AtlasColors.WARNING,
             )
             return e
 
@@ -2241,7 +2243,7 @@ class UnassignMemberSelectView(discord.ui.View):
                     f"**{member.display_name}** (<@{member.id}>) "
                     f"removed from **{entry.team_name}** ({entry.team_abbr})."
                 ),
-                color=discord.Color.orange(),
+                color=AtlasColors.WARNING,
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:

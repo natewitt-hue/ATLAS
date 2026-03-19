@@ -24,6 +24,7 @@ import typing
 import discord
 from discord import app_commands
 from discord.ext import commands
+from atlas_colors import AtlasColors
 
 # ── Group Definition ─────────────────────────────────────────────────────────
 
@@ -598,7 +599,7 @@ class CommishCog(commands.Cog):
         embed = discord.Embed(
             title="Team Assignment",
             description=f"Pick a conference to assign **{member.display_name}** to a team.",
-            color=discord.Color.from_rgb(201, 150, 42),
+            color=AtlasColors.TSL_GOLD,
         )
         view = roster.AssignConferenceView(member)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -624,7 +625,7 @@ class CommishCog(commands.Cog):
                 f"**{member.display_name}** (<@{member.id}>) has been "
                 f"unassigned from the **{old_team}**."
             ),
-            color=discord.Color.orange(),
+            color=AtlasColors.WARNING,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -649,7 +650,7 @@ class CommishCog(commands.Cog):
 
         embed = discord.Embed(
             title="TSL Owner Roster",
-            color=discord.Color.from_rgb(201, 150, 42),
+            color=AtlasColors.TSL_GOLD,
         )
         embed.add_field(
             name="\U0001f3c8 AFC",

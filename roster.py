@@ -27,6 +27,7 @@ import sqlite3
 from dataclasses import dataclass
 
 import discord
+from atlas_colors import AtlasColors
 
 # ── DB path (same as build_member_db) ─────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -437,7 +438,7 @@ class _TeamAssignSelect(discord.ui.Select):
                 f"**{self._member.display_name}** (<@{self._member.id}>) "
                 f"has been assigned to the **{team_nick}** ({team_abbr})."
             ),
-            color=discord.Color.green(),
+            color=AtlasColors.SUCCESS,
         )
         await interaction.response.edit_message(embed=embed, view=None, content=None)
 

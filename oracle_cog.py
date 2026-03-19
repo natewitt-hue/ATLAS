@@ -43,6 +43,12 @@ import data_manager as dm
 import intelligence as ig
 
 from permissions import ADMIN_USER_IDS
+
+try:
+    from echo_loader import get_persona
+except ImportError:
+    get_persona = lambda _mode="casual": "You are ATLAS."
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
@@ -239,7 +245,8 @@ except ImportError:
 
 # ── ATLAS branding constants ──────────────────────────────────────────────────
 from constants import ATLAS_ICON_URL
-ATLAS_GOLD = discord.Color.from_rgb(201, 150, 42)
+from atlas_colors import AtlasColors
+ATLAS_GOLD = AtlasColors.TSL_GOLD
 
 # ── Module-level cached Gemini client (avoids spinning up a new client per call)
 _GEMINI_CLIENT = None
@@ -526,7 +533,6 @@ def _dispatch_tool(name: str, args: dict) -> tuple[list[dict], str | None]:
 
 def _build_oracle_system_prompt(caller_db: str | None = None, conv_context: str = "", affinity: str = "") -> str:
     """Build the system prompt for Claude Oracle queries."""
-    from echo_loader import get_persona
     persona = get_persona("analytical")
 
     known_users = ""
@@ -546,7 +552,6 @@ def _build_oracle_system_prompt(caller_db: str | None = None, conv_context: str 
 
     return f"""{persona}
 
-You are ATLAS Oracle — the intelligence system for The Simulation League (TSL), a Madden NFL sim league.
 You have access to tools that query the TSL database. Use them to answer questions about stats, records, rosters, trades, and league history.
 
 CURRENT CONTEXT:
@@ -687,15 +692,17 @@ async def _claude_chat(question: str, system_prompt: str, context: str = "") -> 
 
 
 # ── Color palette ─────────────────────────────────────────────────────────────
+# Domain-specific Oracle colors (not in AtlasColors — semantic to this module)
 C_HOT     = discord.Color.from_rgb(255, 87,  51)   # fire orange
 C_COLD    = discord.Color.from_rgb(82,  172, 240)   # ice blue
 C_NEUTRAL = discord.Color.from_rgb(148, 163, 184)   # slate
-C_GOLD    = discord.Color.from_rgb(250, 189, 47)    # championship gold
-C_GREEN   = discord.Color.from_rgb(34,  197, 94)
-C_RED     = discord.Color.from_rgb(239, 68,  68)
 C_PURPLE  = discord.Color.from_rgb(139, 92,  246)
-C_BLUE    = discord.Color.from_rgb(59,  130, 246)
 C_DARK    = discord.Color.from_rgb(26,  26,  46)
+# Mapped from AtlasColors
+C_GOLD    = AtlasColors.TSL_GOLD
+C_GREEN   = AtlasColors.SUCCESS
+C_RED     = AtlasColors.ERROR
+C_BLUE    = AtlasColors.INFO
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  NFL TEAM IDENTITY  (colors + ESPN logo CDN)
@@ -1641,7 +1648,7 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
                     f"off3rdDownConvPct={r.get('off3rdDownConvPct','?')}"
                 )
                 prompt = (
-                    f"You are ATLAS Oracle, TSL analytics intelligence. In ONE sharp sentence, "
+                    f"{get_persona('analytical')}\n\nIn ONE sharp sentence, "
                     f"describe {nickname}'s ({team}) playstyle. Be brutal and specific. "
                     f"Stats: {stats_snap}"
                 )
@@ -2453,7 +2460,7 @@ async def _build_team_card_snapshot(
         try:
             games_left = 18 - total_gms
             prompt = (
-                f"You are ATLAS Oracle, TSL predictive intelligence. In exactly 2 sentences max, "
+                f"{get_persona('analytical')}\n\nIn exactly 2 sentences max, "
                 f"give a savage but accurate season projection for the {team_name}. "
                 f"Record: {w}-{l}. Power rank: #{rank}. Seed: #{seed}. "
                 f"Net pts/game: {net_per_gm:+.1f}. Streak: {streak_disp or 'none'}. "
@@ -2776,7 +2783,7 @@ async def _build_team_matchup_embed(team_a: str, team_b: str) -> discord.Embed:
             bw2 = int(b_row.get("totalWins",0)); bl2 = int(b_row.get("totalLosses",0))
             h2h_ctx = f"{a_w}–{b_w} all-time H2H" if total > 0 else "no prior H2H"
             prompt = (
-                f"You are ATLAS Oracle, TSL matchup intelligence. In exactly 2 sentences, "
+                f"{get_persona('analytical')}\n\nIn exactly 2 sentences, "
                 f"predict {team_a} ({aw2}-{al2}) vs {team_b} ({bw2}-{bl2}). "
                 f"H2H: {h2h_ctx}. "
                 f"{team_a} OFF #{a_row.get('offTotalYdsRank','?')} DEF #{a_row.get('defTotalYdsRank','?')} "
@@ -3111,7 +3118,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
                 client = _get_gemini_client()
                 if client:
                     prompt = (
-                        f"You are ATLAS Echo. Write a punchy 2–3 sentence rivalry summary. "
+                        f"{get_persona('casual')}\n\nWrite a punchy 2–3 sentence rivalry summary. "
                         f"{u1} all-time wins: {total_u1}. {u2} all-time wins: {total_u2}. "
                         f"{total_games} total games. Make it entertaining and use football slang."
                     )
@@ -3322,7 +3329,6 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
         try:
             from google.genai import types
 
-            from echo_loader import get_persona
             system_instruction = get_persona("analytical")
 
             loop = asyncio.get_running_loop()
@@ -3384,7 +3390,6 @@ class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"
         try:
             from google.genai import types
 
-            from echo_loader import get_persona
             system_instruction = get_persona("analytical")
 
             loop = asyncio.get_running_loop()
@@ -3510,7 +3515,9 @@ Generate a SQLite SELECT query to answer this scouting question:
             if len(results_str) > 2500:
                 results_str = results_str[:2500] + "\n... (truncated)"
 
-            answer_prompt = f"""You are ATLAS in Scout mode — analyzing Madden player ratings and abilities.
+            answer_prompt = f"""{get_persona('analytical')}
+
+You are in Scout mode — analyzing Madden player ratings and abilities.
 
 A user asked: "{q}"
 
@@ -3536,7 +3543,7 @@ RESPONSE GUIDELINES:
             embed = discord.Embed(
                 title="🎯 ATLAS Intelligence — Player Scout",
                 description=_truncate_for_embed(answer),
-                color=discord.Color.from_rgb(30, 144, 255),
+                color=AtlasColors.TSL_BLUE,
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             embed.set_footer(
@@ -3598,7 +3605,6 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
 
             tsl_context = "\n\n".join(context_parts) if context_parts else ""
 
-            from echo_loader import get_persona
             system_instruction = get_persona("analytical")
 
             contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
@@ -3626,7 +3632,7 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
             embed = discord.Embed(
                 title="🧠 ATLAS Intelligence — Strategy Room",
                 description=_truncate_for_embed(answer),
-                color=discord.Color.from_rgb(34, 197, 94),
+                color=AtlasColors.SUCCESS,
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
             embed.set_footer(
@@ -3866,7 +3872,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
                 client = _get_gemini_client()
                 if client:
                     prompt = (
-                        f"You are ATLAS Echo. Write a vivid 3–4 sentence recap of TSL Season {season_num}. "
+                        f"{get_persona('casual')}\n\nWrite a vivid 3–4 sentence recap of TSL Season {season_num}. "
                         f"Total games: {len(rows)}. Top records:\n{top_str}\n"
                         f"Highlight who dominated, any notable storylines, and tease the playoff picture. "
                         f"Keep it punchy and entertaining."
@@ -4060,7 +4066,7 @@ class HubView(discord.ui.View):
                 "🎯 **Player Scout** — Madden ratings, dev traits, abilities\n"
                 "🧠 **Strategy** — Trade advice, roster tips, game strategy"
             ),
-            color=0xC9962A,
+            color=AtlasColors.TSL_GOLD,
         )
         embed.set_footer(text="ATLAS™ Oracle Module")
         await interaction.response.send_message(
@@ -4237,7 +4243,7 @@ class StatsHubCog(commands.Cog):
                 "🎯 **Player Scout** — Madden ratings, dev traits, abilities\n"
                 "🧠 **Strategy** — Trade advice, roster tips, game strategy"
             ),
-            color=0xC9962A,
+            color=AtlasColors.TSL_GOLD,
         )
         embed.set_author(
             name="ATLAS · Autonomous TSL League Administration System",

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 from atlas_html_engine import render_card, wrap_card, esc, icon_pill
+from odds_utils import american_to_str
 
 # ── Sport icon mapping ────────────────────────────────────────────────────────
 SPORT_ICON_MAP = {
@@ -737,10 +738,6 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 #  REAL SPORTSBOOK MATCH DETAIL CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _american_fmt(odds: int) -> str:
-    """Format American odds as string (+150 / -110)."""
-    return f"+{odds}" if odds > 0 else str(odds)
-
 
 async def build_real_match_detail_card(
     event: dict, odds_rows: list[dict], *, sport_key: str = ""
@@ -770,7 +767,7 @@ async def build_real_match_detail_card(
         cls = "fav" if price < 0 else "dog"
         ml_cells += f"""<div class="odds-cell">
       <div class="odds-team">{name}</div>
-      <div class="odds-value {cls}">{_american_fmt(price)}</div>
+      <div class="odds-value {cls}">{american_to_str(price)}</div>
     </div>"""
     # Pad if only 1 or 0 outcomes
     while ml_cells.count("odds-cell") < 2:
@@ -782,7 +779,7 @@ async def build_real_match_detail_card(
     for o in spreads:
         name = esc(o["outcome_name"])
         point = f"{o['point']:+g}" if o.get("point") is not None else ""
-        price = _american_fmt(o["price"])
+        price = american_to_str(o["price"])
         spread_cells += f"""<div class="odds-cell">
       <div class="odds-team">{name}</div>
       <div class="odds-value">{point}</div>
@@ -797,7 +794,7 @@ async def build_real_match_detail_card(
     for o in totals:
         label = esc(o["outcome_name"])  # "Over" / "Under"
         point = f"{o['point']}" if o.get("point") is not None else ""
-        price = _american_fmt(o["price"])
+        price = american_to_str(o["price"])
         total_cells += f"""<div class="odds-cell">
       <div class="odds-team">{label}</div>
       <div class="odds-value">{point}</div>
@@ -817,19 +814,19 @@ async def build_real_match_detail_card(
         # ML cell
         if ml:
             cls = "fav" if ml["price"] < 0 else "dog"
-            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(ml["outcome_name"])}</div><div class="odds-value {cls}">{_american_fmt(ml["price"])}</div></div>'
+            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(ml["outcome_name"])}</div><div class="odds-value {cls}">{american_to_str(ml["price"])}</div></div>'
         else:
             grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
         # Spread cell
         if sp:
             pt = f"{sp['point']:+g}" if sp.get("point") is not None else ""
-            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(sp["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({_american_fmt(sp["price"])})</div></div>'
+            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(sp["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({american_to_str(sp["price"])})</div></div>'
         else:
             grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
         # Total cell
         if tot:
             pt = f"{tot['point']}" if tot.get("point") is not None else ""
-            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(tot["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({_american_fmt(tot["price"])})</div></div>'
+            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(tot["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({american_to_str(tot["price"])})</div></div>'
         else:
             grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
 

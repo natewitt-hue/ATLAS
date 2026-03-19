@@ -48,6 +48,7 @@ import uuid
 from urllib.parse import urlparse
 
 import discord
+from atlas_colors import AtlasColors
 import httpx
 import requests  # TODO: Unify on async httpx — requests is only used in _fetch_image_bytes()
 from discord import app_commands
@@ -186,7 +187,7 @@ def _build_complaint_embed(c: dict, show_id: bool = True) -> discord.Embed:
 
     embed = discord.Embed(
         title=f"{emoji} TSL Complaint — {label}",
-        color=discord.Color.orange(),
+        color=AtlasColors.WARNING,
         timestamp=datetime.datetime.fromisoformat(c["submitted_at"]),
     )
     embed.add_field(name="📤 Filed By",    value=f"<@{c['accuser_id']}>",  inline=True)
@@ -221,13 +222,13 @@ def _build_ruling_embed(c: dict) -> discord.Embed:
     notes   = c.get("ruling_notes", "")
 
     if verdict == "guilty":
-        color, title = discord.Color.red(),     "⚖️ TSL Ruling — GUILTY"
+        color, title = AtlasColors.ERROR,     "⚖️ TSL Ruling — GUILTY"
     elif verdict == "not_guilty":
-        color, title = discord.Color.green(),   "⚖️ TSL Ruling — NOT GUILTY"
+        color, title = AtlasColors.SUCCESS,   "⚖️ TSL Ruling — NOT GUILTY"
     elif verdict == "dismissed":
-        color, title = discord.Color.greyple(), "⚖️ TSL Ruling — DISMISSED"
+        color, title = AtlasColors.INFO, "⚖️ TSL Ruling — DISMISSED"
     else:
-        color, title = discord.Color.orange(),  "⚖️ TSL Ruling — PENDING"
+        color, title = AtlasColors.WARNING,  "⚖️ TSL Ruling — PENDING"
 
     cat_key         = c["category"]
     emoji, label, _ = CATEGORIES.get(cat_key, ("📝", cat_key, ""))
@@ -365,7 +366,7 @@ class ComplaintModal(discord.ui.Modal):
                     "✅ Upload as many files as you need — there's no limit per message, just send multiple replies.\n\n"
                     "⏳ *Commissioners will review your evidence before issuing a ruling.*"
                 ),
-                color=discord.Color.blurple()
+                color=AtlasColors.INFO
             )
             upload_embed.set_footer(text=f"Case {complaint_id} — evidence window is always open.")
             await thread.send(embed=upload_embed)
@@ -406,7 +407,7 @@ class ComplaintModal(discord.ui.Modal):
                 f"{'📎 **Head to your case thread to upload screenshots or video clips.**' if thread else ''}\n\n"
                 "You will be notified when a ruling is issued."
             ),
-            color=discord.Color.green()
+            color=AtlasColors.SUCCESS
         )
         if thread:
             confirm_embed.add_field(
@@ -614,7 +615,7 @@ class ComplaintCog(commands.Cog):
 
         embed = discord.Embed(
             title="📂 Open TSL Complaints",
-            color=discord.Color.orange(),
+            color=AtlasColors.WARNING,
             description=f"**{len(pending)}** pending case(s)"
         )
         for c in sorted(pending, key=lambda x: x["submitted_at"], reverse=True)[:20]:
@@ -673,10 +674,10 @@ RULING_FAIR_SIM       = "FAIR_SIM"
 RULING_INCONCLUSIVE   = "INCONCLUSIVE"
 
 RULING_COLORS = {
-    RULING_FORCE_WIN:      discord.Color.green(),
-    RULING_FORCE_OPPONENT: discord.Color.red(),
-    RULING_FAIR_SIM:       discord.Color.gold(),
-    RULING_INCONCLUSIVE:   discord.Color.greyple(),
+    RULING_FORCE_WIN:      AtlasColors.SUCCESS,
+    RULING_FORCE_OPPONENT: AtlasColors.ERROR,
+    RULING_FAIR_SIM:       AtlasColors.TSL_GOLD,
+    RULING_INCONCLUSIVE:   AtlasColors.INFO,
 }
 
 RULING_LABELS = {
@@ -845,7 +846,7 @@ def _build_review_embed(
     embed  = discord.Embed(
         title=f"⚖️ Force Request #{request_id} — Admin Review",
         description=f"**AI Ruling: {RULING_LABELS.get(ruling, ruling)}**",
-        color=RULING_COLORS.get(ruling, discord.Color.greyple()),
+        color=RULING_COLORS.get(ruling, AtlasColors.INFO),
         timestamp=dt.now(timezone.utc),
     )
     embed.add_field(name="📋 Requester",     value=requester.mention,                    inline=True)
@@ -889,7 +890,7 @@ def _build_result_embed(
     embed = discord.Embed(
         title=f"📋 Force Request Ruling — #{request_id}",
         description=f"**{RULING_LABELS.get(final_ruling, final_ruling)}**",
-        color=RULING_COLORS.get(final_ruling, discord.Color.greyple()),
+        color=RULING_COLORS.get(final_ruling, AtlasColors.INFO),
         timestamp=dt.now(timezone.utc),
     )
     embed.add_field(name="Requester", value=requester.mention,  inline=True)
@@ -1305,7 +1306,7 @@ def _dc_protocol_embed(quarter: int, score_margin: int) -> discord.Embed | str:
     embed = discord.Embed(
         title=f"📡 Disconnect Protocol — Q{quarter}",
         description=f"{DC_PROTOCOL[quarter]}\n\n**Ruling:** {ruling}",
-        color=discord.Color.blurple(),
+        color=AtlasColors.INFO,
     )
     return embed
 
@@ -1320,7 +1321,7 @@ def _blowout_check_embed(home_team: str, home_score: int, away_team: str, away_s
         violations.append("⚠️ 28-pt protocol: Verify no non-3rd down passes occurred in Q4.")
     embed = discord.Embed(
         title=f"Blowout Check: {home_team} vs {away_team}",
-        color=discord.Color.red() if violations else discord.Color.green(),
+        color=AtlasColors.ERROR if violations else AtlasColors.SUCCESS,
     )
     embed.description = "\n".join(violations) if violations else "✅ No automatic blowout flags."
     return embed
@@ -1336,7 +1337,7 @@ def _stat_check_embed(player: str, stat_type: str, yards: int) -> discord.Embed:
             f"**{yards} {stat_type} yards**\nThreshold: {threshold}\n\n"
             f"{'⚠️ Commissioner review required.' if flagged else '✅ Within range.'}"
         ),
-        color=discord.Color.red() if flagged else discord.Color.green(),
+        color=AtlasColors.ERROR if flagged else AtlasColors.SUCCESS,
     )
 
 
@@ -1740,16 +1741,16 @@ def _result_embed(
     ovr  = player.get("overallRating", "?")
 
     if validation["banned"]:
-        color  = discord.Color.red()
+        color  = AtlasColors.ERROR
         status = "🚫 Banned Move"
     elif not validation["legal"]:
-        color  = discord.Color.red()
+        color  = AtlasColors.ERROR
         status = "❌ Requirements Not Met"
     elif validation["requires_approval"]:
-        color  = discord.Color.gold()
+        color  = AtlasColors.TSL_GOLD
         status = "⏳ Pending Commissioner Approval"
     else:
-        color  = discord.Color.green()
+        color  = AtlasColors.SUCCESS
         status = "✅ Approved"
 
     embed = discord.Embed(
@@ -1821,7 +1822,7 @@ def _result_embed(
 def _announcement_embed(record: dict) -> discord.Embed:
     embed = discord.Embed(
         title=f"🔄 Position Change — {record['player_name']}",
-        color=discord.Color.blue(),
+        color=AtlasColors.INFO,
         description=(
             f"**{record['player_name']}** ({record['team']}) "
             f"has officially moved from **{record['from_pos']}** → **{record['to_pos']}**."
@@ -1850,7 +1851,7 @@ def _build_positionchangelog_embed(team: str = "") -> discord.Embed:
         return discord.Embed(
             title="📋 Position Change Log",
             description=f"No position changes recorded{label} in Season {dm.CURRENT_SEASON}.",
-            color=discord.Color.greyple(),
+            color=AtlasColors.INFO,
         )
     STATUS_EMOJI = {"approved": "✅", "pending": "⏳", "denied": "❌"}
     lines = []
@@ -1872,7 +1873,7 @@ def _build_positionchangelog_embed(team: str = "") -> discord.Embed:
         f"🔄 Position Changes — S{dm.CURRENT_SEASON}"
         + (f" | {team.strip()}" if team.strip() else "")
     )
-    embed = discord.Embed(title=title, color=discord.Color.blurple())
+    embed = discord.Embed(title=title, color=AtlasColors.INFO)
     for i, ch in enumerate(chunks):
         embed.add_field(
             name="\u200b" if i > 0 else f"{len(records)} change(s)",
@@ -2015,7 +2016,7 @@ async def _run_position_change(
     elif status == "pending":
         pending_embed = discord.Embed(
             title=f"⏳ Pending Approval — {p_name}: {from_pos} → {to_pos}",
-            color=discord.Color.gold(),
+            color=AtlasColors.TSL_GOLD,
             description=(
                 f"**{p_name}** ({p_team}) has requested a position change "
                 f"that requires Commissioner approval.\n\n"
@@ -2103,7 +2104,7 @@ class PositionChangeCog(commands.Cog):
         if channel:
             deny_embed = discord.Embed(
                 title=f"❌ Position Change Denied — {record['player_name']}",
-                color=discord.Color.red(),
+                color=AtlasColors.ERROR,
                 description=(
                     f"**{record['player_name']}** ({record['team']}) — "
                     f"{record['from_pos']} → {record['to_pos']}\n\n"
@@ -2438,16 +2439,16 @@ def _build_embed(ruling_text: str, username: str, avatar_url: str) -> discord.Em
 
     if "GO FOR IT" in upper and "STRATEGIC OVERRIDE" in upper:
         # Green but flagged as an override — commissioner should be aware
-        color = discord.Color.from_rgb(0, 200, 120)   # teal-green
+        color = AtlasColors.SUCCESS
         title = "🏈 TSL 4th Down Ruling  •  ⚡ Strategic Override"
     elif "GO FOR IT" in upper:
-        color = discord.Color.green()
+        color = AtlasColors.SUCCESS
         title = "🏈 TSL 4th Down Ruling"
     elif "UNVERIFIABLE" in upper or "FLAG" in upper:
-        color = discord.Color.yellow()
+        color = AtlasColors.WARNING
         title = "🏈 TSL 4th Down Ruling  •  ⚠️ Needs Review"
     else:
-        color = discord.Color.red()
+        color = AtlasColors.ERROR
         title = "🏈 TSL 4th Down Ruling"
 
     embed = discord.Embed(title=title, description=ruling_text, color=color)
@@ -2761,7 +2762,7 @@ class SentinelHubView(discord.ui.View):
                     "**Step 3:** Upload screenshots or video clips directly in your case thread.\n\n"
                     "⚠️ *False or frivolous complaints may result in penalties against the filer.*"
                 ),
-                color=discord.Color.orange(),
+                color=AtlasColors.WARNING,
             )
             embed.add_field(
                 name="📂 Categories",
@@ -2805,7 +2806,7 @@ class SentinelHubView(discord.ui.View):
                     "3. Attach 1-3 screenshots of your DM conversation\n"
                     "4. ATLAS will analyze the screenshots and file the request"
                 ),
-                color=discord.Color.orange(),
+                color=AtlasColors.WARNING,
             )
             embed.set_footer(text="ATLAS Sentinel — Force Request Protocol")
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2829,7 +2830,7 @@ class SentinelHubView(discord.ui.View):
                     "2. Attach your Madden game screenshot\n"
                     "3. ATLAS Vision will analyze the situation and issue a ruling"
                 ),
-                color=discord.Color.orange(),
+                color=AtlasColors.WARNING,
             )
             embed.set_footer(text="ATLAS Sentinel — 4th Down Protocol")
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2929,7 +2930,7 @@ def _build_sentinel_hub_embed() -> discord.Embed:
             "Your one-stop panel for TSL rule enforcement, compliance, and dispute resolution.\n"
             "Use the buttons below to access enforcement tools."
         ),
-        color=discord.Color.from_rgb(201, 150, 42),
+        color=AtlasColors.TSL_GOLD,
     )
     embed.set_thumbnail(url=ATLAS_ICON_URL)
     embed.add_field(

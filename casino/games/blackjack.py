@@ -23,6 +23,7 @@ import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import discord
+from atlas_colors import AtlasColors
 
 from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
@@ -397,7 +398,7 @@ async def _update_table_message(
     embed = discord.Embed(
         title       = "🃏 FLOW Casino — Blackjack",
         description = _hand_description(session),
-        color       = discord.Color.from_rgb(212, 175, 55),
+        color       = AtlasColors.CASINO,
     )
     embed.set_image(url="attachment://blackjack.png")
     embed.set_footer(text=f"Wager: ${session.wager:,}  |  Balance: ${bal:,}")
@@ -528,13 +529,13 @@ async def _finish_hand(
 
     # Amber for near-miss, otherwise normal colors
     if near_miss_msg:
-        color = discord.Color.from_rgb(255, 191, 0)
+        color = AtlasColors.WARNING
     elif log_outcome == "win":
-        color = discord.Color.green()
+        color = AtlasColors.SUCCESS
     elif log_outcome == "loss":
-        color = discord.Color.red()
+        color = AtlasColors.ERROR
     else:
-        color = discord.Color.greyple()
+        color = AtlasColors.INFO
 
     embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
     p_val = _hand_value(session.active_hand)
@@ -701,9 +702,9 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             txn_id       = str(result.get("txn_id", "")),
         )
         file  = discord.File(io.BytesIO(png), filename="blackjack.png")
-        color = (discord.Color.green() if outcome == "win"
-                 else discord.Color.red() if outcome == "loss"
-                 else discord.Color.greyple())
+        color = (AtlasColors.SUCCESS if outcome == "win"
+                 else AtlasColors.ERROR if outcome == "loss"
+                 else AtlasColors.INFO)
 
         embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
         embed.add_field(
@@ -762,7 +763,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     embed = discord.Embed(
         title       = f"🃏 FLOW Casino — Blackjack  |  {interaction.user.display_name}",
         description = _hand_description(session),
-        color       = discord.Color.from_rgb(212, 175, 55),
+        color       = AtlasColors.CASINO,
     )
     embed.set_image(url="attachment://blackjack.png")
     embed.set_footer(text=f"Wager: ${wager:,}  |  Balance: ${bal:,}  |  5-min timeout")

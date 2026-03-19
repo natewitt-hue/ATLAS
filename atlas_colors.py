@@ -24,7 +24,7 @@ class AtlasColors:
 
     # -- Module Colors (Primary) ----------------------------------------
     SPORTSBOOK  = discord.Color(0x1A73E8)  # Blue -- betting hub
-    CASINO      = discord.Color(0xC9962A)  # ATLAS Gold -- casino/gambling
+    CASINO      = discord.Color(0xD4AF37)  # ATLAS Gold -- casino/gambling
     STATS       = discord.Color(0x7B1FA2)  # Purple -- analytics/stats
     ECONOMY     = discord.Color(0x0D652D)  # Green -- money/economy
     SENTINEL    = discord.Color(0xD93025)  # Red -- rules/enforcement
@@ -35,7 +35,7 @@ class AtlasColors:
     ECHO        = discord.Color(0x4A148C)  # Deep Purple -- comms/voice
 
     # -- Brand Colors ---------------------------------------------------
-    TSL_GOLD    = discord.Color(0xC9962A)  # Canonical ATLAS gold
+    TSL_GOLD    = discord.Color(0xD4AF37)  # Canonical ATLAS gold (#D4AF37)
     TSL_DARK    = discord.Color(0x0A0A0A)  # Near-black background
     TSL_BLUE    = discord.Color(0x1E90FF)  # Dodger blue accent
 
@@ -53,7 +53,7 @@ class AtlasColors:
     # Usage: AtlasColors.by_module("sportsbook")
     _MODULE_MAP = {
         "sportsbook": 0x1A73E8,
-        "casino":     0xC9962A,
+        "casino":     0xD4AF37,
         "stats":      0x7B1FA2,
         "economy":    0x0D652D,
         "sentinel":   0xD93025,

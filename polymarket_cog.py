@@ -14,6 +14,7 @@ Author: TheWitt
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+from atlas_colors import AtlasColors
 
 import aiohttp
 import aiosqlite
@@ -32,6 +33,7 @@ import re
 from google import genai
 
 import flow_wallet
+from format_utils import fmt_volume
 from flow_wallet import (
     DB_PATH,
     InsufficientFundsError,
@@ -180,6 +182,13 @@ CATEGORY_COLORS = {
     "🤖 AI":            0x00CED1,
     "🌍 World":         0xE67E22,
     "🌐 Other":         0x95A5A6,
+}
+
+# CSS hex version for HTML renderers — derived from CATEGORY_COLORS
+# Keys strip the emoji prefix so renderers get plain names (e.g. "Elections")
+CATEGORY_COLORS_HEX: dict[str, str] = {
+    k.split(" ", 1)[1] if " " in k else k: f"#{v:06X}"
+    for k, v in CATEGORY_COLORS.items()
 }
 
 MARKETS_PER_PAGE = 10        # Market rows shown per curated view
@@ -686,18 +695,6 @@ def detect_result(market: dict) -> Optional[str]:
 
     return None
 
-
-def fmt_volume(vol) -> str:
-    """Format volume for display."""
-    try:
-        v = float(vol or 0)
-    except (ValueError, TypeError):
-        return "$0"
-    if v >= 1_000_000:
-        return f"${v/1_000_000:.1f}M"
-    if v >= 1_000:
-        return f"${v/1_000:.1f}K"
-    return f"${v:.0f}"
 
 
 
@@ -1215,7 +1212,7 @@ class MarketBrowserView(discord.ui.View):
         embed = discord.Embed(
             title="FLOW Prediction Markets",
             description=f"**{total}** markets · Select one below to view details",
-            color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
+            color=CATEGORY_COLORS.get(cat_label, AtlasColors.TSL_GOLD.value),
         )
 
         card_file = None
@@ -1258,7 +1255,7 @@ class MarketBrowserView(discord.ui.View):
 
         embed = discord.Embed(
             title=m.get("title", "")[:80],
-            color=CATEGORY_COLORS.get(cat_label, 0xD4AF37),
+            color=CATEGORY_COLORS.get(cat_label, AtlasColors.TSL_GOLD.value),
         )
 
         card_file = None
@@ -1486,7 +1483,7 @@ class CuratedBrowserView(discord.ui.View):
         embed = discord.Embed(
             title="FLOW Prediction Markets",
             description=f"**{total}** markets · Select one below to view details & bet",
-            color=0xD4AF37,
+            color=AtlasColors.TSL_GOLD,
         )
 
         card_file = None
@@ -2705,7 +2702,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         embed = discord.Embed(
             title="🔥 Daily Drop — Today's Prediction Markets",
-            color=0xD4AF37,
+            color=AtlasColors.TSL_GOLD,
         )
         card_file = discord.File(io.BytesIO(png), filename="daily_drop.png")
         embed.set_image(url="attachment://daily_drop.png")
@@ -2802,8 +2799,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         try:
             from echo_loader import get_persona
             system_instruction = get_persona("analytical")
-        except Exception:
-            system_instruction = "You are ATLAS, the editorial voice of The Simulation League."
+        except ImportError:
+            system_instruction = "You are ATLAS."
 
         prompt = (
             f"From these {len(shortlist)} prediction markets, select:\n"
@@ -3081,7 +3078,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         yes_bucks = price_to_bucks(yes_price)
         no_bucks  = price_to_bucks(no_price)
 
-        color = CATEGORY_COLORS.get(category, 0xD4AF37)
+        color = CATEGORY_COLORS.get(category, AtlasColors.TSL_GOLD.value)
         try:
             end_dt  = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             end_str = f"<t:{int(end_dt.timestamp())}:R>"

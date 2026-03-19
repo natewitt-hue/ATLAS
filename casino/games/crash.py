@@ -25,6 +25,7 @@ import io
 import logging
 
 import discord
+from atlas_colors import AtlasColors
 
 log = logging.getLogger(__name__)
 
@@ -407,7 +408,7 @@ def _build_lobby_embed(round_obj: CrashRound, remaining: int) -> discord.Embed:
             f"Use `/crash [amount]` to join!\n\n"
             + _players_list(round_obj)
         ),
-        color = discord.Color.from_rgb(212, 175, 55),
+        color = AtlasColors.CASINO,
     )
     embed.add_field(name="Players", value=str(len(round_obj.players)), inline=True)
     embed.add_field(name="Total Wagered", value=f"${round_obj.total_wagered:,}", inline=True)
@@ -417,7 +418,7 @@ def _build_lobby_embed(round_obj: CrashRound, remaining: int) -> discord.Embed:
 def _build_running_embed(round_obj: CrashRound) -> discord.Embed:
     embed = discord.Embed(
         title       = f"🚀 FLOW CRASH — {round_obj.current_mult:.2f}x",
-        color       = discord.Color.from_rgb(212, 175, 55),
+        color       = AtlasColors.CASINO,
     )
     embed.add_field(name="Multiplier",    value=f"**{round_obj.current_mult:.2f}x**", inline=True)
     embed.add_field(name="Still In",      value=str(round_obj.players_in),            inline=True)
@@ -429,7 +430,7 @@ def _build_running_embed(round_obj: CrashRound) -> discord.Embed:
 def _build_crash_embed(round_obj: CrashRound, lms_player: "PlayerBet | None" = None) -> discord.Embed:
     embed = discord.Embed(
         title       = f"💥 CRASHED @ {round_obj.crash_point:.2f}x",
-        color       = discord.Color.red(),
+        color       = AtlasColors.ERROR,
     )
     embed.add_field(name="Crash Point",   value=f"**{round_obj.crash_point:.2f}x**", inline=True)
     embed.add_field(name="Seed (Proof)",  value=f"`{round_obj.seed}`",               inline=True)

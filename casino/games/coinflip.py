@@ -22,6 +22,7 @@ import random
 from datetime import datetime, timezone
 
 import discord
+from atlas_colors import AtlasColors
 
 from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
@@ -141,11 +142,11 @@ async def play_coinflip(
 
     # Amber color for near-miss, green for win, red for loss
     if edge_tease:
-        embed_color = discord.Color.from_rgb(255, 191, 0)
+        embed_color = AtlasColors.WARNING
     elif won:
-        embed_color = discord.Color.green()
+        embed_color = AtlasColors.SUCCESS
     else:
-        embed_color = discord.Color.red()
+        embed_color = AtlasColors.ERROR
 
     embed = discord.Embed(
         title = f"🪙 FLOW Casino — Coin Flip  |  {interaction.user.display_name}",
@@ -275,7 +276,7 @@ class ChallengeView(discord.ui.View):
 
         embed = discord.Embed(
             title = "🪙 FLOW Casino — PvP Coin Flip",
-            color = discord.Color.gold(),
+            color = AtlasColors.TSL_GOLD,
         )
         embed.add_field(
             name  = "Coin landed on",
@@ -339,7 +340,7 @@ class ChallengeView(discord.ui.View):
                 f"<@{self.opponent_id}> declined the challenge.\n"
                 f"<@{self.challenger_id}> refunded **${self.wager:,}**."
             ),
-            color = discord.Color.greyple(),
+            color = AtlasColors.INFO,
         )
         self.clear_items()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -360,7 +361,7 @@ class ChallengeView(discord.ui.View):
                             f"<@{self.opponent_id}> didn't respond in time.\n"
                             f"<@{self.challenger_id}> refunded **${self.wager:,}**."
                         ),
-                        color = discord.Color.greyple(),
+                        color = AtlasColors.INFO,
                     )
                     await self.message.edit(embed=embed, view=self)
                 except discord.HTTPException:
@@ -432,7 +433,7 @@ async def send_challenge(
             f"Winner takes **${int(wager * 1.9):,}** (1.9x)\n\n"
             f"{opponent.mention} — you have **5 minutes** to accept or decline."
         ),
-        color = discord.Color.from_rgb(212, 175, 55),
+        color = AtlasColors.CASINO,
     )
     embed.set_footer(text=f"Challenge #{challenge_id}")
 

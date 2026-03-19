@@ -26,6 +26,7 @@ import io
 import random
 
 import discord
+from atlas_colors import AtlasColors
 
 from casino.casino_db import (
     deduct_wager, process_wager, get_balance,
@@ -211,7 +212,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     file  = discord.File(io.BytesIO(png), filename="slots.png")
     embed = discord.Embed(
         title = f"🎰 FLOW Casino — Slots  |  {player_name}",
-        color = discord.Color.from_rgb(212, 175, 55),
+        color = AtlasColors.CASINO,
     )
     embed.set_image(url="attachment://slots.png")
     embed.set_footer(text="Spinning...")
@@ -224,7 +225,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         file2 = discord.File(io.BytesIO(png2), filename="slots.png")
         embed2 = discord.Embed(
             title = f"🎰 FLOW Casino — Slots  |  {player_name}",
-            color = discord.Color.from_rgb(212, 175, 55),
+            color = AtlasColors.CASINO,
         )
         embed2.set_image(url="attachment://slots.png")
         embed2.set_footer(
@@ -274,11 +275,11 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
 
     # Near-miss uses amber color
     if is_near_miss:
-        embed_color = discord.Color.from_rgb(255, 191, 0)  # amber
+        embed_color = AtlasColors.WARNING
     elif payout > 0:
-        embed_color = discord.Color.green()
+        embed_color = AtlasColors.SUCCESS
     else:
-        embed_color = discord.Color.red()
+        embed_color = AtlasColors.ERROR
 
     # Streak & jackpot info from result
     streak_info = result.get("streak_info")
@@ -394,7 +395,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         free_embed = discord.Embed(
             title=f"🎁 FREE SPIN!  |  {player_name}",
             description=f"Your big win triggered a bonus spin!",
-            color=discord.Color.gold() if free_payout > 0 else discord.Color.from_rgb(100, 100, 100),
+            color=AtlasColors.TSL_GOLD if free_payout > 0 else AtlasColors.CODEX,
         )
         free_embed.add_field(name="Result", value=free_msg, inline=False)
         free_embed.add_field(name="Bonus Payout", value=f"${free_payout:,}", inline=True)
@@ -458,15 +459,15 @@ def _build_scratch_embed(
     is_match:     bool,
 ) -> discord.Embed:
     if revealed < 3:
-        color = discord.Color.from_rgb(212, 175, 55)
+        color = AtlasColors.CASINO
         desc  = f"Tap **Scratch!** to reveal tiles ({3 - revealed} left)"
     elif is_match:
         total = tiles[0] * 3
-        color = discord.Color.gold()
+        color = AtlasColors.TSL_GOLD
         desc  = f"🏆 **TRIPLE MATCH!** All tiles: **{tiles[0]:,}** × 3 = **+{total:,}!**"
     else:
         total = sum(tiles)
-        color = discord.Color.green()
+        color = AtlasColors.SUCCESS
         desc  = f"✅ You won **{total:,}!**"
 
     embed = discord.Embed(

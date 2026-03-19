@@ -44,6 +44,7 @@ from google import genai
 from difflib import get_close_matches
 
 import data_manager as dm
+from atlas_colors import AtlasColors
 
 # Optional modules
 try:
@@ -78,22 +79,14 @@ def _truncate_for_embed(text: str, limit: int = _EMBED_DESC_LIMIT) -> str:
         return text
     return text[:limit - 3] + "..."
 
-ATLAS_PERSONA = """
-You are ATLAS — the official AI intelligence system for The Simulation League (TSL).
-You speak with authority, confidence, and sharp wit. You know TSL inside and out.
-Use football slang, stat callouts, and dramatic flair. Never be boring.
-Keep responses under 400 words unless asked for full breakdowns.
-"""
-
 # ── Echo persona loader — analytical register for answer generation ───────────
-# Defined after ATLAS_PERSONA so the fallback can reference it safely.
 try:
     from echo_loader import get_persona as _get_persona
-    def _answer_persona() -> str:
-        return _get_persona("analytical")
 except ImportError:
-    def _answer_persona() -> str:
-        return ATLAS_PERSONA
+    _get_persona = lambda _mode="casual": "You are ATLAS."
+
+def _answer_persona() -> str:
+    return _get_persona("analytical")
 
 # ── Conversation Memory ──────────────────────────────────────────────────────
 CONV_MAX_TURNS   = 5        # Max Q&A pairs to inject as context
@@ -686,7 +679,7 @@ class CodexCog(commands.Cog):
                     embed = discord.Embed(
                         title="📊 TSL Historical Intelligence",
                         description=_truncate_for_embed(answer),
-                        color=0xC9962A
+                        color=AtlasColors.TSL_GOLD
                     )
                     embed.set_author(
                         name="ATLAS · Autonomous TSL League Administration System",
@@ -759,7 +752,7 @@ class CodexCog(commands.Cog):
             embed = discord.Embed(
                 title="📊 TSL Historical Intelligence",
                 description=_truncate_for_embed(answer),
-                color=0xC9962A  # ATLAS Gold
+                color=AtlasColors.TSL_GOLD  # ATLAS Gold
             )
             embed.set_author(
                 name="ATLAS · Autonomous TSL League Administration System",
@@ -819,7 +812,7 @@ class CodexCog(commands.Cog):
 
             rows, error = run_sql(sql)
 
-            embed = discord.Embed(title="🔧 ATLAS Codex — Debug", color=0xC9962A)
+            embed = discord.Embed(title="🔧 ATLAS Codex — Debug", color=AtlasColors.TSL_GOLD)
             embed.set_author(
                 name="ATLAS · Autonomous TSL League Administration System",
                 icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
@@ -919,7 +912,7 @@ note any sweep seasons, and make it entertaining.
         response = await loop.run_in_executor(None, _call)
         summary = response.text.strip()
 
-        embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=0xC9962A)
+        embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=AtlasColors.TSL_GOLD)
         embed.set_author(
             name="ATLAS · Autonomous TSL League Administration System",
             icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
@@ -989,7 +982,7 @@ Keep it under 350 words.
         embed = discord.Embed(
             title=f"TSL Season {season} Recap",
             description=_truncate_for_embed(response.text.strip()),
-            color=0xC9962A
+            color=AtlasColors.TSL_GOLD
         )
         embed.set_author(
             name="ATLAS · Autonomous TSL League Administration System",

@@ -38,6 +38,7 @@ from difflib import SequenceMatcher
 import discord
 from discord import app_commands
 from discord.ext import commands
+from atlas_colors import AtlasColors
 
 import data_manager as dm
 import trade_engine as te
@@ -420,9 +421,9 @@ def _pick_line(pk: dict) -> str:
 
 
 BAND_CONFIG = {
-    "GREEN":  (discord.Color.from_rgb(34, 197, 94),   "🟢", "FAIR"),
-    "YELLOW": (discord.Color.from_rgb(234, 179, 8),   "🟡", "REVIEW"),
-    "RED":    (discord.Color.from_rgb(239, 68, 68),   "🔴", "LOPSIDED"),
+    "GREEN":  (AtlasColors.SUCCESS,   "🟢", "FAIR"),
+    "YELLOW": (AtlasColors.WARNING,   "🟡", "REVIEW"),
+    "RED":    (AtlasColors.ERROR,     "🔴", "LOPSIDED"),
 }
 
 
@@ -438,7 +439,7 @@ def _build_trade_card(
     status: str = "pending",
 ) -> discord.Embed:
 
-    color, band_emoji, band_label = BAND_CONFIG.get(result.band, (discord.Color.greyple(), "⚪", "UNKNOWN"))
+    color, band_emoji, band_label = BAND_CONFIG.get(result.band, (AtlasColors.INFO, "⚪", "UNKNOWN"))
 
     a_name = _team_label(team_a)
     b_name = _team_label(team_b)
@@ -681,7 +682,7 @@ async def _evaluate_and_post(
                 "\n".join(all_errors) +
                 "\n\n**Tip:** Use full player names. For picks use `S7R1` format (Season 7 Round 1)."
             ),
-            color=discord.Color.red(),
+            color=AtlasColors.ERROR,
         )
         return await interaction.followup.send(embed=err_embed, ephemeral=True)
 
@@ -961,7 +962,7 @@ def _conference_select_embed(step: str, description: str, team_a: dict | None = 
     return discord.Embed(
         title=f"💱 Trade Center — Step {step_num}",
         description=description,
-        color=discord.Color.blurple(),
+        color=AtlasColors.INFO,
     )
 
 
@@ -1125,7 +1126,7 @@ class PickerTradeView(discord.ui.View):
                       "Click **📋 Add Picks** to enter draft picks, or **🚀 Submit Trade** to evaluate now."),
         }
         title, desc = steps.get(self._step, ("Trade Builder", ""))
-        embed = discord.Embed(title=f"💱 TSL Trade Center — {title}", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"💱 TSL Trade Center — {title}", color=AtlasColors.INFO)
         embed.description = desc
 
         a_names = [f"{p.get('firstName','')} {p.get('lastName','')}".strip() for p in self.players_a]
@@ -1559,7 +1560,7 @@ class TradeActionView(discord.ui.View):
             )
         await self._update_status(
             interaction, "approved", "✅ Approved",
-            discord.Color.from_rgb(34, 197, 94)
+            AtlasColors.SUCCESS
         )
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌", row=0)
@@ -1570,7 +1571,7 @@ class TradeActionView(discord.ui.View):
             )
         await self._update_status(
             interaction, "rejected", "❌ Rejected",
-            discord.Color.from_rgb(239, 68, 68)
+            AtlasColors.ERROR
         )
 
     @discord.ui.button(label="Counter", style=discord.ButtonStyle.primary, emoji="🔄", row=0)
@@ -1640,7 +1641,7 @@ class TradeActionView(discord.ui.View):
 
         embed = discord.Embed(
             title=f"📊 Full Breakdown — Trade `{self.trade_id}`",
-            color=discord.Color.blurple(),
+            color=AtlasColors.INFO,
         )
 
         # Chunk breakdown (Discord field limit = 1024 chars)
@@ -1688,7 +1689,7 @@ class TradeCenterCog(commands.Cog):
         embed = discord.Embed(
             title="💱 Trade Center — Step 1",
             description="Pick a conference to select **Team A** (the team sending).",
-            color=discord.Color.blurple(),
+            color=AtlasColors.INFO,
         )
         embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
         view = ConferenceSelectView(
@@ -1703,7 +1704,7 @@ class TradeCenterCog(commands.Cog):
 
         embed = discord.Embed(
             title="💱 Pending Trade Proposals",
-            color=discord.Color.blurple(),
+            color=AtlasColors.INFO,
             description=f"**{len(pending)}** pending"
         )
         for t in sorted(pending, key=lambda x: x["submitted_at"], reverse=True)[:10]:
@@ -1850,7 +1851,7 @@ class ParityCog(commands.Cog):
         lines = [f"**Pick {i+1}**: {team}" for i, team in enumerate(ordered)]
         embed = discord.Embed(
             title=f"🎰 Lottery Results — Season {dm.CURRENT_SEASON}",
-            color=discord.Color.gold(),
+            color=AtlasColors.TSL_GOLD,
             description="\n".join(lines)
         )
         embed.set_footer(text=f"Drawn by {interaction.user} | Results logged.")
@@ -1901,7 +1902,7 @@ def _build_genesis_hub_embed() -> discord.Embed:
             f"Season {dm.CURRENT_SEASON} | Week {dm.CURRENT_WEEK}\n"
             "Trade proposals, lookups, and lottery — **private to you**.\u200b"
         ),
-        color=discord.Color.from_rgb(201, 150, 42),
+        color=AtlasColors.TSL_GOLD,
         timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
     embed.add_field(
@@ -1947,7 +1948,7 @@ class GenesisHubView(discord.ui.View):
         embed = discord.Embed(
             title="💱 Trade Center — Step 1",
             description="Pick a conference to select **Team A** (the team sending).",
-            color=discord.Color.blurple(),
+            color=AtlasColors.INFO,
         )
         embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
         view = ConferenceSelectView(
@@ -1973,7 +1974,7 @@ class GenesisHubView(discord.ui.View):
 
         embed = discord.Embed(
             title="💱 Pending Trades",
-            color=discord.Color.blurple(),
+            color=AtlasColors.INFO,
             description=f"**{len(pending)}** pending",
         )
         for t in sorted(pending, key=lambda x: x["submitted_at"], reverse=True)[:10]:
@@ -2052,7 +2053,7 @@ class _TradeLookupModal(discord.ui.Modal, title="🔍 Trade Lookup"):
                 f"❌ No trade found with ID `{self.trade_id.value.upper()}`.", ephemeral=True
             )
         status_map = {"pending": "⏳ Pending", "approved": "✅ Approved", "rejected": "❌ Rejected", "countered": "🔄 Countered"}
-        embed = discord.Embed(title=f"💱 Trade `{trade['id']}`", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"💱 Trade `{trade['id']}`", color=AtlasColors.INFO)
         embed.add_field(name="Status", value=status_map.get(trade["status"], trade["status"]), inline=True)
         embed.add_field(name="Band",   value=trade.get("band", "?"), inline=True)
         embed.add_field(name="Delta",  value=f"{trade.get('delta_pct', 0):.1f}%", inline=True)

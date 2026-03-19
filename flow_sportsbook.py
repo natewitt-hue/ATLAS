@@ -67,10 +67,11 @@ _DIR              = os.path.dirname(os.path.abspath(__file__))
 DB_PATH           = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
 HISTORY_DB_PATH   = os.path.join(_DIR, "tsl_history.db")
 
-TSL_GOLD          = 0xD4AF37
+from atlas_colors import AtlasColors
+TSL_GOLD          = AtlasColors.TSL_GOLD.value
 TSL_BLACK         = 0x1A1A1A
-TSL_RED           = 0xC0392B
-TSL_GREEN         = 0x27AE60
+TSL_RED           = AtlasColors.ERROR.value
+TSL_GREEN         = AtlasColors.SUCCESS.value
 
 ADMIN_ROLE_NAME   = "Commissioner"
 from permissions import ADMIN_USER_IDS
@@ -699,18 +700,7 @@ def _calc_ou(home_data: dict, away_data: dict,
     return max(OU_FLOOR, min(OU_CEILING, total))
 
 
-def _american_to_str(odds: int) -> str:
-    return f"+{odds}" if odds > 0 else str(odds)
-
-
-def _payout_calc(wager: int, odds: int) -> int:
-    """Return total payout (wager + profit)."""
-    odds = int(odds)
-    if odds == 0:
-        return wager
-    if odds > 0:
-        return int(wager + wager * (odds / 100))
-    return int(wager + wager * (100 / abs(odds)))
+from odds_utils import american_to_str as _american_to_str, payout_calc as _payout_calc  # noqa: E402
 
 
 def _combine_parlay_odds(odds_list: list[int]) -> int:
@@ -1208,15 +1198,16 @@ class BetSlipModal(discord.ui.Modal):
 
         profit  = _payout_calc(amt, self.odds) - amt
 
-        embed = discord.Embed(title="✅ Bet Confirmed", color=TSL_GOLD)
-        embed.add_field(name="Pick",    value=f"**{self.team}**",          inline=True)
-        embed.add_field(name="Type",    value=self.bet_type,               inline=True)
-        embed.add_field(name="Odds",    value=_american_to_str(self.odds), inline=True)
-        embed.add_field(name="Risk",    value=f"**${amt:,}**",             inline=True)
-        embed.add_field(name="To Win",  value=f"**${profit:,}**",          inline=True)
-        embed.add_field(name="Balance", value=f"${new_bal:,}",             inline=True)
-        embed.set_footer(text=f"TSL Sportsbook • Week {self.bet_week}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        from sportsbook_cards import build_bet_confirm_card, card_to_file
+        safe_line = self.line if isinstance(self.line, (int, float)) else None
+        png = await build_bet_confirm_card(
+            pick=self.team, bet_type=self.bet_type, odds=self.odds,
+            risk=amt, to_win=profit, balance=new_bal,
+            matchup=self.matchup_key, week=self.bet_week, line=safe_line,
+        )
+        file = card_to_file(png, "bet_confirm.png")
+        await interaction.followup.send(file=file, ephemeral=True)
 
         # Post to #ledger
         try:
@@ -1281,20 +1272,16 @@ class ParlayWagerModal(discord.ui.Modal):
                 )
 
         potential = _payout_calc(amt, self.combined_odds) - amt
-        embed = discord.Embed(title="🎰 Parlay Confirmed!", color=TSL_GOLD)
-        embed.description = f"**Parlay ID:** `{parlay_id}`"
-        for i, leg in enumerate(self.legs, 1):
-            embed.add_field(
-                name=f"Leg {i}: {leg['matchup']}",
-                value=f"**{leg['pick']}** ({leg['bet_type']}) @ {_american_to_str(leg['odds'])}",
-                inline=False
-            )
-        embed.add_field(name="Combined Odds", value=_american_to_str(self.combined_odds), inline=True)
-        embed.add_field(name="Risk",          value=f"**${amt:,}**",                      inline=True)
-        embed.add_field(name="To Win",        value=f"**${potential:,}**",                inline=True)
-        embed.set_footer(text=f"TSL Sportsbook • Week {dm.CURRENT_WEEK + 1} • All legs must hit")
         _clear_cart(interaction.user.id)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        from sportsbook_cards import build_parlay_confirm_card, card_to_file
+        png = await build_parlay_confirm_card(
+            legs=self.legs, combined_odds=self.combined_odds,
+            risk=amt, to_win=potential, week=dm.CURRENT_WEEK + 1,
+        )
+        file = card_to_file(png, "parlay_confirm.png")
+        await interaction.followup.send(file=file, ephemeral=True)
 
         # Post to #ledger
         try:
@@ -2416,7 +2403,7 @@ class SportsbookCog(commands.Cog):
 
         embed = discord.Embed(
             title=f"🔬  Line Debug — Week {bet_week}  (Elo Engine {SPORTSBOOK_VERSION})",
-            color=discord.Color.blurple()
+            color=AtlasColors.INFO
         )
         for g in ui_games[:8]:   # Discord embed field limit
             ov_note = " **[OVERRIDE]**" if g.get("_overridden") else ""

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from format_utils import fmt_volume
 from atlas_html_engine import (
     render_card,
     wrap_card,
@@ -26,25 +27,25 @@ from atlas_html_engine import (
 
 # ── Category badge colors (hex) ──────────────────────────────────────────────
 
-CATEGORY_COLORS: dict[str, str] = {
-    "Elections":     "#5B9BD5",
-    "Government":    "#3498DB",
-    "Pop Culture":   "#FF69B4",
-    "Entertainment": "#E91E63",
-    "Economics":     "#27AE60",
-    "Science":       "#9B59B6",
-    "Tech":          "#1ABC9C",
-    "AI":            "#00CED1",
-    "World":         "#E67E22",
-    "Other":         "#95A5A6",
-}
+try:
+    from polymarket_cog import CATEGORY_COLORS_HEX
+except ImportError:
+    CATEGORY_COLORS_HEX: dict[str, str] = {
+        "Elections": "#5B9BD5", "Government": "#3498DB",
+        "Pop Culture": "#FF69B4", "Entertainment": "#E91E63",
+        "Economics": "#27AE60", "Science": "#9B59B6",
+        "Tech": "#1ABC9C", "AI": "#00CED1",
+        "World": "#E67E22", "Other": "#95A5A6",
+    }
+
+_DEFAULT_CATEGORY_COLOR = "#95A5A6"
 
 
 def _category_color(category: str) -> str:
     """Get hex color for a category label like '🏛️ Politics'."""
     parts = category.split(" ", 1)
     name = parts[1] if len(parts) > 1 else parts[0]
-    return CATEGORY_COLORS.get(name, CATEGORY_COLORS["Other"])
+    return CATEGORY_COLORS_HEX.get(name, _DEFAULT_CATEGORY_COLOR)
 
 
 # ── Prediction-specific CSS ──────────────────────────────────────────────────
@@ -453,14 +454,6 @@ def _prediction_css() -> str:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _fmt_volume(vol: float) -> str:
-    """Format volume for display."""
-    if vol >= 1_000_000:
-        return f"${vol / 1_000_000:.1f}M"
-    if vol >= 1_000:
-        return f"${vol / 1_000:.0f}K"
-    return f"${vol:.0f}"
-
 
 def _fmt_end_date(end_date: str) -> str:
     """Format ISO date for display."""
@@ -617,9 +610,9 @@ def _build_market_detail_html(
     # Meta line
     meta_parts = []
     if volume:
-        meta_parts.append(f"Vol: {_fmt_volume(volume)}")
+        meta_parts.append(f"Vol: {fmt_volume(volume)}")
     if liquidity:
-        meta_parts.append(f"Liq: {_fmt_volume(liquidity)}")
+        meta_parts.append(f"Liq: {fmt_volume(liquidity)}")
     end_str = _fmt_end_date(end_date)
     if end_str:
         meta_parts.append(f"Ends: {end_str}")
