@@ -61,7 +61,7 @@ _CLAUDE_MODELS = {
 _GEMINI_MODELS = {
     Tier.HAIKU: "gemini-2.0-flash",
     Tier.SONNET: "gemini-2.0-flash",
-    Tier.OPUS: "gemini-2.5-pro",
+    Tier.OPUS: "gemini-2.0-flash",  # 2.5-pro requires thinking mode which can empty-response with low max_tokens
 }
 
 # ── Client singletons ────────────────────────────────────────────────────────
@@ -232,8 +232,9 @@ def _call_gemini(client, prompt, system, tier, max_tokens, temperature, json_mod
         config=config,
         contents=contents,
     )
+    text = (response.text or "").strip()
     return AIResult(
-        text=response.text.strip(),
+        text=text,
         provider="gemini",
         model=model,
     )
