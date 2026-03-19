@@ -22,6 +22,45 @@ import discord
 
 from atlas_html_engine import render_card, wrap_card, esc, icon_pill
 
+# ── Sport icon mapping ────────────────────────────────────────────────────────
+SPORT_ICON_MAP = {
+    # By sport_key prefix (e.g., "americanfootball_nfl" → "americanfootball")
+    "americanfootball": "nfl",
+    "basketball": "basketball",
+    "baseball": "mlb",
+    "icehockey": "nhl",
+    "mma": "ufc",
+    "soccer": "soccer",
+}
+
+# By source label (e.g., "NFL", "NCAAB", "NHL")
+_LABEL_ICON_MAP = {
+    "NFL": "nfl", "NCAAF": "nfl",
+    "NBA": "basketball", "NCAAB": "basketball", "WNBA": "basketball",
+    "MLB": "mlb",
+    "NHL": "nhl",
+    "UFC": "ufc", "MMA": "ufc",
+    "EPL": "soccer", "MLS": "soccer",
+    "TSL": "nfl",
+}
+
+
+def _sport_icon(sport_key: str = "", source: str = "") -> str:
+    """Return icon_pill for the sport, falling back to sportsbook."""
+    # Try sport_key prefix first
+    if sport_key:
+        prefix = sport_key.split("_")[0]
+        icon_name = SPORT_ICON_MAP.get(prefix)
+        if icon_name:
+            return icon_pill(icon_name, "\U0001f3df\ufe0f")
+    # Try source label
+    if source:
+        icon_name = _LABEL_ICON_MAP.get(source.upper())
+        if icon_name:
+            return icon_pill(icon_name, "\U0001f3df\ufe0f")
+    return icon_pill("sportsbook", "\U0001f3df\ufe0f")
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
@@ -621,7 +660,7 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f3df\ufe0f")}</div>
+    <div class="game-icon-pill">{icon_pill("nfl", "\U0001f3c8")}</div>
     <div class="game-title-group">
       <div class="game-title">MATCH DETAIL</div>
       <div class="game-subtitle">WEEK {esc(str(week))} \u00b7 TSL</div>
@@ -799,7 +838,7 @@ async def build_real_match_detail_card(
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f3df\ufe0f")}</div>
+    <div class="game-icon-pill">{_sport_icon(sport_key)}</div>
     <div class="game-title-group">
       <div class="game-title">MATCH DETAIL</div>
       <div class="game-subtitle">{esc(sport_label)} \u00b7 LIVE ODDS</div>
@@ -885,7 +924,7 @@ async def build_bet_confirm_card(
 
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">{icon_pill("sportsbook", "\u2705")}</div>
+    <div class="game-icon-pill">{_sport_icon(source=source)}</div>
     <div class="game-title-group">
       <div class="game-title">BET CONFIRMED</div>
       <div class="game-subtitle">{subtitle}</div>
