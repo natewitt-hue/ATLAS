@@ -137,6 +137,8 @@ TABLE: offensive_stats  (per-game player offensive stats, all seasons)
            recCatches, recDrops, recCatchPct, recYds, recYdsPerCatch,
            recYdsPerGame, recTDs, recLongest, recYdsAfterCatch, recPts, offPts
   Notes: pos values include QB, HB, FB, WR, TE, OL, etc.
+         This table has NO status column — it only contains stats from completed games, so no filtering needed.
+         To join with games: JOIN games ON offensive_stats.gameId = games.id
 
 TABLE: defensive_stats  (per-game player defensive stats, all seasons)
   Columns: statId, fullName, extendedName, seasonIndex, stageIndex, weekIndex,
@@ -144,6 +146,8 @@ TABLE: defensive_stats  (per-game player defensive stats, all seasons)
            defTotalTackles, defSacks, defSafeties, defInts, defIntReturnYds,
            defForcedFum, defFumRec, defTDs, defCatchAllowed, defDeflections, defPts
   Notes: pos values include DT, LE, RE, LOLB, MLB, ROLB, CB, FS, SS
+         This table has NO status column — it only contains stats from completed games, so no filtering needed.
+         To join with games: JOIN games ON defensive_stats.gameId = games.id
 
 TABLE: team_stats  (per-game team stats, all seasons)
   Columns: statId, seasonIndex, stageIndex, weekIndex, gameId,
