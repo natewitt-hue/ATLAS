@@ -21,6 +21,8 @@ _DIR = Path(__file__).parent
 _FONTS_DIR = _DIR / "fonts"
 _CARDS_DIR = _DIR / "casino" / "renderer" / "cards"
 _SLOT_ICONS_DIR = _DIR / "casino" / "renderer" / "slot_icons"
+_GAME_ICONS_DIR = _DIR / "icons"
+_ACH_ICONS_DIR = _DIR / "icons" / "achievements"
 
 # ---------------------------------------------------------------------------
 # Browser singleton
@@ -131,6 +133,7 @@ SLOT_ICON_CONFIG = {
     "shield":   {"file": "shield.png",   "label": "TSL Shield",  "mult": 50, "tier": "jackpot", "weight": 2},
     "crown":    {"file": "crown.png",    "label": "Crown",       "mult": 20, "tier": "legend",  "weight": 5},
     "trophy":   {"file": "trophy.png",   "label": "Trophy",      "mult": 10, "tier": "epic",    "weight": 8},
+    "wild":     {"file": "wild.png",     "label": "Wild",        "mult": 0,  "tier": "wild",    "weight": 0},
     "football": {"file": "football.png", "label": "Football",    "mult": 5,  "tier": "rare",    "weight": 15},
     "star":     {"file": "star.png",     "label": "Star",        "mult": 3,  "tier": "common",  "weight": 20},
     "coin":     {"file": "coin.png",     "label": "Coin",        "mult": 2,  "tier": "base",    "weight": 30},
@@ -156,6 +159,31 @@ def _slot_icon_b64(symbol: str) -> str:
 def slot_icon_src(symbol: str) -> str:
     """Return data-URI src for a slot icon."""
     b64 = _slot_icon_b64(symbol)
+    return f"data:image/png;base64,{b64}" if b64 else ""
+
+
+# ---------------------------------------------------------------------------
+# Game & achievement icon loaders
+# ---------------------------------------------------------------------------
+_GAME_ICON_B64_CACHE: dict[str, str] = {}
+_ACH_ICON_B64_CACHE: dict[str, str] = {}
+
+
+def game_icon_src(name: str) -> str:
+    """Return data-URI src for icons/{name}.png."""
+    if name not in _GAME_ICON_B64_CACHE:
+        path = _GAME_ICONS_DIR / f"{name}.png"
+        _GAME_ICON_B64_CACHE[name] = base64.b64encode(path.read_bytes()).decode() if path.exists() else ""
+    b64 = _GAME_ICON_B64_CACHE[name]
+    return f"data:image/png;base64,{b64}" if b64 else ""
+
+
+def achievement_icon_src(name: str) -> str:
+    """Return data-URI src for icons/achievements/{name}.png."""
+    if name not in _ACH_ICON_B64_CACHE:
+        path = _ACH_ICONS_DIR / f"{name}.png"
+        _ACH_ICON_B64_CACHE[name] = base64.b64encode(path.read_bytes()).decode() if path.exists() else ""
+    b64 = _ACH_ICON_B64_CACHE[name]
     return f"data:image/png;base64,{b64}" if b64 else ""
 
 
