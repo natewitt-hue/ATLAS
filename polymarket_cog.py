@@ -1325,6 +1325,9 @@ class CuratedMarketSelect(discord.ui.Select):
         if market_id == "none":
             await interaction.response.defer()
             return
+        if self._parent is None:
+            await interaction.response.send_message("This view has expired. Please re-open the market browser.", ephemeral=True)
+            return
         await self._parent.select_market(interaction, market_id)
 
 
