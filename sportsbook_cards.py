@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
-from atlas_html_engine import render_card, wrap_card, esc
+from atlas_html_engine import render_card, wrap_card, esc, icon_pill
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -378,7 +378,7 @@ async def build_sportsbook_card(user_id: int) -> bytes:
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f3c6</div>
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f3c6")}</div>
     <div class="game-title-group">
       <div class="game-title">ATLAS SPORTSBOOK</div>
       <div class="game-subtitle">GLOBAL WAGERING</div>
@@ -506,7 +506,7 @@ async def build_stats_card(user_id: int) -> bytes:
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f4ca</div>
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f4ca")}</div>
     <div class="game-title-group">
       <div class="game-title">BETTOR PROFILE</div>
       <div class="game-subtitle">YOUR STATS</div>
@@ -621,7 +621,7 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <div class="game-icon-pill">\U0001f3df\ufe0f</div>
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f3df\ufe0f")}</div>
     <div class="game-title-group">
       <div class="game-title">MATCH DETAIL</div>
       <div class="game-subtitle">WEEK {esc(str(week))} \u00b7 TSL</div>
@@ -692,6 +692,425 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 
     full_html = wrap_card(body, status_class=status_class)
     return await render_card(full_html)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  REAL SPORTSBOOK MATCH DETAIL CARD
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _american_fmt(odds: int) -> str:
+    """Format American odds as string (+150 / -110)."""
+    return f"+{odds}" if odds > 0 else str(odds)
+
+
+async def build_real_match_detail_card(
+    event: dict, odds_rows: list[dict], *, sport_key: str = ""
+) -> bytes:
+    """
+    Render a match detail card for real sports (NCAAB, NFL, etc.).
+    `event` has 'away_team', 'home_team', 'commence_time'.
+    `odds_rows` has dicts with 'market', 'outcome_name', 'price', 'point'.
+    """
+    away = esc(event.get("away_team", "Away"))
+    home = esc(event.get("home_team", "Home"))
+
+    # Parse sport label from sport_key (e.g. "basketball_ncaab" → "NCAAB")
+    sport_label = sport_key.split("_")[-1].upper() if sport_key else "SPORTS"
+
+    # Group odds by market
+    markets: dict[str, list[dict]] = {}
+    for row in odds_rows:
+        markets.setdefault(row["market"], []).append(row)
+
+    # Build ML cells
+    h2h = markets.get("h2h", [])
+    ml_cells = ""
+    for o in h2h:
+        name = esc(o["outcome_name"])
+        price = o["price"]
+        cls = "fav" if price < 0 else "dog"
+        ml_cells += f"""<div class="odds-cell">
+      <div class="odds-team">{name}</div>
+      <div class="odds-value {cls}">{_american_fmt(price)}</div>
+    </div>"""
+    # Pad if only 1 or 0 outcomes
+    while ml_cells.count("odds-cell") < 2:
+        ml_cells += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+
+    # Build spread cells
+    spreads = markets.get("spreads", [])
+    spread_cells = ""
+    for o in spreads:
+        name = esc(o["outcome_name"])
+        point = f"{o['point']:+g}" if o.get("point") is not None else ""
+        price = _american_fmt(o["price"])
+        spread_cells += f"""<div class="odds-cell">
+      <div class="odds-team">{name}</div>
+      <div class="odds-value">{point}</div>
+      <div class="odds-juice">({price})</div>
+    </div>"""
+    while spread_cells.count("odds-cell") < 2:
+        spread_cells += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+
+    # Build total cells
+    totals = markets.get("totals", [])
+    total_cells = ""
+    for o in totals:
+        label = esc(o["outcome_name"])  # "Over" / "Under"
+        point = f"{o['point']}" if o.get("point") is not None else ""
+        price = _american_fmt(o["price"])
+        total_cells += f"""<div class="odds-cell">
+      <div class="odds-team">{label}</div>
+      <div class="odds-value">{point}</div>
+      <div class="odds-juice">({price})</div>
+    </div>"""
+    while total_cells.count("odds-cell") < 2:
+        total_cells += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+
+    # Interleave rows: away ML, away spread, over | home ML, home spread, under
+    # We need row-by-row: [ml_0, spread_0, total_0], [ml_1, spread_1, total_1]
+    ml_list = h2h[:2] if len(h2h) >= 2 else h2h + [None] * (2 - len(h2h))
+    spread_list = spreads[:2] if len(spreads) >= 2 else spreads + [None] * (2 - len(spreads))
+    total_list = totals[:2] if len(totals) >= 2 else totals + [None] * (2 - len(totals))
+
+    grid_rows = ""
+    for ml, sp, tot in zip(ml_list, spread_list, total_list):
+        # ML cell
+        if ml:
+            cls = "fav" if ml["price"] < 0 else "dog"
+            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(ml["outcome_name"])}</div><div class="odds-value {cls}">{_american_fmt(ml["price"])}</div></div>'
+        else:
+            grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+        # Spread cell
+        if sp:
+            pt = f"{sp['point']:+g}" if sp.get("point") is not None else ""
+            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(sp["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({_american_fmt(sp["price"])})</div></div>'
+        else:
+            grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+        # Total cell
+        if tot:
+            pt = f"{tot['point']}" if tot.get("point") is not None else ""
+            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(tot["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({_american_fmt(tot["price"])})</div></div>'
+        else:
+            grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+
+    body = f"""<style>{_MATCH_DETAIL_CSS}</style>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f3df\ufe0f")}</div>
+    <div class="game-title-group">
+      <div class="game-title">MATCH DETAIL</div>
+      <div class="game-subtitle">{esc(sport_label)} \u00b7 LIVE ODDS</div>
+    </div>
+  </div>
+  <div class="status-badge open">\u25cf OPEN</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Matchup Hero -->
+<div class="matchup-hero">
+  <div class="matchup-teams">
+    {away} <span class="at">@</span> {home}
+  </div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Odds Grid -->
+<div class="odds-section">
+  <div class="odds-grid">
+    <div class="odds-col-header">Moneyline</div>
+    <div class="odds-col-header">Spread</div>
+    <div class="odds-col-header">Total</div>
+    {grid_rows}
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="match-footer">
+  <span>ATLAS SPORTSBOOK \u00b7 LIVE ODDS</span>
+</div>
+"""
+
+    full_html = wrap_card(body, status_class="win")
+    return await render_card(full_html)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  BET CONFIRMATION CARD
+# ═════════════════════════════════════════════════════════════════════════════
+
+_BET_CONFIRM_CSS = """\
+.confirm-pick { text-align: center; padding: 12px 20px 4px; }
+.confirm-pick-name { font-family: 'Outfit'; font-weight: 800; font-size: 22px; color: var(--text-primary); letter-spacing: 0.5px; }
+.confirm-pick-detail { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+
+.confirm-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px 16px; }
+.confirm-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 12px 8px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
+.confirm-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
+.confirm-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 20px; color: var(--text-primary); }
+.confirm-value.green { color: var(--win); }
+.confirm-value.gold { color: var(--gold); }
+
+.parlay-legs { padding: 0 20px 8px; }
+.parlay-leg { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.parlay-leg:last-child { border-bottom: none; }
+.leg-num { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 11px; color: var(--gold-dim); min-width: 18px; }
+.leg-pick { font-family: 'Outfit'; font-weight: 700; font-size: 13px; color: var(--text-primary); }
+.leg-info { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
+"""
+
+
+async def build_bet_confirm_card(
+    pick: str, bet_type: str, odds: int, risk: int, to_win: int,
+    balance: int, *, matchup: str = "", week: int = 0,
+    line: float | None = None, source: str = "TSL"
+) -> bytes:
+    """Render a straight bet confirmation card as PNG."""
+    odds_str = f"+{odds}" if odds > 0 else str(odds)
+
+    # Build detail line: "Spread -3.5 · (-110)" or "Moneyline · (-165)"
+    detail_parts = [esc(bet_type)]
+    if line is not None:
+        detail_parts[0] += f" {line:+g}"
+    detail_parts.append(f"({odds_str})")
+    detail_line = " \u00b7 ".join(detail_parts)
+
+    subtitle = f"WEEK {week} \u00b7 {esc(source)}" if week else esc(source)
+
+    body = f"""<style>{_BET_CONFIRM_CSS}</style>
+
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\u2705")}</div>
+    <div class="game-title-group">
+      <div class="game-title">BET CONFIRMED</div>
+      <div class="game-subtitle">{subtitle}</div>
+    </div>
+  </div>
+  <div class="status-badge open">{esc(bet_type)}</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="confirm-pick">
+  <div class="confirm-pick-name">{esc(pick)}</div>
+  <div class="confirm-pick-detail">{detail_line}</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="confirm-grid">
+  <div class="confirm-cell">
+    <div class="confirm-label">Risk</div>
+    <div class="confirm-value">${risk:,}</div>
+  </div>
+  <div class="confirm-cell">
+    <div class="confirm-label">To Win</div>
+    <div class="confirm-value green">${to_win:,}</div>
+  </div>
+  <div class="confirm-cell">
+    <div class="confirm-label">Balance</div>
+    <div class="confirm-value">${balance:,}</div>
+  </div>
+</div>
+
+<div class="match-footer">
+  <span>ATLAS SPORTSBOOK{' \u00b7 ' + esc(matchup) if matchup else ''}</span>
+</div>
+"""
+    return await render_card(wrap_card(body, status_class="jackpot"))
+
+
+async def build_parlay_confirm_card(
+    legs: list[dict], combined_odds: int, risk: int, to_win: int,
+    *, week: int = 0
+) -> bytes:
+    """Render a parlay confirmation card as PNG."""
+    odds_str = f"+{combined_odds}" if combined_odds > 0 else str(combined_odds)
+
+    # Build leg rows
+    leg_html = ""
+    for i, leg in enumerate(legs, 1):
+        pick = esc(leg.get("pick", ""))
+        bt = esc(leg.get("bet_type", ""))
+        lo = leg.get("odds", 0)
+        lo_str = f"+{lo}" if lo > 0 else str(lo)
+        matchup = esc(leg.get("matchup", ""))
+        leg_html += f"""<div class="parlay-leg">
+  <span class="leg-num">{i}.</span>
+  <span class="leg-pick">{pick} ({bt})</span>
+  <span class="leg-info">{lo_str}</span>
+</div>"""
+
+    subtitle = f"WEEK {week} \u00b7 TSL" if week else "TSL"
+
+    body = f"""<style>{_BET_CONFIRM_CSS}</style>
+
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">{icon_pill("parlay", "\U0001f3b0")}</div>
+    <div class="game-title-group">
+      <div class="game-title">PARLAY CONFIRMED</div>
+      <div class="game-subtitle">{subtitle}</div>
+    </div>
+  </div>
+  <div class="status-badge open">{len(legs)}-LEG</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="parlay-legs">
+{leg_html}
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="confirm-grid">
+  <div class="confirm-cell">
+    <div class="confirm-label">Odds</div>
+    <div class="confirm-value gold">{odds_str}</div>
+  </div>
+  <div class="confirm-cell">
+    <div class="confirm-label">Risk</div>
+    <div class="confirm-value">${risk:,}</div>
+  </div>
+  <div class="confirm-cell">
+    <div class="confirm-label">To Win</div>
+    <div class="confirm-value green">${to_win:,}</div>
+  </div>
+</div>
+
+<div class="match-footer">
+  <span>ALL LEGS MUST HIT{' \u00b7 WEEK ' + str(week) if week else ''}</span>
+</div>
+"""
+    return await render_card(wrap_card(body, status_class="jackpot"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  CASINO HUB CARD
+# ═════════════════════════════════════════════════════════════════════════════
+
+_CASINO_HUB_CSS = """\
+.casino-balance { text-align: center; padding: 12px 20px 4px; }
+.casino-bal-label { font-family: 'Outfit'; font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
+.casino-bal-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: 40px; color: var(--text-primary); }
+.casino-bal-sub { font-family: 'Outfit'; font-weight: 600; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+.jackpot-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
+.jackpot-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px 6px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
+.jackpot-label { font-family: 'Outfit'; font-weight: 700; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 4px; }
+.jackpot-label.mini { color: #81d4fa; }
+.jackpot-label.major { color: var(--push); }
+.jackpot-label.grand { color: var(--gold-bright); }
+.jackpot-value { font-family: 'JetBrains Mono'; font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
+
+.game-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px 12px; }
+.game-tile { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px 12px; display: flex; align-items: center; gap: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+.game-emoji { font-size: 18px; }
+.game-name { font-family: 'Outfit'; font-weight: 700; font-size: 13px; color: var(--text-primary); }
+.game-payout { font-family: 'JetBrains Mono'; font-weight: 600; font-size: 10px; color: var(--text-dim); }
+
+.streak-badge { font-family: 'JetBrains Mono'; font-weight: 700; font-size: 11px; letter-spacing: 1px; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
+.streak-badge.hot { color: #fb923c; background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.35); }
+.streak-badge.cold { color: #7dd3fc; background: rgba(125,211,252,0.12); border: 1px solid rgba(125,211,252,0.35); }
+.streak-badge.neutral { color: var(--text-muted); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); }
+"""
+
+
+async def build_casino_hub_card(
+    balance: int, max_bet: int, tier_name: str,
+    streak: dict, jackpots: dict
+) -> bytes:
+    """Render the casino hub landing card as PNG."""
+    # Streak badge
+    s_count = streak.get("count", 0)
+    s_type = streak.get("type", "")  # "win" or "loss"
+    if s_type == "win" and s_count >= 3:
+        streak_cls = "hot"
+        streak_text = f"\U0001f525 {s_count} WIN"
+    elif s_type == "loss" and s_count >= 3:
+        streak_cls = "cold"
+        streak_text = f"\u2744\ufe0f {s_count} LOSS"
+    else:
+        streak_cls = "neutral"
+        streak_text = "NO STREAK"
+
+    mini = jackpots.get("mini", 0)
+    major = jackpots.get("major", 0)
+    grand = jackpots.get("grand", 0)
+
+    body = f"""<style>{_CASINO_HUB_CSS}</style>
+
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">{icon_pill("slots", "\U0001f3b0")}</div>
+    <div class="game-title-group">
+      <div class="game-title">TSL CASINO</div>
+      <div class="game-subtitle">THE SIM LEAGUE</div>
+    </div>
+  </div>
+  <div class="streak-badge {streak_cls}">{streak_text}</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="casino-balance">
+  <div class="casino-bal-label">YOUR BALANCE</div>
+  <div class="casino-bal-value">${balance:,}</div>
+  <div class="casino-bal-sub">Max Bet: ${max_bet:,} \u00b7 {esc(tier_name)} Tier</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div style="padding:0 20px 6px;">
+  <div style="font-family:'Outfit';font-weight:700;font-size:10px;color:var(--gold-dim);letter-spacing:1.5px;text-transform:uppercase;">JACKPOTS</div>
+</div>
+<div class="jackpot-grid">
+  <div class="jackpot-cell">
+    <div class="jackpot-label mini">MINI</div>
+    <div class="jackpot-value">${mini:,}</div>
+  </div>
+  <div class="jackpot-cell">
+    <div class="jackpot-label major">MAJOR</div>
+    <div class="jackpot-value">${major:,}</div>
+  </div>
+  <div class="jackpot-cell">
+    <div class="jackpot-label grand">GRAND</div>
+    <div class="jackpot-value">${grand:,}</div>
+  </div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="game-grid">
+  <div class="game-tile">
+    <span class="game-emoji">\U0001f0cf</span>
+    <div><div class="game-name">Blackjack</div><div class="game-payout">6:5 PAYOUT</div></div>
+  </div>
+  <div class="game-tile">
+    <span class="game-emoji">\U0001f3b0</span>
+    <div><div class="game-name">Slots</div><div class="game-payout">UP TO 50x</div></div>
+  </div>
+  <div class="game-tile">
+    <span class="game-emoji">\U0001f680</span>
+    <div><div class="game-name">Crash</div><div class="game-payout">NO LIMIT</div></div>
+  </div>
+  <div class="game-tile">
+    <span class="game-emoji">\U0001fa99</span>
+    <div><div class="game-name">Coin Flip</div><div class="game-payout">2x PAYOUT</div></div>
+  </div>
+</div>
+
+<div class="match-footer">
+  <span>TSL CASINO \u00b7 THE SIM LEAGUE</span>
+</div>
+"""
+    return await render_card(wrap_card(body, status_class="jackpot"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

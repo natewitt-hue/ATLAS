@@ -18,6 +18,7 @@ from atlas_html_engine import (
     render_card,
     wrap_card,
     esc,
+    icon_pill,
     build_header_html,
     build_data_grid_html,
     build_footer_html,
@@ -499,7 +500,7 @@ def _build_market_list_html(
 ) -> str:
     """Build HTML for the market list card (compact rows, scannable)."""
     header = build_header_html(
-        icon="📊",
+        icon=icon_pill("predictions", "📊"),
         title="PREDICTION MARKETS",
         players=[],
         outcome="active",
@@ -588,7 +589,7 @@ def _build_market_detail_html(
     cat_color = _category_color(category)
 
     header = build_header_html(
-        icon="📊",
+        icon=icon_pill("predictions", "📊"),
         title=cat_name.upper(),
         players=[],
         outcome="active",
@@ -697,7 +698,7 @@ async def render_bet_confirmation_card(
     side_class = "yes" if side.upper() == "YES" else "no"
 
     header = build_header_html(
-        icon="📊",
+        icon=icon_pill("predictions", "📊"),
         title="PREDICTION MARKET",
         players=[player_name],
         outcome=outcome,
@@ -759,7 +760,7 @@ async def render_portfolio_card(
     Each position dict: {title, side, qty, cost, payout, buy_price}
     """
     header = build_header_html(
-        icon="📋",
+        icon=icon_pill("predictions", "📋"),
         title="PORTFOLIO",
         players=[player_name],
         outcome="active",
@@ -847,7 +848,7 @@ async def render_resolution_card(
     result_class = "yes" if is_yes else "no"
 
     header = build_header_html(
-        icon="🏆",
+        icon=icon_pill("predictions", "🏆"),
         title="MARKET RESOLVED",
         players=[],
         outcome=outcome,
@@ -897,7 +898,7 @@ def _build_curated_list_html(
 ) -> str:
     """Build HTML for a curated 10-market list with community sentiment bars."""
     header = build_header_html(
-        icon="📊",
+        icon=icon_pill("predictions", "📊"),
         title="PREDICTION MARKETS",
         players=[],
         outcome="active",
@@ -1139,7 +1140,7 @@ async def render_daily_drop_card(
     leaderboard: [{name, profit, streak}, ...]
     """
     header = build_header_html(
-        icon="🔥",
+        icon=icon_pill("predictions", "🔥"),
         title="DAILY DROP",
         players=[],
         outcome="jackpot",
@@ -1277,7 +1278,7 @@ async def render_price_alert_card(
     cat_name = parts[1] if len(parts) > 1 else parts[0]
 
     header = build_header_html(
-        icon="📈" if direction == "up" else "📉",
+        icon=icon_pill("predictions", "📈" if direction == "up" else "📉"),
         title="PRICE ALERT",
         players=[],
         outcome=outcome,

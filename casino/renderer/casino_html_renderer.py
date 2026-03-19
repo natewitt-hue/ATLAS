@@ -25,6 +25,7 @@ from atlas_html_engine import (
     card_img_src,
     card_back_src,
     slot_icon_src,
+    icon_pill,
     SLOT_ICON_CONFIG,
     build_header_html,
     build_data_grid_html,
@@ -126,7 +127,7 @@ def _build_blackjack_html(
         status_class = "near_miss"
         badge_text = "SO CLOSE"
 
-    header = build_header_html("♠", "BLACKJACK", [player_name], status_class, badge_text, txn_id)
+    header = build_header_html(icon_pill("blackjack", "♠"), "BLACKJACK", [player_name], status_class, badge_text, txn_id)
     streak_badge = build_streak_badge_html(streak_info)
     near_miss_banner = build_near_miss_html(near_miss_msg)
     data_grid = build_data_grid_html(wager, payout, balance) if status else ""
@@ -304,7 +305,7 @@ def _build_slots_html(
         status_class = "near_miss"
         badge_text = "SO CLOSE"
 
-    header = build_header_html("🎰", "SLOTS", [player_name], status_class, badge_text, txn_id)
+    header = build_header_html(icon_pill("slots", "🎰"), "SLOTS", [player_name], status_class, badge_text, txn_id)
     streak_badge = build_streak_badge_html(streak_info)
     near_miss_banner = build_near_miss_html(near_miss_msg)
 
@@ -488,7 +489,7 @@ def _build_crash_html(
         status_class = "near_miss"
 
     display_players = players or [player_name]
-    header = build_header_html("🚀", "CRASH", display_players, status_class, badge_text, txn_id)
+    header = build_header_html(icon_pill("crash", "🚀"), "CRASH", display_players, status_class, badge_text, txn_id)
     streak_badge = build_streak_badge_html(streak_info)
     near_miss_banner = build_near_miss_html(near_miss_msg)
 
@@ -867,7 +868,7 @@ def _build_coinflip_html(
     if near_miss_msg and outcome == "loss":
         status_class = "near_miss"
 
-    header = build_header_html("🪙", "COIN FLIP", display_players, status_class, badge_text, txn_id)
+    header = build_header_html(icon_pill("coinflip", "🪙"), "COIN FLIP", display_players, status_class, badge_text, txn_id)
     streak_badge = build_streak_badge_html(streak_info)
     near_miss_banner = build_near_miss_html(near_miss_msg)
 
@@ -1071,7 +1072,7 @@ def _build_scratch_html(
         badge_text = f"{3 - revealed} LEFT"
 
     header = build_header_html(
-        icon="\U0001f3ab",  # 🎫
+        icon=icon_pill("scratch", "\U0001f3ab"),
         title="DAILY SCRATCH",
         players=[player_name],
         outcome=outcome,
