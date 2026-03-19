@@ -9,8 +9,8 @@ ATLAS (Autonomous TSL League Administration System) is a Discord bot serving as 
 ### Code Rules
 
 - **Bump `ATLAS_VERSION` in `bot.py` before every push.** Minor bump for features (2.1.0 → 2.2.0), patch for fixes (2.1.0 → 2.1.1).
-- **Use `get_persona()` from `echo_loader.py`** for Gemini system prompts — never hardcode `ATLAS_PERSONA`.
-- **Wrap blocking Gemini calls in `loop.run_in_executor()`** — never block the event loop.
+- **Use `get_persona()` from `echo_loader.py`** for AI system prompts — never hardcode `ATLAS_PERSONA`.
+- **Use `atlas_ai.generate()` for all AI calls** — Claude primary, Gemini fallback. Handles `run_in_executor` internally. Never call Gemini/Claude SDKs directly from cogs.
 - **Use `_startup_done` flag** to prevent duplicate `load_all()` on reconnect.
 - **`_build_schema()` dynamically includes `dm.CURRENT_SEASON`** so Gemini always has current season context.
 - **Dead files belong in `QUARANTINE/`** — do not reference or import them.
@@ -74,11 +74,12 @@ build_member_db              →  tsl_members table (identity registry)
 | Module | Purpose | Cog File(s) |
 |--------|---------|-------------|
 | **Core** | Orchestration, routing | `bot.py`, `setup_cog.py`, `permissions.py` |
+| **AI** | Centralized AI client — Claude primary, Gemini fallback | `atlas_ai.py` |
 | **Sentinel** | Rule enforcement, blowout monitor, compliance | `sentinel_cog.py` |
 | **Oracle** | Analytics, stats, power rankings, profiles | `oracle_cog.py` (class: StatsHubCog) |
 | **Genesis** | Trades, roster, dev traits, draft | `genesis_cog.py` |
 | **Flow** | Economy, sportsbook, casino | `flow_sportsbook.py`, `casino/`, `economy_cog.py` |
-| **Codex** | History, records, NL→SQL→NL via Gemini | `codex_cog.py` |
+| **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
 | **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_html_engine.py` |
 
@@ -133,7 +134,8 @@ Width: 480px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 | Var | Required | Purpose |
 |-----|----------|---------|
 | `DISCORD_TOKEN` | Yes | Bot token |
-| `GEMINI_API_KEY` | Yes | Google Gemini API |
+| `ANTHROPIC_API_KEY` | Yes (primary) | Claude API — primary AI provider via `atlas_ai.py` |
+| `GEMINI_API_KEY` | Yes (fallback) | Gemini API — fallback provider + Google Search |
 | `ADMIN_USER_IDS` | Yes | Comma-separated Discord IDs |
 | `ORACLE_DB_PATH` | No | Path to TSL_Archive.db |
 | `FORCE_REQUEST_CHANNEL` | No | Channel ID |

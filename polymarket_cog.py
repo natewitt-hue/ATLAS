@@ -30,7 +30,8 @@ from typing import Optional
 import os
 import re
 
-from google import genai
+import atlas_ai
+from atlas_ai import Tier
 
 import flow_wallet
 from format_utils import fmt_volume
@@ -54,24 +55,6 @@ log = logging.getLogger("polymarket_cog")
 
 PREDICTION_MAX_PAYOUT = 10_000_000  # sanity cap — matches sportsbook MAX_PAYOUT
 
-# ── Gemini AI Client (lazy singleton) ──
-_GEMINI_CLIENT = None
-
-def _get_gemini_client():
-    """Return a cached Gemini client, or None if API key unavailable."""
-    global _GEMINI_CLIENT
-    if _GEMINI_CLIENT is not None:
-        return _GEMINI_CLIENT
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        log.warning("GEMINI_API_KEY not set — AI market analysis unavailable")
-        return None
-    try:
-        _GEMINI_CLIENT = genai.Client(api_key=api_key)
-        return _GEMINI_CLIENT
-    except Exception:
-        log.warning("Failed to initialise Gemini client for polymarket", exc_info=True)
-        return None
 
 
 # ─────────────────────────────────────────────
@@ -1718,11 +1701,6 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         One-time Gemini classification for markets still labeled 'Other'.
         Batches titles into one prompt, parses JSON response, updates DB.
         """
-        gemini = _get_gemini_client()
-        if not gemini:
-            log.info("Gemini not available — skipping AI category classification.")
-            return
-
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
                 "SELECT market_id, title, slug FROM prediction_markets "
@@ -1735,7 +1713,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             log.info("No 'Other' markets to classify.")
             return
 
-        log.info(f"Classifying {len(unknowns)} markets with Gemini...")
+        log.info(f"Classifying {len(unknowns)} markets with AI...")
 
         valid_cats = sorted(set(CATEGORY_MAP.values()))
         lines = [f"{i+1}. {title} (slug: {slug})"
@@ -1750,23 +1728,16 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             f"No explanation. Just the JSON array."
         )
 
-        loop = asyncio.get_running_loop()
-        def _call():
-            return gemini.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[prompt],
-            )
-
         try:
-            response = await loop.run_in_executor(None, _call)
-            text = response.text.strip()
+            result = await atlas_ai.generate(prompt, tier=Tier.HAIKU)
+            text = result.text
             json_match = re.search(r'\[.*\]', text, re.DOTALL)
             if not json_match:
-                log.warning("Gemini returned non-JSON for classification.")
+                log.warning("AI returned non-JSON for classification.")
                 return
             classifications = json.loads(json_match.group())
         except Exception as e:
-            log.error(f"Gemini classification failed: {e}")
+            log.error(f"AI classification failed: {e}")
             return
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2647,22 +2618,20 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             log.warning(f"Only {len(shortlist)} markets in shortlist — need at least 5.")
             return
 
-        # Step 2: Gemini editorial pass
+        # Step 2: AI editorial pass
         spotlight = None
         supporting = []
 
-        gemini = _get_gemini_client()
-        if gemini:
+        try:
+            spotlight, supporting = await self._gemini_curate(shortlist)
+        except Exception as e:
+            log.warning(f"AI curation failed: {e}")
+            # Retry once
+            await asyncio.sleep(30)
             try:
                 spotlight, supporting = await self._gemini_curate(shortlist)
-            except Exception as e:
-                log.warning(f"Gemini curation failed: {e}")
-                # Retry once
-                await asyncio.sleep(30)
-                try:
-                    spotlight, supporting = await self._gemini_curate(shortlist)
-                except Exception as e2:
-                    log.error(f"Gemini curation retry failed: {e2}")
+            except Exception as e2:
+                log.error(f"AI curation retry failed: {e2}")
 
         # Fallback: use top 5 by score without editorial text
         if not spotlight:
@@ -2777,11 +2746,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         log.info(f"Daily Drop posted: spotlight={spotlight['title'][:50]}")
 
     async def _gemini_curate(self, shortlist: list[dict]) -> tuple[dict, list[dict]]:
-        """Use Gemini to select spotlight + 4 supporting markets from shortlist."""
-        gemini = _get_gemini_client()
-        if not gemini:
-            raise RuntimeError("Gemini client unavailable")
-
+        """Use AI to select spotlight + 4 supporting markets from shortlist."""
         # Build market list for prompt
         market_lines = []
         for i, m in enumerate(shortlist):
@@ -2819,17 +2784,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             f'"supporting": [{{"market_id": "...", "hook": "..."}}, ...]}}'
         )
 
-        loop = asyncio.get_running_loop()
-
-        def _call():
-            return gemini.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[prompt],
-                config={"system_instruction": system_instruction},
-            )
-
-        response = await loop.run_in_executor(None, _call)
-        text = response.text.strip()
+        result = await atlas_ai.generate(
+            prompt, system=system_instruction,
+            tier=Tier.HAIKU, json_mode=True,
+        )
+        text = result.text
 
         # Parse JSON
         json_match = re.search(r'\{.*\}', text, re.DOTALL)

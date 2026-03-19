@@ -27,10 +27,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
-import os
 import re
 import sqlite3
-import threading
 from collections import Counter
 from typing import Optional
 
@@ -49,8 +47,8 @@ try:
 except ImportError:
     get_persona = lambda _mode="casual": "You are ATLAS."
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+import atlas_ai
+from atlas_ai import Tier
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -212,8 +210,8 @@ try:
         extract_sql,
         fuzzy_resolve_user,
         resolve_names_in_question,
-        _build_conversation_block,
-        _add_conversation_turn,
+        build_conversation_block as _build_conversation_block,
+        add_conversation_turn as _add_conversation_turn,
         _build_schema as _build_schema_fn,
         KNOWN_USERS,
     )
@@ -248,43 +246,7 @@ from constants import ATLAS_ICON_URL
 from atlas_colors import AtlasColors
 ATLAS_GOLD = AtlasColors.TSL_GOLD
 
-# ── Module-level cached Gemini client (avoids spinning up a new client per call)
-_GEMINI_CLIENT = None
-_gemini_lock = threading.Lock()
-
-def _get_gemini_client():
-    """Return the cached Gemini client, creating it once if needed."""
-    global _GEMINI_CLIENT
-    if _GEMINI_CLIENT is not None:
-        return _GEMINI_CLIENT
-    with _gemini_lock:
-        if _GEMINI_CLIENT is not None:
-            return _GEMINI_CLIENT
-        if not GEMINI_API_KEY:
-            return None
-        try:
-            from google import genai
-            _GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
-            return _GEMINI_CLIENT
-        except Exception:
-            return None
-
-# ── Anthropic Claude client (primary AI for Oracle v3) ────────────────────────
-_ANTHROPIC_CLIENT = None
-
-def _get_anthropic_client():
-    """Return the cached Anthropic client, creating it once if needed."""
-    global _ANTHROPIC_CLIENT
-    if _ANTHROPIC_CLIENT is not None:
-        return _ANTHROPIC_CLIENT
-    if not ANTHROPIC_API_KEY:
-        return None
-    try:
-        from anthropic import Anthropic
-        _ANTHROPIC_CLIENT = Anthropic(api_key=ANTHROPIC_API_KEY)
-        return _ANTHROPIC_CLIENT
-    except Exception:
-        return None
+# ── AI clients managed by atlas_ai module ─────────────────────────────────────
 
 # ── QueryBuilder import (Oracle v3 domain-aware SQL) ──────────────────────────
 _QB_OK = False
@@ -577,10 +539,6 @@ async def _claude_query(question: str, caller_db: str | None = None,
     Route a TSL question through Claude → QueryBuilder tools → Claude answer.
     Returns (answer_text, rows, tool_used).
     """
-    client = _get_anthropic_client()
-    if not client:
-        return "⚠️ ATLAS AI is offline — ANTHROPIC_API_KEY not configured.", [], ""
-
     system = _build_oracle_system_prompt(caller_db, conv_context, affinity)
 
     # Resolve names in the question
@@ -589,18 +547,10 @@ async def _claude_query(question: str, caller_db: str | None = None,
     if resolve_names_in_question:
         annotated, alias_map = resolve_names_in_question(question)
 
-    loop = asyncio.get_running_loop()
-
     # Step 1: Claude picks tools
-    response = await loop.run_in_executor(
-        None,
-        lambda: client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=system,
-            tools=_ORACLE_TOOLS,
-            messages=[{"role": "user", "content": annotated}],
-        ),
+    result = await atlas_ai.generate_with_tools(
+        annotated, tools=_ORACLE_TOOLS,
+        system=system, tier=Tier.SONNET, max_tokens=1024,
     )
 
     # Step 2: Execute tool calls and collect results
@@ -608,85 +558,63 @@ async def _claude_query(question: str, caller_db: str | None = None,
     tool_used = ""
     tool_results = []
 
-    for block in response.content:
-        if block.type == "tool_use":
-            tool_used = block.name
-            rows, error = _dispatch_tool(block.name, block.input)
-            all_rows.extend(rows)
-            result_text = json.dumps(rows[:30], indent=2) if rows else f"Error: {error}" if error else "No results found."
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result_text,
-            })
+    for tc in result.tool_calls:
+        tool_used = tc["name"]
+        rows, error = _dispatch_tool(tc["name"], tc["input"])
+        all_rows.extend(rows)
+        result_text = json.dumps(rows[:30], indent=2) if rows else f"Error: {error}" if error else "No results found."
+        tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": tc["id"],
+            "content": result_text,
+        })
 
     # If Claude didn't use any tools, return its text directly
     if not tool_results:
-        text_parts = [b.text for b in response.content if hasattr(b, "text")]
-        return " ".join(text_parts) or "ATLAS couldn't figure out how to answer that. Try rephrasing.", [], ""
+        return result.text or "ATLAS couldn't figure out how to answer that. Try rephrasing.", [], ""
 
     # Step 3: Send tool results back for Claude to synthesize an answer
-    answer_response = await loop.run_in_executor(
-        None,
-        lambda: client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            system=system,
-            tools=_ORACLE_TOOLS,
-            messages=[
-                {"role": "user", "content": annotated},
-                {"role": "assistant", "content": response.content},
-                {"role": "user", "content": tool_results},
-            ],
-        ),
-    )
-
-    text_parts = [b.text for b in answer_response.content if hasattr(b, "text")]
-    answer = " ".join(text_parts) or "ATLAS pulled the data but couldn't formulate a response."
+    # Build the multi-turn conversation for the synthesis call
+    loop = asyncio.get_running_loop()
+    claude = atlas_ai._get_claude()
+    if claude:
+        answer_response = await loop.run_in_executor(
+            None,
+            lambda: claude.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=800,
+                system=system,
+                tools=_ORACLE_TOOLS,
+                messages=[
+                    {"role": "user", "content": annotated},
+                    {"role": "assistant", "content": result._raw_content},
+                    {"role": "user", "content": tool_results},
+                ],
+            ),
+        )
+        text_parts = [b.text for b in answer_response.content if hasattr(b, "text")]
+        answer = " ".join(text_parts) or "ATLAS pulled the data but couldn't formulate a response."
+    else:
+        answer = result.text or "ATLAS pulled the data but couldn't formulate a response."
 
     return answer, all_rows, tool_used
 
 
 async def _claude_blurb(prompt: str, max_tokens: int = 120) -> str:
     """Short AI-generated text blurb via Claude. Replaces _ai_blurb for non-query uses."""
-    client = _get_anthropic_client()
-    if not client:
-        return ""
     try:
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-        )
-        text_parts = [b.text for b in response.content if hasattr(b, "text")]
-        return " ".join(text_parts).strip()
+        result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=max_tokens)
+        return result.text
     except Exception:
         return ""
 
 
 async def _claude_chat(question: str, system_prompt: str, context: str = "") -> str:
     """General Claude chat for non-TSL modes (Open Intel, Sports Intel, Strategy)."""
-    client = _get_anthropic_client()
-    if not client:
-        return "⚠️ ATLAS AI is offline — ANTHROPIC_API_KEY not configured."
     try:
         content = f"{context}\n\n{question}" if context else question
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=800,
-                system=system_prompt,
-                messages=[{"role": "user", "content": content}],
-            ),
-        )
-        text_parts = [b.text for b in response.content if hasattr(b, "text")]
-        return " ".join(text_parts).strip() or "ATLAS couldn't pull a response on that one."
+        result = await atlas_ai.generate(content, system=system_prompt, tier=Tier.SONNET, max_tokens=800)
+        return result.text or "ATLAS couldn't pull a response on that one."
     except Exception as e:
         return f"ATLAS hit an error: {e}"
 
@@ -1146,21 +1074,9 @@ def _resolve_owner_team(
 
 
 async def _ai_blurb(prompt: str, max_tokens: int = 120) -> str:
-    client = _get_gemini_client()
-    if not client:
-        return ""
     try:
-        from google.genai import types
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model="gemini-2.0-flash",
-                config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=max_tokens),
-                contents=prompt,
-            ),
-        )
-        return response.text.strip()
+        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=max_tokens, temperature=0.8)
+        return result.text
     except Exception:
         return ""
 
@@ -1631,7 +1547,7 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
     )
 
     # AI tendency blurb
-    if GEMINI_API_KEY and not dm.df_team_stats.empty:
+    if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and not dm.df_team_stats.empty:
         try:
             ts_row = dm.df_team_stats[
                 dm.df_team_stats["teamName"].str.lower().str.contains(team.lower(), na=False)
@@ -2456,7 +2372,7 @@ async def _build_team_card_snapshot(
         )
 
     # ── 🔬 ATLAS Oracle · Projection ────────────────────────────────────────────────
-    if GEMINI_API_KEY and st_row is not None:
+    if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and st_row is not None:
         try:
             games_left = 18 - total_gms
             prompt = (
@@ -2777,7 +2693,7 @@ async def _build_team_matchup_embed(team_a: str, team_b: str) -> discord.Embed:
         )
 
     # ── AI matchup prediction ─────────────────────────────────────────────────
-    if GEMINI_API_KEY and a_row is not None and b_row is not None:
+    if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and a_row is not None and b_row is not None:
         try:
             aw2 = int(a_row.get("totalWins",0)); al2 = int(a_row.get("totalLosses",0))
             bw2 = int(b_row.get("totalWins",0)); bl2 = int(b_row.get("totalLosses",0))
@@ -3115,21 +3031,13 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
 
             # ATLAS flair — non-blocking
             try:
-                client = _get_gemini_client()
-                if client:
-                    prompt = (
-                        f"{get_persona('casual')}\n\nWrite a punchy 2–3 sentence rivalry summary. "
-                        f"{u1} all-time wins: {total_u1}. {u2} all-time wins: {total_u2}. "
-                        f"{total_games} total games. Make it entertaining and use football slang."
-                    )
-                    loop = asyncio.get_running_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: client.models.generate_content(
-                            model="gemini-2.0-flash", contents=prompt
-                        ),
-                    )
-                    embed.add_field(name="🎙️ ATLAS Echo", value=response.text.strip()[:900], inline=False)
+                prompt = (
+                    f"{get_persona('casual')}\n\nWrite a punchy 2–3 sentence rivalry summary. "
+                    f"{u1} all-time wins: {total_u1}. {u2} all-time wins: {total_u2}. "
+                    f"{total_games} total games. Make it entertaining and use football slang."
+                )
+                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+                embed.add_field(name="🎙️ ATLAS Echo", value=flair.text[:900], inline=False)
             except Exception:
                 pass
 
@@ -3199,10 +3107,6 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
 
         try:
             annotated, alias_map = resolve_names_in_question(q)
-            client = _get_gemini_client()
-            if not client:
-                await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
-                return
 
             # ── Resolve caller identity ─────────────────────────
             caller_db = None
@@ -3229,7 +3133,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
             intent_result = None
             tier_label = "Tier 3 (NL→SQL)"
             if _detect_intent:
-                intent_result = await _detect_intent(q, caller_db, alias_map, client)
+                intent_result = await _detect_intent(q, caller_db, alias_map)
 
             if intent_result and intent_result.tier < 3 and intent_result.sql:
                 # Tier 1/2: deterministic SQL — skip Gemini SQL generation
@@ -3242,7 +3146,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
 
             if not intent_result or intent_result.tier >= 3 or not intent_result.sql:
                 # Tier 3: Gemini NL→SQL fallback
-                sql = await gemini_sql(annotated, client, alias_map, conv_context=conv_block)
+                sql = await gemini_sql(annotated, alias_map, conv_context=conv_block)
                 if not sql:
                     await interaction.followup.send(
                         "📊 Couldn't generate a query for that. Try rephrasing — "
@@ -3261,14 +3165,8 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                         f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                         f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
                     )
-                    loop = asyncio.get_running_loop()
-                    fix_response = await loop.run_in_executor(
-                        None,
-                        lambda: client.models.generate_content(
-                            model="gemini-2.0-flash", contents=fix_prompt
-                        ),
-                    )
-                    sql = extract_sql(fix_response.text) or sql
+                    fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.SONNET, temperature=0.02)
+                    sql = extract_sql(fix_result.text) or sql
                     rows, error = run_sql(sql)
                     if error:
                         await interaction.followup.send(
@@ -3277,7 +3175,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
                         return
 
             answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
-            answer = await gemini_answer(q, sql, rows, client, conv_context=answer_context)
+            answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
 
             # ── Store conversation turn ─────────────────────────
             if _add_conversation_turn:
@@ -3321,35 +3219,12 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         q = self.question.value.strip()
-        client = _get_gemini_client()
-        if not client:
-            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
-            return
 
         try:
-            from google.genai import types
-
             system_instruction = get_persona("analytical")
+            result = await atlas_ai.generate_with_search(q, system=system_instruction)
 
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.5,
-                        tools=[{"google_search": {}}],
-                    ),
-                    contents=q,
-                ),
-            )
-
-            answer = (
-                response.text.strip()
-                if response.text
-                else "ATLAS couldn't pull a response on that one."
-            )
+            answer = result.text or "ATLAS couldn't pull a response on that one."
 
             embed = discord.Embed(
                 title="🌐 ATLAS Intelligence — Open Intel",
@@ -3357,10 +3232,10 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
                 color=C_BLUE,
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
-            embed.set_footer(
-                text="Open Intel mode · Web search enabled · ATLAS™ Oracle",
-                icon_url=ATLAS_ICON_URL,
-            )
+            footer = "Open Intel mode · Web search enabled · ATLAS™ Oracle"
+            if result.fallback_used:
+                footer += "  ·  ⚡ via Gemini fallback"
+            embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
             await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception as e:
@@ -3382,35 +3257,12 @@ class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         q = self.question.value.strip()
-        client = _get_gemini_client()
-        if not client:
-            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
-            return
 
         try:
-            from google.genai import types
-
             system_instruction = get_persona("analytical")
+            result = await atlas_ai.generate_with_search(q, system=system_instruction)
 
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.5,
-                        tools=[{"google_search": {}}],
-                    ),
-                    contents=q,
-                ),
-            )
-
-            answer = (
-                response.text.strip()
-                if response.text
-                else "ATLAS couldn't pull intel on that one."
-            )
+            answer = result.text or "ATLAS couldn't pull intel on that one."
 
             embed = discord.Embed(
                 title="🏈 ATLAS Intelligence — Sports Intel",
@@ -3418,10 +3270,10 @@ class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"
                 color=ATLAS_GOLD,
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
-            embed.set_footer(
-                text="Sports Intel mode · Web search enabled · ATLAS™ Oracle",
-                icon_url=ATLAS_ICON_URL,
-            )
+            footer = "Sports Intel mode · Web search enabled · ATLAS™ Oracle"
+            if result.fallback_used:
+                footer += "  ·  ⚡ via Gemini fallback"
+            embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
             await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception as e:
@@ -3447,10 +3299,6 @@ class PlayerScoutModal(discord.ui.Modal, title="🎯 Ask ATLAS — Player Scout"
             return
 
         q = self.question.value.strip()
-        client = _get_gemini_client()
-        if not client:
-            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
-            return
 
         try:
             # Scout-specific SQL prompt focusing on players + player_abilities tables
@@ -3487,14 +3335,8 @@ Generate a SQLite SELECT query to answer this scouting question:
 "{q}"
 """
 
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model="gemini-2.0-flash", contents=scout_prompt
-                ),
-            )
-            sql = extract_sql(response.text)
+            sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.SONNET)
+            sql = extract_sql(sql_result.text)
             if not sql:
                 await interaction.followup.send(
                     "🎯 Couldn't generate a scouting query. Try being specific about "
@@ -3532,13 +3374,8 @@ RESPONSE GUIDELINES:
 - Keep it under 300 words. Make it feel like a real scouting report.
 """
 
-            answer_response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model="gemini-2.0-flash", contents=answer_prompt
-                ),
-            )
-            answer = answer_response.text.strip() if answer_response.text else "No scouting data found."
+            answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.SONNET)
+            answer = answer_result.text or "No scouting data found."
 
             embed = discord.Embed(
                 title="🎯 ATLAS Intelligence — Player Scout",
@@ -3571,14 +3408,8 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         q = self.question.value.strip()
-        client = _get_gemini_client()
-        if not client:
-            await interaction.followup.send("⚠️ Gemini API not configured.", ephemeral=True)
-            return
 
         try:
-            from google.genai import types
-
             # Build TSL context from live data
             context_parts = []
 
@@ -3609,25 +3440,9 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
 
             contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
 
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.5,
-                        tools=[{"google_search": {}}],
-                    ),
-                    contents=contents,
-                ),
-            )
+            result = await atlas_ai.generate_with_search(contents, system=system_instruction)
 
-            answer = (
-                response.text.strip()
-                if response.text
-                else "ATLAS couldn't formulate a strategy for that one."
-            )
+            answer = result.text or "ATLAS couldn't formulate a strategy for that one."
 
             embed = discord.Embed(
                 title="🧠 ATLAS Intelligence — Strategy Room",
@@ -3635,10 +3450,10 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
                 color=AtlasColors.SUCCESS,
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
-            embed.set_footer(
-                text="Strategy Room · TSL context + web search · ATLAS™ Oracle",
-                icon_url=ATLAS_ICON_URL,
-            )
+            footer = "Strategy Room · TSL context + web search · ATLAS™ Oracle"
+            if result.fallback_used:
+                footer += "  ·  ⚡ via Gemini fallback"
+            embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
             await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception as e:
@@ -3869,26 +3684,18 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
 
             # ATLAS AI flair — non-blocking
             try:
-                client = _get_gemini_client()
-                if client:
-                    prompt = (
-                        f"{get_persona('casual')}\n\nWrite a vivid 3–4 sentence recap of TSL Season {season_num}. "
-                        f"Total games: {len(rows)}. Top records:\n{top_str}\n"
-                        f"Highlight who dominated, any notable storylines, and tease the playoff picture. "
-                        f"Keep it punchy and entertaining."
-                    )
-                    loop = asyncio.get_running_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: client.models.generate_content(
-                            model="gemini-2.0-flash", contents=prompt
-                        ),
-                    )
-                    embed.add_field(
-                        name="🎙️ ATLAS Echo",
-                        value=response.text.strip()[:900],
-                        inline=False,
-                    )
+                prompt = (
+                    f"{get_persona('casual')}\n\nWrite a vivid 3–4 sentence recap of TSL Season {season_num}. "
+                    f"Total games: {len(rows)}. Top records:\n{top_str}\n"
+                    f"Highlight who dominated, any notable storylines, and tease the playoff picture. "
+                    f"Keep it punchy and entertaining."
+                )
+                flair = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+                embed.add_field(
+                    name="🎙️ ATLAS Echo",
+                    value=flair.text[:900],
+                    inline=False,
+                )
             except Exception:
                 pass
 

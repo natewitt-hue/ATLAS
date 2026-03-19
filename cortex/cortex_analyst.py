@@ -21,12 +21,9 @@ import hashlib
 import time
 import httpx
 
-from google import genai
-from google.genai import types
-from google.genai.errors import ClientError
+import atlas_ai
+from atlas_ai import Tier
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-
-FLASH_MODEL = "gemini-2.5-flash"
 CACHE_DIR   = ".cortex_cache"
 PASS_DELAY  = 5  # seconds between Flash calls to avoid 429s
 
@@ -34,10 +31,6 @@ PASS_DELAY  = 5  # seconds between Flash calls to avoid 429s
 class CortexAnalyst:
 
     def __init__(self):
-        self.client = genai.Client(
-            api_key=os.getenv("GEMINI_API_KEY"),
-            http_options={"timeout": 120_000},
-        )
         os.makedirs(CACHE_DIR, exist_ok=True)
 
     # -- Cache helpers ---------------------------------------------------------
@@ -115,22 +108,20 @@ class CortexAnalyst:
     # -- Flash call wrapper ----------------------------------------------------
 
     @retry(
-        retry=retry_if_exception_type((ClientError, httpx.TransportError)),
+        retry=retry_if_exception_type((Exception, httpx.TransportError)),
         stop=stop_after_attempt(6),
         wait=wait_exponential(multiplier=3, min=5, max=90),
         before_sleep=lambda rs: print(f"    [!] Retry {rs.attempt_number}/6 after error: {rs.outcome.exception().__class__.__name__} -- waiting {rs.next_action.sleep:.0f}s..."),
     )
     def _call_flash(self, prompt, pass_name="unknown"):
         t0 = time.time()
-        response = self.client.models.generate_content(
-            model=FLASH_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            )
+        result = atlas_ai.generate_sync(
+            prompt,
+            tier=Tier.HAIKU,
+            json_mode=True,
+            temperature=0.1,
         )
-        raw = response.text
+        raw = result.text
         elapsed = time.time() - t0
         print(f"    -> Flash call ({pass_name}) completed in {elapsed:.1f}s")
         return self._safe_extract_json(raw, pass_name)

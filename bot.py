@@ -118,16 +118,16 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ext import tasks
-from google import genai
-from google.genai import types
 from dotenv import load_dotenv
 
+import atlas_ai
 import data_manager as dm
 import reasoning
 import build_tsl_db as db_builder
 import build_member_db as member_db
 import roster
 from ui_state import UIStateManager
+from conversation_memory import add_conversation_turn, build_conversation_block
 
 # Optional modules
 try: import intelligence as intel
@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.1.0"  # Codebase audit: gold unification, persona centralization, color system conformance, utility deduplication
+ATLAS_VERSION = "3.3.0"  # Centralized AI provider — atlas_ai.py with Claude primary + Gemini fallback
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -172,7 +172,6 @@ ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 from permissions import ADMIN_USER_IDS
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 intents       = discord.Intents.all()
 bot           = commands.Bot(command_prefix="!", intents=intents)
 
@@ -294,28 +293,13 @@ async def call_atlas(user_input: str, context: str, persona_type: str = "casual"
     Sourced from echo_loader.get_persona() — falls back to inline stub if
     echo_loader is unavailable or echo/ files haven't been generated yet.
     """
-    if not gemini_client:
-        return "ATLAS AI is offline — GEMINI_API_KEY not configured."
-
     system_instruction = get_persona(persona_type)
-
-    def _generate():
-        return gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.4,
-                tools=[{"google_search": {}}]
-            ),
-            contents=[f"CONTEXT:\n{context}\n\nUSER QUERY: {user_input}"]
-        )
-
+    prompt = f"CONTEXT:\n{context}\n\nUSER QUERY: {user_input}"
     try:
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, _generate)
-        return response.text.strip()
+        result = await atlas_ai.generate_with_search(prompt, system=system_instruction)
+        return result.text
     except Exception as e:
-        print(f"[Gemini] call_atlas failed: {e}")
+        print(f"[atlas_ai] call_atlas failed: {e}")
         traceback.print_exc()
         return "ATLAS is having trouble thinking right now. Try again in a moment."
 
@@ -512,8 +496,20 @@ async def on_message(message: discord.Message):
                 if affinity_instruction:
                     context = f"{affinity_instruction}\n\n{context}"
 
+                # ── Conversation memory (follow-up context) ─────────
+                conv_block = await build_conversation_block(
+                    message.author.id, source="casual",
+                )
+                if conv_block:
+                    context = f"{conv_block}\n\n{context}"
+
                 wit = await call_atlas(user_input, context, persona_type=persona_type)
                 await message.reply(wit)
+
+                # ── Record this exchange for future context ─────────
+                await add_conversation_turn(
+                    message.author.id, user_input, wit, source="casual",
+                )
 
                 # ── Post-interaction affinity update ───────────────
                 if _affinity_available:

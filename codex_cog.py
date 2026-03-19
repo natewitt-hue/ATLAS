@@ -29,7 +29,6 @@ v1.4 fixes:
           current season number instead of hardcoded '6'.
 """
 
-import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -37,10 +36,9 @@ import sqlite3
 import json
 import os
 import re
-import time
 from collections import Counter
-from dataclasses import dataclass, field
-from google import genai
+import atlas_ai
+from atlas_ai import Tier
 from difflib import get_close_matches
 
 import data_manager as dm
@@ -88,147 +86,8 @@ except ImportError:
 def _answer_persona() -> str:
     return _get_persona("analytical")
 
-# ── Conversation Memory ──────────────────────────────────────────────────────
-CONV_MAX_TURNS   = 5        # Max Q&A pairs to inject as context
-CONV_TTL_SECONDS = 1800     # 30 minutes — stale conversations are dropped
-
-
-@dataclass
-class ConversationTurn:
-    question: str
-    sql: str
-    answer: str
-    timestamp: float = field(default_factory=time.time)
-
-
-# In-memory cache: discord_id → list of recent turns
-_conv_cache: dict[int, list[ConversationTurn]] = {}
-
-
-def _init_conversation_db() -> None:
-    """Create conversation_history table if it doesn't exist."""
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_history (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                discord_id INTEGER NOT NULL,
-                question   TEXT    NOT NULL,
-                sql_query  TEXT,
-                answer     TEXT    NOT NULL,
-                created_at REAL   NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conv_user_time
-            ON conversation_history(discord_id, created_at DESC)
-        """)
-        conn.commit()
-        conn.close()
-        print("[CodexCog] conversation_history table ready")
-    except Exception as e:
-        print(f"[CodexCog] Conversation DB init error: {e}")
-
-
-def _get_conversation_context(discord_id: int) -> list[ConversationTurn]:
-    """Return recent non-stale conversation turns from the in-memory cache."""
-    turns = _conv_cache.get(discord_id, [])
-    cutoff = time.time() - CONV_TTL_SECONDS
-    fresh = [t for t in turns if t.timestamp >= cutoff]
-    if len(fresh) != len(turns):
-        _conv_cache[discord_id] = fresh
-    return fresh[-CONV_MAX_TURNS:]
-
-
-def _load_conversations_from_db(discord_id: int) -> list[ConversationTurn]:
-    """Cold-start recovery: load recent turns from SQLite."""
-    cutoff = time.time() - CONV_TTL_SECONDS
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT question, sql_query, answer, created_at "
-                "FROM conversation_history "
-                "WHERE discord_id = ? AND created_at >= ? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (discord_id, cutoff, CONV_MAX_TURNS),
-            ).fetchall()
-        return [
-            ConversationTurn(
-                question=r["question"], sql=r["sql_query"] or "",
-                answer=r["answer"], timestamp=r["created_at"],
-            )
-            for r in reversed(rows)
-        ]
-    except Exception:
-        return []
-
-
-def _add_conversation_turn(discord_id: int, question: str, sql: str, answer: str) -> None:
-    """Store a turn in memory and persist to DB."""
-    turn = ConversationTurn(question=question, sql=sql, answer=answer)
-    turns = _conv_cache.setdefault(discord_id, [])
-    turns.append(turn)
-
-    # Trim when memory exceeds 2x target to avoid unbounded growth.
-    # Trigger at CONV_MAX_TURNS*2, trim down to CONV_MAX_TURNS (hysteresis
-    # prevents trimming on every call while keeping memory bounded).
-    if len(turns) > CONV_MAX_TURNS * 2:
-        _conv_cache[discord_id] = turns[-CONV_MAX_TURNS:]
-
-    try:
-        with sqlite3.connect(DB_PATH, timeout=10) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(
-                "INSERT INTO conversation_history "
-                "(discord_id, question, sql_query, answer, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (discord_id, turn.question, turn.sql, turn.answer, turn.timestamp),
-            )
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e):
-            print("[CodexCog] conversation_history missing — recreating")
-            _init_conversation_db()
-            try:
-                with sqlite3.connect(DB_PATH, timeout=10) as conn:
-                    conn.execute(
-                        "INSERT INTO conversation_history "
-                        "(discord_id, question, sql_query, answer, created_at) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (discord_id, turn.question, turn.sql, turn.answer, turn.timestamp),
-                    )
-            except Exception:
-                pass
-        else:
-            print(f"[CodexCog] Conversation persist error: {e}")
-    except Exception as e:
-        print(f"[CodexCog] Conversation persist error: {e}")
-
-
-def _build_conversation_block(discord_id: int) -> str:
-    """Build a conversation history string for prompt injection."""
-    turns = _get_conversation_context(discord_id)
-    if not turns:
-        turns = _load_conversations_from_db(discord_id)
-        if turns:
-            _conv_cache[discord_id] = turns
-
-    if not turns:
-        return ""
-
-    lines = ["RECENT CONVERSATION HISTORY (use for context and follow-up references):"]
-    for i, t in enumerate(turns, 1):
-        lines.append(f"  Q{i}: {t.question}")
-        if t.sql:
-            lines.append(f"  SQL{i}: {t.sql}")
-        lines.append(f"  A{i}: {t.answer[:200]}")
-    lines.append(
-        "If the current question references 'that', 'those', 'them', 'the same', "
-        "'it', 'he', 'she', 'they', etc., use the above history to resolve what is "
-        "being referenced. You may reuse or modify previous SQL patterns if relevant."
-    )
-    return "\n".join(lines)
+# ── Conversation Memory (shared module) ──────────────────────────────────────
+from conversation_memory import add_conversation_turn, build_conversation_block
 
 
 # ── Schema fed to Gemini for SQL generation ──────────────────────────────────
@@ -478,7 +337,7 @@ def extract_sql(text: str) -> str | None:
 
 
 async def gemini_sql(
-    question: str, client, alias_map: dict | None = None,
+    question: str, alias_map: dict | None = None,
     conv_context: str = "",
 ) -> str | None:
     """Ask Gemini to generate SQL. Non-blocking via run_in_executor."""
@@ -544,16 +403,12 @@ Now generate a query for this question:
 "{question}"
 """
 
-    def _call():
-        return client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None, _call)
-    return extract_sql(response.text)
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, temperature=0.05)
+    return extract_sql(result.text)
 
 
 async def gemini_answer(
-    question: str, sql: str, rows: list[dict], client,
+    question: str, sql: str, rows: list[dict],
     conv_context: str = "",
 ) -> str:
     """Format SQL results into natural language. Non-blocking via run_in_executor."""
@@ -589,12 +444,8 @@ RESPONSE GUIDELINES:
 - Use sports language and dramatic flair — make numbers tell a story.
 """
 
-    def _call():
-        return client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None, _call)
-    return response.text.strip()
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+    return result.text.strip()
 
 
 # ── Cog ──────────────────────────────────────────────────────────────────────
@@ -602,11 +453,6 @@ RESPONSE GUIDELINES:
 class CodexCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot  = bot
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("[CodexCog] ⚠️  GEMINI_API_KEY not set — /ask, /h2h, /season_recap will fail.")
-        self.gemini = genai.Client(api_key=api_key) if api_key else None
-        _init_conversation_db()
 
     # ── /ask ─────────────────────────────────────────────────────────────────
     @app_commands.command(
@@ -617,10 +463,6 @@ class CodexCog(commands.Cog):
     @app_commands.checks.cooldown(3, 30)  # 3 uses per 30 seconds per user
     async def ask(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(thinking=True)
-
-        if not self.gemini:
-            await interaction.followup.send("❌ ATLAS AI is offline — GEMINI_API_KEY not configured.")
-            return
 
         try:
             # ── 1. Dynamic identity resolution ────────────────────
@@ -647,7 +489,7 @@ class CodexCog(commands.Cog):
                     await interaction.followup.send(f"⚠️ {collision_msg}")
                     return
 
-            conv_block = _build_conversation_block(interaction.user.id)
+            conv_block = await build_conversation_block(interaction.user.id, source="codex")
 
             # Affinity tone (answer only, not SQL)
             affinity_block = ""
@@ -662,7 +504,7 @@ class CodexCog(commands.Cog):
             intent_result = None
             if detect_intent:
                 intent_result = await detect_intent(
-                    question, caller_db, alias_map, self.gemini
+                    question, caller_db, alias_map
                 )
 
             # ── 5. Tier 1/2: Deterministic SQL ────────────────────
@@ -671,10 +513,10 @@ class CodexCog(commands.Cog):
                 if not error:
                     answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
                     answer = await gemini_answer(
-                        question, intent_result.sql, rows, self.gemini,
+                        question, intent_result.sql, rows,
                         conv_context=answer_context,
                     )
-                    _add_conversation_turn(interaction.user.id, question, intent_result.sql, answer)
+                    await add_conversation_turn(interaction.user.id, question, answer, sql=intent_result.sql, source="codex")
 
                     embed = discord.Embed(
                         title="📊 TSL Historical Intelligence",
@@ -702,7 +544,7 @@ class CodexCog(commands.Cog):
 
             # ── 6. Tier 3: Existing NL→SQL pipeline (unchanged) ───
             sql = await gemini_sql(
-                annotated_question, self.gemini, alias_map,
+                annotated_question, alias_map,
                 conv_context=conv_block,
             )
             if not sql:
@@ -723,12 +565,8 @@ class CodexCog(commands.Cog):
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                     f"Schema:\n{_get_db_schema()}"
                 )
-                def _fix():
-                    return self.gemini.models.generate_content(
-                        model="gemini-2.0-flash", contents=fix_prompt
-                    )
-                fix_response = await asyncio.get_running_loop().run_in_executor(None, _fix)
-                sql = extract_sql(fix_response.text) or sql
+                fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.SONNET, temperature=0.02)
+                sql = extract_sql(fix_result.text) or sql
                 rows, error = run_sql(sql)
                 if error:
                     await interaction.followup.send(
@@ -742,12 +580,12 @@ class CodexCog(commands.Cog):
 
             answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
             answer = await gemini_answer(
-                question, sql, rows, self.gemini,
+                question, sql, rows,
                 conv_context=answer_context,
             )
 
             # ── Store conversation turn ─────────────────────────
-            _add_conversation_turn(interaction.user.id, question, sql or "", answer)
+            await add_conversation_turn(interaction.user.id, question, answer, sql=sql or "", source="codex")
 
             embed = discord.Embed(
                 title="📊 TSL Historical Intelligence",
@@ -787,10 +625,6 @@ class CodexCog(commands.Cog):
         """Core ask_debug logic — shared by /commish askdebug and deprecated /ask_debug."""
         await interaction.response.defer(thinking=True, ephemeral=True)
 
-        if not self.gemini:
-            await interaction.followup.send("❌ ATLAS AI is offline — GEMINI_API_KEY not configured.")
-            return
-
         try:
             try:
                 from build_member_db import get_db_username_for_discord_id
@@ -805,7 +639,7 @@ class CodexCog(commands.Cog):
                 f"When the question uses 'me', 'my', or 'I', use '{caller_db}' in SQL WHERE clauses.]"
             )
             annotated_question, alias_map = resolve_names_in_question(f"{caller_context} {question}")
-            sql = await gemini_sql(annotated_question, self.gemini, alias_map)
+            sql = await gemini_sql(annotated_question, alias_map)
             if not sql:
                 await interaction.followup.send("❌ No SQL generated.")
                 return
@@ -846,10 +680,6 @@ class CodexCog(commands.Cog):
     async def _h2h_impl(self, interaction: discord.Interaction, owner1: str, owner2: str):
         """Head-to-head record — used by oracle HubView H2H modal."""
         await interaction.response.defer(thinking=True)
-
-        if not self.gemini:
-            await interaction.followup.send("ATLAS AI is offline — GEMINI_API_KEY not configured.")
-            return
 
         u1 = fuzzy_resolve_user(owner1)
         u2 = fuzzy_resolve_user(owner2)
@@ -906,11 +736,8 @@ Head-to-head data for {u1} vs {u2} in TSL (regular season only):
 Write a punchy 3-4 sentence rivalry summary. Call out the dominant party if clear,
 note any sweep seasons, and make it entertaining.
 """
-        def _call():
-            return self.gemini.models.generate_content(model="gemini-2.0-flash", contents=summary_prompt)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, _call)
-        summary = response.text.strip()
+        result = await atlas_ai.generate(summary_prompt, tier=Tier.SONNET)
+        summary = result.text.strip()
 
         embed = discord.Embed(title=f"Rivalry Report: {u1} vs {u2}", color=AtlasColors.TSL_GOLD)
         embed.set_author(
@@ -974,14 +801,11 @@ Write a vivid Season {season} recap. Highlight who dominated, any upsets or nota
 storylines from the records, and tease the playoff picture.
 Keep it under 350 words.
 """
-        def _call():
-            return self.gemini.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, _call)
+        result = await atlas_ai.generate(prompt, tier=Tier.SONNET)
 
         embed = discord.Embed(
             title=f"TSL Season {season} Recap",
-            description=_truncate_for_embed(response.text.strip()),
+            description=_truncate_for_embed(result.text.strip()),
             color=AtlasColors.TSL_GOLD
         )
         embed.set_author(

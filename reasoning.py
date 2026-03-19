@@ -42,6 +42,8 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import data_manager as dm
+import atlas_ai
+from atlas_ai import Tier
 
 # ── Schema cache with TTL ─────────────────────────────────────────────────────
 _SCHEMA_CACHE:     str   = ""
@@ -436,31 +438,25 @@ Write Python code to answer this. Assign the answer to `result`.
 #  GEMINI CALL HELPER
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) -> str:
+async def _call_analyst(prompt: str, temperature: float = 0.2) -> str:
     """
-    Single Gemini call for the analyst persona.
+    Single AI call for the analyst persona via atlas_ai.
     Strips markdown code fences from the response.
     Returns raw Python code string, or empty string on failure.
     """
-    from google.genai import types
     import logging
     log = logging.getLogger(__name__)
 
     try:
-        import asyncio
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=ANALYST_SYSTEM,
-                temperature=temperature,
-                top_p=0.9,
-            ),
-            contents=[prompt],
-        ))
-        if not response.text:
+        result = await atlas_ai.generate(
+            prompt,
+            system=ANALYST_SYSTEM,
+            tier=Tier.SONNET,
+            temperature=temperature,
+        )
+        if not result.text:
             return ""
-        code = response.text.strip()
+        code = result.text.strip()
         if code.startswith("```"):
             lines = code.split("\n")
             code  = "\n".join(
@@ -469,14 +465,14 @@ async def _call_analyst(prompt: str, gemini_client, temperature: float = 0.2) ->
             )
         return code.strip()
     except Exception as e:
-        log.error(f"[Reasoning] Gemini analyst call failed: {e}")
+        log.error(f"[Reasoning] Analyst call failed: {e}")
         return ""
 
 
-async def generate_analysis_code(question: str, gemini_client) -> str:
-    """Phase 1: Ask Gemini to write Python code to answer the question."""
+async def generate_analysis_code(question: str) -> str:
+    """Phase 1: Ask AI to write Python code to answer the question."""
     prompt = ANALYST_USER_TEMPLATE.format(schema=get_schema(), question=question)
-    return await _call_analyst(prompt, gemini_client, temperature=0.2)
+    return await _call_analyst(prompt, temperature=0.2)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -486,7 +482,7 @@ async def generate_analysis_code(question: str, gemini_client) -> str:
 MAX_RETRIES = 2   # hard cap: max 2 retries before graceful failure
 
 
-async def reason(question: str, gemini_client) -> dict:
+async def reason(question: str) -> dict:
     """
     Self-correcting two-phase reasoning pipeline.
 
@@ -508,7 +504,7 @@ async def reason(question: str, gemini_client) -> dict:
     log = logging.getLogger(__name__)
 
     initial_prompt = ANALYST_USER_TEMPLATE.format(schema=get_schema(), question=question)
-    code = await _call_analyst(initial_prompt, gemini_client, temperature=0.2)
+    code = await _call_analyst(initial_prompt, temperature=0.2)
 
     if not code:
         return {
@@ -561,7 +557,7 @@ async def reason(question: str, gemini_client) -> dict:
         )
 
         retry_temp = 0.05 * attempt
-        code = await _call_analyst(retry_prompt, gemini_client, temperature=retry_temp)
+        code = await _call_analyst(retry_prompt, temperature=retry_temp)
 
         if not code:
             log.error(f"[Reasoning] Gemini returned no code on retry {attempt}.")
@@ -765,27 +761,20 @@ _SQL_USER_TEMPLATE = """Question: {question}
 Write a SQLite SELECT query to answer this. Output ONLY the raw SQL, nothing else."""
 
 
-async def generate_sql(question: str, gemini_client) -> str:
+async def generate_sql(question: str) -> str:
     """Ask the LLM to write a SQLite query for the given question."""
-    from google.genai import types
-
     schema = dm.get_discord_db_schema()
     try:
-        import asyncio
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=_SQL_SYSTEM_PROMPT.format(schema=schema),
-                temperature=0.05,
-                top_p=0.9,
-            ),
-            contents=[_SQL_USER_TEMPLATE.format(question=question)],
-        ))
-        raw = response.text.strip() if response.text else ""
+        result = await atlas_ai.generate(
+            _SQL_USER_TEMPLATE.format(question=question),
+            system=_SQL_SYSTEM_PROMPT.format(schema=schema),
+            tier=Tier.SONNET,
+            temperature=0.05,
+        )
+        raw = result.text.strip() if result.text else ""
         return _sanitize_sql(raw)
     except Exception as e:
-        _sql_log.error(f"[SQL] generate_sql Gemini error: {e}")
+        _sql_log.error(f"[SQL] generate_sql error: {e}")
         return ""
 
 
@@ -903,7 +892,7 @@ def _format_sql_result(result: _SQLResult, question: str) -> str:
 
 # ── Full pipeline ─────────────────────────────────────────────────────────────
 
-async def query_discord_history(question: str, gemini_client) -> dict:
+async def query_discord_history(question: str) -> dict:
     """
     Full Text-to-SQL pipeline with self-correction.
 
@@ -916,9 +905,7 @@ async def query_discord_history(question: str, gemini_client) -> dict:
     Returns:
         dict: { 'success', 'context', 'sql', 'rows', 'error', 'attempts' }
     """
-    from google.genai import types
-
-    sql = await generate_sql(question, gemini_client)
+    sql = await generate_sql(question)
     if not sql:
         return {
             "success": False,
@@ -970,25 +957,20 @@ async def query_discord_history(question: str, gemini_client) -> dict:
         )
 
         try:
-            import asyncio
-            loop = asyncio.get_running_loop()
-            fix_response = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
-                model="gemini-2.0-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=_SQL_SYSTEM_PROMPT.format(schema=schema),
-                    temperature=0.02,
-                    top_p=0.85,
-                ),
-                contents=[fix_prompt],
-            ))
-            if fix_response.text:
-                sql = _sanitize_sql(fix_response.text.strip())
+            fix_result = await atlas_ai.generate(
+                fix_prompt,
+                system=_SQL_SYSTEM_PROMPT.format(schema=schema),
+                tier=Tier.SONNET,
+                temperature=0.02,
+            )
+            if fix_result.text:
+                sql = _sanitize_sql(fix_result.text.strip())
                 _sql_log.info(f"[SQL] Retry {attempt} rewritten SQL: {sql[:150]}")
             else:
                 _sql_log.error(f"[SQL] LLM returned no SQL on retry {attempt}.")
                 break
         except Exception as e:
-            _sql_log.error(f"[SQL] Retry {attempt} Gemini error: {e}")
+            _sql_log.error(f"[SQL] Retry {attempt} error: {e}")
             break
 
     _sql_log.error(f"[SQL] All {MAX_SQL_RETRIES + 1} attempts failed for: '{question[:60]}'")

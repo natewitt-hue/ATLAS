@@ -150,8 +150,8 @@ def _serialize_player(p: dict) -> dict:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-_gemini_client = None  # lazily initialized
+import atlas_ai
+from atlas_ai import Tier
 STATE_PATH     = os.path.join(os.path.dirname(__file__), "trade_state.json")
 
 # ── Channel routing via setup_cog (ID-based, rename-proof) ───────────────────
@@ -350,17 +350,9 @@ def _resolve_assets(
 # ── AI Commentary ─────────────────────────────────────────────────────────────
 
 async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_b_name: str) -> str:
-    """Get ATLAS Echo trade commentary via Gemini."""
-    if not GEMINI_API_KEY:
-        return "_AI commentary unavailable._"
+    """Get ATLAS Echo trade commentary via atlas_ai."""
     try:
-        from google import genai
-        from google.genai import types
-
-        global _gemini_client
-        if _gemini_client is None:
-            _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        client = _gemini_client
+        from echo_loader import get_persona
 
         notes_text = "\n".join(result.notes) if result.notes else "No flags."
         # Determine which team benefits (sends less value = receives more)
@@ -370,7 +362,6 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
         else:
             favored_team = team_b_name
             disadvantaged_team = team_a_name
-        from echo_loader import get_persona
         prompt = (
             f"Give a 2-sentence ruthless, sharp trade verdict. No fluff. Refer to yourself as ATLAS in third person.\n\n"
             f"TRADE DETAILS:\n"
@@ -384,19 +375,11 @@ async def _get_ai_commentary(result: te.TradeEvalResult, team_a_name: str, team_
             f"{'Flags: ' + notes_text if result.notes else ''}"
         )
 
-        response = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model="gemini-2.0-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=get_persona("analytical"),
-                    temperature=0.7,
-                    max_output_tokens=120,
-                ),
-                contents=prompt,
-            )
+        ai_result = await atlas_ai.generate(
+            prompt, system=get_persona("analytical"),
+            tier=Tier.HAIKU, temperature=0.7, max_tokens=120,
         )
-        return response.text.strip()
+        return ai_result.text
     except Exception as e:
         print(f"[trade_center] AI commentary error: {e}")
         return "_AI commentary unavailable._"

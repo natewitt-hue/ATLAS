@@ -41,7 +41,6 @@ import io
 import json
 import os
 import re
-import threading
 import traceback
 import uuid
 
@@ -53,8 +52,9 @@ import httpx
 import requests  # TODO: Unify on async httpx — requests is only used in _fetch_image_bytes()
 from discord import app_commands
 from discord.ext import commands
-from google import genai
-from google.genai import types
+import atlas_ai
+from atlas_ai import Tier
+import base64
 
 import data_manager as dm
 
@@ -649,22 +649,6 @@ def _results_channel_id() -> int | None:
     """Public results channel — where approved rulings are posted."""
     return _get_channel_id("force_request")
 
-# ── Gemini client (lazy — avoids crash if GEMINI_API_KEY unset at import) ─────
-_sentinel_gemini = None
-_sentinel_gemini_lock = threading.Lock()
-
-def _get_sentinel_gemini():
-    global _sentinel_gemini
-    if _sentinel_gemini is not None:
-        return _sentinel_gemini
-    with _sentinel_gemini_lock:
-        if _sentinel_gemini is not None:
-            return _sentinel_gemini
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY not set")
-        _sentinel_gemini = genai.Client(api_key=api_key)
-        return _sentinel_gemini
 
 
 # ── Ruling constants ──────────────────────────────────────────────────────────
@@ -749,17 +733,7 @@ async def _analyze_screenshots(
     opponent_name: str,
     note: str,
 ) -> dict:
-    """Download screenshot(s), send to Gemini Vision, return parsed ruling dict."""
-
-    image_parts = []
-    async with httpx.AsyncClient(timeout=30) as client:
-        for url in image_urls:
-            if not _validate_image_url(url):
-                raise ValueError(f"Blocked image URL (must be Discord CDN): {url}")
-            resp = await client.get(url)
-            resp.raise_for_status()
-            mime = resp.headers.get("content-type", "image/png").split(";")[0]
-            image_parts.append(types.Part.from_bytes(data=resp.content, mime_type=mime))
+    """Download screenshot(s), send to AI Vision, return parsed ruling dict."""
 
     user_context = (
         f"Requester (submitted this force request): {requester_name}\n"
@@ -769,22 +743,21 @@ async def _analyze_screenshots(
         user_context += f"\n<untrusted_user_note>{note}</untrusted_user_note>\n"
     user_context += "\nAnalyze the screenshot(s) and return your ruling."
 
-    contents = [user_context] + image_parts
+    content_blocks = [{"type": "text", "text": user_context}]
+    async with httpx.AsyncClient(timeout=30) as client:
+        for url in image_urls:
+            if not _validate_image_url(url):
+                raise ValueError(f"Blocked image URL (must be Discord CDN): {url}")
+            resp = await client.get(url)
+            resp.raise_for_status()
+            mime = resp.headers.get("content-type", "image/png").split(";")[0]
+            content_blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(resp.content).decode()},
+            })
 
-    loop = asyncio.get_running_loop()
-
-    def _call():
-        return _get_sentinel_gemini().models.generate_content(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                temperature=0.1,
-            ),
-            contents=contents,
-        )
-
-    response = await loop.run_in_executor(None, _call)
-    raw = response.text.strip()
+    result = await atlas_ai.generate(content_blocks, system=_SYSTEM_PROMPT, tier=Tier.SONNET, temperature=0.1)
+    raw = result.text
 
     # Defaults
     result = {
@@ -2393,14 +2366,7 @@ def _fetch_image_bytes(url: str) -> bytes:
 
 
 async def _analyze_screenshot(image_bytes: bytes, filename: str) -> str:
-    """Send screenshot to Gemini Vision and get a TSL ruling (async wrapper)."""
-    return _analyze_screenshot_sync(image_bytes, filename)
-
-
-def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
-    """Send screenshot to Gemini Vision and get a TSL ruling (sync, safe for run_in_executor)."""
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
+    """Send screenshot to AI Vision and get a TSL ruling."""
     # Detect MIME type from filename
     ext = filename.lower().split(".")[-1]
     mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
@@ -2417,14 +2383,12 @@ def _analyze_screenshot_sync(image_bytes: bytes, filename: str) -> str:
             f"{qb_table}"
         )
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            types.Part.from_text(text=prompt),
-        ],
-    )
-    return response.text
+    content_blocks = [
+        {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": base64.b64encode(image_bytes).decode()}},
+        {"type": "text", "text": prompt},
+    ]
+    result = await atlas_ai.generate(content_blocks, tier=Tier.SONNET)
+    return result.text
 
 
 def _is_madden_screenshot(attachment: discord.Attachment) -> bool:
@@ -2487,11 +2451,7 @@ class FourthDown(commands.Cog):
             image_bytes = await self.bot.loop.run_in_executor(
                 None, _fetch_image_bytes, screenshot.url
             )
-            # Gemini call is sync under the hood — run in executor to avoid blocking event loop
-            ruling = await self.bot.loop.run_in_executor(
-                None,
-                lambda: _analyze_screenshot_sync(image_bytes, screenshot.filename)
-            )
+            ruling = await _analyze_screenshot(image_bytes, screenshot.filename)
         except Exception as e:
             await interaction.followup.send(f"❌ Failed to analyze screenshot: `{e}`")
             return
@@ -2534,10 +2494,7 @@ class FourthDown(commands.Cog):
                 image_bytes = await self.bot.loop.run_in_executor(
                     None, _fetch_image_bytes, image_attachment.url
                 )
-                ruling = await self.bot.loop.run_in_executor(
-                    None,
-                    lambda: _analyze_screenshot_sync(image_bytes, image_attachment.filename)
-                )
+                ruling = await _analyze_screenshot(image_bytes, image_attachment.filename)
             except Exception as e:
                 await message.reply(f"❌ 4th Down Analyzer error: `{e}`")
                 return

@@ -9,7 +9,7 @@ Tier 2: Gemini structured classification (flexible, ~1s)
 Tier 3: Existing gemini_sql() pipeline (unchanged fallback)
 
 Public API:
-  detect_intent(question, caller_db, resolved_names, gemini_client) → IntentResult
+  detect_intent(question, caller_db, resolved_names) → IntentResult
   get_h2h_sql_and_params(u1, u2) → (sql, params)
   check_self_reference_collision(caller_db, resolved_names) → str | None
 ─────────────────────────────────────────────────────────────────────────────
@@ -17,10 +17,12 @@ Public API:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from dataclasses import dataclass, field
+
+import atlas_ai
+from atlas_ai import Tier
 
 try:
     import data_manager as dm
@@ -1365,7 +1367,6 @@ async def _classify_gemini(
     question: str,
     caller_db: str | None,
     resolved_names: dict[str, str],
-    gemini_client,
 ) -> IntentResult:
     """Tier 2: Ask Gemini to classify intent + extract params as JSON."""
     prompt = _CLASSIFICATION_PROMPT.format(
@@ -1375,13 +1376,8 @@ async def _classify_gemini(
     )
 
     try:
-        loop = asyncio.get_running_loop()
-        def _call():
-            return gemini_client.models.generate_content(
-                model="gemini-2.0-flash", contents=prompt
-            )
-        response = await loop.run_in_executor(None, _call)
-        text = response.text.strip()
+        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU)
+        text = result.text.strip()
 
         # Strip markdown fences if present
         if text.startswith("```"):
@@ -1753,13 +1749,12 @@ async def detect_intent(
     question: str,
     caller_db: str | None,
     resolved_names: dict[str, str] | None = None,
-    gemini_client=None,
 ) -> IntentResult:
     """
     Three-tier intent detection.
 
     Tier 1: Regex pre-flight (instant)
-    Tier 2: Gemini structured classification (if regex misses + client available)
+    Tier 2: AI structured classification (if regex misses)
     Tier 3: Returns IntentResult(tier=3) → caller uses existing gemini_sql() pipeline
     """
     resolved = resolved_names or {}
@@ -1770,11 +1765,10 @@ async def detect_intent(
     if result:
         return result
 
-    # Tier 2: Gemini classification
-    if gemini_client:
-        result = await _classify_gemini(question, caller_db, resolved, gemini_client)
-        if result.tier < 3:
-            return result
+    # Tier 2: AI classification
+    result = await _classify_gemini(question, caller_db, resolved)
+    if result.tier < 3:
+        return result
 
     # Tier 3: Fallthrough
     return IntentResult(intent="unknown", tier=3)

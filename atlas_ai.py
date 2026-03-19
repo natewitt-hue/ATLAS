@@ -1,0 +1,588 @@
+"""atlas_ai — Centralized AI client for ATLAS.
+
+Claude primary, Gemini fallback. Every cog calls this module instead of
+managing its own AI client.
+
+Public API
+----------
+generate()             – async text generation (Discord cog callsites)
+generate_with_tools()  – async tool-use (Oracle QueryBuilder flow)
+generate_with_search() – async Gemini-primary with Google Search
+generate_stream()      – async streaming iterator (future use)
+generate_sync()        – sync text generation (cortex, echo_voice_extractor CLIs)
+
+Tier enum selects model capability:
+    HAIKU  – fast, cheap (blurbs, classification)
+    SONNET – balanced (SQL gen, chat, analysis)
+    OPUS   – complex reasoning (synthesis, long-form)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import AsyncIterator
+
+log = logging.getLogger("atlas_ai")
+
+# ── Tier & Result ────────────────────────────────────────────────────────────
+
+
+class Tier(Enum):
+    HAIKU = "haiku"
+    SONNET = "sonnet"
+    OPUS = "opus"
+
+
+@dataclass
+class AIResult:
+    text: str
+    provider: str  # "claude" or "gemini"
+    model: str  # actual model ID used
+    tool_calls: list[dict] = field(default_factory=list)
+    fallback_used: bool = False
+    _raw_content: list = field(default_factory=list, repr=False)
+
+
+# ── Model mapping ────────────────────────────────────────────────────────────
+
+_CLAUDE_MODELS = {
+    Tier.HAIKU: "claude-haiku-4-5-20251001",
+    Tier.SONNET: "claude-sonnet-4-20250514",
+    Tier.OPUS: "claude-opus-4-20250514",
+}
+
+_GEMINI_MODELS = {
+    Tier.HAIKU: "gemini-2.0-flash",
+    Tier.SONNET: "gemini-2.0-flash",
+    Tier.OPUS: "gemini-2.5-pro",
+}
+
+# ── Client singletons ────────────────────────────────────────────────────────
+
+_claude_client = None
+_gemini_client = None
+
+
+def _get_claude():
+    """Lazy singleton. Returns None if ANTHROPIC_API_KEY not set."""
+    global _claude_client
+    if _claude_client is not None:
+        return _claude_client
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from anthropic import Anthropic
+        _claude_client = Anthropic(api_key=api_key)
+        return _claude_client
+    except Exception as e:
+        log.warning(f"[atlas_ai] Failed to init Claude client: {e}")
+        return None
+
+
+def _get_gemini():
+    """Lazy singleton. Returns None if GEMINI_API_KEY not set."""
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from google import genai
+        _gemini_client = genai.Client(api_key=api_key)
+        return _gemini_client
+    except Exception as e:
+        log.warning(f"[atlas_ai] Failed to init Gemini client: {e}")
+        return None
+
+
+# ── Internal helpers (sync, pure) ────────────────────────────────────────────
+
+def _build_claude_messages(prompt: str | list[dict]) -> list[dict]:
+    """Convert prompt to Claude messages format."""
+    if isinstance(prompt, str):
+        return [{"role": "user", "content": prompt}]
+    # list[dict] = content blocks (multimodal)
+    return [{"role": "user", "content": prompt}]
+
+
+def _apply_json_mode_prompt(prompt: str | list[dict]) -> str | list[dict]:
+    """Append JSON instruction to prompt for Claude JSON mode."""
+    suffix = "\n\nRespond with valid JSON only. No markdown fences, no explanation."
+    if isinstance(prompt, str):
+        return prompt + suffix
+    # Multimodal: append to last text block or add new text block
+    blocks = list(prompt)
+    for i in range(len(blocks) - 1, -1, -1):
+        if blocks[i].get("type") == "text":
+            blocks[i] = {**blocks[i], "text": blocks[i]["text"] + suffix}
+            return blocks
+    blocks.append({"type": "text", "text": suffix.strip()})
+    return blocks
+
+
+def _strip_json_fences(text: str) -> str:
+    """Remove markdown code fences from JSON response."""
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _call_claude(client, prompt, system, tier, max_tokens, temperature, json_mode):
+    """Sync Claude API call. Returns AIResult."""
+    model = _CLAUDE_MODELS[tier]
+    effective_prompt = _apply_json_mode_prompt(prompt) if json_mode else prompt
+    messages = _build_claude_messages(effective_prompt)
+
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+    if system:
+        kwargs["system"] = system
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    response = client.messages.create(**kwargs)
+
+    text_parts = [b.text for b in response.content if hasattr(b, "text")]
+    text = " ".join(text_parts).strip()
+
+    if json_mode:
+        text = _strip_json_fences(text)
+        # Validate JSON; retry once on failure
+        try:
+            json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            retry_prompt = (
+                f"Your previous response was not valid JSON. "
+                f"Here is what you returned:\n{text}\n\n"
+                f"Please fix and return ONLY valid JSON."
+            )
+            retry_msgs = messages + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": retry_prompt},
+            ]
+            retry_kwargs = {k: v for k, v in kwargs.items() if k != "messages"}
+            retry_kwargs["messages"] = retry_msgs
+            retry_response = client.messages.create(**retry_kwargs)
+            retry_parts = [b.text for b in retry_response.content if hasattr(b, "text")]
+            text = _strip_json_fences(" ".join(retry_parts).strip())
+
+    return AIResult(
+        text=text,
+        provider="claude",
+        model=model,
+        _raw_content=list(response.content),
+    )
+
+
+def _convert_to_gemini_parts(prompt):
+    """Convert Claude-format content blocks to Gemini Part objects."""
+    from google.genai import types
+
+    if isinstance(prompt, str):
+        return [prompt]
+
+    parts = []
+    for block in prompt:
+        btype = block.get("type", "")
+        if btype == "text":
+            parts.append(types.Part.from_text(text=block["text"]))
+        elif btype == "image":
+            source = block["source"]
+            data = source["data"]
+            if isinstance(data, str):
+                data = base64.b64decode(data)
+            parts.append(types.Part.from_bytes(data=data, mime_type=source["media_type"]))
+    return parts
+
+
+def _call_gemini(client, prompt, system, tier, max_tokens, temperature, json_mode):
+    """Sync Gemini API call. Returns AIResult."""
+    from google.genai import types
+
+    model = _GEMINI_MODELS[tier]
+    contents = _convert_to_gemini_parts(prompt)
+
+    config_kwargs = {}
+    if system:
+        config_kwargs["system_instruction"] = system
+    if temperature is not None:
+        config_kwargs["temperature"] = temperature
+    if max_tokens:
+        config_kwargs["max_output_tokens"] = max_tokens
+    if json_mode:
+        config_kwargs["response_mime_type"] = "application/json"
+
+    config = types.GenerateContentConfig(**config_kwargs)
+
+    response = client.models.generate_content(
+        model=model,
+        config=config,
+        contents=contents,
+    )
+    return AIResult(
+        text=response.text.strip(),
+        provider="gemini",
+        model=model,
+    )
+
+
+def _call_gemini_with_search(client, prompt, system, max_tokens):
+    """Sync Gemini API call with Google Search tool. Returns AIResult."""
+    from google.genai import types
+
+    config_kwargs = {
+        "tools": [{"google_search": {}}],
+    }
+    if system:
+        config_kwargs["system_instruction"] = system
+    if max_tokens:
+        config_kwargs["max_output_tokens"] = max_tokens
+
+    config = types.GenerateContentConfig(**config_kwargs)
+    contents = _convert_to_gemini_parts(prompt)
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        config=config,
+        contents=contents,
+    )
+    return AIResult(
+        text=response.text.strip(),
+        provider="gemini",
+        model="gemini-2.0-flash",
+    )
+
+
+def _call_claude_with_tools(client, prompt, tools, system, tier, max_tokens):
+    """Sync Claude tool-use call. Returns AIResult with tool_calls populated."""
+    model = _CLAUDE_MODELS[tier]
+    messages = _build_claude_messages(prompt)
+
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "tools": tools,
+    }
+    if system:
+        kwargs["system"] = system
+
+    response = client.messages.create(**kwargs)
+
+    # Extract tool calls
+    tool_calls = []
+    for block in response.content:
+        if block.type == "tool_use":
+            tool_calls.append({
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+            })
+
+    # Extract text
+    text_parts = [b.text for b in response.content if hasattr(b, "text")]
+    text = " ".join(text_parts).strip()
+
+    return AIResult(
+        text=text,
+        provider="claude",
+        model=model,
+        tool_calls=tool_calls,
+        _raw_content=list(response.content),
+    )
+
+
+def _convert_tools_to_gemini(tools):
+    """Convert Claude tool definitions to Gemini function declarations."""
+    from google.genai import types
+
+    declarations = []
+    for tool in tools:
+        decl = types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool.get("description", ""),
+            parameters=tool.get("input_schema", {}),
+        )
+        declarations.append(decl)
+    return [types.Tool(function_declarations=declarations)]
+
+
+def _call_gemini_with_tools(client, prompt, tools, system, tier, max_tokens):
+    """Sync Gemini tool-use call. Returns AIResult with tool_calls populated."""
+    from google.genai import types
+
+    model = _GEMINI_MODELS[tier]
+    contents = _convert_to_gemini_parts(prompt)
+    gemini_tools = _convert_tools_to_gemini(tools)
+
+    config_kwargs = {"tools": gemini_tools}
+    if system:
+        config_kwargs["system_instruction"] = system
+    if max_tokens:
+        config_kwargs["max_output_tokens"] = max_tokens
+
+    config = types.GenerateContentConfig(**config_kwargs)
+
+    response = client.models.generate_content(
+        model=model,
+        config=config,
+        contents=contents,
+    )
+
+    # Extract function calls from Gemini response
+    tool_calls = []
+    text_parts = []
+    for part in response.candidates[0].content.parts:
+        if hasattr(part, "function_call") and part.function_call:
+            fc = part.function_call
+            tool_calls.append({
+                "id": fc.name,  # Gemini doesn't have separate IDs
+                "name": fc.name,
+                "input": dict(fc.args) if fc.args else {},
+            })
+        elif hasattr(part, "text") and part.text:
+            text_parts.append(part.text)
+
+    return AIResult(
+        text=" ".join(text_parts).strip(),
+        provider="gemini",
+        model=model,
+        tool_calls=tool_calls,
+    )
+
+
+# ── Public async API ─────────────────────────────────────────────────────────
+
+async def generate(
+    prompt: str | list[dict],
+    *,
+    system: str = "",
+    tier: Tier = Tier.SONNET,
+    max_tokens: int = 1024,
+    temperature: float | None = None,
+    json_mode: bool = False,
+) -> AIResult:
+    """Generate text. Claude primary, Gemini fallback.
+
+    prompt: Plain string or list of content blocks for multimodal input.
+    json_mode: Instructs the model to return valid JSON.
+    """
+    loop = asyncio.get_running_loop()
+
+    claude = _get_claude()
+    if claude:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_claude(claude, prompt, system, tier,
+                                     max_tokens, temperature, json_mode),
+            )
+            return result
+        except Exception as e:
+            log.warning(f"[atlas_ai] Claude failed ({e}), falling back to Gemini")
+
+    gemini = _get_gemini()
+    if gemini:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_gemini(gemini, prompt, system, tier,
+                                     max_tokens, temperature, json_mode),
+            )
+            result.fallback_used = True
+            return result
+        except Exception as e2:
+            log.error(f"[atlas_ai] Gemini fallback also failed: {e2}")
+            raise
+
+    raise RuntimeError("No AI provider configured (set ANTHROPIC_API_KEY or GEMINI_API_KEY)")
+
+
+async def generate_with_tools(
+    prompt: str,
+    tools: list[dict],
+    *,
+    system: str = "",
+    tier: Tier = Tier.SONNET,
+    max_tokens: int = 1024,
+) -> AIResult:
+    """Generate with tool use. Claude primary, Gemini fallback."""
+    loop = asyncio.get_running_loop()
+
+    claude = _get_claude()
+    if claude:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_claude_with_tools(claude, prompt, tools,
+                                                system, tier, max_tokens),
+            )
+            return result
+        except Exception as e:
+            log.warning(f"[atlas_ai] Claude tools failed ({e}), falling back to Gemini")
+
+    gemini = _get_gemini()
+    if gemini:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_gemini_with_tools(gemini, prompt, tools,
+                                                system, tier, max_tokens),
+            )
+            result.fallback_used = True
+            return result
+        except Exception as e2:
+            log.error(f"[atlas_ai] Gemini tools fallback also failed: {e2}")
+            raise
+
+    raise RuntimeError("No AI provider configured")
+
+
+async def generate_with_search(
+    prompt: str,
+    *,
+    system: str = "",
+    max_tokens: int = 1024,
+) -> AIResult:
+    """Gemini-primary (has Google Search), Claude fallback (without search)."""
+    loop = asyncio.get_running_loop()
+
+    gemini = _get_gemini()
+    if gemini:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_gemini_with_search(gemini, prompt, system, max_tokens),
+            )
+            return result
+        except Exception as e:
+            log.warning(f"[atlas_ai] Gemini search failed ({e}), falling back to Claude (no search)")
+
+    claude = _get_claude()
+    if claude:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: _call_claude(claude, prompt, system, Tier.SONNET,
+                                     max_tokens, None, False),
+            )
+            result.fallback_used = True
+            return result
+        except Exception as e2:
+            log.error(f"[atlas_ai] Claude fallback also failed: {e2}")
+            raise
+
+    raise RuntimeError("No AI provider configured")
+
+
+async def generate_stream(
+    prompt: str,
+    *,
+    system: str = "",
+    tier: Tier = Tier.SONNET,
+    max_tokens: int = 4096,
+    temperature: float | None = None,
+) -> AsyncIterator[str]:
+    """Stream text chunks. Claude primary, Gemini fallback (non-streaming).
+
+    If Claude fails before the first chunk, falls back to Gemini non-streaming
+    (full result yielded as one chunk).
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    claude = _get_claude()
+    if claude:
+        model = _CLAUDE_MODELS[tier]
+
+        def _run_stream():
+            kwargs = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if system:
+                kwargs["system"] = system
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+
+            with claude.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        try:
+            fut = loop.run_in_executor(None, _run_stream)
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+            await fut  # propagate exceptions
+            return
+        except Exception as e:
+            log.warning(f"[atlas_ai] Claude stream failed ({e}), falling back to Gemini")
+
+    # Fallback: Gemini non-streaming, yield full result as one chunk
+    gemini = _get_gemini()
+    if gemini:
+        result = await loop.run_in_executor(
+            None,
+            lambda: _call_gemini(gemini, prompt, system, tier,
+                                 max_tokens, temperature, False),
+        )
+        yield result.text
+        return
+
+    raise RuntimeError("No AI provider configured")
+
+
+# ── Public sync API ──────────────────────────────────────────────────────────
+
+def generate_sync(
+    prompt: str | list[dict],
+    *,
+    system: str = "",
+    tier: Tier = Tier.SONNET,
+    max_tokens: int = 1024,
+    temperature: float | None = None,
+    json_mode: bool = False,
+) -> AIResult:
+    """Sync version of generate() for CLI scripts (cortex, echo_voice_extractor).
+
+    Uses the sync clients directly (no asyncio.run needed).
+    Fallback to Gemini on failure.
+    """
+    claude = _get_claude()
+    if claude:
+        try:
+            return _call_claude(claude, prompt, system, tier,
+                                max_tokens, temperature, json_mode)
+        except Exception as e:
+            log.warning(f"[atlas_ai] Claude sync failed ({e}), falling back to Gemini")
+
+    gemini = _get_gemini()
+    if gemini:
+        try:
+            result = _call_gemini(gemini, prompt, system, tier,
+                                  max_tokens, temperature, json_mode)
+            result.fallback_used = True
+            return result
+        except Exception as e2:
+            log.error(f"[atlas_ai] Gemini sync fallback also failed: {e2}")
+            raise
+
+    raise RuntimeError("No AI provider configured")

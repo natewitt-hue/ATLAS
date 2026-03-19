@@ -21,21 +21,17 @@ import os
 import json
 import time
 from datetime import datetime
-from google import genai
-from google.genai import types
+import atlas_ai
+from atlas_ai import Tier
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-PRO_MODEL  = "gemini-2.5-pro"
 PRO_DELAY  = 4  # seconds between Pro calls
 
 
 class CortexWriter:
 
     def __init__(self):
-        self.client = genai.Client(
-            api_key=os.getenv("GEMINI_API_KEY"),
-            http_options={"timeout": 180_000},
-        )
+        pass
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=20))
     def _synthesize(self, subject, section_title,
@@ -85,15 +81,13 @@ HARD RULES:
 8. Vary sentence structure. Avoid repetitive phrasing.
 """
 
-        response = self.client.models.generate_content(
-            model=PRO_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=8192,
-            ),
+        result = atlas_ai.generate_sync(
+            prompt,
+            tier=Tier.OPUS,
+            max_tokens=8192,
+            temperature=0.3,
         )
-        return f"## {section_title}\n\n{response.text}\n"
+        return f"## {section_title}\n\n{result.text}\n"
 
     def write_report(self, subject, signals):
         """

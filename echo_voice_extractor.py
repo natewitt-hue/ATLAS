@@ -41,11 +41,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    raise ImportError("Run: python -m pip install google-genai")
+import atlas_ai
+from atlas_ai import Tier
 
 try:
     from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -59,9 +56,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 DB_PATH        = os.getenv("ORACLE_DB_PATH", "TSL_Archive.db")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-FLASH_MODEL    = "gemini-2.5-flash"
-PRO_MODEL = "gemini-2.5-pro"
 AUTHOR_ID      = "322498632542846987"
 AUTHOR_NAME    = "TheWitt"
 CACHE_DIR      = ".echo_cache"
@@ -272,16 +266,6 @@ def fetch_samples(conn) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# GEMINI CLIENT
-# ---------------------------------------------------------------------------
-
-def get_client():
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY not set in .env")
-    return genai.Client(api_key=GEMINI_API_KEY)
-
-
-# ---------------------------------------------------------------------------
 # CACHE
 # ---------------------------------------------------------------------------
 
@@ -388,28 +372,22 @@ def parse_json_safe(raw: str) -> dict:
 # API CALLS WITH RETRY
 # ---------------------------------------------------------------------------
 
-def _flash_inner(client, prompt: str) -> dict:
-    response = client.models.generate_content(
-        model=FLASH_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.15
-        )
+def _flash_inner(prompt: str) -> dict:
+    result = atlas_ai.generate_sync(
+        prompt,
+        tier=Tier.SONNET,
+        json_mode=True,
     )
-    return parse_json_safe(response.text)
+    return parse_json_safe(result.text)
 
 
-def _pro_inner(client, prompt: str) -> str:
-    response = client.models.generate_content(
-        model=PRO_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            max_output_tokens=8192   # was 4096 - was truncating rich personas mid-section
-        )
+def _pro_inner(prompt: str) -> str:
+    result = atlas_ai.generate_sync(
+        prompt,
+        tier=Tier.OPUS,
+        max_tokens=8192,
     )
-    return response.text.strip()
+    return result.text.strip()
 
 
 if HAS_TENACITY:
@@ -419,8 +397,8 @@ if HAS_TENACITY:
         retry=retry_if_exception_type(Exception),
         reraise=True
     )
-    def _flash_with_retry(client, prompt):
-        return _flash_inner(client, prompt)
+    def _flash_with_retry(prompt):
+        return _flash_inner(prompt)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -428,27 +406,27 @@ if HAS_TENACITY:
         retry=retry_if_exception_type(Exception),
         reraise=True
     )
-    def _pro_with_retry(client, prompt):
-        return _pro_inner(client, prompt)
+    def _pro_with_retry(prompt):
+        return _pro_inner(prompt)
 else:
     _flash_with_retry = _flash_inner
     _pro_with_retry   = _pro_inner
 
 
-def call_flash(client, prompt: str, cache_key: str = None) -> dict:
+def call_flash(prompt: str, cache_key: str = None) -> dict:
     if cache_key:
         cached = get_cache(cache_key)
         if cached:
             print(f"        -> cache hit")
             return cached
-    result = _flash_with_retry(client, prompt)
+    result = _flash_with_retry(prompt)
     if cache_key and "raw" not in result:
         set_cache(cache_key, result)
     return result
 
 
-def call_pro(client, prompt: str) -> str:
-    return _pro_with_retry(client, prompt)
+def call_pro(prompt: str) -> str:
+    return _pro_with_retry(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +482,7 @@ Every message must appear in exactly one category. Do not skip any messages.
 """
 
 
-def classify_messages(client, msgs: list) -> dict:
+def classify_messages(msgs: list) -> dict:
     """Classify messages into registers by content using Flash, batches of 400."""
     print(f"    [Flash] Classifying {len(msgs)} messages by content...")
     classified = {"casual": [], "official": [], "analytical": []}
@@ -521,7 +499,7 @@ def classify_messages(client, msgs: list) -> dict:
             continue
 
         prompt = CLASSIFY_PROMPT.format(messages=fmt(batch, len(batch)))
-        result = call_flash(client, prompt, None)
+        result = call_flash(prompt, None)
 
         batch_result = {reg: result.get(reg, []) for reg in classified}
         for reg in classified:
@@ -734,7 +712,7 @@ Return JSON:
 }
 
 
-def run_extraction_pass(client, samples: dict, classified: dict) -> dict:
+def run_extraction_pass(samples: dict, classified: dict) -> dict:
     """Run all 8 Flash extraction passes with targeted message sets per pass."""
     signals = {}
 
@@ -781,7 +759,7 @@ def run_extraction_pass(client, samples: dict, classified: dict) -> dict:
                 messages=fmt_annotated(annotated, 200),
                 count=len(annotated[:200])
             )
-            signals[pass_name] = call_flash(client, prompt, ck)
+            signals[pass_name] = call_flash(prompt, ck)
 
         elif mode == "temporal":
             early = samples.get("early", [])
@@ -795,7 +773,7 @@ def run_extraction_pass(client, samples: dict, classified: dict) -> dict:
                 early_messages=fmt(early, 200),
                 recent_messages=fmt(late, 200)
             )
-            signals[pass_name] = call_flash(client, prompt, ck)
+            signals[pass_name] = call_flash(prompt, ck)
 
         else:
             if not msgs:
@@ -808,7 +786,7 @@ def run_extraction_pass(client, samples: dict, classified: dict) -> dict:
                 messages=fmt(msgs, actual),
                 count=actual
             )
-            signals[pass_name] = call_flash(client, prompt, ck)
+            signals[pass_name] = call_flash(prompt, ck)
 
         key_count = len(signals.get(pass_name, {}))
         print(f"        -> {key_count} signal keys extracted")
@@ -1012,7 +990,7 @@ At least 3 must address the risk of sounding like a generic ESPN broadcast.
 }
 
 
-def run_synthesis_pass(client, signals: dict, samples: dict, classified: dict, total: int) -> dict:
+def run_synthesis_pass(signals: dict, samples: dict, classified: dict, total: int) -> dict:
     """Pass B: Synthesize three register system prompts using Pro."""
     personas    = {}
     signals_str = json.dumps(signals, indent=2)
@@ -1056,7 +1034,7 @@ def run_synthesis_pass(client, signals: dict, samples: dict, classified: dict, t
 
     for register, prompt in configs:
         print(f"    [Pro] Synthesizing {register} persona...")
-        result = call_pro(client, prompt)
+        result = call_pro(prompt)
         personas[register] = result
         print(f"        -> {len(result.split()):,} words generated")
         if register != "analytical":
@@ -1091,7 +1069,7 @@ Return JSON:
 """
 
 
-def run_validation_pass(client, signals: dict, personas: dict) -> dict:
+def run_validation_pass(signals: dict, personas: dict) -> dict:
     """Pass C: Flash validates each generated persona against extracted signal data."""
     validation  = {}
     signals_str = json.dumps(signals, indent=2)
@@ -1102,7 +1080,7 @@ def run_validation_pass(client, signals: dict, personas: dict) -> dict:
             signals=signals_str,
             persona=persona_text[:6000]
         )
-        result = call_flash(client, prompt, None)
+        result = call_flash(prompt, None)
         validation[register] = result
         score   = result.get("confidence_score", "?")
         verdict = result.get("overall_verdict", "")
@@ -1173,24 +1151,22 @@ def run_extraction(verbose: bool = True, validate: bool = True) -> dict:
     samples, total = fetch_samples(conn)
     conn.close()
 
-    client = get_client()
-
     if verbose: print("\n[2/5] PRE-PASS - Content Classification (Flash, batches of 400)...")
     # All medium messages + 1000 short for best official/analytical coverage
     classify_pool = samples["short"][:1000] + samples["medium"][:]
-    classified = classify_messages(client, classify_pool)
+    classified = classify_messages(classify_pool)
 
     if verbose: print("\n[3/5] PASS A - Signal Extraction (8 Flash passes)...")
-    signals = run_extraction_pass(client, samples, classified)
+    signals = run_extraction_pass(samples, classified)
     if verbose: print(f"    -> {len(signals)} signal packs extracted")
 
     if verbose: print("\n[4/5] PASS B - Persona Synthesis (3 Pro passes)...")
-    personas = run_synthesis_pass(client, signals, samples, classified, total)
+    personas = run_synthesis_pass(signals, samples, classified, total)
 
     validation = {}
     if validate:
         if verbose: print("\n[4b] PASS C - Validation (Flash)...")
-        validation = run_validation_pass(client, signals, personas)
+        validation = run_validation_pass(signals, personas)
 
     if verbose: print("\n[5/5] Saving persona files...")
     paths = save_personas(personas, total, classified, validation)
