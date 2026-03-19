@@ -2953,7 +2953,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
         self.owner1.default = default_owner
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Immediate defer — Gemini will take > 3 sec
+        # Immediate defer — AI call will take > 3 sec
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         if not _HISTORY_OK:
@@ -3195,7 +3195,7 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
 
 
 class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
-    """Open Intel mode: straight Gemini + web search. No DB. General knowledge."""
+    """Open Intel mode: AI + web search. No DB. General knowledge."""
 
     question = discord.ui.TextInput(
         label="Your Question",
@@ -3233,7 +3233,7 @@ class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
 
 
 class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"):
-    """Sports Intel mode: real-world NFL/sports questions via Gemini + web search."""
+    """Sports Intel mode: real-world NFL/sports questions via AI + web search."""
 
     question = discord.ui.TextInput(
         label="Your Sports Question",

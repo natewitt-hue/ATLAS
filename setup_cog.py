@@ -96,7 +96,8 @@ _channel_cache: dict[str, int] = {}
 
 def _ensure_table() -> None:
     """Create server_config table if it doesn't exist. Also enables WAL."""
-    with sqlite3.connect(DB_PATH, timeout=30) as con:
+    con = sqlite3.connect(DB_PATH, timeout=5)
+    try:
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("""
             CREATE TABLE IF NOT EXISTS server_config (
@@ -106,6 +107,8 @@ def _ensure_table() -> None:
             )
         """)
         con.commit()
+    finally:
+        con.close()
 
 
 def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
@@ -122,34 +125,41 @@ def get_channel_id(key: str, guild_id: Optional[int] = None) -> Optional[int]:
     cached = _channel_cache.get(cache_key)
     if cached is not None:
         return cached
+    con = None
     try:
-        with sqlite3.connect(DB_PATH, timeout=30) as con:
-            # Ensure table exists — sync_tsl_db's atomic swap can destroy it,
-            # and the table preservation step may not always succeed.
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS server_config (
-                    config_key  TEXT PRIMARY KEY,
-                    channel_id  INTEGER NOT NULL,
-                    guild_id    INTEGER NOT NULL
-                )
-            """)
-            if guild_id:
-                row = con.execute(
-                    "SELECT channel_id FROM server_config WHERE config_key=? AND guild_id=?",
-                    (key, guild_id)
-                ).fetchone()
-            else:
-                row = con.execute(
-                    "SELECT channel_id FROM server_config WHERE config_key=? LIMIT 1",
-                    (key,)
-                ).fetchone()
-            result = row[0] if row else None
-            if result is not None:
-                _channel_cache[cache_key] = result
-            return result
+        # Short timeout (2s) — fail fast during startup when sync_tsl_db holds
+        # a write lock.  Once auto_discover populates the cache, this DB path
+        # is rarely hit.
+        con = sqlite3.connect(DB_PATH, timeout=2)
+        # Ensure table exists — sync_tsl_db's atomic swap can destroy it,
+        # and the table preservation step may not always succeed.
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS server_config (
+                config_key  TEXT PRIMARY KEY,
+                channel_id  INTEGER NOT NULL,
+                guild_id    INTEGER NOT NULL
+            )
+        """)
+        if guild_id:
+            row = con.execute(
+                "SELECT channel_id FROM server_config WHERE config_key=? AND guild_id=?",
+                (key, guild_id)
+            ).fetchone()
+        else:
+            row = con.execute(
+                "SELECT channel_id FROM server_config WHERE config_key=? LIMIT 1",
+                (key,)
+            ).fetchone()
+        result = row[0] if row else None
+        if result is not None:
+            _channel_cache[cache_key] = result
+        return result
     except Exception:
         log.error("Failed to read channel config for key=%s guild_id=%s", key, guild_id, exc_info=True)
         return None
+    finally:
+        if con:
+            con.close()
 
 
 async def get_channel_id_async(key: str, guild_id: Optional[int] = None) -> Optional[int]:
@@ -164,7 +174,8 @@ async def get_channel_id_async(key: str, guild_id: Optional[int] = None) -> Opti
 
 def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
     _ensure_table()
-    with sqlite3.connect(DB_PATH, timeout=30) as con:
+    con = sqlite3.connect(DB_PATH, timeout=5)
+    try:
         con.execute("""
             INSERT INTO server_config (config_key, channel_id, guild_id)
             VALUES (?, ?, ?)
@@ -172,16 +183,21 @@ def _save_channel_id(key: str, channel_id: int, guild_id: int) -> None:
                                                    guild_id=excluded.guild_id
         """, (key, channel_id, guild_id))
         con.commit()
+    finally:
+        con.close()
     # Invalidate cache for this key
     _channel_cache.pop(f"{key}:{guild_id}", None)
 
 
 def _clear_guild_config(guild_id: int) -> int:
     """Delete all server_config rows for a guild. Returns count deleted."""
-    with sqlite3.connect(DB_PATH, timeout=30) as con:
+    con = sqlite3.connect(DB_PATH, timeout=5)
+    try:
         cur = con.execute("DELETE FROM server_config WHERE guild_id=?", (guild_id,))
         con.commit()
         count = cur.rowcount
+    finally:
+        con.close()
     # Invalidate all cached entries for this guild
     stale = [k for k in _channel_cache if k.endswith(f":{guild_id}")]
     for k in stale:
@@ -561,7 +577,8 @@ class SetupChoiceView(discord.ui.View):
 
 def _ensure_discovery_tables() -> None:
     """Create guild_registry, guild_roles, and guild_emojis tables."""
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+    con = sqlite3.connect(DB_PATH, timeout=5)
+    try:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS guild_registry (
                 guild_id      INTEGER PRIMARY KEY,
@@ -591,6 +608,8 @@ def _ensure_discovery_tables() -> None:
                 PRIMARY KEY (guild_id, emoji_id)
             );
         """)
+    finally:
+        con.close()
 
 
 # Module-level cache: guild_id → {role_name_lower → role_id}
@@ -605,30 +624,35 @@ def get_cached_role_id(guild_id: int, role_name: str) -> Optional[int]:
     return None
 
 
-async def auto_discover(guild: discord.Guild) -> None:
+def _auto_discover_db(guild_data: dict) -> dict:
     """
-    Scan a guild at startup and persist structure to DB.
-    Called from on_ready() for each guild. Never overwrites manual /setup config.
+    Synchronous auto-discovery — all SQLite work runs here via run_in_executor.
+    Receives a plain-Python snapshot of guild data (no discord.py objects).
+    Returns {"role_cache": dict, "log_lines": list[str], "cfg_rows": list}.
     """
     _ensure_table()
     _ensure_discovery_tables()
-    gid = guild.id
-    now = datetime.now(timezone.utc).isoformat()
 
-    print(f"\n🔍 Auto-discovery: {guild.name} (guild {gid})")
+    gid = guild_data["gid"]
+    now = guild_data["now"]
+    log: list[str] = []
+
+    log.append(f"\n🔍 Auto-discovery: {guild_data['guild_name']} (guild {gid})")
 
     # ── 1. CHANNELS — match by name, skip already-configured keys ────────
     existing_keys: set[str] = set()
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    try:
         rows = con.execute(
             "SELECT config_key FROM server_config WHERE guild_id=?", (gid,)
         ).fetchall()
         existing_keys = {r[0] for r in rows}
+    finally:
+        con.close()
 
-    # Build name → channel lookup (lowered, stripped)
-    ch_by_name: dict[str, discord.TextChannel] = {}
-    for ch in guild.text_channels:
-        normalized = ch.name.lower().replace(" ", "-")
+    ch_by_name: dict[str, dict] = {}
+    for ch in guild_data["channels"]:
+        normalized = ch["name"].lower().replace(" ", "-")
         ch_by_name[normalized] = ch
 
     matched, skipped = 0, 0
@@ -638,99 +662,91 @@ async def auto_discover(guild: discord.Guild) -> None:
             continue
         target = ch_by_name.get(channel_name.lower())
         if not target:
-            # Try alias lookup
             for alias, alias_key in _CHANNEL_ALIASES.items():
                 if alias_key == config_key:
                     target = ch_by_name.get(alias)
                     if target:
                         break
         if target:
-            _save_channel_id(config_key, target.id, gid)
-            print(f"   ✅ {config_key} → #{target.name} ({target.id})")
+            _save_channel_id(config_key, target["id"], gid)
+            log.append(f"   ✅ {config_key} → #{target['name']} ({target['id']})")
             matched += 1
         else:
-            print(f"   ⚠️  {config_key} — no match found")
+            log.append(f"   ⚠️  {config_key} — no match found")
 
     total = len(REQUIRED_CHANNELS)
     configured = len(existing_keys) + matched
-    print(f"   Channels: {configured}/{total} configured ({skipped} kept, {matched} auto-matched)")
-
-    # Bridge newly discovered casino channels to casino_db
-    try:
-        from casino.casino_db import set_setting as _casino_set
-        for cfg_key, casino_setting in _CASINO_BRIDGE.items():
-            ch_id = get_channel_id(cfg_key, gid)
-            if ch_id:
-                await _casino_set(casino_setting, str(ch_id))
-    except Exception:
-        pass  # Casino module may not be loaded yet
+    log.append(f"   Channels: {configured}/{total} configured ({skipped} kept, {matched} auto-matched)")
 
     # ── 2. PERMISSION AUDIT — check bot perms in configured channels ─────
     perm_ok, perm_warn = 0, 0
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    try:
         cfg_rows = con.execute(
             "SELECT config_key, channel_id FROM server_config WHERE guild_id=?", (gid,)
         ).fetchall()
+    finally:
+        con.close()
 
+    bot_perms = guild_data["bot_perms"]
     for config_key, channel_id in cfg_rows:
-        ch = guild.get_channel(channel_id)
-        if not ch:
+        perms = bot_perms.get(channel_id)
+        if not perms:
             continue
-        perms = ch.permissions_for(guild.me)
         missing = []
-        if not perms.send_messages:
+        if not perms["send"]:
             missing.append("send_messages")
-        if not perms.embed_links:
+        if not perms["embed"]:
             missing.append("embed_links")
-        if not perms.attach_files:
+        if not perms["attach"]:
             missing.append("attach_files")
-        if not perms.read_messages:
+        if not perms["read"]:
             missing.append("read_messages")
         if missing:
-            print(f"   ⚠️  #{ch.name} — missing: {', '.join(missing)}")
+            log.append(f"   ⚠️  #{perms['name']} — missing: {', '.join(missing)}")
             perm_warn += 1
         else:
             perm_ok += 1
 
     if perm_warn:
-        print(f"   Permissions: {perm_ok} OK, {perm_warn} warnings")
+        log.append(f"   Permissions: {perm_ok} OK, {perm_warn} warnings")
     else:
-        print(f"   Permissions: {perm_ok} channels OK")
+        log.append(f"   Permissions: {perm_ok} channels OK")
 
     # ── 3. ROLES — cache all roles, identify key roles ───────────────────
-    key_roles = {"commissioner": None, "tsl owner": None}
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
-        # Clear stale roles for this guild, then insert fresh
+    key_role_ids: dict[str, int | None] = {"commissioner": None, "tsl owner": None}
+    key_role_found: dict[str, bool] = {"commissioner": False, "tsl owner": False}
+    role_cache_local: dict[str, int] = {}
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    try:
         con.execute("DELETE FROM guild_roles WHERE guild_id=?", (gid,))
-        role_cache_local: dict[str, int] = {}
-        for role in guild.roles:
-            if role.is_default():
+        for role in guild_data["roles"]:
+            if role["is_default"]:
                 continue
             con.execute(
                 "INSERT OR REPLACE INTO guild_roles (guild_id, role_id, role_name, color, position, is_admin) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (gid, role.id, role.name, role.color.value, role.position,
-                 1 if role.permissions.administrator else 0),
+                (gid, role["id"], role["name"], role["color_value"], role["position"],
+                 1 if role["is_admin"] else 0),
             )
-            role_cache_local[role.name.lower()] = role.id
-            if role.name.lower() in key_roles:
-                key_roles[role.name.lower()] = role
+            role_cache_local[role["name"].lower()] = role["id"]
+            if role["name"].lower() in key_role_ids:
+                key_role_ids[role["name"].lower()] = role["id"]
+                key_role_found[role["name"].lower()] = True
         con.commit()
+    finally:
+        con.close()
 
-    _role_cache[gid] = role_cache_local
-    role_count = len([r for r in guild.roles if not r.is_default()])
+    role_count = len([r for r in guild_data["roles"] if not r["is_default"]])
     key_str = ", ".join(
-        f"{name.title()} {'✅' if role else '❌'}"
-        for name, role in key_roles.items()
+        f"{name.title()} {'✅' if found else '❌'}"
+        for name, found in key_role_found.items()
     )
-    print(f"   Roles: {role_count} cached ({key_str})")
+    log.append(f"   Roles: {role_count} cached ({key_str})")
 
     # ── 4. GUILD METADATA — persist guild info ───────────────────────────
-    icon_url = str(guild.icon.url) if guild.icon else None
-    banner_url = str(guild.banner.url) if guild.banner else None
-    human_count = sum(1 for m in guild.members if not m.bot)
-
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    try:
         con.execute("""
             INSERT INTO guild_registry (guild_id, guild_name, owner_id, member_count,
                                         boost_level, icon_url, banner_url, discovered_at, updated_at)
@@ -740,66 +756,159 @@ async def auto_discover(guild: discord.Guild) -> None:
                 member_count=excluded.member_count, boost_level=excluded.boost_level,
                 icon_url=excluded.icon_url, banner_url=excluded.banner_url,
                 updated_at=excluded.updated_at
-        """, (gid, guild.name, guild.owner_id, human_count,
-              guild.premium_tier, icon_url, banner_url, now, now))
+        """, (gid, guild_data["guild_name"], guild_data["owner_id"],
+              guild_data["human_count"], guild_data["premium_tier"],
+              guild_data["icon_url"], guild_data["banner_url"], now, now))
         con.commit()
+    finally:
+        con.close()
 
     upload_limits = {0: "25MB", 1: "25MB", 2: "50MB", 3: "100MB"}
-    print(f"   Boost: Level {guild.premium_tier} ({upload_limits.get(guild.premium_tier, '?')} upload limit)")
+    log.append(f"   Boost: Level {guild_data['premium_tier']} ({upload_limits.get(guild_data['premium_tier'], '?')} upload limit)")
 
     # ── 5. CATEGORIES — log structure ────────────────────────────────────
-    if guild.categories:
+    if guild_data["categories"]:
         cat_parts = []
-        for cat in sorted(guild.categories, key=lambda c: c.position):
-            cat_parts.append(f"{cat.name} ({len(cat.channels)}ch)")
-        print(f"   Categories: {', '.join(cat_parts)}")
+        for cat in guild_data["categories"]:
+            cat_parts.append(f"{cat['name']} ({cat['channel_count']}ch)")
+        log.append(f"   Categories: {', '.join(cat_parts)}")
 
-    # ── 6. MEMBER ROLE ENRICHMENT — update tsl_members status from roles ─
+    # ── 6. MEMBER ROLE ENRICHMENT — batched single connection ────────────
     enriched = 0
+    commissioner_role_id = key_role_ids.get("commissioner")
+    owner_role_id = key_role_ids.get("tsl owner")
+    con = None
     try:
-        import build_member_db as mdb
-        commissioner_role = key_roles.get("commissioner")
-        owner_role = key_roles.get("tsl owner")
-        for m in guild.members:
-            if m.bot:
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        for member in guild_data["members"]:
+            if member["bot"]:
                 continue
             new_status = None
-            if commissioner_role and commissioner_role in m.roles:
+            if commissioner_role_id and commissioner_role_id in member["role_ids"]:
                 new_status = "Admin"
-            elif owner_role and owner_role in m.roles:
+            elif owner_role_id and owner_role_id in member["role_ids"]:
                 new_status = "League Owner"
             if new_status:
-                with sqlite3.connect(DB_PATH, timeout=10) as con:
-                    cur = con.execute(
-                        "UPDATE tsl_members SET status=? WHERE discord_id=? AND status != ?",
-                        (new_status, str(m.id), new_status),
-                    )
-                    if cur.rowcount:
-                        enriched += 1
-                    con.commit()
+                cur = con.execute(
+                    "UPDATE tsl_members SET status=? WHERE discord_id=? AND status != ?",
+                    (new_status, str(member["id"]), new_status),
+                )
+                if cur.rowcount:
+                    enriched += 1
+        con.commit()
     except Exception:
-        pass  # build_member_db may not be available
+        pass  # tsl_members table may not exist yet
+    finally:
+        if con:
+            con.close()
 
     if enriched:
-        print(f"   Members: {enriched} status updates from roles")
+        log.append(f"   Members: {enriched} status updates from roles")
 
     # ── 7. EMOJIS — cache custom emojis ──────────────────────────────────
     emoji_count = 0
-    with sqlite3.connect(DB_PATH, timeout=10) as con:
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    try:
         con.execute("DELETE FROM guild_emojis WHERE guild_id=?", (gid,))
-        for emoji in guild.emojis:
+        for emoji in guild_data["emojis"]:
             con.execute(
                 "INSERT INTO guild_emojis (guild_id, emoji_id, emoji_name, animated) "
                 "VALUES (?, ?, ?, ?)",
-                (gid, emoji.id, emoji.name, 1 if emoji.animated else 0),
+                (gid, emoji["id"], emoji["name"], 1 if emoji["animated"] else 0),
             )
             emoji_count += 1
         con.commit()
+    finally:
+        con.close()
 
     if emoji_count:
-        print(f"   Emojis: {emoji_count} custom emojis cached")
+        log.append(f"   Emojis: {emoji_count} custom emojis cached")
 
-    # ── 8. WEBHOOKS — informational inventory ────────────────────────────
+    return {
+        "role_cache": role_cache_local,
+        "log_lines": log,
+        "cfg_rows": cfg_rows,
+    }
+
+
+async def auto_discover(guild: discord.Guild) -> None:
+    """
+    Scan a guild at startup and persist structure to DB.
+    Called from on_ready() for each guild. Never overwrites manual /setup config.
+
+    All synchronous SQLite work is offloaded to a thread executor via
+    _auto_discover_db() to avoid blocking the Discord gateway heartbeat.
+    """
+    # ── Collect guild snapshot (CPU-only, no I/O) ────────────────────────
+    me = guild.me
+    guild_data = {
+        "gid": guild.id,
+        "guild_name": guild.name,
+        "owner_id": guild.owner_id,
+        "premium_tier": guild.premium_tier,
+        "icon_url": str(guild.icon.url) if guild.icon else None,
+        "banner_url": str(guild.banner.url) if guild.banner else None,
+        "human_count": sum(1 for m in guild.members if not m.bot),
+        "now": datetime.now(timezone.utc).isoformat(),
+        "channels": [
+            {"name": ch.name, "id": ch.id}
+            for ch in guild.text_channels
+        ],
+        "roles": [
+            {
+                "name": r.name, "id": r.id, "color_value": r.color.value,
+                "position": r.position, "is_admin": r.permissions.administrator,
+                "is_default": r.is_default(),
+            }
+            for r in guild.roles
+        ],
+        "members": [
+            {"id": m.id, "bot": m.bot, "role_ids": {r.id for r in m.roles}}
+            for m in guild.members
+        ],
+        "emojis": [
+            {"id": e.id, "name": e.name, "animated": e.animated}
+            for e in guild.emojis
+        ],
+        "categories": sorted(
+            [{"name": c.name, "channel_count": len(c.channels), "position": c.position}
+             for c in guild.categories],
+            key=lambda c: c["position"],
+        ) if guild.categories else [],
+        "bot_perms": {
+            ch.id: {
+                "name": ch.name,
+                "send": ch.permissions_for(me).send_messages,
+                "embed": ch.permissions_for(me).embed_links,
+                "attach": ch.permissions_for(me).attach_files,
+                "read": ch.permissions_for(me).read_messages,
+            }
+            for ch in guild.text_channels
+        },
+    }
+
+    # ── Run all SQLite in thread pool (no event loop blocking) ───────────
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _auto_discover_db, guild_data)
+
+    # ── Update module-level caches ───────────────────────────────────────
+    _role_cache[guild.id] = result["role_cache"]
+
+    # ── Print accumulated log lines ──────────────────────────────────────
+    for line in result["log_lines"]:
+        print(line)
+
+    # ── Casino bridge (async — uses aiosqlite, must stay on event loop) ──
+    try:
+        from casino.casino_db import set_setting as _casino_set
+        for cfg_key, casino_setting in _CASINO_BRIDGE.items():
+            ch_id = get_channel_id(cfg_key, guild.id)
+            if ch_id:
+                await _casino_set(casino_setting, str(ch_id))
+    except Exception:
+        pass  # Casino module may not be loaded yet
+
+    # ── Webhooks (async — Discord API) ───────────────────────────────────
     webhook_count = 0
     try:
         for ch in guild.text_channels:
