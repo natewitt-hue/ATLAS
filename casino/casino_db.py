@@ -938,8 +938,9 @@ async def process_wager(
 
             # 11. Jackpot contribution + roll
             if wager > 0 and session_id is not None:
+                _sid: int = session_id
                 jackpot_result = await _contribute_and_check_jackpot(
-                    discord_id, wager, game_type, streak_info.get("len", 0), db, session_id
+                    discord_id, wager, game_type, streak_info.get("len", 0), db, _sid
                 )
                 if jackpot_result:
                     new_balance = await flow_wallet.get_balance(discord_id, con=db)
