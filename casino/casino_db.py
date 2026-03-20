@@ -425,7 +425,7 @@ async def get_jackpot_pools() -> dict[str, dict]:
 
 
 async def _contribute_and_check_jackpot(
-    discord_id: int, wager: int, game_type: str, streak_len: int, con
+    discord_id: int, wager: int, game_type: str, streak_len: int, con, session_id: int
 ) -> dict | None:
     """
     Contribute wager % to jackpot pools and roll for jackpot win.
@@ -472,12 +472,12 @@ async def _contribute_and_check_jackpot(
         base_odds = JACKPOT_BASE_ODDS[tier]
         threshold = (wager_factor * jp_mult * boost) / base_odds
         if roll < threshold:
-            return await _award_jackpot(tier, discord_id, game_type, con)
+            return await _award_jackpot(tier, discord_id, game_type, con, session_id)
 
     return None
 
 
-async def _award_jackpot(tier: str, discord_id: int, game_type: str, con) -> dict:
+async def _award_jackpot(tier: str, discord_id: int, game_type: str, con, session_id: int) -> dict:
     """Award jackpot pool to the winner. Returns info dict."""
     now = datetime.now(timezone.utc).isoformat()
     async with con.execute(
@@ -497,6 +497,8 @@ async def _award_jackpot(tier: str, discord_id: int, game_type: str, con) -> dic
         discord_id, amount, "CASINO",
         description=f"JACKPOT {tier.upper()} win!",
         reference_key=ref_key,
+        subsystem="CASINO",
+        subsystem_id=str(session_id),
         con=con,
     )
 
@@ -507,6 +509,12 @@ async def _award_jackpot(tier: str, discord_id: int, game_type: str, con) -> dic
             total_paid = total_paid + ?, total_hits = total_hits + 1
         WHERE tier = ?
     """, (seed_val, discord_id, amount, now, amount, tier))
+
+    # Record jackpot payout in house bank (money leaving house to player)
+    await con.execute(
+        "INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at) VALUES (?,?,?,?)",
+        ("jackpot_payout", -amount, session_id, now),
+    )
 
     # Log
     await con.execute("""
@@ -890,13 +898,25 @@ async def process_wager(
                     )
                     cold_mercy = {"type": "free_credit", "amount": credit_amt}
 
-            # 8. Backlink debit txn to this session
+            # 8. Backlink debit txn to this session + wager registry
             if correlation_id:
                 await db.execute(
                     "UPDATE transactions SET subsystem_id=? "
                     "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id=?",
                     (sid, discord_id, correlation_id),
                 )
+                # Backlink wager registry: correlation_id → session_id
+                import wager_registry
+                await db.execute(
+                    "UPDATE wagers SET subsystem_id=?, label=? "
+                    "WHERE subsystem='CASINO' AND subsystem_id=?",
+                    (sid, f"Casino {game_type}", correlation_id),
+                )
+
+            # 8b. Settle wager in unified registry
+            import wager_registry
+            _casino_status = "won" if outcome == "win" else ("push" if outcome == "push" else "lost")
+            await wager_registry.settle_wager("CASINO", sid, _casino_status, payout - wager, con=db)
 
             # 9. Get txn_id
             txn_id = None
@@ -919,7 +939,7 @@ async def process_wager(
             # 11. Jackpot contribution + roll
             if wager > 0:
                 jackpot_result = await _contribute_and_check_jackpot(
-                    discord_id, wager, game_type, streak_info.get("len", 0), db
+                    discord_id, wager, game_type, streak_info.get("len", 0), db, session_id
                 )
                 if jackpot_result:
                     new_balance = await flow_wallet.get_balance(discord_id, con=db)
@@ -960,22 +980,33 @@ async def deduct_wager(discord_id: int, wager: int,
     if wager > max_bet:
         raise ValueError(f"Wager ${wager:,} exceeds your tier limit of ${max_bet:,}")
     async with flow_wallet.get_user_lock(discord_id):
-        return await flow_wallet.debit(
+        new_bal = await flow_wallet.debit(
             discord_id, wager, "CASINO",
             description="casino wager",
             subsystem="CASINO",
             subsystem_id=correlation_id,
         )
+        # Register wager in unified registry (non-atomic — see GAP 5 spec)
+        if correlation_id:
+            import wager_registry
+            await wager_registry.register_wager(
+                "CASINO", correlation_id, discord_id, wager, label="Casino",
+            )
+        return new_bal
 
 
 async def refund_wager(discord_id: int, amount: int,
                        correlation_id: str | None = None) -> int:
     """Refund a wager (e.g. declined PvP challenge, crash round void). Returns new balance."""
-    return await flow_wallet.credit(
+    new_bal = await flow_wallet.credit(
         discord_id, amount, "CASINO",
         description="casino refund",
         subsystem="CASINO", subsystem_id=correlation_id,
     )
+    if correlation_id:
+        import wager_registry
+        await wager_registry.settle_wager("CASINO", correlation_id, "voided", 0)
+    return new_bal
 
 
 # ═════════════════════════════════════════════════════════════════════════════
