@@ -742,7 +742,7 @@ class CodexCog(commands.Cog):
                     await interaction.followup.send(f"⚠️ {collision_msg}")
                     return
 
-            conv_block = await build_conversation_block(interaction.user.id, source="codex")
+            conv_block = await build_conversation_block(interaction.user.id, source="oracle")
 
             # Affinity tone (answer only, not SQL)
             affinity_block = ""
@@ -769,7 +769,7 @@ class CodexCog(commands.Cog):
                         question, intent_result.sql, rows,
                         conv_context=answer_context,
                     )
-                    await add_conversation_turn(interaction.user.id, question, answer, sql=intent_result.sql, source="codex")
+                    await add_conversation_turn(interaction.user.id, question, answer, sql=intent_result.sql, source="oracle")
 
                     embed = discord.Embed(
                         title="📊 TSL Historical Intelligence",
@@ -826,7 +826,7 @@ class CodexCog(commands.Cog):
             )
 
             # ── Store conversation turn ─────────────────────────
-            await add_conversation_turn(interaction.user.id, question, answer, sql=sql or "", source="codex")
+            await add_conversation_turn(interaction.user.id, question, answer, sql=sql or "", source="oracle")
 
             embed = discord.Embed(
                 title="📊 TSL Historical Intelligence",

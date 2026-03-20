@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.9.0"  # StrategyRoom enrichment — roster/cap/trades/FA context + TSL/general routing
+ATLAS_VERSION = "3.10.0"  # Cross-modal memory — unified oracle source, source filtering fix, _AskWebModal memory
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

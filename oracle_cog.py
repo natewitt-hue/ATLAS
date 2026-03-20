@@ -3176,7 +3176,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
         # ── Conversation memory ─────────────────────────────
         conv_block = ""
         if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="codex")
+            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
 
         # ── Affinity tone (answer only) ─────────────────────
         affinity_block = ""
@@ -3222,7 +3222,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
         answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
 
         if _add_conversation_turn:
-            await _add_conversation_turn(interaction.user.id, q, answer, sql=sql or "", source="codex")
+            await _add_conversation_turn(interaction.user.id, q, answer, sql=sql or "", source="oracle")
 
         footer_parts = [f"🔍 {len(rows)} records analyzed", tier_label]
         if alias_map:
@@ -3266,8 +3266,14 @@ class _AskWebModal(_OracleIntelModal):
     async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
 
+        # ── Conversation memory ────────────────────────────
+        conv_block = ""
+        if _build_conversation_block:
+            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
+
         system_instruction = get_persona("analytical")
-        result = await atlas_ai.generate_with_search(q, system=system_instruction)
+        contents = f"{conv_block}\n\n{q}" if conv_block else q
+        result = await atlas_ai.generate_with_search(contents, system=system_instruction)
 
         if self.mode == "sports":
             embed_title = "🏈 ATLAS Intelligence — Sports Intel"
@@ -3281,6 +3287,11 @@ class _AskWebModal(_OracleIntelModal):
             fallback_msg = "ATLAS couldn't pull a response on that one."
 
         answer = result.text or fallback_msg
+
+        if _add_conversation_turn:
+            await _add_conversation_turn(
+                interaction.user.id, q, answer, sql="", source="oracle"
+            )
 
         footer = f"{footer_mode} · Web search enabled · ATLAS™ Oracle"
         if result.fallback_used:
@@ -3326,7 +3337,7 @@ class PlayerScoutModal(_OracleIntelModal, title="🎯 Ask ATLAS — Player Scout
         # ── Conversation memory fetch ─────────────────────────
         conv_block = ""
         if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="codex")
+            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
 
         # ── Scout-specific SQL prompt ─────────────────────────
         scout_schema = f"""DATABASE: tsl_history.db — Madden Player Scouting Data
@@ -3425,7 +3436,7 @@ RESPONSE GUIDELINES:
         # ── Store conversation turn ───────────────────────────
         if _add_conversation_turn:
             await _add_conversation_turn(
-                interaction.user.id, q, answer, sql=sql or "", source="codex"
+                interaction.user.id, q, answer, sql=sql or "", source="oracle"
             )
 
         footer_parts = [f"🔍 {len(rows)} players analyzed"]
@@ -3471,7 +3482,7 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
         # ── Conversation memory ─────────────────────────────
         conv_block = ""
         if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="codex")
+            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
 
         # ── Build TSL context from live data ────────────────
         context_parts = []
@@ -3624,7 +3635,7 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
         # ── Store conversation turn ─────────────────────────
         if _add_conversation_turn:
             await _add_conversation_turn(
-                interaction.user.id, q, answer, sql="", source="codex"
+                interaction.user.id, q, answer, sql="", source="oracle"
             )
 
         # ── Footer ──────────────────────────────────────────
