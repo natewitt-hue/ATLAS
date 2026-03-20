@@ -29,26 +29,29 @@ CREATE TABLE IF NOT EXISTS parlay_legs (
     game_id    TEXT    NOT NULL,
     matchup    TEXT    NOT NULL,
     pick       TEXT    NOT NULL,
-    bet_type   TEXT    NOT NULL,   -- 'Spread' | 'Moneyline' | 'Total'
+    bet_type   TEXT    NOT NULL,   -- 'Spread' | 'Moneyline' | 'Over' | 'Under'
     line       REAL    NOT NULL DEFAULT 0,
     odds       INTEGER NOT NULL,   -- American odds for this leg
-    status     TEXT    NOT NULL DEFAULT 'Pending'
+    status     TEXT    NOT NULL DEFAULT 'Pending',
+    UNIQUE(parlay_id, leg_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_parlay_legs_parlay ON parlay_legs(parlay_id);
-CREATE INDEX IF NOT EXISTS idx_parlay_legs_game   ON parlay_legs(game_id);
-CREATE INDEX IF NOT EXISTS idx_parlay_legs_type   ON parlay_legs(bet_type, status);
+CREATE INDEX IF NOT EXISTS idx_parlay_legs_parlay  ON parlay_legs(parlay_id);
+CREATE INDEX IF NOT EXISTS idx_parlay_legs_game    ON parlay_legs(game_id);
+CREATE INDEX IF NOT EXISTS idx_parlay_legs_matchup ON parlay_legs(matchup);
+CREATE INDEX IF NOT EXISTS idx_parlay_legs_type    ON parlay_legs(bet_type, status);
 ```
 
 ### Index rationale
 
 - **`parlay_id`** — join back to `parlays_table`, fetch all legs for a parlay
-- **`game_id`** — cancellation lookup: "which pending parlays have a leg on this game?"
+- **`game_id`** — future exact-match lookups when game ID is available
+- **`matchup`** — cancellation uses case-insensitive substring match on matchup
 - **`bet_type, status`** — analytics: "win rate by bet type", "how many spread bets hit this week"
 
 ### Status values
 
-`Pending` | `Won` | `Lost` | `Push` | `Unknown` (historical backfill where per-leg result is unrecoverable)
+`Pending` | `Won` | `Lost` | `Push` | `Cancelled` | `Unknown` (historical backfill where per-leg result is unrecoverable)
 
 ---
 
@@ -69,62 +72,105 @@ for i, leg in enumerate(self.legs):
 
 The JSON `legs` column is still written as before — dual-write, both atomic within the same transaction.
 
+**Data dependency:** The leg dict keys (`game_id`, `matchup`, `pick`, `bet_type`, `line`, `odds`) originate in `_make_parlay_cb()` (~line 1446) where the cart leg dict is built. No changes needed to the cart data structure — keys already match the `parlay_legs` columns.
+
 ---
 
 ## Grading Path
 
-In `_grade_bets_impl()` parlay grading loop, after `_grade_single_bet()` returns a result for each leg:
+The existing grading loop early-breaks on the first lost leg. To record per-leg outcomes, the loop must be refactored to iterate **all** legs before determining the parlay's overall result:
 
 ```python
-con.execute(
-    "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
-    (leg_result, pid, leg_idx),
-)
+# Replace: for leg in legs → break-on-loss pattern
+# With: iterate all legs, collect results, then determine parlay status
+
+leg_results = []
+for leg_idx, leg in enumerate(legs):
+    matchup_key = leg["matchup"].lower()
+    match = _fuzzy_match(matchup_key, scores)
+    if not match:
+        leg_results.append("Pending")
+        continue
+
+    res = _grade_single_bet(leg["bet_type"], leg["pick"], leg["line"],
+                            match["home"], match["away"],
+                            match["home_score"], match["away_score"])
+    leg_results.append(res)
+
+    # Record per-leg status
+    con.execute(
+        "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
+        (res, pid, leg_idx),
+    )
+
+# Derive parlay status from leg results (same logic as before)
+if "Pending" in leg_results:
+    continue  # not all games resolved yet
+elif all(r == "Won" for r in leg_results):
+    # all won → payout
+elif "Lost" in leg_results:
+    # any lost → parlay lost
+elif all(r == "Push" for r in leg_results):
+    # all pushed → refund
+else:
+    # mix of Won + Push → push the parlay
 ```
 
-The parlay's overall status determination is unchanged — all won → `Won`, any lost → `Lost`, all pushed → `Push`. We're recording individual outcomes alongside the existing logic, not replacing it.
+**Key behavioral change:** The grading loop no longer breaks on the first loss — it grades all legs so each gets its own status. The overall parlay outcome determination is unchanged, just computed from the collected `leg_results` list instead of mid-loop flags.
+
+This same refactor applies to both the auto-grade path (~line 1014) and the manual grade path (~line 2206).
 
 ---
 
 ## Cancellation Path
 
-Current code parses JSON to find parlays affected by a cancelled game. With the normalized table:
+Current code parses JSON to find parlays affected by a cancelled matchup. The existing cancellation function `_sb_cancelgame_impl()` takes a `matchup` string and does a case-insensitive substring match. With the normalized table:
 
 ```python
+# Match the existing behavior: case-insensitive substring match on matchup
 affected = con.execute(
     "SELECT DISTINCT parlay_id FROM parlay_legs "
-    "WHERE game_id=? AND status='Pending'",
-    (cancelled_game_id,),
+    "WHERE LOWER(matchup) LIKE ? AND status='Pending'",
+    (f"%{matchup_key.lower()}%",),
 ).fetchall()
+
+# Also update the cancelled legs' status
+con.execute(
+    "UPDATE parlay_legs SET status='Cancelled' "
+    "WHERE LOWER(matchup) LIKE ? AND status='Pending'",
+    (f"%{matchup_key.lower()}%",),
+)
 ```
 
-No JSON parsing needed. The `idx_parlay_legs_game` index makes this fast.
+The `idx_parlay_legs_matchup` index helps with lookups, though `LIKE` with leading wildcard may not use it. The `game_id` index is still useful for future code that has the exact game ID available.
 
 ---
 
 ## Migration (Backfill)
 
-One-time startup function (idempotent — skips parlays already backfilled):
+One-time startup function (idempotent — skips parlays already backfilled). Uses **sync sqlite3** to match the sportsbook module's established pattern. Called from `bot.py` via `await asyncio.to_thread(backfill_parlay_legs_sync)`.
 
 ```python
-async def backfill_parlay_legs() -> int:
+def backfill_parlay_legs_sync() -> int:
     """Populate parlay_legs from existing JSON legs column. Returns rows inserted."""
     count = 0
-    async with aiosqlite.connect(DB_PATH) as db:
-        rows = await db.execute_fetchall(
+    with _db_con() as con:
+        rows = con.execute(
             "SELECT parlay_id, legs, status FROM parlays_table WHERE legs IS NOT NULL"
-        )
+        ).fetchall()
+
+        batch = 0
         for parlay_id, legs_json, parlay_status in rows:
-            existing = await db.execute_fetchall(
+            existing = con.execute(
                 "SELECT 1 FROM parlay_legs WHERE parlay_id=? LIMIT 1", (parlay_id,)
-            )
+            ).fetchone()
             if existing:
                 continue
             legs = json.loads(legs_json) if isinstance(legs_json, str) else []
             for i, leg in enumerate(legs):
                 leg_status = _derive_historical_leg_status(parlay_status)
-                await db.execute(
-                    "INSERT INTO parlay_legs "
+                con.execute(
+                    "INSERT OR IGNORE INTO parlay_legs "
                     "(parlay_id, leg_index, game_id, matchup, pick, bet_type, line, odds, status) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (parlay_id, i, leg.get("game_id", ""),
@@ -133,7 +179,10 @@ async def backfill_parlay_legs() -> int:
                      leg.get("odds", 0), leg_status),
                 )
                 count += 1
-        await db.commit()
+            batch += 1
+            if batch % 100 == 0:
+                con.commit()  # Batched commits for crash resilience
+        con.commit()
     return count
 ```
 
@@ -142,7 +191,7 @@ async def backfill_parlay_legs() -> int:
 | Parlay status | Leg status | Reasoning |
 |---------------|------------|-----------|
 | `Won` | `Won` | All legs must have hit for parlay to win |
-| `Push` | `Push` | All legs pushed means each leg pushed |
+| `Push` | `Unknown` | Can't determine individual leg outcomes — a "Push" parlay may have Won+Won+Push legs |
 | `Lost` | `Unknown` | Can't determine which leg(s) lost without replaying scores |
 | `Cancelled` | `Cancelled` | Entire parlay was cancelled |
 | `Pending` | `Pending` | Not yet graded |
