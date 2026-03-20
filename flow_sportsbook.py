@@ -2699,25 +2699,35 @@ class SportsbookCog(commands.Cog):
                 refunded      += 1
                 total_refunded += amt
 
-            # Also refund parlays containing this matchup
-            parlay_rows = con.execute(
-                "SELECT parlay_id, discord_id, legs, wager_amount "
-                "FROM parlays_table WHERE status='Pending'"
-            ).fetchall()
+            # Also refund parlays containing this matchup (query normalized table)
             parlay_refunds = 0
-            for pid, uid, legs_json, amt in parlay_rows:
-                try:
-                    legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
-                except Exception:
-                    log.warning("Corrupt parlay JSON in cancellation refund: pid=%s json=%r", pid, legs_json[:200] if isinstance(legs_json, str) else legs_json)
+            parlay_refund_users = set()  # collect UIDs for ledger posting outside this block
+            affected_parlay_ids = con.execute(
+                "SELECT DISTINCT parlay_id FROM parlay_legs "
+                "WHERE LOWER(matchup) LIKE ? AND status='Pending'",
+                (f"%{key}%",),
+            ).fetchall()
+            for (pid,) in affected_parlay_ids:
+                row = con.execute(
+                    "SELECT discord_id, wager_amount FROM parlays_table "
+                    "WHERE parlay_id=? AND status='Pending'",
+                    (pid,),
+                ).fetchone()
+                if not row:
                     continue
-                if any(key in leg.get("matchup", "").lower() for leg in legs):
-                    _update_balance(uid, amt, con)
-                    con.execute(
-                        "UPDATE parlays_table SET status='Cancelled' WHERE parlay_id=?", (pid,)
-                    )
-                    parlay_refunds += 1
-                    total_refunded += amt
+                uid, amt = row
+                _update_balance(uid, amt, con)
+                con.execute(
+                    "UPDATE parlays_table SET status='Cancelled' WHERE parlay_id=?", (pid,)
+                )
+                con.execute(
+                    "UPDATE parlay_legs SET status='Cancelled' "
+                    "WHERE parlay_id=? AND status='Pending'",
+                    (pid,),
+                )
+                parlay_refunds += 1
+                total_refunded += amt
+                parlay_refund_users.add(uid)
 
             # Lock the game so no new bets come in
             _set_locked(matchup.strip(), True)
@@ -2737,14 +2747,8 @@ class SportsbookCog(commands.Cog):
             refund_users = set()
             for bid, uid, amt in pending:
                 refund_users.add(uid)
-            for pid, uid, legs_json, amt in parlay_rows:
-                try:
-                    legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
-                except Exception:
-                    log.warning("Corrupt parlay JSON in ledger refund: pid=%s", pid)
-                    continue
-                if any(key in leg.get("matchup", "").lower() for leg in legs):
-                    refund_users.add(uid)
+            for uid in parlay_refund_users:
+                refund_users.add(uid)
             for uid in refund_users:
                 bal = _get_balance(uid)
                 txn_id = await flow_wallet.get_last_txn_id(uid)
