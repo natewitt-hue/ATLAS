@@ -2284,23 +2284,31 @@ class SportsbookCog(commands.Cog):
                     log.warning("Corrupt parlay JSON in manual grade: pid=%s", pid)
                     continue
 
-                all_won = True; any_lost = False; unresolved = 0; any_pushed = False
-                for leg in legs:
+                leg_results = []
+                for leg_idx, leg in enumerate(legs):
                     gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
                     if not gd:
-                        all_won = False; unresolved += 1; continue
+                        leg_results.append("Pending")
+                        continue
                     res = _grade_single_bet(
                         leg["bet_type"], leg["pick"], float(leg.get("line", 0)),
                         gd["home"], gd["away"], gd["home_score"], gd["away_score"]
                     )
-                    if res == "Lost":
-                        all_won = False; any_lost = True; break
-                    elif res == "Push":
-                        all_won = False; any_pushed = True
-                    elif res == "Pending":
-                        all_won = False; unresolved += 1
+                    leg_results.append(res)
+                    try:
+                        con.execute(
+                            "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
+                            (res, pid, leg_idx),
+                        )
+                    except Exception:
+                        log.debug("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
 
-                if unresolved > 0 and not any_lost:
+                any_lost = "Lost" in leg_results
+                has_pending = "Pending" in leg_results
+                all_won = all(r == "Won" for r in leg_results)
+                any_pushed = "Push" in leg_results
+
+                if has_pending and not any_lost:
                     continue
                 if all_won:
                     payout = _payout_calc(amt, c_odds)
