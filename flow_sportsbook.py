@@ -1025,34 +1025,33 @@ async def _run_autograde(bot) -> None:
                             log.warning("Corrupt parlay JSON in auto-grade: pid=%s json=%r", pid, legs_json[:200] if isinstance(legs_json, str) else legs_json)
                             continue
 
-                        all_won    = True
-                        any_lost   = False
-                        unresolved = 0
-                        any_pushed = False
-
-                        for leg in legs:
+                        leg_results = []
+                        for leg_idx, leg in enumerate(legs):
                             gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
                             if not gd:
-                                unresolved += 1
-                                all_won = False
+                                leg_results.append("Pending")
                                 continue
                             res = _grade_single_bet(
                                 leg["bet_type"], leg["pick"], float(leg.get("line", 0)),
                                 gd["home"], gd["away"], gd["home_score"], gd["away_score"]
                             )
-                            if res == "Lost":
-                                all_won  = False
-                                any_lost = True
-                                break
-                            elif res == "Push":
-                                all_won    = False
-                                any_pushed = True
-                            elif res == "Pending":
-                                all_won    = False
-                                unresolved += 1
+                            leg_results.append(res)
+                            # Record per-leg status
+                            try:
+                                con.execute(
+                                    "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
+                                    (res, pid, leg_idx),
+                                )
+                            except Exception:
+                                log.debug("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
 
-                        # Leave Pending if any leg still unresolved (not yet final)
-                        if unresolved > 0 and not any_lost:
+                        # A single loss kills the parlay even if other legs are unresolved
+                        any_lost = "Lost" in leg_results
+                        has_pending = "Pending" in leg_results
+                        all_won = all(r == "Won" for r in leg_results)
+                        any_pushed = "Push" in leg_results
+
+                        if has_pending and not any_lost:
                             continue
 
                         if all_won:
@@ -1062,7 +1061,9 @@ async def _run_autograde(bot) -> None:
                                 con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (pid,))
                                 settled += 1
                                 continue
-                            _update_balance(uid, payout, con)
+                            _update_balance(uid, payout, con,
+                                            subsystem="PARLAY", subsystem_id=str(pid),
+                                            reference_key=f"PARLAY_SETTLE_{pid}")
                             total_paid += payout - amt
                             con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
                             wins += 1
@@ -1090,7 +1091,9 @@ async def _run_autograde(bot) -> None:
                                 "bet_id": pid,
                             })
                         elif any_pushed:
-                            _update_balance(uid, amt, con)
+                            _update_balance(uid, amt, con,
+                                            subsystem="PARLAY", subsystem_id=str(pid),
+                                            reference_key=f"PARLAY_PUSH_{pid}")
                             con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
                             pushes += 1
                             pending_events.append({
