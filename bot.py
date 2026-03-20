@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.7.0"  # Unified modal base — _OracleIntelModal Template Method refactor
+ATLAS_VERSION = "3.8.0"  # Multi-retry SQL — 3-attempt progressive cascade with Opus rescue
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
