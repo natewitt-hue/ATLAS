@@ -536,6 +536,30 @@ async def seed_jackpot(tier: str, amount: int) -> None:
         await db.commit()
 
 
+async def backfill_jackpot_tags() -> int:
+    """
+    One-time migration: tag historical jackpot credit transactions with
+    subsystem='CASINO' and subsystem_id='JP_<log_id>'.
+    Idempotent — only affects rows where subsystem IS NULL.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            UPDATE transactions SET subsystem='CASINO', subsystem_id='JP_' || (
+                SELECT jl.id FROM casino_jackpot_log jl
+                WHERE jl.discord_id = transactions.discord_id
+                  AND jl.amount = transactions.amount
+                  AND ABS(julianday(jl.won_at) - julianday(transactions.created_at)) < 0.001
+                ORDER BY ABS(julianday(jl.won_at) - julianday(transactions.created_at))
+                LIMIT 1
+            )
+            WHERE transactions.description LIKE 'JACKPOT%'
+              AND transactions.subsystem IS NULL
+        """)
+        count = cursor.rowcount
+        await db.commit()
+    return count
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  STREAK SYSTEM ("Momentum")
 # ═════════════════════════════════════════════════════════════════════════════
