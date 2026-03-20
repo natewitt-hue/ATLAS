@@ -3458,7 +3458,22 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
     async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
 
-        # Build TSL context from live data
+        # ── Resolve caller identity ─────────────────────────
+        caller_db = None
+        team_name = None
+        if _resolve_db_username_fn:
+            caller_db = _resolve_db_username_fn(interaction.user.id)
+        if caller_db and not dm.df_teams.empty:
+            mask = dm.df_teams["userName"].str.lower() == caller_db.lower()
+            if mask.any():
+                team_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+
+        # ── Conversation memory ─────────────────────────────
+        conv_block = ""
+        if _build_conversation_block:
+            conv_block = await _build_conversation_block(interaction.user.id, source="codex")
+
+        # ── Build TSL context from live data ────────────────
         context_parts = []
 
         if not dm.df_standings.empty:
@@ -3472,24 +3487,154 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
             context_parts.append("CURRENT STANDINGS (Top 10):\n" + "\n".join(standings_lines))
 
         if not dm.df_teams.empty:
+            has_cap = "capRoomFormatted" in dm.df_teams.columns
             team_lines = []
             for _, row in dm.df_teams.iterrows():
                 name = row.get("nickName", "?")
                 ovr = row.get("ovrRating", "?")
                 owner = row.get("userName", "?")
-                team_lines.append(f"  {name} (OVR {ovr}) — {owner}")
-            context_parts.append("TEAM RATINGS:\n" + "\n".join(team_lines[:16]))
+                line = f"  {name} (OVR {ovr}) — {owner}"
+                if has_cap:
+                    line += f" | Cap: {row.get('capRoomFormatted', '?')} room"
+                team_lines.append(line)
+            context_parts.append("TEAM RATINGS & CAP:\n" + "\n".join(team_lines[:16]))
 
+        # ── Recent trades ───────────────────────────────────
+        if not dm.df_trades.empty:
+            trades_sorted = dm.df_trades.sort_values(
+                by=["seasonIndex", "weekIndex"], ascending=False
+            ).head(5)
+            trade_lines = []
+            for _, row in trades_sorted.iterrows():
+                t1 = row.get("team1Name", "?")
+                t2 = row.get("team2Name", "?")
+                sent1 = row.get("team1Sent", "?")
+                sent2 = row.get("team2Sent", "?")
+                wk = row.get("weekIndex", "?")
+                trade_lines.append(f"  {t1} sent {sent1} ↔ {t2} sent {sent2} (Wk {wk})")
+            context_parts.append("RECENT TRADES:\n" + "\n".join(trade_lines))
+
+        # ── Caller's roster summary ─────────────────────────
+        if team_name and run_sql:
+            roster_rows, roster_err = run_sql(
+                "SELECT firstName || ' ' || lastName AS name, pos, "
+                "CAST(playerBestOvr AS INTEGER) AS ovr, dev "
+                "FROM players WHERE teamName = ? AND isFA != '1' "
+                "ORDER BY CAST(playerBestOvr AS INTEGER) DESC",
+                (team_name,),
+            )
+            if not roster_err and roster_rows:
+                from collections import defaultdict
+                pos_map = {}
+                for group, positions in {
+                    "QB": ["QB"], "HB": ["HB", "FB"], "WR": ["WR"], "TE": ["TE"],
+                    "OL": ["LT", "LG", "C", "RG", "RT"],
+                    "DL": ["LE", "RE", "DT"], "LB": ["LOLB", "MLB", "ROLB"],
+                    "DB": ["CB", "FS", "SS"], "K/P": ["K", "P"],
+                }.items():
+                    for p in positions:
+                        pos_map[p] = group
+
+                grouped = defaultdict(list)
+                for r in roster_rows:
+                    grouped[pos_map.get(r.get("pos", ""), "Other")].append(r)
+
+                roster_lines = []
+                elite = []
+                for g in ["QB", "HB", "WR", "TE", "OL", "DL", "LB", "DB", "K/P"]:
+                    players = grouped.get(g, [])
+                    if not players:
+                        continue
+                    top = players[0]
+                    roster_lines.append(
+                        f"  {g} ({len(players)}): {top['name']} {top['ovr']} OVR [{top.get('dev', 'Normal')}]"
+                    )
+                    for p in players:
+                        if p.get("dev") in ("Superstar", "Superstar X-Factor"):
+                            elite.append(f"{p['name']} ({p.get('pos', '?')} {p['ovr']})")
+
+                block = f"YOUR ROSTER ({team_name}):\n" + "\n".join(roster_lines)
+                if elite:
+                    block += "\n  Elite Dev: " + ", ".join(elite[:8])
+                context_parts.append(block)
+
+        # ── Free agent highlights ───────────────────────────
+        if run_sql:
+            fa_rows, fa_err = run_sql(
+                "SELECT firstName || ' ' || lastName AS name, pos, "
+                "CAST(playerBestOvr AS INTEGER) AS ovr, dev, age "
+                "FROM players WHERE isFA = '1' AND teamName = 'Free Agent' "
+                "ORDER BY CAST(playerBestOvr AS INTEGER) DESC LIMIT 10"
+            )
+            if not fa_err and fa_rows:
+                fa_lines = [
+                    f"  {r['name']} ({r.get('pos', '?')}) — {r['ovr']} OVR, Age {r.get('age', '?')}, {r.get('dev', 'Normal')}"
+                    for r in fa_rows
+                ]
+                context_parts.append("TOP FREE AGENTS:\n" + "\n".join(fa_lines))
+
+        # ── Classify intent: TSL-specific or general? ───────
+        use_web_search = True
+        try:
+            classify_prompt = (
+                "You are classifying questions for a Madden NFL sim league called TSL.\n"
+                "TSL has ~31 teams with custom rosters, trades, and standings.\n\n"
+                f"Question: \"{q}\"\n\n"
+                "Is this about TSL league-specific data (rosters, trades, cap, "
+                "matchups between TSL teams, team strategy using TSL data) "
+                "or general Madden/NFL knowledge (scheme tips, playbook advice, "
+                "real-world NFL news)?\n\n"
+                "Reply with ONLY one word: TSL or GENERAL"
+            )
+            classify_result = await atlas_ai.generate(
+                classify_prompt, tier=Tier.HAIKU, max_tokens=10, temperature=0.0
+            )
+            if classify_result.text and "TSL" in classify_result.text.upper().strip():
+                use_web_search = False
+        except Exception:
+            pass  # default to web search on classification failure
+
+        # ── Assemble prompt + route ─────────────────────────
         tsl_context = "\n\n".join(context_parts) if context_parts else ""
 
+        caller_block = ""
+        if team_name:
+            caller_block = (
+                f"\nUSER CONTEXT: The user owns the {team_name}. "
+                f"When they say 'my team', 'my roster', interpret accordingly.\n"
+            )
+
+        conv_inject = ""
+        if conv_block:
+            conv_inject = f"\nRECENT CONTEXT:\n{conv_block}\n"
+
         system_instruction = get_persona("analytical")
-        contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
-        result = await atlas_ai.generate_with_search(contents, system=system_instruction)
+        contents = (
+            f"TSL CONTEXT:\n{tsl_context}\n{caller_block}{conv_inject}\nUSER QUESTION: {q}"
+            if tsl_context else q
+        )
+
+        if use_web_search:
+            result = await atlas_ai.generate_with_search(contents, system=system_instruction)
+        else:
+            result = await atlas_ai.generate(contents, system=system_instruction, tier=Tier.SONNET)
 
         answer = result.text or "ATLAS couldn't formulate a strategy for that one."
 
-        footer = "Strategy Room · TSL context + web search · ATLAS™ Oracle"
-        if result.fallback_used:
+        # ── Store conversation turn ─────────────────────────
+        if _add_conversation_turn:
+            await _add_conversation_turn(
+                interaction.user.id, q, answer, sql="", source="codex"
+            )
+
+        # ── Footer ──────────────────────────────────────────
+        footer_parts = ["Strategy Room"]
+        if team_name:
+            footer_parts.append(team_name)
+        footer_parts.append("Web search" if use_web_search else "TSL analysis")
+        footer_parts.append("ATLAS™ Oracle")
+        footer = " · ".join(footer_parts)
+        if hasattr(result, 'fallback_used') and result.fallback_used:
             footer += "  ·  ⚡ via Gemini fallback"
 
         return answer, {

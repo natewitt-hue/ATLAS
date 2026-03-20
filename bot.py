@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.8.0"  # Multi-retry SQL — 3-attempt progressive cascade with Opus rescue
+ATLAS_VERSION = "3.9.0"  # StrategyRoom enrichment — roster/cap/trades/FA context + TSL/general routing
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
