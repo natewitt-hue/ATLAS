@@ -160,6 +160,25 @@ def setup_db():
             )
         """)
         con.execute("""
+            CREATE TABLE IF NOT EXISTS parlay_legs (
+                leg_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                parlay_id  TEXT    NOT NULL REFERENCES parlays_table(parlay_id),
+                leg_index  INTEGER NOT NULL,
+                game_id    TEXT    NOT NULL,
+                matchup    TEXT    NOT NULL,
+                pick       TEXT    NOT NULL,
+                bet_type   TEXT    NOT NULL,
+                line       REAL    NOT NULL DEFAULT 0,
+                odds       INTEGER NOT NULL,
+                status     TEXT    NOT NULL DEFAULT 'Pending',
+                UNIQUE(parlay_id, leg_index)
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_parlay  ON parlay_legs(parlay_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_game    ON parlay_legs(game_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_matchup ON parlay_legs(matchup)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_type    ON parlay_legs(bet_type, status)")
+        con.execute("""
             CREATE TABLE IF NOT EXISTS games_state (
                 game_id TEXT PRIMARY KEY,
                 locked  INTEGER DEFAULT 0
