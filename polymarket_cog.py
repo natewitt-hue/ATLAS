@@ -794,6 +794,12 @@ class WagerModal(discord.ui.Modal):
                         subsystem="PREDICTION", subsystem_id=str(contract_id),
                         con=db,
                     )
+                    import wager_registry
+                    await wager_registry.register_wager(
+                        "PREDICTION", str(contract_id), int(user_id), cost_bucks,
+                        label=f"{self.slug}: {self.side} @ ${self.price:.2f}",
+                        con=db,
+                    )
                     await db.commit()
             except flow_wallet.InsufficientFundsError as e:
                 await interaction.response.send_message(f"❌ {e}", ephemeral=True)
@@ -3283,6 +3289,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             ) as cursor:
                 contracts = await cursor.fetchall()
 
+            import wager_registry
             for cid, user_id, side, qty, cost, payout in contracts:
                 if result == "VOID":
                     await flow_wallet.credit(
@@ -3296,6 +3303,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         "SET status='voided', resolved_at=? WHERE id=?",
                         (now, cid)
                     )
+                    await wager_registry.settle_wager("PREDICTION", str(cid), "voided", 0, con=db)
                     counts["voided"] += 1
                 elif side == result:
                     if payout > PREDICTION_MAX_PAYOUT:
@@ -3312,6 +3320,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         "SET status='won', resolved_at=? WHERE id=?",
                         (now, cid)
                     )
+                    await wager_registry.settle_wager("PREDICTION", str(cid), "won", payout - cost, con=db)
                     counts["won"] += 1
                     total_payout += payout
                 else:
@@ -3320,6 +3329,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         "SET status='lost', resolved_at=? WHERE id=?",
                         (now, cid)
                     )
+                    await wager_registry.settle_wager("PREDICTION", str(cid), "lost", -cost, con=db)
                     counts["lost"] += 1
 
             # Mark market as resolved

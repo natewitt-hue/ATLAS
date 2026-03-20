@@ -417,6 +417,9 @@ async def setup_wallet_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_tx_subsystem "
             "ON transactions(subsystem, subsystem_id)"
         )
+        # -- Unified wager registry (GAP 5) --
+        import wager_registry
+        await wager_registry.ensure_wager_table(db)
         await db.commit()
 
 

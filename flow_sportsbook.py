@@ -1065,6 +1065,8 @@ async def _run_autograde(bot) -> None:
                                             reference_key=f"PARLAY_SETTLE_{pid}")
                             total_paid += payout - amt
                             con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
+                            import wager_registry
+                            wager_registry.settle_wager_sync("PARLAY", str(pid), "won", payout - amt, con=con)
                             wins += 1
                             pending_events.append({
                                 "discord_id": uid,
@@ -1078,6 +1080,8 @@ async def _run_autograde(bot) -> None:
                             })
                         elif any_lost:
                             con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
+                            import wager_registry
+                            wager_registry.settle_wager_sync("PARLAY", str(pid), "lost", -amt, con=con)
                             losses += 1
                             pending_events.append({
                                 "discord_id": uid,
@@ -1094,6 +1098,8 @@ async def _run_autograde(bot) -> None:
                                             subsystem="PARLAY", subsystem_id=str(pid),
                                             reference_key=f"PARLAY_PUSH_{pid}")
                             con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
+                            import wager_registry
+                            wager_registry.settle_wager_sync("PARLAY", str(pid), "push", 0, con=con)
                             pushes += 1
                             pending_events.append({
                                 "discord_id": uid,
@@ -1218,6 +1224,12 @@ class BetSlipModal(discord.ui.Modal):
                         interaction.user.id, -amt, source="TSL_BET", con=con,
                         subsystem="TSL_BET", subsystem_id=str(bet_id),
                     )
+                    import wager_registry
+                    wager_registry.register_wager_sync(
+                        "TSL_BET", str(bet_id), int(interaction.user.id), int(amt),
+                        label=f"{self.team} {self.bet_type} {_american_to_str(self.odds)}",
+                        odds=int(self.odds), con=con,
+                    )
                     con.commit()
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
@@ -1303,6 +1315,13 @@ class ParlayWagerModal(discord.ui.Modal):
                         interaction.user.id, -amt, source="TSL_BET", con=con,
                         subsystem="PARLAY", subsystem_id=parlay_id,
                     )
+                    import wager_registry
+                    leg_summary = " / ".join(l["pick"] for l in self.legs)
+                    wager_registry.register_wager_sync(
+                        "PARLAY", parlay_id, int(interaction.user.id), int(amt),
+                        label=f"Parlay ({len(self.legs)}L): {leg_summary[:80]}",
+                        odds=int(self.combined_odds), con=con,
+                    )
                     con.commit()
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
@@ -1386,6 +1405,12 @@ class PropBetModal(discord.ui.Modal):
                     new_bal = flow_wallet.update_balance_sync(
                         interaction.user.id, -amt, source="TSL_BET", con=con,
                         subsystem="PROP", subsystem_id=str(wager_id),
+                    )
+                    import wager_registry
+                    wager_registry.register_wager_sync(
+                        "PROP", str(wager_id), int(interaction.user.id), int(amt),
+                        label=f"Prop #{self.prop_id}: {self.pick}",
+                        odds=int(self.odds), con=con,
                     )
                     con.commit()
             except flow_wallet.InsufficientFundsError:
@@ -2303,6 +2328,9 @@ class SportsbookCog(commands.Cog):
                     )
                     losses += 1
                 con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
+                import wager_registry
+                _ra = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (0 if res == "Push" else -amt)
+                wager_registry.settle_wager_sync("TSL_BET", str(bid), res.lower(), _ra, con=con)
                 settled += 1
                 profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else 0
                 bet_log.append({"uid": uid, "result": res, "pick": pick,
@@ -2361,6 +2389,8 @@ class SportsbookCog(commands.Cog):
                                     reference_key=f"PARLAY_SETTLE_{pid}")
                     total_paid += payout - amt
                     con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
+                    import wager_registry
+                    wager_registry.settle_wager_sync("PARLAY", str(pid), "won", payout - amt, con=con)
                     wins += 1
                     bet_log.append({"uid": uid, "result": "Won", "pick": "parlay",
                                     "bet_type": "parlay", "matchup": f"parlay_id={pid}",
@@ -2373,6 +2403,8 @@ class SportsbookCog(commands.Cog):
                         con=con, subsystem="PARLAY", subsystem_id=str(pid),
                     )
                     con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
+                    import wager_registry
+                    wager_registry.settle_wager_sync("PARLAY", str(pid), "lost", -amt, con=con)
                     losses += 1
                     bet_log.append({"uid": uid, "result": "Lost", "pick": "parlay",
                                     "bet_type": "parlay", "matchup": f"parlay_id={pid}",
@@ -2382,6 +2414,8 @@ class SportsbookCog(commands.Cog):
                                     subsystem="PARLAY", subsystem_id=str(pid),
                                     reference_key=f"PARLAY_PUSH_{pid}")
                     con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
+                    import wager_registry
+                    wager_registry.settle_wager_sync("PARLAY", str(pid), "push", 0, con=con)
                     pushes += 1
                     bet_log.append({"uid": uid, "result": "Push", "pick": "parlay",
                                     "bet_type": "parlay", "matchup": f"parlay_id={pid}",
@@ -2735,6 +2769,8 @@ class SportsbookCog(commands.Cog):
                 con.execute(
                     "UPDATE bets_table SET status='Cancelled' WHERE bet_id=?", (bid,)
                 )
+                import wager_registry
+                wager_registry.settle_wager_sync("TSL_BET", str(bid), "voided", 0, con=con)
                 refunded      += 1
                 total_refunded += amt
 
@@ -2764,6 +2800,8 @@ class SportsbookCog(commands.Cog):
                     "WHERE parlay_id=? AND status='Pending'",
                     (pid,),
                 )
+                import wager_registry
+                wager_registry.settle_wager_sync("PARLAY", str(pid), "voided", 0, con=con)
                 parlay_refunds += 1
                 total_refunded += amt
                 parlay_refund_users.add(uid)
@@ -2821,6 +2859,8 @@ class SportsbookCog(commands.Cog):
             con.execute(
                 "UPDATE bets_table SET status='Cancelled' WHERE bet_id=?", (bet_id,)
             )
+            import wager_registry
+            wager_registry.settle_wager_sync("TSL_BET", str(bet_id), "voided", 0, con=con)
 
         member = interaction.guild.get_member(uid) if interaction.guild else None
         name   = member.display_name if member else f"<@{uid}>"
@@ -2939,6 +2979,8 @@ class SportsbookCog(commands.Cog):
                                     subsystem="PROP", subsystem_id=str(wid),
                                     reference_key=f"PROP_PUSH_{wid}")
                     con.execute("UPDATE prop_wagers SET status='Push' WHERE id=?", (wid,))
+                    import wager_registry
+                    wager_registry.settle_wager_sync("PROP", str(wid), "push", 0, con=con)
                     pushes += 1
                 else:
                     winning_pick = opt_a if result == "a" else opt_b
@@ -2949,6 +2991,8 @@ class SportsbookCog(commands.Cog):
                                         reference_key=f"PROP_SETTLE_{wid}")
                         total_paid += payout - amt
                         con.execute("UPDATE prop_wagers SET status='Won' WHERE id=?", (wid,))
+                        import wager_registry
+                        wager_registry.settle_wager_sync("PROP", str(wid), "won", payout - amt, con=con)
                         wins += 1
                     else:
                         flow_wallet.update_balance_sync(
@@ -2958,6 +3002,8 @@ class SportsbookCog(commands.Cog):
                             con=con, subsystem="PROP", subsystem_id=str(wid),
                         )
                         con.execute("UPDATE prop_wagers SET status='Lost' WHERE id=?", (wid,))
+                        import wager_registry
+                        wager_registry.settle_wager_sync("PROP", str(wid), "lost", -amt, con=con)
                         losses += 1
 
             result_label = (opt_a if result == "a" else opt_b if result == "b" else "PUSH")
