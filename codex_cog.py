@@ -807,38 +807,17 @@ class CodexCog(commands.Cog):
                 )
                 return
 
-            # Validate generated SQL for common pitfalls
-            sql_warnings = validate_sql(sql)
-
-            rows, error = run_sql(sql)
+            schema = _get_db_schema()
+            rows, sql, error, attempt, warnings = await retry_sql(sql, schema)
             if error:
-                # Self-correct once with targeted validation hints
-                validation_hint = ""
-                if sql_warnings:
-                    validation_hint = "\nVALIDATION WARNINGS (fix these too):\n" + "\n".join(
-                        f"- {w}" for w in sql_warnings
-                    ) + "\n"
-                fix_prompt = (
-                    f"This SQLite query for a Madden database failed:\n{sql}\n\n"
-                    f"Error: {error}\n\n"
-                    f"REMINDER: ALL columns are stored as TEXT. Always use CAST(col AS INTEGER) "
-                    f"for numeric comparisons.\n"
-                    f"{validation_hint}"
-                    f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{_get_db_schema()}"
+                await interaction.followup.send(
+                    "⚠️ ATLAS couldn't find an answer for that query. Try rephrasing:\n"
+                    "• Use full player names ('Patrick Mahomes' not 'Mahomes')\n"
+                    "• Specify the season ('in season 95' not 'this year')\n"
+                    "• Ask about one thing at a time\n"
+                    "• Use `/ask_debug` for technical details"
                 )
-                fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.HAIKU, temperature=0.02)
-                sql = extract_sql(fix_result.text) or sql
-                rows, error = run_sql(sql)
-                if error:
-                    await interaction.followup.send(
-                        "⚠️ ATLAS couldn't find an answer for that query. Try rephrasing:\n"
-                        "• Use full player names ('Patrick Mahomes' not 'Mahomes')\n"
-                        "• Specify the season ('in season 95' not 'this year')\n"
-                        "• Ask about one thing at a time\n"
-                        "• Use `/ask_debug` for technical details"
-                    )
-                    return
+                return
 
             answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
             answer = await gemini_answer(
@@ -860,6 +839,8 @@ class CodexCog(commands.Cog):
             )
             footer_parts = [f"🔍 {len(rows)} records analyzed"]
             footer_parts.append("🧠 Tier 3 (NL→SQL)")
+            if attempt > 1:
+                footer_parts.append("⚠️ Self-corrected" if attempt == 2 else "🧠 Opus rescue")
             if alias_map:
                 resolved_str = ", ".join(f"{k}→{v}" for k, v in alias_map.items())
                 footer_parts.append(f"🔎 Resolved: {resolved_str}")
