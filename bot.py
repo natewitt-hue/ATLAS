@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.5.0"  # GAP 4: explicit casino session ↔ transaction linkage
+ATLAS_VERSION = "4.7.0"  # GAP 6: jackpot payout tagging + house bank tracking
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -232,6 +232,14 @@ async def setup_hook():
         backfilled = await flow_wallet.backfill_subsystem_tags()
         if backfilled:
             print(f"ATLAS: Flow wallet — backfilled {backfilled} txn subsystem tags.")
+        import wager_registry
+        wager_count = await wager_registry.backfill_wagers()
+        if wager_count:
+            print(f"ATLAS: Wager registry — backfilled {wager_count} wagers.")
+        from casino.casino_db import backfill_jackpot_tags
+        jp_count = await backfill_jackpot_tags()
+        if jp_count:
+            print(f"ATLAS: Jackpot tags — backfilled {jp_count} transactions.")
         print("ATLAS: Flow wallet system initialized.")
     except Exception as e:
         print(f"ATLAS: Flow wallet setup failed: {e}")
