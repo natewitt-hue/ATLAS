@@ -79,15 +79,16 @@ async def setup_casino_db() -> None:
         # ── Casino session log (one row per completed game) ────────────────
         await db.execute("""
             CREATE TABLE IF NOT EXISTS casino_sessions (
-                session_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                discord_id  INTEGER NOT NULL,
-                game_type   TEXT    NOT NULL,
-                wager       INTEGER NOT NULL,
-                outcome     TEXT    NOT NULL,
-                payout      INTEGER NOT NULL,
-                multiplier  REAL    DEFAULT 1.0,
-                channel_id  INTEGER,
-                played_at   TEXT    NOT NULL
+                session_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id     INTEGER NOT NULL,
+                game_type      TEXT    NOT NULL,
+                wager          INTEGER NOT NULL,
+                outcome        TEXT    NOT NULL,
+                payout         INTEGER NOT NULL,
+                multiplier     REAL    DEFAULT 1.0,
+                channel_id     INTEGER,
+                played_at      TEXT    NOT NULL,
+                correlation_id TEXT
             )
         """)
 
@@ -218,6 +219,18 @@ async def setup_casino_db() -> None:
             )
         except Exception:
             pass
+
+        # ── casino_sessions correlation_id (link session ↔ debit txn) ────
+        try:
+            await db.execute(
+                "ALTER TABLE casino_sessions ADD COLUMN correlation_id TEXT"
+            )
+        except Exception:
+            pass  # column already exists
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cs_discord_corr "
+            "ON casino_sessions (discord_id, correlation_id)"
+        )
 
         # -- Casino settings (max bet overrides, channel IDs, etc.) --------
         await db.execute("""
@@ -830,10 +843,24 @@ async def process_wager(
                             payout += refund
                             cold_mercy = {"type": "loss_refund", "amount": refund}
 
-            # 4. Credit payout via flow_wallet (with sanity cap)
+            # 4. Apply payout sanity cap
             if payout > CASINO_MAX_PAYOUT:
                 log.error(f"[CASINO] Insane payout ${payout:,.2f} for {game_type} — capping to ${CASINO_MAX_PAYOUT:,.2f}")
                 payout = CASINO_MAX_PAYOUT
+
+            # 5. Log session BEFORE credit so we have session_id for tagging
+            async with db.execute("""
+                INSERT INTO casino_sessions
+                    (discord_id, game_type, wager, outcome, payout, multiplier,
+                     channel_id, played_at, correlation_id)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (discord_id, game_type, wager, outcome, payout, multiplier,
+                  channel_id, now, correlation_id)) as cur:
+                session_id = cur.lastrowid
+
+            sid = str(session_id)
+
+            # 6. Credit payout via flow_wallet (tagged with session_id at creation)
             if payout > 0:
                 ref_key = f"CASINO_{game_type}_{discord_id}_{now}"
                 new_balance = await flow_wallet.credit(
@@ -841,12 +868,13 @@ async def process_wager(
                     description=f"{game_type} {outcome}",
                     reference_key=ref_key,
                     subsystem="CASINO",
+                    subsystem_id=sid,
                     con=db,
                 )
             else:
                 new_balance = await flow_wallet.get_balance(discord_id, con=db)
 
-            # 5. Cold streak free credit (at 8+ losses, once per streak)
+            # 7. Cold streak free credit (at 8+ losses, once per streak)
             if outcome == "loss" and streak_info["type"] == "loss" and streak_info["len"] >= 8:
                 mercy = get_cold_streak_mercy(streak_info)
                 if mercy and mercy["type"] == "free_credit":
@@ -856,36 +884,21 @@ async def process_wager(
                         discord_id, credit_amt, "CASINO",
                         description="cold streak mercy credit",
                         reference_key=ref_key2,
+                        subsystem="CASINO",
+                        subsystem_id=sid,
                         con=db,
                     )
                     cold_mercy = {"type": "free_credit", "amount": credit_amt}
 
-            # 6. Log session
-            async with db.execute("""
-                INSERT INTO casino_sessions
-                    (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, played_at)
-                VALUES (?,?,?,?,?,?,?,?)
-            """, (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, now)) as cur:
-                session_id = cur.lastrowid
-
-            # 6b. Backlink debit txn to this session + tag credit txn
-            sid = str(session_id)
+            # 8. Backlink debit txn to this session
             if correlation_id:
                 await db.execute(
                     "UPDATE transactions SET subsystem_id=? "
                     "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id=?",
                     (sid, discord_id, correlation_id),
                 )
-            if payout > 0:
-                # Tag the credit txn we just inserted (most recent for this user)
-                await db.execute(
-                    "UPDATE transactions SET subsystem_id=? "
-                    "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id IS NULL "
-                    "AND amount > 0 ORDER BY txn_id DESC LIMIT 1",
-                    (sid, discord_id),
-                )
 
-            # 7. Get txn_id
+            # 9. Get txn_id
             txn_id = None
             async with db.execute(
                 "SELECT txn_id FROM transactions "
@@ -896,14 +909,14 @@ async def process_wager(
                 if row:
                     txn_id = row[0]
 
-            # 8. Log house bank (delta uses original wager vs final payout)
+            # 10. Log house bank (delta uses original wager vs final payout)
             house_delta = wager - payout
             await db.execute("""
                 INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at)
                 VALUES (?,?,?,?)
             """, (game_type, house_delta, session_id, now))
 
-            # 9. Jackpot contribution + roll
+            # 11. Jackpot contribution + roll
             if wager > 0:
                 jackpot_result = await _contribute_and_check_jackpot(
                     discord_id, wager, game_type, streak_info.get("len", 0), db
