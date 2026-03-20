@@ -937,7 +937,7 @@ async def process_wager(
             """, (game_type, house_delta, session_id, now))
 
             # 11. Jackpot contribution + roll
-            if wager > 0:
+            if wager > 0 and session_id is not None:
                 jackpot_result = await _contribute_and_check_jackpot(
                     discord_id, wager, game_type, streak_info.get("len", 0), db, session_id
                 )
