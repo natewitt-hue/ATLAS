@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.12.0"  # Result citation — web search sources in Open/Sports/Strategy embeds
+ATLAS_VERSION = "3.12.1"  # Code review fixes — NameError, cache corruption, citation truncation, SQL guard
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -180,6 +180,15 @@ bot.ui_state  = UIStateManager(bot)
 
 # ── FIX #8: Startup guard — prevents re-running load_all() on reconnect ──────
 _startup_done = False
+
+
+def _invalidate_caches():
+    """Clear query cache after data refresh. Called from all sync_tsl_db paths."""
+    try:
+        from codex_cog import clear_query_cache
+        clear_query_cache()
+    except Exception:
+        pass
 
 # ── Extension Loader ─────────────────────────────────────────────────────────
 
@@ -325,12 +334,7 @@ def _startup_load():
             print(f"[TSL-DB] Startup DB sync OK — {db_result['games']} games | {db_result['players']} players ({db_result['elapsed']}s)")
         else:
             print(f"[TSL-DB] Startup DB sync had issues: {db_result['errors']}")
-        # Invalidate query cache after data refresh
-        try:
-            from codex_cog import clear_query_cache
-            clear_query_cache()
-        except Exception:
-            pass
+        _invalidate_caches()
     except Exception as e:
         print(f"[TSL-DB] Startup DB sync failed: {e}")
 
@@ -680,12 +684,7 @@ async def _sync_impl(interaction: discord.Interaction):
     except Exception as e:
         db_line = f"\nHistory DB sync failed: `{e}`"
 
-    # Invalidate query cache after data refresh
-    try:
-        from codex_cog import clear_query_cache
-        clear_query_cache()
-    except Exception:
-        pass
+    _invalidate_caches()
 
     status = dm.get_league_status()
     await interaction.followup.send(
@@ -717,12 +716,7 @@ async def _rebuilddb_impl(interaction: discord.Interaction):
     else:
         lines = [f"DB rebuild failed: {', '.join(db_result['errors'][:3])}"]
 
-    # Invalidate query cache after rebuild
-    try:
-        from codex_cog import clear_query_cache
-        clear_query_cache()
-    except Exception:
-        pass
+    _invalidate_caches()
 
     await interaction.followup.send("\n".join(lines))
 

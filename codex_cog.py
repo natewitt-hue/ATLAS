@@ -492,6 +492,8 @@ def get_db():
 
 def run_sql(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
     """Execute SQL, return (rows, error).  Supports parameterized queries."""
+    if not sql.strip().upper().startswith("SELECT"):
+        return [], "Only SELECT queries are allowed"
     try:
         conn = get_db()
         cur = conn.execute(sql, params)
@@ -609,11 +611,13 @@ async def retry_sql(
     )
     sql_2 = extract_sql(fix_result_2.text)
     if not sql_2:
-        print(f"[retry_sql] Attempt 2: extract_sql returned None, reusing previous SQL")
+        print(f"[retry_sql] Attempt 2: AI returned no SQL, skipping to Attempt 3")
+        error_2 = error_1  # carry forward for Attempt 3 prompt
         sql_2 = sql_1
-    rows, error_2 = run_sql(sql_2)
-    if not error_2:
-        return rows, sql_2, None, 2, warnings
+    else:
+        rows, error_2 = run_sql(sql_2)
+        if not error_2:
+            return rows, sql_2, None, 2, warnings
 
     # ── Attempt 3: Opus + full history + reasoning ────────
     fix_prompt_3 = (
@@ -631,8 +635,8 @@ async def retry_sql(
     )
     sql_3 = extract_sql(fix_result_3.text)
     if not sql_3:
-        print(f"[retry_sql] Attempt 3: extract_sql returned None, reusing previous SQL")
-        sql_3 = sql_2
+        print(f"[retry_sql] Attempt 3: AI returned no SQL, giving up")
+        return [], sql_2, error_2, 3, warnings
     rows, error_3 = run_sql(sql_3)
     if not error_3:
         return rows, sql_3, None, 3, warnings

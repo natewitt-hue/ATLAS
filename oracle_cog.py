@@ -3100,7 +3100,8 @@ def _format_citations(result) -> str:
         sources.append(f"[{title}]({uri})")
         if len(sources) >= 5:
             break
-    return "\n".join(sources) if sources else ""
+    result = "\n".join(sources) if sources else ""
+    return result[:1024] if len(result) > 1024 else result
 
 
 class _EarlyReturn(Exception):
@@ -3211,6 +3212,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
                 pass
 
         # ── Three-tier intent detection ─────────────────────
+        attempt = 1
         intent_result = None
         tier_label = "Tier 3 (NL→SQL)"
         if _detect_intent:

@@ -77,11 +77,12 @@ async def _ensure_db() -> None:
                 await db.execute(
                     "ALTER TABLE conversation_history ADD COLUMN source TEXT DEFAULT 'casual'"
                 )
-                await db.execute(
-                    "UPDATE conversation_history SET source = 'codex' WHERE source IS NULL"
-                )
             except Exception:
                 pass  # Column already exists
+            # Always attempt backfill — safe if already done (WHERE source IS NULL finds nothing)
+            await db.execute(
+                "UPDATE conversation_history SET source = 'codex' WHERE source IS NULL"
+            )
             await db.commit()
         _db_initialized = True
         print("[ConversationMemory] conversation_history table ready")
@@ -97,8 +98,11 @@ def _get_cached_context(discord_id: int, source: str = "casual") -> list[Convers
     turns = _conv_cache.get(discord_id, [])
     cutoff = time.time() - cfg["ttl_seconds"]
     fresh = [t for t in turns if t.timestamp >= cutoff and t.source == source]
-    if len(fresh) != len(turns):
-        _conv_cache[discord_id] = fresh
+    # Evict only stale turns (across all sources) — don't drop other sources' data
+    if len(fresh) != len([t for t in turns if t.source == source]):
+        max_ttl = max(c["ttl_seconds"] for c in _SOURCE_CONFIG.values())
+        global_cutoff = time.time() - max_ttl
+        _conv_cache[discord_id] = [t for t in turns if t.timestamp >= global_cutoff]
     return fresh[-cfg["max_turns"]:]
 
 
@@ -130,7 +134,8 @@ async def _load_from_db(discord_id: int, source: str = "casual") -> list[Convers
             )
             for r in reversed(rows)
         ]
-    except Exception:
+    except Exception as e:
+        print(f"[ConversationMemory] DB load error for {discord_id}/{source}: {e}")
         return []
 
 
@@ -149,14 +154,15 @@ async def add_conversation_turn(
     turns = _conv_cache.setdefault(discord_id, [])
     turns.append(turn)
 
-    # Hysteresis trim: trigger at 2x max, trim down to max
-    cfg = _config(source)
-    if len(turns) > cfg["max_turns"] * 2:
-        _conv_cache[discord_id] = turns[-cfg["max_turns"]:]
+    # Hysteresis trim: evict stale turns across all sources when list grows large
+    max_total = sum(c["max_turns"] for c in _SOURCE_CONFIG.values()) * 2
+    if len(turns) > max_total:
+        max_ttl = max(c["ttl_seconds"] for c in _SOURCE_CONFIG.values())
+        global_cutoff = time.time() - max_ttl
+        _conv_cache[discord_id] = [t for t in turns if t.timestamp >= global_cutoff]
 
     try:
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
             await db.execute(
                 "INSERT INTO conversation_history "
                 "(discord_id, question, sql_query, answer, source, created_at) "

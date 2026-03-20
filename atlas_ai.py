@@ -279,8 +279,8 @@ def _call_gemini_with_search(client, prompt, system, max_tokens):
                         "domain": getattr(web, "domain", ""),
                     })
             search_queries = list(getattr(meta, "web_search_queries", None) or [])
-    except Exception:
-        pass  # Citation extraction is best-effort
+    except Exception as e:
+        print(f"[atlas_ai] Citation extraction failed: {e}")  # best-effort, non-fatal
 
     return AIResult(
         text=response.text.strip(),
