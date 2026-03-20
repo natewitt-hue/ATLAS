@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.1.0"  # Unified audit: subsystem tagging + $0 loss settlement txns
+ATLAS_VERSION = "4.2.0"  # Parlay leg normalization: relational parlay_legs table
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -235,6 +235,15 @@ async def setup_hook():
         print("ATLAS: Flow wallet system initialized.")
     except Exception as e:
         print(f"ATLAS: Flow wallet setup failed: {e}")
+
+    # Parlay legs backfill (normalize JSON → relational)
+    try:
+        import flow_sportsbook
+        backfilled_legs = await asyncio.to_thread(flow_sportsbook.backfill_parlay_legs_sync)
+        if backfilled_legs:
+            print(f"ATLAS: Sportsbook — backfilled {backfilled_legs} parlay legs.")
+    except Exception as e:
+        print(f"ATLAS: Parlay legs backfill failed: {e}")
 
     # Hub Infrastructure — persistent UI state table
     try:

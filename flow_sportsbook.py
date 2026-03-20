@@ -1870,6 +1870,57 @@ class PropBetButtons(discord.ui.View):
         return callback
 
 
+def _derive_historical_leg_status(parlay_status: str) -> str:
+    """Map parlay-level status to individual leg status for historical backfill."""
+    if parlay_status == "Won":
+        return "Won"
+    if parlay_status in ("Cancelled",):
+        return "Cancelled"
+    if parlay_status == "Pending":
+        return "Pending"
+    # Lost, Push, Error — can't determine individual leg outcomes
+    return "Unknown"
+
+
+def backfill_parlay_legs_sync() -> int:
+    """Populate parlay_legs from existing JSON legs column. Returns rows inserted."""
+    count = 0
+    with _db_con() as con:
+        rows = con.execute(
+            "SELECT parlay_id, legs, status FROM parlays_table WHERE legs IS NOT NULL"
+        ).fetchall()
+
+        batch = 0
+        for parlay_id, legs_json, parlay_status in rows:
+            existing = con.execute(
+                "SELECT 1 FROM parlay_legs WHERE parlay_id=? LIMIT 1", (parlay_id,)
+            ).fetchone()
+            if existing:
+                continue
+            try:
+                legs = json.loads(legs_json) if isinstance(legs_json, str) else []
+            except Exception:
+                log.warning("Corrupt parlay JSON in backfill: pid=%s", parlay_id)
+                continue
+            for i, leg in enumerate(legs):
+                leg_status = _derive_historical_leg_status(parlay_status)
+                con.execute(
+                    "INSERT OR IGNORE INTO parlay_legs "
+                    "(parlay_id, leg_index, game_id, matchup, pick, bet_type, line, odds, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (parlay_id, i, leg.get("game_id", ""),
+                     leg.get("matchup", ""), leg.get("pick", ""),
+                     leg.get("bet_type", ""), leg.get("line", 0),
+                     leg.get("odds", 0), leg_status),
+                )
+                count += 1
+            batch += 1
+            if batch % 100 == 0:
+                con.commit()
+        con.commit()
+    return count
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  THE COG
 # ═════════════════════════════════════════════════════════════════════════════
