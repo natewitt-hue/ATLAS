@@ -104,12 +104,14 @@ for leg_idx, leg in enumerate(legs):
     )
 
 # Derive parlay status from leg results (same logic as before)
-if "Pending" in leg_results:
-    continue  # not all games resolved yet
+# Key: a single loss kills the parlay even if other legs are unresolved
+if "Lost" in leg_results:
+    # any lost → parlay lost (settle immediately, don't wait for pending legs)
+    ...
+elif "Pending" in leg_results:
+    continue  # not all games resolved yet, but no loss — wait
 elif all(r == "Won" for r in leg_results):
     # all won → payout
-elif "Lost" in leg_results:
-    # any lost → parlay lost
 elif all(r == "Push" for r in leg_results):
     # all pushed → refund
 else:
@@ -271,6 +273,6 @@ FROM parlay_legs GROUP BY bet_type ORDER BY leg_count DESC;
 2. **Check backfill** — `SELECT COUNT(*) FROM parlay_legs` matches total legs across all parlays
 3. **Place a parlay** — verify rows in both `parlays_table.legs` (JSON) and `parlay_legs` (relational)
 4. **Grade bets** — verify each leg gets individual status in `parlay_legs`
-5. **Cancel a matchup** — verify cancellation finds affected parlays via `parlay_legs.game_id` index
+5. **Cancel a matchup** — verify cancellation finds affected parlays via `parlay_legs.matchup` query
 6. **Analytics query** — run win-rate-by-bet-type query, confirm results make sense
 7. **Idempotency** — restart bot, verify backfill skips already-populated parlays
