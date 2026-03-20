@@ -1288,6 +1288,15 @@ class ParlayWagerModal(discord.ui.Modal):
                         (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
                          json.dumps(self.legs), int(self.combined_odds), int(amt))
                     )
+                    # Dual-write: insert normalized legs
+                    for i, leg in enumerate(self.legs):
+                        con.execute(
+                            "INSERT INTO parlay_legs "
+                            "(parlay_id, leg_index, game_id, matchup, pick, bet_type, line, odds) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (parlay_id, i, leg["game_id"], leg["matchup"], leg["pick"],
+                             leg["bet_type"], leg.get("line", 0), leg["odds"]),
+                        )
                     flow_wallet.update_balance_sync(
                         interaction.user.id, -amt, source="TSL_BET", con=con,
                         subsystem="PARLAY", subsystem_id=parlay_id,
