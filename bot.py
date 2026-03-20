@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.0.1"  # Fix /oracle interaction timeout
+ATLAS_VERSION = "4.0.1"  # Quiet handling for expired interactions (10062/40060)
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -266,16 +266,29 @@ async def setup_hook():
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Catch-all so no interaction ever goes unacknowledged (prevents 10062)."""
+    cmd_name = interaction.command.name if interaction.command else "unknown"
+
+    # ── Expired / stale interactions (unrecoverable — quiet log only) ─────
+    original = error.original if isinstance(error, app_commands.CommandInvokeError) else error
+    if isinstance(original, discord.NotFound) and original.code == 10062:
+        print(f"[CommandError] /{cmd_name}: interaction expired (10062) — likely stale after RESUME")
+        return
+    if isinstance(original, discord.HTTPException) and original.code == 40060:
+        print(f"[CommandError] /{cmd_name}: already acknowledged (40060)")
+        return
+
     if isinstance(error, app_commands.CheckFailure):
         # Permission check already sent a message — nothing more to do
         if interaction.response.is_done():
             return
-        await interaction.response.send_message(
-            "ATLAS: You don't have permission for this command.", ephemeral=True
-        )
+        try:
+            await interaction.response.send_message(
+                "ATLAS: You don't have permission for this command.", ephemeral=True
+            )
+        except discord.NotFound:
+            pass
         return
 
-    cmd_name = interaction.command.name if interaction.command else "unknown"
     print(f"[CommandError] /{cmd_name}: {error}")
     traceback.print_exc()
 
