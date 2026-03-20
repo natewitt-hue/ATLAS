@@ -721,10 +721,10 @@ class FlowLiveCog(commands.Cog):
                     from casino.renderer.highlight_renderer import render_parlay_card
                     from flow_sportsbook import get_parlay_display_info
                     loop = asyncio.get_running_loop()
-                    leg_count, odds_str = await loop.run_in_executor(
+                    leg_count, odds_str, leg_picks = await loop.run_in_executor(
                         None, get_parlay_display_info, event.bet_id
                     )
-                    png_bytes = await render_parlay_card(player, leg_count, odds_str, event.amount)
+                    png_bytes = await render_parlay_card(player, leg_count, odds_str, event.amount, leg_picks=leg_picks)
 
             elif hasattr(event, "market_title"):
                 # PredictionEvent

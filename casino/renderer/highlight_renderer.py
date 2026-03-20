@@ -534,14 +534,56 @@ async def render_prediction_card(
 
 # ── Sportsbook parlay card ────────────────────────────────────────────────────
 
+def _format_leg_label(lp: dict) -> str:
+    """Format a single leg pick for display: 'KC -3', 'LAC ML', 'O45.5'."""
+    bt = lp["bet_type"]
+    if bt in ("Over", "Under"):
+        return f"{bt[0]}{lp['line']:g}" if lp["line"] else bt
+    if bt == "Moneyline":
+        return f"{lp['pick']} ML"
+    # Spread
+    line = lp["line"]
+    if line:
+        return f"{lp['pick']} {line:+g}"
+    return lp["pick"]
+
+
 def _build_parlay_html(
     player: str,
     legs: int,
     odds: str,
     payout: int,
     commentary: str,
+    leg_picks: list[dict] | None = None,
 ) -> str:
     payout_str = f"${payout:,}"
+
+    # Build leg picks strip if available
+    picks_html = ""
+    if leg_picks:
+        pills = []
+        for lp in leg_picks:
+            icon = {"Won": "&#10003;", "Lost": "&#10007;", "Push": "&#8212;"}.get(lp["status"], "&#10003;")
+            color = {"Won": "#4ADE80", "Lost": "#EF4444", "Push": "#9a9280"}.get(lp["status"], "#4ADE80")
+            label = esc(_format_leg_label(lp))
+            pills.append(
+                f'<span style="display:inline-block;padding:4px 10px;margin:3px;'
+                f'border-radius:6px;background:rgba(255,255,255,0.05);'
+                f'border:1px solid {color}33;'
+                f'font-family:var(--font-mono),monospace;font-size:var(--font-xs);'
+                f'color:{color};font-weight:600;letter-spacing:0.5px;">'
+                f'{label} {icon}</span>'
+            )
+        picks_html = f"""
+  <!-- Leg picks -->
+  <div style="text-align:center;margin-bottom:var(--space-lg);">
+    <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;
+        letter-spacing:1px;margin-bottom:var(--space-xs);">PICKS</div>
+    <div style="display:flex;flex-wrap:wrap;justify-content:center;">
+      {"".join(pills)}
+    </div>
+  </div>
+"""
 
     body = f"""
 <div style="
@@ -596,6 +638,8 @@ def _build_parlay_html(
 
   </div>
 
+  {picks_html}
+
   <!-- Payout hero -->
   <div style="
       text-align:center;
@@ -643,7 +687,8 @@ async def render_parlay_card(
     odds: str,
     payout: int,
     commentary: str = "",
+    leg_picks: list[dict] | None = None,
 ) -> bytes:
     """Render a sportsbook parlay hit highlight card to PNG bytes."""
-    doc = _build_parlay_html(player, legs, odds, payout, commentary)
+    doc = _build_parlay_html(player, legs, odds, payout, commentary, leg_picks=leg_picks)
     return await render_card(doc)

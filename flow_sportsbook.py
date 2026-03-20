@@ -152,7 +152,7 @@ def setup_db():
                 parlay_id     TEXT PRIMARY KEY,
                 discord_id    INTEGER,
                 week          INTEGER,
-                legs          TEXT,
+                legs          TEXT,              -- DEPRECATED: no longer written (v4.4.0), use parlay_legs table
                 combined_odds INTEGER,
                 wager_amount  INTEGER,
                 status        TEXT DEFAULT 'Pending',
@@ -1010,40 +1010,39 @@ async def _run_autograde(bot) -> None:
 
                     # ── Parlays ───────────────────────────────────────────
                     parlays = con.execute(
-                        "SELECT parlay_id, discord_id, legs, combined_odds, wager_amount "
+                        "SELECT parlay_id, discord_id, combined_odds, wager_amount "
                         "FROM parlays_table WHERE week=? AND status='Pending'",
                         (week,)
                     ).fetchall()
 
-                    for pid, uid, legs_json, c_odds, amt in parlays:
-                        try:
-                            legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else legs_json
-                            if not isinstance(legs, list) or not legs:
-                                con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
-                                continue
-                        except Exception:
-                            log.warning("Corrupt parlay JSON in auto-grade: pid=%s json=%r", pid, legs_json[:200] if isinstance(legs_json, str) else legs_json)
+                    for pid, uid, c_odds, amt in parlays:
+                        legs = con.execute(
+                            "SELECT game_id, matchup, pick, bet_type, line, odds "
+                            "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
+                            (pid,)
+                        ).fetchall()
+                        if not legs:
+                            con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
                             continue
 
                         leg_results = []
-                        for leg_idx, leg in enumerate(legs):
+                        for leg_idx, row in enumerate(legs):
+                            leg = {"game_id": row[0], "matchup": row[1], "pick": row[2],
+                                   "bet_type": row[3], "line": row[4], "odds": row[5]}
                             gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
                             if not gd:
                                 leg_results.append("Pending")
                                 continue
                             res = _grade_single_bet(
-                                leg["bet_type"], leg["pick"], float(leg.get("line", 0)),
+                                leg["bet_type"], leg["pick"], float(leg["line"]),
                                 gd["home"], gd["away"], gd["home_score"], gd["away_score"]
                             )
                             leg_results.append(res)
-                            # Record per-leg status
-                            try:
-                                con.execute(
-                                    "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
-                                    (res, pid, leg_idx),
-                                )
-                            except Exception:
-                                log.warning("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
+                            # Update per-leg status
+                            con.execute(
+                                "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
+                                (res, pid, leg_idx),
+                            )
 
                         # A single loss kills the parlay even if other legs are unresolved
                         any_lost = "Lost" in leg_results
@@ -1286,12 +1285,12 @@ class ParlayWagerModal(discord.ui.Modal):
                     con.execute("BEGIN IMMEDIATE")
                     con.execute(
                         "INSERT INTO parlays_table "
-                        "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
-                        "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
+                        "(parlay_id, discord_id, week, combined_odds, wager_amount, status) "
+                        "VALUES (?, ?, ?, ?, ?, 'Pending')",
                         (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
-                         json.dumps(self.legs), int(self.combined_odds), int(amt))
+                         int(self.combined_odds), int(amt))
                     )
-                    # Dual-write: insert normalized legs
+                    # Insert normalized legs (primary data source)
                     for i, leg in enumerate(self.legs):
                         con.execute(
                             "INSERT INTO parlay_legs "
@@ -1910,17 +1909,20 @@ def _derive_historical_leg_status(parlay_status: str) -> str:
     return "Unknown"
 
 
-def get_parlay_display_info(parlay_id: str) -> tuple[int, str]:
-    """Return (leg_count, odds_str) for a parlay. Used by highlight cards."""
+def get_parlay_display_info(parlay_id: str) -> tuple[int, str, list[dict]]:
+    """Return (leg_count, odds_str, leg_picks) for a parlay. Used by highlight cards."""
     with _db_con() as con:
-        count = con.execute(
-            "SELECT COUNT(*) FROM parlay_legs WHERE parlay_id=?", (parlay_id,)
-        ).fetchone()[0]
+        leg_rows = con.execute(
+            "SELECT pick, bet_type, line, status FROM parlay_legs "
+            "WHERE parlay_id=? ORDER BY leg_index",
+            (parlay_id,)
+        ).fetchall()
         row = con.execute(
             "SELECT combined_odds FROM parlays_table WHERE parlay_id=?", (parlay_id,)
         ).fetchone()
     odds_str = f"{int(row[0]):+d}" if row else ""
-    return count, odds_str
+    leg_picks = [{"pick": r[0], "bet_type": r[1], "line": r[2], "status": r[3]} for r in leg_rows]
+    return len(leg_rows), odds_str, leg_picks
 
 
 def backfill_parlay_legs_sync() -> int:
@@ -2138,7 +2140,7 @@ class SportsbookCog(commands.Cog):
                 (uid, max(1, dm.CURRENT_WEEK - weeks))
             ).fetchall()
             parlays = con.execute(
-                "SELECT parlay_id, week, legs, combined_odds, wager_amount, status "
+                "SELECT parlay_id, week, combined_odds, wager_amount, status "
                 "FROM parlays_table WHERE discord_id=? AND week >= ? ORDER BY week DESC",
                 (uid, max(1, dm.CURRENT_WEEK - weeks))
             ).fetchall()
@@ -2155,7 +2157,7 @@ class SportsbookCog(commands.Cog):
                 pushes += 1
 
         for p in parlays:
-            pid, week, legs_json, c_odds, amt, status = p
+            pid, week, c_odds, amt, status = p
             total_wagered += amt
             if status == "Won":
                 total_profit += _payout_calc(amt, c_odds) - amt; wins += 1
@@ -2309,37 +2311,36 @@ class SportsbookCog(commands.Cog):
 
             # Grade parlays
             parlays = con.execute(
-                "SELECT parlay_id, discord_id, legs, combined_odds, wager_amount "
+                "SELECT parlay_id, discord_id, combined_odds, wager_amount "
                 "FROM parlays_table WHERE week=? AND status='Pending'",
                 (week,)
             ).fetchall()
-            for pid, uid, legs_json, c_odds, amt in parlays:
-                try:
-                    legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else legs_json
-                    if not isinstance(legs, list):
-                        continue
-                except Exception:
-                    log.warning("Corrupt parlay JSON in manual grade: pid=%s", pid)
+            for pid, uid, c_odds, amt in parlays:
+                legs = con.execute(
+                    "SELECT game_id, matchup, pick, bet_type, line, odds "
+                    "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
+                    (pid,)
+                ).fetchall()
+                if not legs:
                     continue
 
                 leg_results = []
-                for leg_idx, leg in enumerate(legs):
+                for leg_idx, row in enumerate(legs):
+                    leg = {"game_id": row[0], "matchup": row[1], "pick": row[2],
+                           "bet_type": row[3], "line": row[4], "odds": row[5]}
                     gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
                     if not gd:
                         leg_results.append("Pending")
                         continue
                     res = _grade_single_bet(
-                        leg["bet_type"], leg["pick"], float(leg.get("line", 0)),
+                        leg["bet_type"], leg["pick"], float(leg["line"]),
                         gd["home"], gd["away"], gd["home_score"], gd["away_score"]
                     )
                     leg_results.append(res)
-                    try:
-                        con.execute(
-                            "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
-                            (res, pid, leg_idx),
-                        )
-                    except Exception:
-                        log.warning("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
+                    con.execute(
+                        "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
+                        (res, pid, leg_idx),
+                    )
 
                 any_lost = "Lost" in leg_results
                 has_pending = "Pending" in leg_results

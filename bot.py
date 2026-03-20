@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.3.0"  # Parlay phase 2: display migration, analytics card, highlight fix
+ATLAS_VERSION = "4.4.0"  # Parlay phase 3: JSON removal, highlight enrichment
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
