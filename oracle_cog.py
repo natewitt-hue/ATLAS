@@ -3388,34 +3388,14 @@ Generate a SQLite SELECT query to answer this scouting question:
             )
             raise _EarlyReturn()
 
-        # ── Execute with self-correction ──────────────────────
-        self_corrected = False
-        rows, error = run_sql(sql)
+        # ── Execute with progressive retry ─────────────────────
+        rows, sql, error, attempt, _warnings = await retry_sql(sql, scout_schema)
         if error:
-            warnings = validate_sql(sql) if validate_sql else []
-            hint_block = "\n".join(f"- {w}" for w in warnings) if warnings else ""
-
-            fix_prompt = (
-                f"This SQLite query for Madden player data failed:\n{sql}\n\n"
-                f"Error: {error}\n\n"
-                f"REMINDER: ALL columns are TEXT. Use CAST(col AS INTEGER) for math.\n"
-                f"{f'Validation warnings:\n{hint_block}\n' if hint_block else ''}"
-                f"Fix the query. Return ONLY valid SQLite SQL.\n\n"
-                f"Schema:\n{scout_schema}"
+            await interaction.followup.send(
+                "⚠️ Scout query failed after retry. Try rephrasing!",
+                ephemeral=True,
             )
-            fix_result = await atlas_ai.generate(
-                fix_prompt, tier=Tier.HAIKU, max_tokens=500, temperature=0.02
-            )
-            sql = extract_sql(fix_result.text) or sql
-            rows, error = run_sql(sql)
-            if not error:
-                self_corrected = True
-            if error:
-                await interaction.followup.send(
-                    "⚠️ Scout query failed after retry. Try rephrasing!",
-                    ephemeral=True,
-                )
-                raise _EarlyReturn()
+            raise _EarlyReturn()
 
         # ── Generate scouting report ──────────────────────────
         results_str = json.dumps(rows[:20], indent=2)
@@ -3451,8 +3431,10 @@ RESPONSE GUIDELINES:
         footer_parts = [f"🔍 {len(rows)} players analyzed"]
         if team_name:
             footer_parts.append(f"🏈 {team_name}")
-        if self_corrected:
+        if attempt == 2:
             footer_parts.append("⚠️ Self-corrected")
+        elif attempt == 3:
+            footer_parts.append("🧠 Opus rescue")
         footer_parts.append("ATLAS™ Oracle · Scout Mode")
 
         return answer, {
