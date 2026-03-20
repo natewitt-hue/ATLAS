@@ -443,7 +443,7 @@ class FlowLiveCog(commands.Cog):
         """Create flow_live_state table in flow_economy.db if needed."""
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db")
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS flow_live_state (
                     guild_id    INTEGER PRIMARY KEY,
@@ -459,7 +459,7 @@ class FlowLiveCog(commands.Cog):
         try:
             import sqlite3
             self._ensure_state_table()
-            conn = sqlite3.connect("flow_economy.db")
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
             rows = conn.execute("SELECT guild_id, pulse_msg_id FROM flow_live_state").fetchall()
             conn.close()
             for guild_id, msg_id in rows:
@@ -470,7 +470,7 @@ class FlowLiveCog(commands.Cog):
     def _save_pulse_message_id(self, guild_id: int, message_id: int):
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db")
+            conn = sqlite3.connect("flow_economy.db", timeout=10)
             conn.execute(
                 "INSERT OR REPLACE INTO flow_live_state (guild_id, pulse_msg_id) VALUES (?, ?)",
                 (guild_id, message_id)
@@ -567,39 +567,43 @@ class FlowLiveCog(commands.Cog):
                 slots_top_player = member.display_name if member else str(s.discord_id)
 
         # Jackpot — query from casino_jackpot (3 tiers: mini/major/grand)
-        jackpot_amount = 0
-        jackpot_last_player = None
-        jackpot_last_amount = 0
-        jackpot_last_ago = "never"
-        try:
-            import sqlite3
-            conn = sqlite3.connect("flow_economy.db")
-            # Sum all tier pools for the headline number
-            row = conn.execute("SELECT COALESCE(SUM(pool), 0) FROM casino_jackpot").fetchone()
-            if row:
-                jackpot_amount = row[0]
-            # Last winner across all tiers
-            winner_row = conn.execute(
-                "SELECT last_winner, last_amount, last_won_at FROM casino_jackpot "
-                "WHERE last_won_at IS NOT NULL ORDER BY last_won_at DESC LIMIT 1"
-            ).fetchone()
-            if winner_row and winner_row[0]:
-                jackpot_last_player = str(winner_row[0])
-                jackpot_last_amount = winner_row[1] or 0
-                # Convert ISO timestamp to relative time
-                from datetime import datetime, timezone
-                won_at = datetime.fromisoformat(winner_row[2])
-                delta = datetime.now(timezone.utc) - won_at.replace(tzinfo=timezone.utc)
-                mins = int(delta.total_seconds() / 60)
-                if mins < 60:
-                    jackpot_last_ago = f"{mins}m ago"
-                elif mins < 1440:
-                    jackpot_last_ago = f"{mins // 60}h ago"
-                else:
-                    jackpot_last_ago = f"{mins // 1440}d ago"
-            conn.close()
-        except Exception:
-            pass
+        def _get_jackpot_data():
+            """Sync: query jackpot data from flow_economy.db."""
+            import sqlite3 as _sq
+            data = {"amount": 0, "last_player": None, "last_amount": 0, "last_ago": "never"}
+            try:
+                conn = _sq.connect("flow_economy.db", timeout=10)
+                row = conn.execute("SELECT COALESCE(SUM(pool), 0) FROM casino_jackpot").fetchone()
+                if row:
+                    data["amount"] = row[0]
+                winner_row = conn.execute(
+                    "SELECT last_winner, last_amount, last_won_at FROM casino_jackpot "
+                    "WHERE last_won_at IS NOT NULL ORDER BY last_won_at DESC LIMIT 1"
+                ).fetchone()
+                if winner_row and winner_row[0]:
+                    data["last_player"] = str(winner_row[0])
+                    data["last_amount"] = winner_row[1] or 0
+                    from datetime import datetime, timezone
+                    won_at = datetime.fromisoformat(winner_row[2])
+                    delta = datetime.now(timezone.utc) - won_at.replace(tzinfo=timezone.utc)
+                    mins = int(delta.total_seconds() / 60)
+                    if mins < 60:
+                        data["last_ago"] = f"{mins}m ago"
+                    elif mins < 1440:
+                        data["last_ago"] = f"{mins // 60}h ago"
+                    else:
+                        data["last_ago"] = f"{mins // 1440}d ago"
+                conn.close()
+            except Exception:
+                log.warning("Jackpot data query failed, using defaults")
+            return data
+
+        import asyncio
+        jp = await asyncio.get_running_loop().run_in_executor(None, _get_jackpot_data)
+        jackpot_amount = jp["amount"]
+        jackpot_last_player = jp["last_player"]
+        jackpot_last_amount = jp["last_amount"]
+        jackpot_last_ago = jp["last_ago"]
 
         # Build recent highlights from session events (last 6)
         from casino.renderer.pulse_renderer import HighlightRow

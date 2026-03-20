@@ -163,8 +163,8 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.12.1"  # Code review fixes — NameError, cache corruption, citation truncation, SQL guard
-from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
+ATLAS_VERSION = "4.0.0"  # Audit fix — async DB, silent failure logging, crash refunds, dead code removal
+from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")

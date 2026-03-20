@@ -1752,9 +1752,9 @@ _build_draft_embed = _build_draft_season_embeds
 
 # ── Draft Class Drilldown View ────────────────────────────────────────────────
 
-def _build_team_draft_embed(team_abbr: str, team_nick: str, season: int) -> discord.Embed:
+async def _build_team_draft_embed(team_abbr: str, team_nick: str, season: int) -> discord.Embed:
     """Build rich embed showing a team's draft class with per-player fields."""
-    data = ig.get_team_draft_class(team_abbr, season)
+    data = await ig.get_team_draft_class_async(team_abbr, season)
 
     if "error" in data:
         return discord.Embed(
@@ -1954,14 +1954,14 @@ class DraftClassView(discord.ui.View):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        embed = _build_team_draft_embed(
+        embed = await _build_team_draft_embed(
             self._selected_team_abbr,
             self._selected_team_nick or self._selected_team_abbr,
             self._selected_season,
         )
 
         # Check for traded players — add trade buttons
-        data = ig.get_team_draft_class(self._selected_team_abbr, self._selected_season)
+        data = await ig.get_team_draft_class_async(self._selected_team_abbr, self._selected_season)
         traded = [p for p in data.get("players", []) if p.get("was_traded")]
 
         if traded:

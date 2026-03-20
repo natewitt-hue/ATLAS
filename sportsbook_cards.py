@@ -13,6 +13,7 @@ Integration:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+import asyncio
 import io
 import os
 import sqlite3
@@ -380,17 +381,30 @@ def _ticker_html(results: list, record: str, label_prefix: str = "LAST 5") -> st
 #  MAIN SPORTSBOOK CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _gather_sportsbook_data(user_id: int) -> dict:
+    """Sync: collect all DB data for sportsbook hub card."""
+    return {
+        "balance": _get_balance(user_id),
+        "delta": _get_weekly_delta(user_id),
+        "spark_data": _get_sparkline_data(user_id, days=7),
+        "results_record": _get_last_n_results(user_id, n=5),
+        "open_bets": _get_open_bets(user_id),
+        "status": _determine_status(user_id),
+    }
+
+
 async def build_sportsbook_card(user_id: int) -> bytes:
     """
     Build the main sportsbook hub card for a user.
     Returns PNG bytes.
     """
-    balance = _get_balance(user_id)
-    delta = _get_weekly_delta(user_id)
-    spark_data = _get_sparkline_data(user_id, days=7)
-    results, record = _get_last_n_results(user_id, n=5)
-    open_count, wagered, payout = _get_open_bets(user_id)
-    status = _determine_status(user_id)
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_sportsbook_data, user_id)
+    balance = d["balance"]
+    delta = d["delta"]
+    spark_data = d["spark_data"]
+    results, record = d["results_record"]
+    open_count, wagered, payout = d["open_bets"]
+    status = d["status"]
 
     # ── Delta string ──────────────────────────────────────────────────────
     delta_str = f"+${delta:,}" if delta >= 0 else f"-${abs(delta):,}"
@@ -478,21 +492,39 @@ async def build_sportsbook_card(user_id: int) -> bytes:
 #  STATS / PROFILE CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _gather_stats_data(user_id: int) -> dict:
+    """Sync: collect all DB data for stats card."""
+    wins, losses, pushes = _get_lifetime_record(user_id)
+    return {
+        "balance": _get_balance(user_id),
+        "delta": _get_weekly_delta(user_id),
+        "spark_data": _get_sparkline_data(user_id, days=30),
+        "results_record": _get_last_n_results(user_id, n=10),
+        "wins": wins, "losses": losses, "pushes": pushes,
+        "total_wagered": _get_total_wagered(user_id),
+        "total_won": _get_total_won(user_id),
+        "rank_total": _get_leaderboard_rank(user_id),
+        "open_bets": _get_open_bets(user_id),
+        "status": _determine_status(user_id),
+    }
+
+
 async def build_stats_card(user_id: int) -> bytes:
     """
     Build the detailed bettor stats card for a user.
     Returns PNG bytes.
     """
-    balance = _get_balance(user_id)
-    delta = _get_weekly_delta(user_id)
-    spark_data = _get_sparkline_data(user_id, days=30)
-    results, record = _get_last_n_results(user_id, n=10)
-    wins, losses, pushes = _get_lifetime_record(user_id)
-    total_wagered = _get_total_wagered(user_id)
-    total_won = _get_total_won(user_id)
-    rank, total_users = _get_leaderboard_rank(user_id)
-    open_count, wagered, payout = _get_open_bets(user_id)
-    status = _determine_status(user_id)
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_stats_data, user_id)
+    balance = d["balance"]
+    delta = d["delta"]
+    spark_data = d["spark_data"]
+    results, record = d["results_record"]
+    wins, losses, pushes = d["wins"], d["losses"], d["pushes"]
+    total_wagered = d["total_wagered"]
+    total_won = d["total_won"]
+    rank, total_users = d["rank_total"]
+    open_count, wagered, payout = d["open_bets"]
+    status = d["status"]
 
     total_bets = wins + losses + pushes
     win_rate = (wins / total_bets * 100) if total_bets > 0 else 0

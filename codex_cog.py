@@ -29,6 +29,8 @@ v1.4 fixes:
           current season number instead of hardcoded '6'.
 """
 
+import asyncio
+import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -45,6 +47,8 @@ from difflib import get_close_matches
 
 import data_manager as dm
 from atlas_colors import AtlasColors
+
+log = logging.getLogger(__name__)
 
 # Optional modules
 try:
@@ -451,6 +455,7 @@ Return ONLY valid JSON, no explanation:
                 alias_map[mentioned] = resolved
         return alias_map
     except Exception:
+        log.error("AI alias resolution failed for question")
         return {}
 
 
@@ -502,6 +507,12 @@ def run_sql(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
         return rows[:MAX_ROWS], None
     except Exception as e:
         return [], str(e)
+
+
+async def run_sql_async(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
+    """Non-blocking wrapper for run_sql — dispatches to thread pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, run_sql, sql, params)
 
 
 def extract_sql(text: str) -> str | None:
@@ -588,7 +599,7 @@ async def retry_sql(
         - warnings: validate_sql() output (empty list if not used)
     """
     # ── Attempt 1 ─────────────────────────────────────────
-    rows, error_1 = run_sql(sql, params)
+    rows, error_1 = await run_sql_async(sql, params)
     if not error_1:
         return rows, sql, None, 1, []
 
@@ -615,7 +626,7 @@ async def retry_sql(
         error_2 = error_1  # carry forward for Attempt 3 prompt
         sql_2 = sql_1
     else:
-        rows, error_2 = run_sql(sql_2)
+        rows, error_2 = await run_sql_async(sql_2)
         if not error_2:
             return rows, sql_2, None, 2, warnings
 
@@ -637,7 +648,7 @@ async def retry_sql(
     if not sql_3:
         print(f"[retry_sql] Attempt 3: AI returned no SQL, giving up")
         return [], sql_2, error_2, 3, warnings
-    rows, error_3 = run_sql(sql_3)
+    rows, error_3 = await run_sql_async(sql_3)
     if not error_3:
         return rows, sql_3, None, 3, warnings
 
@@ -835,7 +846,7 @@ class CodexCog(commands.Cog):
 
             # ── 5. Tier 1/2: Deterministic SQL ────────────────────
             if intent_result and intent_result.tier < 3 and intent_result.sql:
-                rows, error = run_sql(intent_result.sql, intent_result.params)
+                rows, error = await run_sql_async(intent_result.sql, intent_result.params)
                 if not error:
                     answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
                     answer = await gemini_answer(
@@ -974,7 +985,7 @@ class CodexCog(commands.Cog):
                 await interaction.followup.send("❌ No SQL generated.")
                 return
 
-            rows, error = run_sql(sql)
+            rows, error = await run_sql_async(sql)
 
             embed = discord.Embed(title="🔧 ATLAS Codex — Debug", color=AtlasColors.TSL_GOLD)
             embed.set_author(
@@ -1044,7 +1055,7 @@ class CodexCog(commands.Cog):
             """
             params = (u1, u2, u1, u2, u2, u1)
 
-        rows, error = run_sql(sql, params)
+        rows, error = await run_sql_async(sql, params)
         if error or not rows:
             await interaction.followup.send(
                 f"No completed regular season games found between **{u1}** and **{u2}**."
@@ -1108,7 +1119,7 @@ note any sweep seasons, and make it entertaining.
         WHERE seasonIndex=? AND stageIndex='1' AND status IN ('2','3')
         ORDER BY CAST(weekIndex AS INTEGER)
         """
-        rows, _ = run_sql(sql, (str(season),))
+        rows, _ = await run_sql_async(sql, (str(season),))
 
         wins   = Counter()
         losses = Counter()

@@ -14,6 +14,7 @@ Integration:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+import asyncio
 import io
 import json
 import os
@@ -224,24 +225,42 @@ _STATUS_MAP = {
 }
 
 
+def _gather_flow_data(user_id: int) -> dict:
+    """Sync: collect all DB data for flow card in one executor dispatch."""
+    balance = _get_balance(user_id)
+    wins, losses, pushes = _get_lifetime_record(user_id)
+    return {
+        "balance": balance,
+        "delta": _get_weekly_delta(user_id),
+        "spark_data": _get_sparkline_data(user_id, days=7),
+        "wins": wins, "losses": losses, "pushes": pushes,
+        "total_wagered": _get_total_wagered(user_id),
+        "positions": _get_active_positions(user_id),
+        "rank_total": _get_leaderboard_rank(user_id),
+        "status": _determine_status(user_id),
+        "season_start": _get_season_start_balance(user_id),
+    }
+
+
 async def build_flow_card(user_id: int) -> bytes:
     """
     Build the unified Flow Hub card for a user.
     Returns PNG bytes.
     """
-    # ── Gather data ───────────────────────────────────────────────────────
-    balance = _get_balance(user_id)
-    delta = _get_weekly_delta(user_id)
-    spark_data = _get_sparkline_data(user_id, days=7)
-    wins, losses, pushes = _get_lifetime_record(user_id)
-    total_wagered = _get_total_wagered(user_id)
-    positions = _get_active_positions(user_id)
-    rank, total_users = _get_leaderboard_rank(user_id)
-    status = _determine_status(user_id)
+    # ── Gather data (dispatched to thread pool) ───────────────────────────
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_flow_data, user_id)
+    balance = d["balance"]
+    delta = d["delta"]
+    spark_data = d["spark_data"]
+    wins, losses, pushes = d["wins"], d["losses"], d["pushes"]
+    total_wagered = d["total_wagered"]
+    positions = d["positions"]
+    rank, total_users = d["rank_total"]
+    status = d["status"]
 
     total_bets = wins + losses + pushes
     win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
-    season_start = _get_season_start_balance(user_id)
+    season_start = d["season_start"]
     roi = ((balance - season_start) / season_start * 100) if season_start > 0 else 0
 
     # ── Delta string ──────────────────────────────────────────────────────
@@ -441,10 +460,9 @@ from odds_utils import american_to_str as _american_to_str, payout_calc as _payo
 #  MY BETS CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def build_my_bets_card(user_id: int) -> bytes:
-    """Build the My Bets card showing active sportsbook positions."""
+def _gather_my_bets_data(user_id: int) -> dict:
+    """Sync: collect DB data for My Bets card."""
     balance = _get_balance(user_id)
-
     with sqlite3.connect(DB_PATH) as con:
         straight = con.execute(
             "SELECT matchup, bet_type, pick, wager_amount, odds, line, status, week "
@@ -458,6 +476,15 @@ async def build_my_bets_card(user_id: int) -> bytes:
             "ORDER BY rowid DESC",
             (user_id,),
         ).fetchall()
+    return {"balance": balance, "straight": straight, "parlays": parlays}
+
+
+async def build_my_bets_card(user_id: int) -> bytes:
+    """Build the My Bets card showing active sportsbook positions."""
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_my_bets_data, user_id)
+    balance = d["balance"]
+    straight = d["straight"]
+    parlays = d["parlays"]
 
     pending_count = len(straight) + len(parlays)
     total_risk = sum(b[3] for b in straight) + sum(p[4] for p in parlays)
@@ -585,10 +612,9 @@ async def build_my_bets_card(user_id: int) -> bytes:
 #  PORTFOLIO CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def build_portfolio_card(user_id: int) -> bytes:
-    """Build the Portfolio card showing prediction market positions."""
+def _gather_portfolio_data(user_id: int) -> dict:
+    """Sync: collect DB data for Portfolio card."""
     balance = _get_balance(user_id)
-
     with sqlite3.connect(DB_PATH) as con:
         try:
             rows = con.execute(
@@ -604,6 +630,14 @@ async def build_portfolio_card(user_id: int) -> bytes:
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
+    return {"balance": balance, "rows": rows}
+
+
+async def build_portfolio_card(user_id: int) -> bytes:
+    """Build the Portfolio card showing prediction market positions."""
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_portfolio_data, user_id)
+    balance = d["balance"]
+    rows = d["rows"]
 
     open_count = sum(1 for r in rows if r[4] == "open")
     total_invested = sum(r[2] for r in rows if r[4] == "open")
@@ -691,12 +725,10 @@ _SOURCE_MAP = {
 }
 
 
-async def build_wallet_card(user_id: int) -> bytes:
-    """Build the Wallet/Ledger card showing balance and recent transactions."""
+def _gather_wallet_data(user_id: int) -> dict:
+    """Sync: collect DB data for Wallet card."""
     balance = _get_balance(user_id)
     delta = _get_weekly_delta(user_id)
-
-    # Use sync sqlite3 to match existing patterns in this file
     with sqlite3.connect(DB_PATH) as con:
         con.row_factory = sqlite3.Row
         txns = con.execute(
@@ -705,6 +737,16 @@ async def build_wallet_card(user_id: int) -> bytes:
             "ORDER BY created_at DESC LIMIT 15",
             (user_id,),
         ).fetchall()
+        txns = [dict(t) for t in txns]  # sqlite3.Row can't cross thread boundary
+    return {"balance": balance, "delta": delta, "txns": txns}
+
+
+async def build_wallet_card(user_id: int) -> bytes:
+    """Build the Wallet/Ledger card showing balance and recent transactions."""
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_wallet_data, user_id)
+    balance = d["balance"]
+    delta = d["delta"]
+    txns = d["txns"]
 
     # Status
     status_class = "win" if balance >= STARTING_BALANCE else "loss"
@@ -771,23 +813,13 @@ async def build_wallet_card(user_id: int) -> bytes:
 #  LEADERBOARD CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
-    """Build the Leaderboard card showing top 10 users with multi-stat columns.
-
-    Args:
-        viewer_id: Discord user ID of the viewer (highlighted in the table).
-        name_resolver: Optional callable(discord_id) -> str that resolves
-            Discord IDs to display names. Falls back to truncated ID.
-    """
-
+def _gather_leaderboard_data() -> dict:
+    """Sync: collect DB data for Leaderboard card."""
     with sqlite3.connect(DB_PATH) as con:
-        # Get all users for ranking
         users = con.execute(
             "SELECT discord_id, balance, season_start_balance FROM users_table "
             "ORDER BY balance DESC"
         ).fetchall()
-
-        # Pre-compute win rates for all users in one query
         win_rates = {}
         wr_rows = con.execute(
             "SELECT discord_id, "
@@ -798,6 +830,21 @@ async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
         ).fetchall()
         for did, wins, total in wr_rows:
             win_rates[did] = (wins / total * 100) if total > 0 else 0.0
+    return {"users": users, "win_rates": win_rates}
+
+
+async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
+    """Build the Leaderboard card showing top 10 users with multi-stat columns.
+
+    Args:
+        viewer_id: Discord user ID of the viewer (highlighted in the table).
+        name_resolver: Optional callable(discord_id) -> str that resolves
+            Discord IDs to display names. Falls back to truncated ID.
+    """
+
+    d = await asyncio.get_running_loop().run_in_executor(None, _gather_leaderboard_data)
+    users = d["users"]
+    win_rates = d["win_rates"]
 
     # Build user entries
     entries = []

@@ -35,6 +35,7 @@ Fixes applied (v4 — WittGPT Code Review rebuild):
 ─────────────────────────────────────────────────────────────────────────────
 """
 
+import asyncio
 import traceback
 import time
 import re as _re
@@ -763,7 +764,7 @@ Write a SQLite SELECT query to answer this. Output ONLY the raw SQL, nothing els
 
 async def generate_sql(question: str) -> str:
     """Ask the LLM to write a SQLite query for the given question."""
-    schema = dm.get_discord_db_schema()
+    schema = await asyncio.get_running_loop().run_in_executor(None, dm.get_discord_db_schema)
     try:
         result = await atlas_ai.generate(
             _SQL_USER_TEMPLATE.format(question=question),
@@ -918,7 +919,7 @@ async def query_discord_history(question: str) -> dict:
 
     last_error = ""
     for attempt in range(1, MAX_SQL_RETRIES + 2):
-        result = execute_sql_safe(sql)
+        result = await asyncio.get_running_loop().run_in_executor(None, execute_sql_safe, sql)
 
         if not result.error:
             context = _format_sql_result(result, question)
@@ -941,7 +942,7 @@ async def query_discord_history(question: str) -> dict:
         if attempt > MAX_SQL_RETRIES:
             break
 
-        schema     = dm.get_discord_db_schema()
+        schema     = await asyncio.get_running_loop().run_in_executor(None, dm.get_discord_db_schema)
         fix_prompt = (
             f"Your SQL query failed with this error:\n{last_error}\n\n"
             f"Original question: {question}\n\n"

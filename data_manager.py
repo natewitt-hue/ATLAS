@@ -922,11 +922,27 @@ def discord_db_exists() -> bool:
     return os.path.isfile(_DB_PATH)
 
 
+_discord_schema_cache: str | None = None
+_discord_schema_ts: float = 0.0
+_SCHEMA_TTL = 300  # 5 minutes
+_wal_enabled = False
+
+
 def get_discord_db_schema() -> str:
+    """Return schema string for TSL_Archive.db. Cached for 5 min to avoid repeated 1.3GB reads."""
+    global _discord_schema_cache, _discord_schema_ts, _wal_enabled
+    import time as _t
+    now = _t.time()
+    if _discord_schema_cache and (now - _discord_schema_ts) < _SCHEMA_TTL:
+        return _discord_schema_cache
     if not discord_db_exists():
         return "Discord history DB not found."
     try:
         con = sqlite3.connect(_DB_PATH)
+        # Enable WAL mode for better concurrent read performance
+        if not _wal_enabled:
+            con.execute("PRAGMA journal_mode=WAL")
+            _wal_enabled = True
         cur = con.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [r[0] for r in cur.fetchall()]
@@ -936,7 +952,10 @@ def get_discord_db_schema() -> str:
             cols = [r[1] for r in cur.fetchall()]
             lines.append(f"{t}({', '.join(cols)})")
         con.close()
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        _discord_schema_cache = result
+        _discord_schema_ts = now
+        return result
     except Exception as e:
         return f"Error reading schema: {e}"
 

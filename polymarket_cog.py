@@ -889,7 +889,7 @@ class BetButtonView(discord.ui.View):
                     await db.commit()
                 return prices["yes_price"] if side == "YES" else prices["no_price"]
         except Exception:
-            pass
+            log.warning("Live price fetch failed for market %s, using cached", self.market_id)
         return self.yes_price if side == "YES" else self.no_price
 
     @discord.ui.button(label="Buy YES ✅", style=discord.ButtonStyle.success)
@@ -3032,7 +3032,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     )
                     await db.commit()
         except Exception:
-            pass  # use cached prices
+            log.warning("Price sync failed for market %s, using cached", market_id)
 
         yes_bucks = price_to_bucks(yes_price)
         no_bucks  = price_to_bucks(no_price)
@@ -3144,7 +3144,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             from flow_wallet import get_balance
             balance = await get_balance(user_id)
         except Exception:
-            pass
+            log.warning("Balance fetch failed for user %s, defaulting to 0", user_id)
 
         try:
             png = await render_portfolio_card(
@@ -3350,7 +3350,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                             f"Won: {side} — {market_id[:30]}", txn_id,
                         )
         except Exception:
-            pass
+            log.exception("Ledger post failed for prediction payout")
 
         # Emit FLOW event for live engagement system
         try:

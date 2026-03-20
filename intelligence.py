@@ -24,11 +24,14 @@ Fixes applied (v3):
 """
 
 import asyncio
+import logging
 import sqlite3
 import os
 import pandas as pd
 import numpy as np
 import data_manager as dm
+
+log = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tsl_history.db")
 
@@ -79,6 +82,7 @@ def _load_identity_cache():
         import build_member_db as member_db
         members = member_db.get_active_members()
     except Exception:
+        log.warning("Identity cache load failed: build_member_db unavailable")
         return
 
     KNOWN_MEMBERS.clear()
@@ -105,7 +109,7 @@ def _load_identity_cache():
         for entry in roster.get_all():
             KNOWN_MEMBER_TEAMS[entry.discord_id] = entry.team_name
     except Exception:
-        pass
+        log.warning("Roster load failed in identity cache")
 
 
 # ── Draft class analysis ──────────────────────────────────────────────────────
@@ -237,6 +241,12 @@ async def get_draft_class(season: int) -> dict:
         "busts":       busts,
         "team_grades": team_grades.head(10).to_dict("records"),
     }
+
+
+async def get_team_draft_class_async(team_abbr: str, season: int) -> dict:
+    """Async wrapper — dispatches sync DB work to thread pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, get_team_draft_class, team_abbr, season)
 
 
 def get_team_draft_class(team_abbr: str, season: int) -> dict:

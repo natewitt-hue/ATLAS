@@ -998,6 +998,7 @@ async def _run_autograde(bot) -> None:
                                 con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
                                 continue
                         except Exception:
+                            log.warning("Corrupt parlay JSON in auto-grade: pid=%s json=%r", pid, legs_json[:200] if isinstance(legs_json, str) else legs_json)
                             continue
 
                         all_won    = True
@@ -1220,7 +1221,7 @@ class BetSlipModal(discord.ui.Modal):
                 txn_id,
             )
         except Exception:
-            pass
+            log.exception("Ledger post failed for straight bet")
 
 
 class ParlayWagerModal(discord.ui.Modal):
@@ -1296,7 +1297,7 @@ class ParlayWagerModal(discord.ui.Modal):
                 txn_id,
             )
         except Exception:
-            pass
+            log.exception("Ledger post failed for parlay bet")
 
 
 class PropBetModal(discord.ui.Modal):
@@ -1374,7 +1375,7 @@ class PropBetModal(discord.ui.Modal):
                 txn_id,
             )
         except Exception:
-            pass
+            log.exception("Ledger post failed for prop bet")
 
 
 class GameCardViewWithParlay(discord.ui.View):
@@ -2178,6 +2179,7 @@ class SportsbookCog(commands.Cog):
                     if not isinstance(legs, list):
                         continue
                 except Exception:
+                    log.warning("Corrupt parlay JSON in manual grade: pid=%s", pid)
                     continue
 
                 all_won = True; any_lost = False; unresolved = 0; any_pushed = False
@@ -2275,7 +2277,7 @@ class SportsbookCog(commands.Cog):
                         txn_id,
                     )
         except Exception:
-            pass
+            log.exception("Ledger post failed for push refund")
 
         try:
             from flow_events import SportsbookEvent, flow_bus
@@ -2587,6 +2589,7 @@ class SportsbookCog(commands.Cog):
                 try:
                     legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
                 except Exception:
+                    log.warning("Corrupt parlay JSON in cancellation refund: pid=%s json=%r", pid, legs_json[:200] if isinstance(legs_json, str) else legs_json)
                     continue
                 if any(key in leg.get("matchup", "").lower() for leg in legs):
                     _update_balance(uid, amt, con)
@@ -2618,6 +2621,7 @@ class SportsbookCog(commands.Cog):
                 try:
                     legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
                 except Exception:
+                    log.warning("Corrupt parlay JSON in ledger refund: pid=%s", pid)
                     continue
                 if any(key in leg.get("matchup", "").lower() for leg in legs):
                     refund_users.add(uid)
@@ -2631,7 +2635,7 @@ class SportsbookCog(commands.Cog):
                     txn_id,
                 )
         except Exception:
-            pass
+            log.exception("Ledger post failed for cancellation refund")
 
     async def _sb_refund_impl(self, interaction: discord.Interaction, bet_id: int):
         with _db_con() as con:
@@ -2675,7 +2679,7 @@ class SportsbookCog(commands.Cog):
                 txn_id,
             )
         except Exception:
-            pass
+            log.exception("Ledger post failed for bet refund #%s", bet_id)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — BALANCE MANAGEMENT
@@ -2706,7 +2710,7 @@ class SportsbookCog(commands.Cog):
                 "ADMIN", adjustment, new_balance, reason, txn_id,
             )
         except Exception:
-            pass
+            log.exception("Ledger post failed for admin adjustment")
 
     # ─────────────────────────────────────────────────────────────────────────
     # ADMIN — PROP BET MANAGEMENT
@@ -2822,7 +2826,7 @@ class SportsbookCog(commands.Cog):
                             f"Won: Prop #{prop_id} — {desc[:40]}", txn_id,
                         )
         except Exception:
-            pass
+            log.exception("Ledger post failed for prop resolution")
 
 async def setup(bot: commands.Bot):
     cog = SportsbookCog(bot)

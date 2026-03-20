@@ -599,6 +599,14 @@ async def _lobby_then_run(round_obj: CrashRound, bot: discord.Client) -> None:
 
         await _run_round(round_obj, bot)
     except Exception as exc:
-        print(f"[Casino] Crash round error in channel {round_obj.channel_id}: {exc}")
+        log.exception("Crash round error in channel %s", round_obj.channel_id)
+        # Refund all players who haven't cashed out
+        for pid, pbet in round_obj.players.items():
+            if not pbet.cashed_out:
+                try:
+                    await refund_wager(pid, pbet.wager)
+                    log.info("Crash refund: %s to user %s", pbet.wager, pid)
+                except Exception:
+                    log.exception("Failed crash refund for user %s", pid)
     finally:
         active_rounds.pop(round_obj.channel_id, None)
