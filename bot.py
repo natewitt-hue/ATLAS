@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.10.0"  # Cross-modal memory — unified oracle source, source filtering fix, _AskWebModal memory
+ATLAS_VERSION = "3.11.0"  # Query caching — Tier 3 NL→SQL LRU cache with sync invalidation
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -325,6 +325,12 @@ def _startup_load():
             print(f"[TSL-DB] Startup DB sync OK — {db_result['games']} games | {db_result['players']} players ({db_result['elapsed']}s)")
         else:
             print(f"[TSL-DB] Startup DB sync had issues: {db_result['errors']}")
+        # Invalidate query cache after data refresh
+        try:
+            from codex_cog import clear_query_cache
+            clear_query_cache()
+        except Exception:
+            pass
     except Exception as e:
         print(f"[TSL-DB] Startup DB sync failed: {e}")
 
@@ -674,6 +680,13 @@ async def _sync_impl(interaction: discord.Interaction):
     except Exception as e:
         db_line = f"\nHistory DB sync failed: `{e}`"
 
+    # Invalidate query cache after data refresh
+    try:
+        from codex_cog import clear_query_cache
+        clear_query_cache()
+    except Exception:
+        pass
+
     status = dm.get_league_status()
     await interaction.followup.send(
         f"Data reloaded. League status: **{status}**{db_line}"
@@ -703,6 +716,14 @@ async def _rebuilddb_impl(interaction: discord.Interaction):
             lines.append(f"Warnings: {', '.join(db_result['errors'][:3])}")
     else:
         lines = [f"DB rebuild failed: {', '.join(db_result['errors'][:3])}"]
+
+    # Invalidate query cache after rebuild
+    try:
+        from codex_cog import clear_query_cache
+        clear_query_cache()
+    except Exception:
+        pass
+
     await interaction.followup.send("\n".join(lines))
 
 

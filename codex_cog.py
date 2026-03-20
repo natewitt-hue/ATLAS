@@ -36,7 +36,9 @@ import sqlite3
 import json
 import os
 import re
+import time
 from collections import Counter
+from dataclasses import dataclass, field
 import atlas_ai
 from atlas_ai import Tier
 from difflib import get_close_matches
@@ -76,6 +78,73 @@ def _truncate_for_embed(text: str, limit: int = _EMBED_DESC_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit - 3] + "..."
+
+# ── Query Cache — Tier 3 NL→SQL result caching ──────────────────────────────
+
+@dataclass
+class _CacheEntry:
+    sql: str
+    rows: list[dict]
+    attempt: int
+    warnings: list[str]
+    created_at: float = field(default_factory=time.time)
+
+
+class _QueryCache:
+    """LRU cache for Tier 3 NL→SQL pipeline results."""
+
+    def __init__(self, max_entries: int = 200, ttl_seconds: int = 300):
+        self._cache: dict[str, _CacheEntry] = {}
+        self._max = max_entries
+        self._ttl = ttl_seconds
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def _normalize(question: str) -> str:
+        q = question.lower().strip()
+        q = re.sub(r'\s+', ' ', q)
+        q = q.rstrip('?.!')
+        return q
+
+    def make_key(self, question: str, caller_db: str | None) -> str:
+        return f"{self._normalize(question)}|{caller_db or 'anon'}"
+
+    def get(self, key: str) -> _CacheEntry | None:
+        entry = self._cache.get(key)
+        if not entry or (time.time() - entry.created_at) > self._ttl:
+            if entry:
+                del self._cache[key]
+            self.misses += 1
+            return None
+        self.hits += 1
+        return entry
+
+    def set(self, key: str, sql: str, rows: list[dict], attempt: int, warnings: list[str]) -> None:
+        if len(self._cache) >= self._max:
+            # Evict oldest 25%
+            by_age = sorted(self._cache, key=lambda k: self._cache[k].created_at)
+            for k in by_age[:self._max // 4]:
+                del self._cache[k]
+        self._cache[key] = _CacheEntry(sql=sql, rows=rows, attempt=attempt, warnings=warnings)
+
+    def clear(self) -> None:
+        n = len(self._cache)
+        self._cache.clear()
+        if n:
+            print(f"[QueryCache] Cleared {n} entries")
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+_query_cache = _QueryCache()
+
+
+def clear_query_cache() -> None:
+    """Public API for bot.py to invalidate cache after sync_tsl_db()."""
+    _query_cache.clear()
+
 
 # ── Echo persona loader — analytical register for answer generation ───────────
 try:
@@ -795,29 +864,41 @@ class CodexCog(commands.Cog):
                     await interaction.followup.send(embed=embed)
                     return
 
-            # ── 6. Tier 3: Existing NL→SQL pipeline (unchanged) ───
-            sql = await gemini_sql(
-                annotated_question, alias_map,
-                conv_context=conv_block,
-            )
-            if not sql:
-                await interaction.followup.send(
-                    "📊 Couldn't generate a query for that one. Try rephrasing — "
-                    "be specific about player names, seasons, or owners."
-                )
-                return
+            # ── 6. Tier 3: NL→SQL pipeline with query caching ───
+            from_cache = False
+            cache_key = _query_cache.make_key(annotated_question, caller_db)
+            cached = _query_cache.get(cache_key)
 
-            schema = _get_db_schema()
-            rows, sql, error, attempt, warnings = await retry_sql(sql, schema)
-            if error:
-                await interaction.followup.send(
-                    "⚠️ ATLAS couldn't find an answer for that query. Try rephrasing:\n"
-                    "• Use full player names ('Patrick Mahomes' not 'Mahomes')\n"
-                    "• Specify the season ('in season 95' not 'this year')\n"
-                    "• Ask about one thing at a time\n"
-                    "• Use `/ask_debug` for technical details"
+            if cached:
+                sql, rows, attempt, warnings = cached.sql, cached.rows, cached.attempt, cached.warnings
+                from_cache = True
+                print(f"[QueryCache] HIT key={cache_key[:32]}… entries={len(_query_cache)}")
+            else:
+                sql = await gemini_sql(
+                    annotated_question, alias_map,
+                    conv_context=conv_block,
                 )
-                return
+                if not sql:
+                    await interaction.followup.send(
+                        "📊 Couldn't generate a query for that one. Try rephrasing — "
+                        "be specific about player names, seasons, or owners."
+                    )
+                    return
+
+                schema = _get_db_schema()
+                rows, sql, error, attempt, warnings = await retry_sql(sql, schema)
+                if error:
+                    await interaction.followup.send(
+                        "⚠️ ATLAS couldn't find an answer for that query. Try rephrasing:\n"
+                        "• Use full player names ('Patrick Mahomes' not 'Mahomes')\n"
+                        "• Specify the season ('in season 95' not 'this year')\n"
+                        "• Ask about one thing at a time\n"
+                        "• Use `/ask_debug` for technical details"
+                    )
+                    return
+
+                _query_cache.set(cache_key, sql, rows, attempt, warnings)
+                print(f"[QueryCache] MISS key={cache_key[:32]}… entries={len(_query_cache)}")
 
             answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
             answer = await gemini_answer(
@@ -839,7 +920,9 @@ class CodexCog(commands.Cog):
             )
             footer_parts = [f"🔍 {len(rows)} records analyzed"]
             footer_parts.append("🧠 Tier 3 (NL→SQL)")
-            if attempt > 1:
+            if from_cache:
+                footer_parts.append("⚡ Cached")
+            elif attempt > 1:
                 footer_parts.append("⚠️ Self-corrected" if attempt == 2 else "🧠 Opus rescue")
             if alias_map:
                 resolved_str = ", ".join(f"{k}→{v}" for k, v in alias_map.items())
