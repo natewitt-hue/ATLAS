@@ -197,6 +197,7 @@ resolve_names_in_question = None
 gemini_sql = None
 gemini_answer = None
 extract_sql = None
+validate_sql = None
 KNOWN_USERS = ""
 _build_schema_fn = None
 _build_conversation_block = None
@@ -208,8 +209,10 @@ try:
         gemini_answer,
         run_sql,
         extract_sql,
+        validate_sql,
         fuzzy_resolve_user,
         resolve_names_in_question,
+        ai_resolve_names as _ai_resolve_names,
         build_conversation_block as _build_conversation_block,
         add_conversation_turn as _add_conversation_turn,
         _build_schema as _build_schema_fn,
@@ -218,6 +221,7 @@ try:
     _HISTORY_OK = True
 except ImportError:
     _HISTORY_OK = False
+    _ai_resolve_names = None
     print("[oracle_cog] codex_cog not available — /ask history queries disabled")
 
 # Shared H2H SQL from intent system
@@ -3074,8 +3078,65 @@ class OracleHubView(discord.ui.View):
         await interaction.response.send_modal(StrategyRoomModal())
 
 
-class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
+# ── Oracle Intelligence Modal Base ────────────────────────────────────────────
+
+class _EarlyReturn(Exception):
+    """Signal that _generate() already sent a response."""
+
+
+class _OracleIntelModal(discord.ui.Modal):
+    """Base class for AI-powered Oracle intelligence modals.
+
+    Subclasses implement _generate() which returns the answer text
+    and embed configuration. The base class handles the lifecycle:
+    defer → guard → try/except → embed → send.
+    """
+
+    _requires_history: bool = False
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        if self._requires_history and not _HISTORY_OK:
+            await interaction.followup.send(
+                "⚠️ Historical database not available.", ephemeral=True
+            )
+            return
+
+        try:
+            answer, embed_kwargs = await self._generate(interaction)
+            embed = self._build_embed(answer, **embed_kwargs)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except _EarlyReturn:
+            pass  # _generate() already sent its own response
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Something broke: `{e}`", ephemeral=True
+            )
+
+    async def _generate(
+        self, interaction: discord.Interaction
+    ) -> tuple[str, dict]:
+        raise NotImplementedError
+
+    @staticmethod
+    def _build_embed(answer: str, *, title: str, color, footer: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=title,
+            description=_truncate_for_embed(answer),
+            color=color,
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
+        )
+        embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
+        return embed
+
+
+# ── Oracle Intelligence Modals ────────────────────────────────────────────────
+
+class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
     """TSL League mode: natural language → SQL → AI-powered answer against tsl_history.db."""
+
+    _requires_history = True
 
     question = discord.ui.TextInput(
         label="Your TSL Question",
@@ -3085,193 +3146,168 @@ class AskTSLModal(discord.ui.Modal, title="📊 Ask ATLAS — TSL League"):
         style=discord.TextStyle.paragraph,
     )
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # CRITICAL: Immediate defer — AI calls always take > 3 sec
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        if not _HISTORY_OK:
-            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
-            return
-
+    async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
 
-        try:
-            annotated, alias_map = resolve_names_in_question(q)
+        annotated, alias_map = resolve_names_in_question(q)
 
-            # ── Resolve caller identity ─────────────────────────
-            caller_db = None
-            if _resolve_db_username_fn:
-                caller_db = _resolve_db_username_fn(interaction.user.id)
-            if not caller_db:
-                caller_db = interaction.user.name
+        # ── AI name resolution fallback ───────────────────────
+        if not alias_map and _ai_resolve_names:
+            try:
+                ai_aliases = await _ai_resolve_names(q)
+                if ai_aliases:
+                    alias_map = ai_aliases
+                    for nickname, username in alias_map.items():
+                        annotated = annotated.replace(
+                            nickname, f"{nickname} (username: '{username}')"
+                        )
+            except Exception:
+                pass
 
-            # ── Conversation memory ─────────────────────────────
-            conv_block = ""
-            if _build_conversation_block:
-                conv_block = _build_conversation_block(interaction.user.id)
+        # ── Resolve caller identity ─────────────────────────
+        caller_db = None
+        if _resolve_db_username_fn:
+            caller_db = _resolve_db_username_fn(interaction.user.id)
+        if not caller_db:
+            caller_db = interaction.user.name
 
-            # ── Affinity tone (answer only) ─────────────────────
-            affinity_block = ""
-            if _affinity_mod:
-                try:
-                    score = await _affinity_mod.get_affinity(interaction.user.id)
-                    affinity_block = _affinity_mod.get_affinity_instruction(score)
-                except Exception:
-                    pass
+        # ── Conversation memory ─────────────────────────────
+        conv_block = ""
+        if _build_conversation_block:
+            conv_block = await _build_conversation_block(interaction.user.id, source="codex")
 
-            # ── Three-tier intent detection ─────────────────────
-            intent_result = None
-            tier_label = "Tier 3 (NL→SQL)"
-            if _detect_intent:
-                intent_result = await _detect_intent(q, caller_db, alias_map)
+        # ── Affinity tone (answer only) ─────────────────────
+        affinity_block = ""
+        if _affinity_mod:
+            try:
+                score = await _affinity_mod.get_affinity(interaction.user.id)
+                affinity_block = _affinity_mod.get_affinity_instruction(score)
+            except Exception:
+                pass
 
-            if intent_result and intent_result.tier < 3 and intent_result.sql:
-                # Tier 1/2: deterministic SQL — skip Gemini SQL generation
-                rows, error = run_sql(intent_result.sql, intent_result.params)
-                sql = intent_result.sql
-                tier_label = f"Tier {intent_result.tier} ({'regex' if intent_result.tier == 1 else 'classified'})"
-                if error:
-                    # Fall through to Gemini SQL on deterministic failure
-                    intent_result = None
+        # ── Three-tier intent detection ─────────────────────
+        intent_result = None
+        tier_label = "Tier 3 (NL→SQL)"
+        if _detect_intent:
+            intent_result = await _detect_intent(q, caller_db, alias_map)
 
-            if not intent_result or intent_result.tier >= 3 or not intent_result.sql:
-                # Tier 3: Gemini NL→SQL fallback
-                sql = await gemini_sql(annotated, alias_map, conv_context=conv_block)
-                if not sql:
-                    await interaction.followup.send(
-                        "📊 Couldn't generate a query for that. Try rephrasing — "
-                        "be specific about player names, seasons, or owners.",
-                        ephemeral=True,
-                    )
-                    return
+        if intent_result and intent_result.tier < 3 and intent_result.sql:
+            rows, error = run_sql(intent_result.sql, intent_result.params)
+            sql = intent_result.sql
+            tier_label = f"Tier {intent_result.tier} ({'regex' if intent_result.tier == 1 else 'classified'})"
+            if error:
+                intent_result = None
 
+        if not intent_result or intent_result.tier >= 3 or not intent_result.sql:
+            sql = await gemini_sql(annotated, alias_map, conv_context=conv_block)
+            if not sql:
+                await interaction.followup.send(
+                    "📊 Couldn't generate a query for that. Try rephrasing — "
+                    "be specific about player names, seasons, or owners.",
+                    ephemeral=True,
+                )
+                raise _EarlyReturn()
+
+            rows, error = run_sql(sql)
+            if error:
+                fix_prompt = (
+                    f"This SQLite query for a Madden database failed:\n{sql}\n\n"
+                    f"Error: {error}\n\n"
+                    f"REMINDER: ALL columns are stored as TEXT. Always use "
+                    f"CAST(col AS INTEGER) for numeric comparisons.\n"
+                    f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
+                    f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
+                )
+                fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.HAIKU, max_tokens=500, temperature=0.02)
+                sql = extract_sql(fix_result.text) or sql
                 rows, error = run_sql(sql)
                 if error:
-                    fix_prompt = (
-                        f"This SQLite query for a Madden database failed:\n{sql}\n\n"
-                        f"Error: {error}\n\n"
-                        f"REMINDER: ALL columns are stored as TEXT. Always use "
-                        f"CAST(col AS INTEGER) for numeric comparisons.\n"
-                        f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                        f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
+                    await interaction.followup.send(
+                        "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
                     )
-                    fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.HAIKU, max_tokens=500, temperature=0.02)
-                    sql = extract_sql(fix_result.text) or sql
-                    rows, error = run_sql(sql)
-                    if error:
-                        await interaction.followup.send(
-                            "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
-                        )
-                        return
+                    raise _EarlyReturn()
 
-            answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
-            answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
+        answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
+        answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
 
-            # ── Store conversation turn ─────────────────────────
-            if _add_conversation_turn:
-                _add_conversation_turn(interaction.user.id, q, sql or "", answer)
+        if _add_conversation_turn:
+            await _add_conversation_turn(interaction.user.id, q, answer, sql=sql or "", source="codex")
 
-            embed = discord.Embed(
-                title="🔬 ATLAS Intelligence — TSL League",
-                description=_truncate_for_embed(answer),
-                color=C_DARK,
-                timestamp=datetime.datetime.now(datetime.timezone.utc),
+        footer_parts = [f"🔍 {len(rows)} records analyzed", tier_label]
+        if alias_map:
+            footer_parts.append(
+                f"🔎 Resolved: {', '.join(f'{k}→{v}' for k, v in alias_map.items())}"
             )
-            footer_parts = [f"🔍 {len(rows)} records analyzed", tier_label]
-            if alias_map:
-                footer_parts.append(
-                    f"🔎 Resolved: {', '.join(f'{k}→{v}' for k, v in alias_map.items())}"
-                )
-            if conv_block:
-                footer_parts.append("💬 Conversational")
-            embed.set_footer(
-                text=" | ".join(footer_parts) + " · ATLAS™ Oracle",
-                icon_url=ATLAS_ICON_URL,
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        if conv_block:
+            footer_parts.append("💬 Conversational")
 
-        except Exception as e:
-            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+        return answer, {
+            "title": "🔬 ATLAS Intelligence — TSL League",
+            "color": C_DARK,
+            "footer": " | ".join(footer_parts) + " · ATLAS™ Oracle",
+        }
 
 
-class AskOpenModal(discord.ui.Modal, title="🌐 Ask ATLAS — Open Intel"):
-    """Open Intel mode: AI + web search. No DB. General knowledge."""
+class _AskWebModal(_OracleIntelModal):
+    """Unified web search modal — parameterized for Open Intel and Sports Intel modes."""
 
     question = discord.ui.TextInput(
         label="Your Question",
-        placeholder="e.g. Who is better, Luka or Jokic? Latest NFL news?",
+        placeholder="Ask anything...",
         required=True,
         max_length=300,
         style=discord.TextStyle.paragraph,
     )
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+    def __init__(self, *, mode: str = "open"):
+        self.mode = mode
+        if mode == "sports":
+            super().__init__(title="🏈 Ask ATLAS — Sports Intel")
+            self.question.label = "Your Sports Question"
+            self.question.placeholder = "e.g. Who leads the NFL in passing yards? Latest trade rumors?"
+        else:
+            super().__init__(title="🌐 Ask ATLAS — Open Intel")
+            self.question.label = "Your Question"
+            self.question.placeholder = "e.g. Who is better, Luka or Jokic? Latest NFL news?"
 
+    async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
 
-        try:
-            system_instruction = get_persona("analytical")
-            result = await atlas_ai.generate_with_search(q, system=system_instruction)
+        system_instruction = get_persona("analytical")
+        result = await atlas_ai.generate_with_search(q, system=system_instruction)
 
-            answer = result.text or "ATLAS couldn't pull a response on that one."
+        if self.mode == "sports":
+            embed_title = "🏈 ATLAS Intelligence — Sports Intel"
+            embed_color = ATLAS_GOLD
+            footer_mode = "Sports Intel mode"
+            fallback_msg = "ATLAS couldn't pull intel on that one."
+        else:
+            embed_title = "🌐 ATLAS Intelligence — Open Intel"
+            embed_color = C_BLUE
+            footer_mode = "Open Intel mode"
+            fallback_msg = "ATLAS couldn't pull a response on that one."
 
-            embed = discord.Embed(
-                title="🌐 ATLAS Intelligence — Open Intel",
-                description=_truncate_for_embed(answer),
-                color=C_BLUE,
-                timestamp=datetime.datetime.now(datetime.timezone.utc),
-            )
-            footer = "Open Intel mode · Web search enabled · ATLAS™ Oracle"
-            if result.fallback_used:
-                footer += "  ·  ⚡ via Gemini fallback"
-            embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        answer = result.text or fallback_msg
 
-        except Exception as e:
-            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+        footer = f"{footer_mode} · Web search enabled · ATLAS™ Oracle"
+        if result.fallback_used:
+            footer += "  ·  ⚡ via Gemini fallback"
 
-
-class SportsIntelModal(discord.ui.Modal, title="🏈 Ask ATLAS — Sports Intel"):
-    """Sports Intel mode: real-world NFL/sports questions via AI + web search."""
-
-    question = discord.ui.TextInput(
-        label="Your Sports Question",
-        placeholder="e.g. Who leads the NFL in passing yards? Latest trade rumors?",
-        required=True,
-        max_length=300,
-        style=discord.TextStyle.paragraph,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        q = self.question.value.strip()
-
-        try:
-            system_instruction = get_persona("analytical")
-            result = await atlas_ai.generate_with_search(q, system=system_instruction)
-
-            answer = result.text or "ATLAS couldn't pull intel on that one."
-
-            embed = discord.Embed(
-                title="🏈 ATLAS Intelligence — Sports Intel",
-                description=_truncate_for_embed(answer),
-                color=ATLAS_GOLD,
-                timestamp=datetime.datetime.now(datetime.timezone.utc),
-            )
-            footer = "Sports Intel mode · Web search enabled · ATLAS™ Oracle"
-            if result.fallback_used:
-                footer += "  ·  ⚡ via Gemini fallback"
-            embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+        return answer, {"title": embed_title, "color": embed_color, "footer": footer}
 
 
-class PlayerScoutModal(discord.ui.Modal, title="🎯 Ask ATLAS — Player Scout"):
+# Backwards-compatible aliases for hub view button callbacks
+def AskOpenModal():
+    return _AskWebModal(mode="open")
+
+def SportsIntelModal():
+    return _AskWebModal(mode="sports")
+
+
+class PlayerScoutModal(_OracleIntelModal, title="🎯 Ask ATLAS — Player Scout"):
     """Player Scout mode: query Madden player ratings, abilities, dev traits from the roster."""
+
+    _requires_history = True
 
     question = discord.ui.TextInput(
         label="Your Scouting Question",
@@ -3281,18 +3317,26 @@ class PlayerScoutModal(discord.ui.Modal, title="🎯 Ask ATLAS — Player Scout"
         style=discord.TextStyle.paragraph,
     )
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        if not _HISTORY_OK:
-            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
-            return
-
+    async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
 
-        try:
-            # Scout-specific SQL prompt focusing on players + player_abilities tables
-            scout_schema = f"""DATABASE: tsl_history.db — Madden Player Scouting Data
+        # ── Caller team resolution ────────────────────────────
+        caller_db = None
+        team_name = None
+        if _resolve_db_username_fn:
+            caller_db = _resolve_db_username_fn(interaction.user.id)
+        if caller_db and not dm.df_teams.empty:
+            mask = dm.df_teams["userName"].str.lower() == caller_db.lower()
+            if mask.any():
+                team_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+
+        # ── Conversation memory fetch ─────────────────────────
+        conv_block = ""
+        if _build_conversation_block:
+            conv_block = await _build_conversation_block(interaction.user.id, source="codex")
+
+        # ── Scout-specific SQL prompt ─────────────────────────
+        scout_schema = f"""DATABASE: tsl_history.db — Madden Player Scouting Data
 
 TABLE: players (current roster snapshot — {dm.CURRENT_SEASON})
   Columns: rosterId, firstName, lastName, age, height, weight, pos, jerseyNum,
@@ -3322,35 +3366,70 @@ RULES:
 - Return ONLY the SQL query, no explanation, no markdown fences.
 """
 
-            scout_prompt = f"""{scout_schema}
+        # Build prompt: schema → team context → conversation → question
+        team_block = ""
+        if team_name:
+            team_block = (
+                f"\nUSER CONTEXT: The user owns the {team_name}. "
+                f"When they say 'my team', 'my players', or 'my roster', "
+                f"filter by teamName='{team_name}'.\n"
+            )
 
+        conv_inject = ""
+        if conv_block:
+            conv_inject = f"\n{conv_block}\n"
+
+        scout_prompt = f"""{scout_schema}{team_block}{conv_inject}
 Generate a SQLite SELECT query to answer this scouting question:
 "{q}"
 """
 
-            sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.HAIKU, max_tokens=500)
-            sql = extract_sql(sql_result.text)
-            if not sql:
-                await interaction.followup.send(
-                    "🎯 Couldn't generate a scouting query. Try being specific about "
-                    "position, team, or rating (e.g. 'fastest WR on the Ravens').",
-                    ephemeral=True,
-                )
-                return
+        # ── SQL generation (Sonnet for accuracy) ──────────────
+        sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.SONNET, max_tokens=500)
+        sql = extract_sql(sql_result.text)
+        if not sql:
+            await interaction.followup.send(
+                "🎯 Couldn't generate a scouting query. Try being specific about "
+                "position, team, or rating (e.g. 'fastest WR on the Ravens').",
+                ephemeral=True,
+            )
+            raise _EarlyReturn()
 
+        # ── Execute with self-correction ──────────────────────
+        self_corrected = False
+        rows, error = run_sql(sql)
+        if error:
+            warnings = validate_sql(sql) if validate_sql else []
+            hint_block = "\n".join(f"- {w}" for w in warnings) if warnings else ""
+
+            fix_prompt = (
+                f"This SQLite query for Madden player data failed:\n{sql}\n\n"
+                f"Error: {error}\n\n"
+                f"REMINDER: ALL columns are TEXT. Use CAST(col AS INTEGER) for math.\n"
+                f"{f'Validation warnings:\n{hint_block}\n' if hint_block else ''}"
+                f"Fix the query. Return ONLY valid SQLite SQL.\n\n"
+                f"Schema:\n{scout_schema}"
+            )
+            fix_result = await atlas_ai.generate(
+                fix_prompt, tier=Tier.HAIKU, max_tokens=500, temperature=0.02
+            )
+            sql = extract_sql(fix_result.text) or sql
             rows, error = run_sql(sql)
+            if not error:
+                self_corrected = True
             if error:
                 await interaction.followup.send(
-                    "⚠️ Scout query failed. Try rephrasing your question!", ephemeral=True
+                    "⚠️ Scout query failed after retry. Try rephrasing!",
+                    ephemeral=True,
                 )
-                return
+                raise _EarlyReturn()
 
-            # Generate scouting report from results
-            results_str = json.dumps(rows[:20], indent=2)
-            if len(results_str) > 2500:
-                results_str = results_str[:2500] + "\n... (truncated)"
+        # ── Generate scouting report ──────────────────────────
+        results_str = json.dumps(rows[:20], indent=2)
+        if len(results_str) > 2500:
+            results_str = results_str[:2500] + "\n... (truncated)"
 
-            answer_prompt = f"""{get_persona('analytical')}
+        answer_prompt = f"""{get_persona('analytical')}
 
 You are in Scout mode — analyzing Madden player ratings and abilities.
 
@@ -3367,26 +3446,30 @@ RESPONSE GUIDELINES:
 - Keep it under 300 words. Make it feel like a real scouting report.
 """
 
-            answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.HAIKU, max_tokens=400)
-            answer = answer_result.text or "No scouting data found."
+        answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.HAIKU, max_tokens=400)
+        answer = answer_result.text or "No scouting data found."
 
-            embed = discord.Embed(
-                title="🎯 ATLAS Intelligence — Player Scout",
-                description=_truncate_for_embed(answer),
-                color=AtlasColors.TSL_BLUE,
-                timestamp=datetime.datetime.now(datetime.timezone.utc),
+        # ── Store conversation turn ───────────────────────────
+        if _add_conversation_turn:
+            await _add_conversation_turn(
+                interaction.user.id, q, answer, sql=sql or "", source="codex"
             )
-            embed.set_footer(
-                text=f"🔍 {len(rows)} players analyzed · ATLAS™ Oracle · Scout Mode",
-                icon_url=ATLAS_ICON_URL,
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
 
-        except Exception as e:
-            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+        footer_parts = [f"🔍 {len(rows)} players analyzed"]
+        if team_name:
+            footer_parts.append(f"🏈 {team_name}")
+        if self_corrected:
+            footer_parts.append("⚠️ Self-corrected")
+        footer_parts.append("ATLAS™ Oracle · Scout Mode")
+
+        return answer, {
+            "title": "🎯 ATLAS Intelligence — Player Scout",
+            "color": AtlasColors.TSL_BLUE,
+            "footer": " · ".join(footer_parts),
+        }
 
 
-class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Room"):
+class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Room"):
     """Strategy mode: trade advice, roster tips, and game strategy using TSL context."""
 
     question = discord.ui.TextInput(
@@ -3397,60 +3480,48 @@ class StrategyRoomModal(discord.ui.Modal, title="🧠 Ask ATLAS — Strategy Roo
         style=discord.TextStyle.paragraph,
     )
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
+    async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
 
-        try:
-            # Build TSL context from live data
-            context_parts = []
+        # Build TSL context from live data
+        context_parts = []
 
-            # Standings snapshot
-            if not dm.df_standings.empty:
-                top_teams = dm.df_standings.head(10)
-                standings_lines = []
-                for _, row in top_teams.iterrows():
-                    name = row.get("teamName", "?")
-                    wins = row.get("totalWins", "0")
-                    losses = row.get("totalLosses", "0")
-                    standings_lines.append(f"  {name}: {wins}-{losses}")
-                context_parts.append("CURRENT STANDINGS (Top 10):\n" + "\n".join(standings_lines))
+        if not dm.df_standings.empty:
+            top_teams = dm.df_standings.head(10)
+            standings_lines = []
+            for _, row in top_teams.iterrows():
+                name = row.get("teamName", "?")
+                wins = row.get("totalWins", "0")
+                losses = row.get("totalLosses", "0")
+                standings_lines.append(f"  {name}: {wins}-{losses}")
+            context_parts.append("CURRENT STANDINGS (Top 10):\n" + "\n".join(standings_lines))
 
-            # Team ratings
-            if not dm.df_teams.empty:
-                team_lines = []
-                for _, row in dm.df_teams.iterrows():
-                    name = row.get("nickName", "?")
-                    ovr = row.get("ovrRating", "?")
-                    owner = row.get("userName", "?")
-                    team_lines.append(f"  {name} (OVR {ovr}) — {owner}")
-                context_parts.append("TEAM RATINGS:\n" + "\n".join(team_lines[:16]))
+        if not dm.df_teams.empty:
+            team_lines = []
+            for _, row in dm.df_teams.iterrows():
+                name = row.get("nickName", "?")
+                ovr = row.get("ovrRating", "?")
+                owner = row.get("userName", "?")
+                team_lines.append(f"  {name} (OVR {ovr}) — {owner}")
+            context_parts.append("TEAM RATINGS:\n" + "\n".join(team_lines[:16]))
 
-            tsl_context = "\n\n".join(context_parts) if context_parts else ""
+        tsl_context = "\n\n".join(context_parts) if context_parts else ""
 
-            system_instruction = get_persona("analytical")
+        system_instruction = get_persona("analytical")
+        contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
+        result = await atlas_ai.generate_with_search(contents, system=system_instruction)
 
-            contents = f"TSL CONTEXT:\n{tsl_context}\n\nUSER QUESTION: {q}" if tsl_context else q
+        answer = result.text or "ATLAS couldn't formulate a strategy for that one."
 
-            result = await atlas_ai.generate_with_search(contents, system=system_instruction)
+        footer = "Strategy Room · TSL context + web search · ATLAS™ Oracle"
+        if result.fallback_used:
+            footer += "  ·  ⚡ via Gemini fallback"
 
-            answer = result.text or "ATLAS couldn't formulate a strategy for that one."
-
-            embed = discord.Embed(
-                title="🧠 ATLAS Intelligence — Strategy Room",
-                description=_truncate_for_embed(answer),
-                color=AtlasColors.SUCCESS,
-                timestamp=datetime.datetime.now(datetime.timezone.utc),
-            )
-            footer = "Strategy Room · TSL context + web search · ATLAS™ Oracle"
-            if result.fallback_used:
-                footer += "  ·  ⚡ via Gemini fallback"
-            embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ Something broke: `{e}`", ephemeral=True)
+        return answer, {
+            "title": "🧠 ATLAS Intelligence — Strategy Room",
+            "color": AtlasColors.SUCCESS,
+            "footer": footer,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

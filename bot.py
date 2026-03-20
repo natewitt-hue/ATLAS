@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.5.0"  # Startup stability — offload auto_discover SQLite to executor, batch member enrichment
+ATLAS_VERSION = "3.7.0"  # Unified modal base — _OracleIntelModal Template Method refactor
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -344,6 +344,12 @@ def _startup_load():
                 print(f"[MemberDB] ⚠️  db_username not found in games table: {names}")
         except Exception as e:
             print(f"[MemberDB] validate_db_usernames() failed: {e}")
+        # Refresh codex identity cache so newly auto-filled db_usernames are visible
+        try:
+            from codex_cog import refresh_codex_identity
+            refresh_codex_identity()
+        except Exception as e:
+            print(f"[MemberDB] Codex identity refresh failed: {e}")
     except Exception as e:
         print(f"[MemberDB] Startup registry build failed: {e}")
 

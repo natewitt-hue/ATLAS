@@ -271,6 +271,23 @@ def _ensure_codex_identity():
         print(f"[codex_cog] Failed to load identity data: {e}")
 
 
+def refresh_codex_identity():
+    """Reload identity data after sync_tsl_db populates the teams table.
+
+    Call this after startup sync so that members whose db_username was
+    auto-filled from teams.userName are included in the alias map.
+    """
+    global KNOWN_USERS, NICKNAME_TO_USER, _codex_identity_loaded
+    try:
+        import build_member_db as member_db
+        KNOWN_USERS = member_db.get_known_users()
+        NICKNAME_TO_USER = member_db.get_alias_map()
+        _codex_identity_loaded = True
+        print(f"[codex_cog] Identity refreshed: {len(KNOWN_USERS)} users, {len(NICKNAME_TO_USER)} aliases")
+    except Exception as e:
+        print(f"[codex_cog] Failed to refresh identity data: {e}")
+
+
 def fuzzy_resolve_user(name: str) -> str | None:
     """Resolve a loose username/nickname to the closest known TSL owner.
 
@@ -305,6 +322,69 @@ def fuzzy_resolve_user(name: str) -> str | None:
     return None
 
 
+async def ai_resolve_names(question: str) -> dict[str, str]:
+    """AI-powered name resolution fallback.
+
+    When regex-based resolve_names_in_question() can't find any TSL member
+    references, this function asks AI to identify which members are mentioned.
+    Uses the full KNOWN_USERS list + NICKNAME_TO_USER map as context.
+
+    Returns alias_map: {mentioned_text: db_username} or empty dict.
+    """
+    _ensure_codex_identity()
+    if not KNOWN_USERS:
+        return {}
+
+    # Build compact member list for the prompt
+    member_lines = []
+    # Reverse the alias map to group aliases by db_username
+    user_aliases: dict[str, list[str]] = {}
+    for alias, db_u in NICKNAME_TO_USER.items():
+        user_aliases.setdefault(db_u, []).append(alias)
+    for db_u in KNOWN_USERS:
+        aliases = user_aliases.get(db_u, [])
+        # Filter out the db_username itself and show only unique short aliases
+        short_aliases = [a for a in aliases if a.lower() != db_u.lower()][:5]
+        if short_aliases:
+            member_lines.append(f"  {db_u} (aka: {', '.join(short_aliases)})")
+        else:
+            member_lines.append(f"  {db_u}")
+
+    prompt = f"""You are a name resolver for The Simulation League (TSL), a Madden NFL sim league.
+
+TSL MEMBERS (db_username and known aliases):
+{chr(10).join(member_lines)}
+
+USER QUESTION: "{question}"
+
+TASK: Identify which TSL members are referenced in this question.
+- Match nicknames, abbreviations, partial names, team references, or any other identifier
+- "my" / "me" / "I" should NOT be resolved here (handled separately)
+- If no TSL members are referenced, return empty names list
+- Only return members you are confident about (>80% sure)
+
+Return ONLY valid JSON, no explanation:
+{{"names": [{{"mentioned": "text from question", "resolved": "exact db_username"}}]}}
+"""
+
+    try:
+        result = await atlas_ai.generate(
+            prompt, tier=Tier.HAIKU, max_tokens=300,
+            temperature=0.05, json_mode=True,
+        )
+        import json as _json
+        data = _json.loads(result.text)
+        alias_map = {}
+        for entry in data.get("names", []):
+            mentioned = entry.get("mentioned", "")
+            resolved = entry.get("resolved", "")
+            if mentioned and resolved and resolved in KNOWN_USERS:
+                alias_map[mentioned] = resolved
+        return alias_map
+    except Exception:
+        return {}
+
+
 def resolve_names_in_question(question: str) -> tuple[str, dict[str, str]]:
     """
     Scan the question for TSL owner references and annotate with DB usernames.
@@ -316,7 +396,7 @@ def resolve_names_in_question(question: str) -> tuple[str, dict[str, str]]:
 
     for candidate in candidates:
         clean = candidate.strip("?!.,':\"\t").strip()
-        if len(clean) < 3:
+        if len(clean) < 2:
             continue
         resolved = fuzzy_resolve_user(clean)
         if resolved and clean.lower() != resolved.lower():
@@ -362,6 +442,55 @@ def extract_sql(text: str) -> str | None:
     if match:
         return match.group(1).strip()
     return None
+
+
+def validate_sql(sql: str) -> list[str]:
+    """Check generated SQL for common TSL-specific pitfalls.
+
+    Returns a list of warning strings (empty = no issues found).
+    These are injected into the self-correction prompt if the query fails,
+    giving the AI targeted hints about what went wrong.
+    """
+    warnings = []
+    sql_upper = sql.upper()
+
+    # Check 1: games table queried without status filter
+    if "GAMES" in sql_upper and "STATUS" not in sql_upper:
+        if "offensive_stats" not in sql.lower() and "defensive_stats" not in sql.lower():
+            warnings.append(
+                "Missing status IN ('2','3') filter on games table — "
+                "will include unplayed/scheduled games."
+            )
+
+    # Check 2: Numeric comparison without CAST on TEXT columns
+    # Look for ORDER BY or comparison operators on known numeric columns
+    numeric_patterns = [
+        r"ORDER BY\s+\w*(?:score|wins|losses|yds|tds|ints|tackles|sacks|rating|ovr)\w*\s+(?:ASC|DESC)",
+        r"(?:>|<|>=|<=)\s*\d+",
+    ]
+    has_numeric_op = any(re.search(p, sql, re.IGNORECASE) for p in numeric_patterns)
+    if has_numeric_op and "CAST(" not in sql_upper:
+        warnings.append(
+            "Numeric comparison or ordering without CAST() — "
+            "all columns are TEXT, so '9' > '80' in string comparison."
+        )
+
+    # Check 3: Using players.teamName for draft queries
+    if "DRAFT" in sql_upper and "PLAYERS" in sql_upper and "PLAYER_DRAFT_MAP" not in sql_upper:
+        warnings.append(
+            "Draft query uses players table — should use player_draft_map instead "
+            "(players.teamName shows current team, not drafting team)."
+        )
+
+    # Check 4: Using fullName on players table (doesn't exist)
+    if "PLAYERS" in sql_upper and "FULLNAME" in sql_upper:
+        if "OFFENSIVE_STATS" not in sql_upper and "DEFENSIVE_STATS" not in sql_upper:
+            warnings.append(
+                "players table has no fullName column — "
+                "use (firstName || ' ' || lastName) instead."
+            )
+
+    return warnings
 
 
 async def gemini_sql(
@@ -427,11 +556,17 @@ SQL: SELECT winner_user, COUNT(*) AS wins FROM games WHERE status IN ('2','3') A
 Q: "Best defensive players on the Ravens?"
 SQL: SELECT fullName, pos, SUM(CAST(defTotalTackles AS INTEGER)) AS tackles, SUM(CAST(defSacks AS REAL)) AS sacks, SUM(CAST(defInts AS INTEGER)) AS ints FROM defensive_stats WHERE teamName LIKE '%Ravens%' AND seasonIndex='{dm.CURRENT_SEASON}' AND stageIndex='1' GROUP BY fullName ORDER BY tackles DESC LIMIT 15
 
+Q: "Which team's draft picks have the highest average OVR?"
+SQL: SELECT drafting_team, COUNT(*) AS picks, ROUND(AVG(CAST(playerBestOvr AS REAL)),1) AS avg_ovr FROM player_draft_map GROUP BY drafting_team ORDER BY avg_ovr DESC LIMIT 10
+
+Q: "Who has the best record as an away team across all seasons?"
+SQL: SELECT awayUser AS owner, SUM(CASE WHEN winner_user=awayUser THEN 1 ELSE 0 END) AS away_wins, COUNT(*) AS away_games, ROUND(CAST(SUM(CASE WHEN winner_user=awayUser THEN 1 ELSE 0 END) AS REAL)/COUNT(*)*100,1) AS win_pct FROM games WHERE status IN ('2','3') AND stageIndex='1' AND awayUser != '' GROUP BY awayUser HAVING COUNT(*) >= 10 ORDER BY win_pct DESC LIMIT 10
+
 Now generate a query for this question:
 "{question}"
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, temperature=0.05)
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, temperature=0.05)
     return extract_sql(result.text)
 
 
@@ -511,6 +646,17 @@ class CodexCog(commands.Cog):
             question_with_context = f"{caller_context} {question}"
             annotated_question, alias_map = resolve_names_in_question(question_with_context)
 
+            # ── 2b. AI name resolution fallback ────────────────────
+            # If regex didn't find any names, try AI resolution
+            if not alias_map:
+                ai_aliases = await ai_resolve_names(question)
+                if ai_aliases:
+                    alias_map = ai_aliases
+                    for nickname, username in alias_map.items():
+                        annotated_question = annotated_question.replace(
+                            nickname, f"{nickname} (username: '{username}')"
+                        )
+
             # ── 3. Self-reference collision check ─────────────────
             if check_self_reference_collision and alias_map:
                 collision_msg = check_self_reference_collision(caller_db, alias_map)
@@ -583,14 +729,23 @@ class CodexCog(commands.Cog):
                 )
                 return
 
+            # Validate generated SQL for common pitfalls
+            sql_warnings = validate_sql(sql)
+
             rows, error = run_sql(sql)
             if error:
-                # Self-correct once with TEXT casting reminder
+                # Self-correct once with targeted validation hints
+                validation_hint = ""
+                if sql_warnings:
+                    validation_hint = "\nVALIDATION WARNINGS (fix these too):\n" + "\n".join(
+                        f"- {w}" for w in sql_warnings
+                    ) + "\n"
                 fix_prompt = (
                     f"This SQLite query for a Madden database failed:\n{sql}\n\n"
                     f"Error: {error}\n\n"
                     f"REMINDER: ALL columns are stored as TEXT. Always use CAST(col AS INTEGER) "
                     f"for numeric comparisons.\n"
+                    f"{validation_hint}"
                     f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
                     f"Schema:\n{_get_db_schema()}"
                 )
