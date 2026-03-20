@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.0.0"  # Audit fix — async DB, silent failure logging, crash refunds, dead code removal
+ATLAS_VERSION = "4.0.1"  # Fix /oracle interaction timeout
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

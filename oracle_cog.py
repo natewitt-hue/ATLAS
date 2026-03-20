@@ -4272,6 +4272,7 @@ class StatsHubCog(commands.Cog):
     @app_commands.command(name="oracle", description="🔮 ATLAS Oracle Hub — Ask questions across 5 intelligence modes.")
     @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     async def oracle(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
         embed = discord.Embed(
             title="🔮 ATLAS Oracle Hub",
             description=(
@@ -4289,7 +4290,7 @@ class StatsHubCog(commands.Cog):
             icon_url=ATLAS_ICON_URL
         )
         embed.set_footer(text="ATLAS™ Oracle Module · Pick a mode to begin")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=embed,
             view=OracleHubView(),
             ephemeral=True,
