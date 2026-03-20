@@ -16,7 +16,6 @@ Integration:
 
 import asyncio
 import io
-import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -471,12 +470,24 @@ def _gather_my_bets_data(user_id: int) -> dict:
             (user_id,),
         ).fetchall()
         parlays = con.execute(
-            "SELECT parlay_id, week, legs, combined_odds, wager_amount, status "
+            "SELECT parlay_id, week, combined_odds, wager_amount, status "
             "FROM parlays_table WHERE discord_id=? AND status='Pending' "
             "ORDER BY rowid DESC",
             (user_id,),
         ).fetchall()
-    return {"balance": balance, "straight": straight, "parlays": parlays}
+        # Batch-fetch legs from normalized parlay_legs table
+        legs_map: dict[str, list[dict]] = {}
+        if parlays:
+            pids = [p[0] for p in parlays]
+            placeholders = ",".join("?" * len(pids))
+            leg_rows = con.execute(
+                f"SELECT parlay_id, pick, status FROM parlay_legs "
+                f"WHERE parlay_id IN ({placeholders}) ORDER BY parlay_id, leg_index",
+                pids,
+            ).fetchall()
+            for parlay_id, pick, status in leg_rows:
+                legs_map.setdefault(parlay_id, []).append({"pick": pick, "status": status})
+    return {"balance": balance, "straight": straight, "parlays": parlays, "legs_map": legs_map}
 
 
 async def build_my_bets_card(user_id: int) -> bytes:
@@ -485,12 +496,13 @@ async def build_my_bets_card(user_id: int) -> bytes:
     balance = d["balance"]
     straight = d["straight"]
     parlays = d["parlays"]
+    legs_map = d["legs_map"]
 
     pending_count = len(straight) + len(parlays)
-    total_risk = sum(b[3] for b in straight) + sum(p[4] for p in parlays)
+    total_risk = sum(b[3] for b in straight) + sum(p[3] for p in parlays)
     max_payout = (
         sum(_payout_calc(b[3], b[4]) for b in straight)
-        + sum(_payout_calc(p[4], p[3]) for p in parlays)
+        + sum(_payout_calc(p[3], p[2]) for p in parlays)
     )
 
     # Status bar
@@ -523,19 +535,13 @@ async def build_my_bets_card(user_id: int) -> bytes:
     if parlays:
         bets_html += '<div class="section-label" style="margin-top:var(--space-sm);">PARLAYS</div>\n'
         for p in parlays[:4]:
-            pid, week, legs_json, c_odds, wager, status = p
-            try:
-                legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
-            except Exception:
-                legs = []
+            pid, week, c_odds, wager, status = p
+            legs = legs_map.get(pid, [])
             potential = _payout_calc(wager, c_odds)
             legs_html = ""
             for leg in legs:
-                if not isinstance(leg, dict):
-                    continue
-                leg_pick = leg.get("pick", "?")
-                # Check if individual leg is graded
-                leg_status = leg.get("status", "Pending")
+                leg_pick = leg["pick"]
+                leg_status = leg["status"]
                 if leg_status == "Won":
                     cls = "won"
                     icon = "✔"

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 from atlas_html_engine import render_card, wrap_card, esc, icon_pill
-from odds_utils import american_to_str
+from odds_utils import american_to_str, payout_calc
 
 # ── Sport icon mapping ────────────────────────────────────────────────────────
 SPORT_ICON_MAP = {
@@ -1179,6 +1179,287 @@ async def build_casino_hub_card(
 </div>
 """
     return await render_card(wrap_card(body, status_class="jackpot"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PARLAY ANALYTICS CARD
+# ═════════════════════════════════════════════════════════════════════════════
+
+_PARLAY_ANALYTICS_CSS = """\
+.section-title { font-family: var(--font-display); font-weight: 700; font-size: 11px; color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; padding: 0 20px var(--space-xs); }
+.bar-row { display: flex; align-items: center; gap: 8px; padding: 4px 20px; }
+.bar-label { font-family: var(--font-display); font-weight: 700; font-size: 11px; color: var(--text-sub); width: 80px; text-align: right; flex-shrink: 0; }
+.bar-track { flex: 1; height: 14px; background: rgba(255,255,255,0.06); border-radius: 7px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 7px; background: var(--gold); }
+.bar-fill.green { background: var(--win); }
+.bar-stat { font-family: var(--font-mono); font-weight: 700; font-size: 11px; color: var(--text-muted); width: 110px; flex-shrink: 0; }
+.recent-row { display: flex; align-items: center; gap: 8px; padding: 3px 20px; }
+.recent-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
+.recent-icon.won { color: var(--win); }
+.recent-icon.lost { color: var(--loss); }
+.recent-info { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--text-sub); flex: 1; }
+.recent-amount { font-family: var(--font-mono); font-weight: 700; font-size: 12px; }
+.recent-amount.won { color: var(--win); }
+.recent-amount.lost { color: var(--text-dim); }
+.recent-section { padding: var(--space-xs) 0 var(--space-md); }
+.empty-msg { font-family: var(--font-display); font-weight: 600; font-size: 13px; color: var(--text-dim); text-align: center; padding: 20px; }
+"""
+
+
+def _gather_parlay_analytics_data(user_id: int) -> dict:
+    """Sync: collect all DB data for parlay analytics card."""
+    with sqlite3.connect(DB_PATH) as con:
+        # 1. Parlay-level aggregates
+        agg = con.execute(
+            "SELECT "
+            "  COUNT(*), "
+            "  SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END), "
+            "  SUM(CASE WHEN status='Lost' THEN 1 ELSE 0 END), "
+            "  SUM(CASE WHEN status='Push' THEN 1 ELSE 0 END), "
+            "  SUM(CASE WHEN status='Pending' THEN 1 ELSE 0 END), "
+            "  SUM(wager_amount) "
+            "FROM parlays_table WHERE discord_id=?",
+            (user_id,),
+        ).fetchone()
+        total_parlays = agg[0] or 0
+        wins = agg[1] or 0
+        losses = agg[2] or 0
+        pushes = agg[3] or 0
+        pending = agg[4] or 0
+        total_wagered = agg[5] or 0
+
+        # 2. Won parlay payouts (compute via payout_calc in Python)
+        won_rows = con.execute(
+            "SELECT wager_amount, combined_odds "
+            "FROM parlays_table WHERE discord_id=? AND status='Won'",
+            (user_id,),
+        ).fetchall()
+        total_won = sum(payout_calc(w, o) for w, o in won_rows)
+
+        # 3. Per-leg bet type breakdown (excludes Unknown/Pending/Cancelled)
+        leg_stats_rows = con.execute(
+            "SELECT pl.bet_type, "
+            "  COUNT(*), "
+            "  SUM(CASE WHEN pl.status='Won' THEN 1 ELSE 0 END), "
+            "  SUM(CASE WHEN pl.status='Lost' THEN 1 ELSE 0 END) "
+            "FROM parlay_legs pl "
+            "JOIN parlays_table p ON p.parlay_id = pl.parlay_id "
+            "WHERE p.discord_id=? AND pl.status IN ('Won','Lost') "
+            "GROUP BY pl.bet_type ORDER BY COUNT(*) DESC",
+            (user_id,),
+        ).fetchall()
+        leg_stats = []
+        for bt, total, won_ct, lost_ct in leg_stats_rows:
+            wr = (won_ct / total * 100) if total > 0 else 0
+            leg_stats.append({"bet_type": bt, "total": total, "won": won_ct, "lost": lost_ct, "win_rate": wr})
+
+        # 4. Avg/max legs per parlay
+        legs_agg = con.execute(
+            "SELECT AVG(cnt), MAX(cnt) FROM ("
+            "  SELECT COUNT(*) as cnt FROM parlay_legs pl "
+            "  JOIN parlays_table p ON p.parlay_id = pl.parlay_id "
+            "  WHERE p.discord_id=? GROUP BY pl.parlay_id"
+            ")",
+            (user_id,),
+        ).fetchone()
+        avg_legs = legs_agg[0] or 0
+        max_legs = legs_agg[1] or 0
+
+        # 5. Recent 5 settled parlays
+        recent_parlays_raw = con.execute(
+            "SELECT parlay_id, status, wager_amount, combined_odds "
+            "FROM parlays_table "
+            "WHERE discord_id=? AND status IN ('Won','Lost','Push') "
+            "ORDER BY rowid DESC LIMIT 5",
+            (user_id,),
+        ).fetchall()
+        # Batch-fetch legs for recent parlays
+        recent_parlays = []
+        if recent_parlays_raw:
+            pids = [r[0] for r in recent_parlays_raw]
+            ph = ",".join("?" * len(pids))
+            leg_rows = con.execute(
+                f"SELECT parlay_id, pick, bet_type, status FROM parlay_legs "
+                f"WHERE parlay_id IN ({ph}) ORDER BY parlay_id, leg_index",
+                pids,
+            ).fetchall()
+            legs_map: dict[str, list[dict]] = {}
+            for pid, pick, bt, st in leg_rows:
+                legs_map.setdefault(pid, []).append({"pick": pick, "bet_type": bt, "status": st})
+            for pid, status, wager, c_odds in recent_parlays_raw:
+                recent_parlays.append({
+                    "parlay_id": pid,
+                    "status": status,
+                    "wager": wager,
+                    "combined_odds": c_odds,
+                    "legs": legs_map.get(pid, []),
+                })
+
+    return {
+        "total_parlays": total_parlays, "wins": wins, "losses": losses,
+        "pushes": pushes, "pending": pending,
+        "total_wagered": total_wagered, "total_won": total_won,
+        "net_pnl": total_won - total_wagered,
+        "leg_stats": leg_stats,
+        "avg_legs": avg_legs, "max_legs": max_legs,
+        "recent_parlays": recent_parlays,
+    }
+
+
+async def build_parlay_analytics_card(user_id: int) -> bytes:
+    """Build the parlay analytics card. Returns PNG bytes."""
+    d = await asyncio.get_running_loop().run_in_executor(
+        None, _gather_parlay_analytics_data, user_id
+    )
+    total = d["total_parlays"]
+    wins, losses, pushes, pending = d["wins"], d["losses"], d["pushes"], d["pending"]
+    total_wagered = d["total_wagered"]
+    total_won = d["total_won"]
+    net_pnl = d["net_pnl"]
+    leg_stats = d["leg_stats"]
+    avg_legs = d["avg_legs"]
+    max_legs = d["max_legs"]
+    recent_parlays = d["recent_parlays"]
+
+    # Derived values
+    settled = wins + losses + pushes
+    win_rate = (wins / settled * 100) if settled > 0 else 0
+    pnl_class = "green" if net_pnl >= 0 else "red"
+    pnl_str = f"+${net_pnl:,}" if net_pnl >= 0 else f"-${abs(net_pnl):,}"
+
+    # Status bar
+    if total == 0:
+        status_class = "jackpot"
+    elif win_rate >= 55:
+        status_class = "win"
+    else:
+        status_class = "loss"
+
+    # Empty state
+    if total == 0:
+        body = f"""<style>{_SPORTSBOOK_CSS}{_PARLAY_ANALYTICS_CSS}</style>
+
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f4ca")}</div>
+    <div class="game-title-group">
+      <div class="game-title">PARLAY ANALYTICS</div>
+      <div class="game-subtitle">YOUR PARLAYS</div>
+    </div>
+  </div>
+</div>
+
+<div class="gold-divider"></div>
+
+<div class="empty-msg">No parlays placed yet. Build a parlay from the Sportsbook!</div>
+"""
+        return await render_card(wrap_card(body, status_class="jackpot"))
+
+    # ── Bar chart HTML ─────────────────────────────────────────────────────
+    bars_html = ""
+    if leg_stats:
+        for ls in leg_stats:
+            wr = ls["win_rate"]
+            bar_class = "green" if wr >= 50 else ""
+            bars_html += f"""<div class="bar-row">
+  <span class="bar-label">{esc(ls['bet_type'])}</span>
+  <div class="bar-track"><div class="bar-fill {bar_class}" style="width:{wr:.0f}%"></div></div>
+  <span class="bar-stat">{wr:.1f}% ({ls['won']}/{ls['total']})</span>
+</div>\n"""
+    else:
+        bars_html = '<div class="empty-msg">No graded leg data yet</div>'
+
+    # ── Recent parlays HTML ────────────────────────────────────────────────
+    recent_html = ""
+    if recent_parlays:
+        for rp in recent_parlays:
+            is_won = rp["status"] == "Won"
+            icon = "✔" if is_won else "✗"
+            icon_cls = "won" if is_won else "lost"
+            n_legs = len(rp["legs"])
+            odds_str = f"{int(rp['combined_odds']):+d}" if rp["combined_odds"] else ""
+            if is_won:
+                payout_val = payout_calc(rp["wager"], rp["combined_odds"])
+                amt_str = f"${rp['wager']:,} → ${payout_val:,}"
+                amt_cls = "won"
+            else:
+                amt_str = f"${rp['wager']:,} → $0"
+                amt_cls = "lost"
+            recent_html += f"""<div class="recent-row">
+  <span class="recent-icon {icon_cls}">{icon}</span>
+  <span class="recent-info">{n_legs}-leg {odds_str}</span>
+  <span class="recent-amount {amt_cls}">{amt_str}</span>
+</div>\n"""
+    else:
+        recent_html = '<div class="empty-msg">No settled parlays yet</div>'
+
+    body = f"""<style>{_SPORTSBOOK_CSS}{_PARLAY_ANALYTICS_CSS}</style>
+
+<div class="header">
+  <div class="header-left">
+    <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f4ca")}</div>
+    <div class="game-title-group">
+      <div class="game-title">PARLAY ANALYTICS</div>
+      <div class="game-subtitle">YOUR PARLAYS</div>
+    </div>
+  </div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Record -->
+<div class="hero-section">
+  <div class="hero-label">PARLAY RECORD</div>
+  <div class="hero-value">{wins}-{losses}-{pushes}</div>
+  <div class="hero-delta {'positive' if win_rate >= 50 else 'negative'}">{win_rate:.1f}% WIN RATE</div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Stats Grid -->
+<div class="stat-grid-2col">
+  <div class="stat-cell">
+    <div class="stat-label">TOTAL WAGERED</div>
+    <div class="stat-value">${total_wagered:,}</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">TOTAL WON</div>
+    <div class="stat-value green">${total_won:,}</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">NET P&amp;L</div>
+    <div class="stat-value {pnl_class}">{esc(pnl_str)}</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">AVG LEGS</div>
+    <div class="stat-value">{avg_legs:.1f}</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">BIGGEST PARLAY</div>
+    <div class="stat-value">{max_legs} legs</div>
+  </div>
+  <div class="stat-cell">
+    <div class="stat-label">PENDING</div>
+    <div class="stat-value">{pending}</div>
+  </div>
+</div>
+
+<div class="gold-divider"></div>
+
+<!-- Leg Win Rate by Type -->
+<div class="section-title">LEG WIN RATE BY TYPE</div>
+{bars_html}
+
+<div class="gold-divider"></div>
+
+<!-- Recent Parlays -->
+<div class="section-title">RECENT PARLAYS</div>
+<div class="recent-section">
+{recent_html}
+</div>
+"""
+
+    return await render_card(wrap_card(body, status_class=status_class))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

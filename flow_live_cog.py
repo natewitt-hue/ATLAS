@@ -719,7 +719,12 @@ class FlowLiveCog(commands.Cog):
                     member = guild.get_member(event.discord_id) if guild else None
                     player = member.display_name if member else str(event.discord_id)
                     from casino.renderer.highlight_renderer import render_parlay_card
-                    png_bytes = await render_parlay_card(player, 0, "", event.amount)
+                    from flow_sportsbook import get_parlay_display_info
+                    loop = asyncio.get_running_loop()
+                    leg_count, odds_str = await loop.run_in_executor(
+                        None, get_parlay_display_info, event.bet_id
+                    )
+                    png_bytes = await render_parlay_card(player, leg_count, odds_str, event.amount)
 
             elif hasattr(event, "market_title"):
                 # PredictionEvent

@@ -56,7 +56,7 @@ import data_manager as dm
 import flow_wallet
 from odds_api_client import SUPPORTED_SPORTS as REAL_SPORTS
 from real_sportsbook_cog import EventListView, SPORT_EMOJI
-from sportsbook_cards import build_sportsbook_card, build_stats_card, card_to_file
+from sportsbook_cards import build_sportsbook_card, build_stats_card, build_parlay_analytics_card, card_to_file
 from db_migration_snapshots import setup_snapshots_table, take_daily_snapshot, backfill_from_bets
 import logging
 
@@ -1736,6 +1736,22 @@ class SportsbookHubView(discord.ui.View):
             else:
                 await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
+    # ── Row 3: Analytics ───────────────────────────────────────────────────
+
+    @discord.ui.button(label="Parlay Stats", emoji="\U0001f4ca",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:parlay_stats", row=3)
+    async def parlay_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            img = await build_parlay_analytics_card(interaction.user.id)
+            file = card_to_file(img, "parlay_analytics.png")
+            embed = discord.Embed(color=TSL_GOLD)
+            embed.set_image(url="attachment://parlay_analytics.png")
+            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
     # ── Internal: real sport drill-down ────────────────────────────────────
 
     async def _show_real_sport(self, interaction: discord.Interaction, sport_key: str):
@@ -1894,6 +1910,19 @@ def _derive_historical_leg_status(parlay_status: str) -> str:
     return "Unknown"
 
 
+def get_parlay_display_info(parlay_id: str) -> tuple[int, str]:
+    """Return (leg_count, odds_str) for a parlay. Used by highlight cards."""
+    with _db_con() as con:
+        count = con.execute(
+            "SELECT COUNT(*) FROM parlay_legs WHERE parlay_id=?", (parlay_id,)
+        ).fetchone()[0]
+        row = con.execute(
+            "SELECT combined_odds FROM parlays_table WHERE parlay_id=?", (parlay_id,)
+        ).fetchone()
+    odds_str = f"{int(row[0]):+d}" if row else ""
+    return count, odds_str
+
+
 def backfill_parlay_legs_sync() -> int:
     """Populate parlay_legs from existing JSON legs column. Returns rows inserted."""
     count = 0
@@ -2038,10 +2067,22 @@ class SportsbookCog(commands.Cog):
                 (uid,)
             ).fetchall()
             parlays = con.execute(
-                "SELECT parlay_id, week, legs, combined_odds, wager_amount, status "
+                "SELECT parlay_id, week, combined_odds, wager_amount, status "
                 "FROM parlays_table WHERE discord_id=? AND status='Pending' ORDER BY rowid DESC",
                 (uid,)
             ).fetchall()
+            # Batch-fetch legs from normalized parlay_legs table
+            legs_map: dict[str, list[dict]] = {}
+            if parlays:
+                pids = [p[0] for p in parlays]
+                placeholders = ",".join("?" * len(pids))
+                leg_rows = con.execute(
+                    f"SELECT parlay_id, pick FROM parlay_legs "
+                    f"WHERE parlay_id IN ({placeholders}) ORDER BY parlay_id, leg_index",
+                    pids,
+                ).fetchall()
+                for parlay_id, pick in leg_rows:
+                    legs_map.setdefault(parlay_id, []).append({"pick": pick})
 
         embed = discord.Embed(
             title=f"📋  {interaction.user.display_name}'s Active Bets", color=TSL_GOLD
@@ -2065,11 +2106,8 @@ class SportsbookCog(commands.Cog):
             if parlays:
                 lines = []
                 for p in parlays[:4]:
-                    pid, week, legs_json, c_odds, amt, status = p
-                    try:
-                        legs = json.loads(legs_json) if isinstance(legs_json, (str, bytes)) else []
-                    except Exception:
-                        legs = []
+                    pid, week, c_odds, amt, status = p
+                    legs = legs_map.get(pid, [])
                     potential = _payout_calc(amt, c_odds) - amt
                     picks = ", ".join(l["pick"] for l in legs) if legs else "—"
                     lines.append(
