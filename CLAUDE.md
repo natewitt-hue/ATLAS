@@ -6,6 +6,25 @@ ATLAS (Autonomous TSL League Administration System) is a Discord bot serving as 
 
 ## Critical Rules
 
+I may be running multiple Claude Code sessions on this repo simultaneously.  Ask me if I will be using multiple sessions before starting any planning, so you can adjust the plan accordingly.  This is called being in 'Sicko Mode'
+My repo is at C:\Users\natew\Desktop\discord_bot
+
+If I answer that yes, I want to use multiple sessions, aka 'Sicko Mode' then before making changes:
+1. List the specific files you plan to touch
+2. Wait for my approval before editing
+3. Never edit files claimed by another session
+
+When planning a task, break it into independent workstreams that can run
+in parallel across sessions. Label each workstream with:
+- Workstream name
+- Files it touches (exclusive — no overlap)
+- Dependencies on other workstreams (if any)
+- Estimated steps
+
+I'll assign each workstream to a different session. Design workstreams
+so they can merge cleanly with no conflicts.
+
+
 ### Code Rules
 
 - **Bump `ATLAS_VERSION` in `bot.py` before every push.** Minor bump for features (2.1.0 → 2.2.0), patch for fixes (2.1.0 → 2.1.1).
