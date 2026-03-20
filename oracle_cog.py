@@ -3082,6 +3082,27 @@ class OracleHubView(discord.ui.View):
 
 # ── Oracle Intelligence Modal Base ────────────────────────────────────────────
 
+def _format_citations(result) -> str:
+    """Format grounding_chunks from an AIResult into a compact sources string."""
+    chunks = getattr(result, "grounding_chunks", None)
+    if not chunks:
+        return ""
+    # Deduplicate by domain, keep first 5
+    seen = set()
+    sources = []
+    for c in chunks:
+        domain = c.get("domain", "")
+        uri = c.get("uri", "")
+        title = c.get("title", domain)
+        if domain in seen or not uri:
+            continue
+        seen.add(domain)
+        sources.append(f"[{title}]({uri})")
+        if len(sources) >= 5:
+            break
+    return "\n".join(sources) if sources else ""
+
+
 class _EarlyReturn(Exception):
     """Signal that _generate() already sent a response."""
 
@@ -3122,13 +3143,15 @@ class _OracleIntelModal(discord.ui.Modal):
         raise NotImplementedError
 
     @staticmethod
-    def _build_embed(answer: str, *, title: str, color, footer: str) -> discord.Embed:
+    def _build_embed(answer: str, *, title: str, color, footer: str, fields: list | None = None) -> discord.Embed:
         embed = discord.Embed(
             title=title,
             description=_truncate_for_embed(answer),
             color=color,
             timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
+        for name, value in (fields or []):
+            embed.add_field(name=name, value=value, inline=False)
         embed.set_footer(text=footer, icon_url=ATLAS_ICON_URL)
         return embed
 
@@ -3297,7 +3320,12 @@ class _AskWebModal(_OracleIntelModal):
         if result.fallback_used:
             footer += "  ·  ⚡ via Gemini fallback"
 
-        return answer, {"title": embed_title, "color": embed_color, "footer": footer}
+        fields = []
+        citations = _format_citations(result)
+        if citations:
+            fields.append(("📚 Sources", citations))
+
+        return answer, {"title": embed_title, "color": embed_color, "footer": footer, "fields": fields}
 
 
 # Backwards-compatible aliases for hub view button callbacks
@@ -3648,10 +3676,17 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
         if hasattr(result, 'fallback_used') and result.fallback_used:
             footer += "  ·  ⚡ via Gemini fallback"
 
+        fields = []
+        if use_web_search:
+            citations = _format_citations(result)
+            if citations:
+                fields.append(("📚 Sources", citations))
+
         return answer, {
             "title": "🧠 ATLAS Intelligence — Strategy Room",
             "color": AtlasColors.SUCCESS,
             "footer": footer,
+            "fields": fields,
         }
 
 

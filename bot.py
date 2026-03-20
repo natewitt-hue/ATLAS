@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "3.11.0"  # Query caching — Tier 3 NL→SQL LRU cache with sync invalidation
+ATLAS_VERSION = "3.12.0"  # Result citation — web search sources in Open/Sports/Strategy embeds
 from constants import ATLAS_ICON_URL, ATLAS_GOLD, ATLAS_DARK, ATLAS_BLUE
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

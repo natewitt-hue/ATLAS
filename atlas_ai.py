@@ -48,6 +48,8 @@ class AIResult:
     tool_calls: list[dict] = field(default_factory=list)
     fallback_used: bool = False
     _raw_content: list = field(default_factory=list, repr=False)
+    grounding_chunks: list[dict] = field(default_factory=list)  # [{uri, title, domain}]
+    search_queries: list[str] = field(default_factory=list)
 
 
 # ── Model mapping ────────────────────────────────────────────────────────────
@@ -260,10 +262,32 @@ def _call_gemini_with_search(client, prompt, system, max_tokens):
         config=config,
         contents=contents,
     )
+
+    # Extract grounding metadata (web search citations)
+    grounding_chunks = []
+    search_queries = []
+    try:
+        candidate = response.candidates[0] if response.candidates else None
+        meta = getattr(candidate, "grounding_metadata", None) if candidate else None
+        if meta:
+            for chunk in getattr(meta, "grounding_chunks", None) or []:
+                web = getattr(chunk, "web", None)
+                if web:
+                    grounding_chunks.append({
+                        "uri": getattr(web, "uri", ""),
+                        "title": getattr(web, "title", ""),
+                        "domain": getattr(web, "domain", ""),
+                    })
+            search_queries = list(getattr(meta, "web_search_queries", None) or [])
+    except Exception:
+        pass  # Citation extraction is best-effort
+
     return AIResult(
         text=response.text.strip(),
         provider="gemini",
         model="gemini-2.0-flash",
+        grounding_chunks=grounding_chunks,
+        search_queries=search_queries,
     )
 
 
