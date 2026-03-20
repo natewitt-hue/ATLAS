@@ -493,6 +493,84 @@ def validate_sql(sql: str) -> list[str]:
     return warnings
 
 
+async def retry_sql(
+    sql: str,
+    schema: str,
+    *,
+    params: tuple = (),
+) -> tuple[list[dict], str, str | None, int, list[str]]:
+    """Execute SQL with 3-attempt progressive retry cascade.
+
+    Attempt 1: Execute as-is.
+    Attempt 2: Haiku + error + validate_sql() hints + full schema.
+    Attempt 3: Opus + both previous attempts + "think step by step".
+
+    params are only used for Attempt 1. AI-regenerated SQL in Attempts
+    2/3 is executed without params since the AI produces literal values.
+
+    Returns:
+        (rows, final_sql, error, attempt_num, warnings)
+        - rows: query results (capped at MAX_ROWS)
+        - final_sql: the SQL that ultimately ran (may differ from input)
+        - error: None on success, error string if all 3 attempts failed
+        - attempt_num: 1 = first try, 2 = Haiku self-correct, 3 = Opus rescue
+        - warnings: validate_sql() output (empty list if not used)
+    """
+    # ── Attempt 1 ─────────────────────────────────────────
+    rows, error_1 = run_sql(sql, params)
+    if not error_1:
+        return rows, sql, None, 1, []
+
+    sql_1 = sql  # preserve original for attempt 3
+
+    # ── Attempt 2: Haiku + validation hints ─────────────
+    warnings = validate_sql(sql)
+    hint_block = "\n".join(f"- {w}" for w in warnings) if warnings else ""
+
+    fix_prompt_2 = (
+        f"This SQLite query failed:\n{sql_1}\n\n"
+        f"Error: {error_1}\n\n"
+        f"REMINDER: ALL columns are TEXT. Use CAST(col AS INTEGER) for math.\n"
+        f"{f'Validation warnings:\n{hint_block}\n' if hint_block else ''}"
+        f"Fix the query. Return ONLY valid SQLite SQL.\n\n"
+        f"Schema:\n{schema}"
+    )
+    fix_result_2 = await atlas_ai.generate(
+        fix_prompt_2, tier=Tier.HAIKU, max_tokens=500, temperature=0.02
+    )
+    sql_2 = extract_sql(fix_result_2.text)
+    if not sql_2:
+        print(f"[retry_sql] Attempt 2: extract_sql returned None, reusing previous SQL")
+        sql_2 = sql_1
+    rows, error_2 = run_sql(sql_2)
+    if not error_2:
+        return rows, sql_2, None, 2, warnings
+
+    # ── Attempt 3: Opus + full history + reasoning ────────
+    fix_prompt_3 = (
+        f"Two SQL attempts against this schema both failed.\n\n"
+        f"Attempt 1:\n{sql_1}\nError: {error_1}\n\n"
+        f"Attempt 2:\n{sql_2}\nError: {error_2}\n\n"
+        f"{f'Validation warnings:\n{hint_block}\n' if hint_block else ''}"
+        f"Think step by step: which tables and columns are needed, "
+        f"what JOINs are required, and what CAST operations are necessary. "
+        f"Then write the corrected SQL. Return ONLY valid SQLite SQL.\n\n"
+        f"Schema:\n{schema}"
+    )
+    fix_result_3 = await atlas_ai.generate(
+        fix_prompt_3, tier=Tier.OPUS, max_tokens=800, temperature=0.02
+    )
+    sql_3 = extract_sql(fix_result_3.text)
+    if not sql_3:
+        print(f"[retry_sql] Attempt 3: extract_sql returned None, reusing previous SQL")
+        sql_3 = sql_2
+    rows, error_3 = run_sql(sql_3)
+    if not error_3:
+        return rows, sql_3, None, 3, warnings
+
+    return [], sql_3, error_3, 3, warnings
+
+
 async def gemini_sql(
     question: str, alias_map: dict | None = None,
     conv_context: str = "",
