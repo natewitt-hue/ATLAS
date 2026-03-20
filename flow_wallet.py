@@ -103,13 +103,14 @@ async def _check_idempotent(db, reference_key: str) -> Optional[int]:
 async def _insert_txn(
     db, discord_id: int, amount: int, balance_after: int,
     source: str, reference_key: Optional[str], description: str,
+    subsystem: Optional[str] = None, subsystem_id: Optional[str] = None,
 ):
     """Insert a transaction record."""
     await db.execute(
         "INSERT INTO transactions "
-        "(discord_id, amount, balance_after, source, reference_key, description, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (discord_id, amount, balance_after, source, reference_key, description, _now()),
+        "(discord_id, amount, balance_after, source, reference_key, description, created_at, subsystem, subsystem_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (discord_id, amount, balance_after, source, reference_key, description, _now(), subsystem, subsystem_id),
     )
 
 
@@ -135,6 +136,8 @@ async def credit(
     description: str = "",
     reference_key: Optional[str] = None,
     *,
+    subsystem: Optional[str] = None,
+    subsystem_id: Optional[str] = None,
     con=None,
 ) -> int:
     """
@@ -159,6 +162,7 @@ async def credit(
         await _insert_txn(
             con, discord_id, amount, new_balance,
             source, reference_key, description,
+            subsystem, subsystem_id,
         )
         return new_balance
 
@@ -178,6 +182,7 @@ async def credit(
             await _insert_txn(
                 db, discord_id, amount, new_balance,
                 source, reference_key, description,
+                subsystem, subsystem_id,
             )
             await db.commit()
         except Exception:
@@ -193,6 +198,8 @@ async def debit(
     description: str = "",
     reference_key: Optional[str] = None,
     *,
+    subsystem: Optional[str] = None,
+    subsystem_id: Optional[str] = None,
     con=None,
 ) -> int:
     """
@@ -220,6 +227,7 @@ async def debit(
         await _insert_txn(
             con, discord_id, -amount, new_balance,
             source, reference_key, description,
+            subsystem, subsystem_id,
         )
         return new_balance
 
@@ -244,6 +252,7 @@ async def debit(
             await _insert_txn(
                 db, discord_id, -amount, new_balance,
                 source, reference_key, description,
+                subsystem, subsystem_id,
             )
             await db.commit()
         except InsufficientFundsError:
@@ -260,6 +269,8 @@ async def set_balance(
     source: str,
     description: str = "",
     *,
+    subsystem: Optional[str] = None,
+    subsystem_id: Optional[str] = None,
     con=None,
 ) -> tuple[int, int]:
     """
@@ -276,6 +287,7 @@ async def set_balance(
         await _insert_txn(
             con, discord_id, delta, amount,
             source, None, description,
+            subsystem, subsystem_id,
         )
         return old, amount
 
@@ -291,6 +303,7 @@ async def set_balance(
             await _insert_txn(
                 db, discord_id, delta, amount,
                 source, None, description,
+                subsystem, subsystem_id,
             )
             await db.commit()
         except Exception:
@@ -394,6 +407,16 @@ async def setup_wallet_db() -> None:
                 value TEXT NOT NULL DEFAULT ''
             )
         """)
+        # -- Audit columns: subsystem + subsystem_id (idempotent migration) --
+        for col in ("subsystem TEXT DEFAULT NULL", "subsystem_id TEXT DEFAULT NULL"):
+            try:
+                await db.execute(f"ALTER TABLE transactions ADD COLUMN {col}")
+            except Exception:
+                pass  # column already exists
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tx_subsystem "
+            "ON transactions(subsystem, subsystem_id)"
+        )
         await db.commit()
 
 
@@ -421,6 +444,8 @@ def update_balance_sync(
     description: str = "",
     reference_key: Optional[str] = None,
     con: Optional[sqlite3.Connection] = None,
+    subsystem: Optional[str] = None,
+    subsystem_id: Optional[str] = None,
 ) -> int:
     """
     Sync version: add/subtract from balance + log transaction.
@@ -448,9 +473,9 @@ def update_balance_sync(
         )
         c.execute(
             "INSERT INTO transactions "
-            "(discord_id, amount, balance_after, source, reference_key, description, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (discord_id, delta, new_balance, source, reference_key, description, _now()),
+            "(discord_id, amount, balance_after, source, reference_key, description, created_at, subsystem, subsystem_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (discord_id, delta, new_balance, source, reference_key, description, _now(), subsystem, subsystem_id),
         )
         return new_balance
 
@@ -462,3 +487,20 @@ def update_balance_sync(
             result = _run(c)
             c.commit()
             return result
+
+
+async def backfill_subsystem_tags() -> int:
+    """
+    One-time migration: populate subsystem column for existing rows
+    based on source column. Returns number of rows updated.
+    """
+    total = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for source in ("TSL_BET", "CASINO", "PREDICTION", "ADMIN", "STIPEND", "REAL_BET"):
+            cursor = await db.execute(
+                "UPDATE transactions SET subsystem=? WHERE source=? AND subsystem IS NULL",
+                (source, source),
+            )
+            total += cursor.rowcount
+        await db.commit()
+    return total

@@ -107,6 +107,7 @@ async def admin_give(discord_id: int, amount: int, admin_id: int,
                     discord_id, amount, "ADMIN",
                     description=reason or "admin give",
                     reference_key=ref_key,
+                    subsystem="ADMIN",
                     con=db,
                 )
                 await db.execute("""
@@ -135,6 +136,7 @@ async def admin_take(discord_id: int, amount: int, admin_id: int,
                     new_balance = await flow_wallet.debit(
                         discord_id, actual_take, "ADMIN",
                         description=reason or "admin take",
+                        subsystem="ADMIN",
                         con=db,
                     )
                 else:
@@ -163,6 +165,7 @@ async def admin_set(discord_id: int, amount: int, admin_id: int,
                 old_balance, new_balance = await flow_wallet.set_balance(
                     discord_id, new_amount, "ADMIN",
                     description=reason or "admin set",
+                    subsystem="ADMIN",
                     con=db,
                 )
                 await db.execute("""

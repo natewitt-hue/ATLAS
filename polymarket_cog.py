@@ -374,18 +374,21 @@ async def get_balance(user_id) -> int:
     return await flow_wallet.get_balance(int(user_id))
 
 
-async def update_balance(user_id, delta: int):
+async def update_balance(user_id, delta: int, *, contract_id=None):
     """
     Add `delta` (positive = credit, negative = debit) to a user's balance.
     Raises ValueError if the resulting balance would go negative.
     """
     uid = int(user_id)
+    sid = str(contract_id) if contract_id is not None else None
     if delta >= 0:
         await flow_wallet.credit(uid, delta, "PREDICTION",
-                                 description="prediction market")
+                                 description="prediction market",
+                                 subsystem="PREDICTION", subsystem_id=sid)
     else:
         await flow_wallet.debit(uid, abs(delta), "PREDICTION",
-                                description="prediction market")
+                                description="prediction market",
+                                subsystem="PREDICTION", subsystem_id=sid)
 
 
 # ─────────────────────────────────────────────
@@ -772,13 +775,7 @@ class WagerModal(discord.ui.Modal):
                         )
                         return
 
-                    await flow_wallet.debit(
-                        user_id, cost_bucks, "PREDICTION",
-                        description="prediction market bet",
-                        con=db,
-                    )
-
-                    # Write contract in same transaction
+                    # Write contract first to get ID for audit link
                     await db.execute("""
                         INSERT INTO prediction_contracts
                             (user_id, market_id, slug, side, buy_price,
@@ -789,6 +786,14 @@ class WagerModal(discord.ui.Modal):
                         self.side, self.price,
                         quantity, cost_bucks, payout, now,
                     ))
+                    async with db.execute("SELECT last_insert_rowid()") as cur:
+                        contract_id = (await cur.fetchone())[0]
+                    await flow_wallet.debit(
+                        user_id, cost_bucks, "PREDICTION",
+                        description="prediction market bet",
+                        subsystem="PREDICTION", subsystem_id=str(contract_id),
+                        con=db,
+                    )
                     await db.commit()
             except flow_wallet.InsufficientFundsError as e:
                 await interaction.response.send_message(f"❌ {e}", ephemeral=True)
@@ -3282,7 +3287,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 if result == "VOID":
                     await flow_wallet.credit(
                         int(user_id), cost, "PREDICTION",
-                        description=f"prediction market voided",
+                        description="prediction market voided",
+                        subsystem="PREDICTION", subsystem_id=str(cid),
                         con=db,
                     )
                     await db.execute(
@@ -3297,7 +3303,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         payout = PREDICTION_MAX_PAYOUT
                     await flow_wallet.credit(
                         int(user_id), payout, "PREDICTION",
-                        description=f"prediction market won",
+                        description="prediction market won",
+                        subsystem="PREDICTION", subsystem_id=str(cid),
                         con=db,
                     )
                     await db.execute(

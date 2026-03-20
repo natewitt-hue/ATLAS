@@ -19,6 +19,7 @@ import asyncio
 import functools
 import io
 import random
+import uuid
 from datetime import datetime, timezone
 
 import discord
@@ -78,8 +79,9 @@ async def play_coinflip(
             ephemeral=True
         )
 
+    correlation_id = uuid.uuid4().hex[:8]
     try:
-        await deduct_wager(uid, wager)
+        await deduct_wager(uid, wager, correlation_id=correlation_id)
     except Exception as e:
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -100,6 +102,7 @@ async def play_coinflip(
         payout     = payout,
         multiplier = mult,
         channel_id = interaction.channel_id,
+        correlation_id = correlation_id,
     )
 
     # Check achievements
@@ -201,13 +204,15 @@ async def play_coinflip(
 class ChallengeView(discord.ui.View):
     """Accept/Decline buttons for PvP coin flip challenge."""
 
-    def __init__(self, challenge_id: int, challenger_id: int, opponent_id: int, wager: int):
+    def __init__(self, challenge_id: int, challenger_id: int, opponent_id: int, wager: int, challenger_correlation_id: str = ""):
         super().__init__(timeout=300)   # 5-minute window
         self.challenge_id  = challenge_id
         self.challenger_id = challenger_id
         self.opponent_id   = opponent_id
         self.wager         = wager
         self.resolved      = False
+        self.challenger_correlation_id = challenger_correlation_id
+        self.opponent_correlation_id   = ""
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -224,8 +229,9 @@ class ChallengeView(discord.ui.View):
         self.resolved = True
 
         # Deduct opponent's wager
+        self.opponent_correlation_id = uuid.uuid4().hex[:8]
         try:
-            await deduct_wager(self.opponent_id, self.wager)
+            await deduct_wager(self.opponent_id, self.wager, correlation_id=self.opponent_correlation_id)
         except Exception as e:
             self.resolved = False
             return await interaction.response.send_message(
@@ -409,8 +415,9 @@ async def send_challenge(
         )
 
     # Deduct challenger's wager now (refunded if declined/timeout)
+    challenger_correlation_id = uuid.uuid4().hex[:8]
     try:
-        await deduct_wager(uid, wager)
+        await deduct_wager(uid, wager, correlation_id=challenger_correlation_id)
     except Exception as e:
         return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
 
@@ -422,7 +429,7 @@ async def send_challenge(
         channel_id    = interaction.channel_id,
     )
 
-    view = ChallengeView(challenge_id, uid, opponent.id, wager)
+    view = ChallengeView(challenge_id, uid, opponent.id, wager, challenger_correlation_id=challenger_correlation_id)
     active_challenges[challenge_id] = view
 
     embed = discord.Embed(

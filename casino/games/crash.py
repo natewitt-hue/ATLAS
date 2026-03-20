@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -86,6 +87,7 @@ class PlayerBet:
     bet_id:      int
     cashed_out:  bool  = False
     cashout_mult: float = 0.0
+    correlation_id: str = ""
 
 
 @dataclass
@@ -239,6 +241,7 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 payout     = lms_bonus,
                 multiplier = 0.10,
                 channel_id = round_obj.channel_id,
+                correlation_id = None,
             )
             # Emit LMS FLOW event
             from casino.casino import post_to_ledger
@@ -268,6 +271,7 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 payout     = 0,
                 multiplier = round_obj.crash_point,
                 channel_id = round_obj.channel_id,
+                correlation_id = player.correlation_id or None,
             )
             # Check achievements
             await check_achievements(
@@ -370,6 +374,7 @@ class CrashView(discord.ui.View):
             payout     = payout,
             multiplier = mult,
             channel_id = self.round_obj.channel_id,
+            correlation_id = player.correlation_id or None,
         )
 
         # Check achievements
@@ -535,8 +540,9 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
         )
 
     # ── Deduct wager ───────────────────────────────────────────────────────
+    correlation_id = uuid.uuid4().hex[:8]
     try:
-        await deduct_wager(uid, wager)
+        await deduct_wager(uid, wager, correlation_id=correlation_id)
     except Exception as e:
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -568,6 +574,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
             display_name = interaction.user.display_name,
             wager        = wager,
             bet_id       = bet_id,
+            correlation_id = correlation_id,
         )
 
         # Run lobby countdown, then the round — async background task
@@ -581,6 +588,7 @@ async def join_crash(interaction: discord.Interaction, wager: int, bot: discord.
             display_name = interaction.user.display_name,
             wager        = wager,
             bet_id       = bet_id,
+            correlation_id = correlation_id,
         )
 
 

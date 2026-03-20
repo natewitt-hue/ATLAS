@@ -770,6 +770,7 @@ async def process_wager(
     payout:      int,       # total bucks returned to player (0 if loss)
     multiplier:  float = 1.0,
     channel_id:  int | None = None,
+    correlation_id: str | None = None,
 ) -> dict:
     """
     Atomically process a casino wager result.
@@ -839,6 +840,7 @@ async def process_wager(
                     discord_id, payout, "CASINO",
                     description=f"{game_type} {outcome}",
                     reference_key=ref_key,
+                    subsystem="CASINO",
                     con=db,
                 )
             else:
@@ -865,6 +867,23 @@ async def process_wager(
                 VALUES (?,?,?,?,?,?,?,?)
             """, (discord_id, game_type, wager, outcome, payout, multiplier, channel_id, now)) as cur:
                 session_id = cur.lastrowid
+
+            # 6b. Backlink debit txn to this session + tag credit txn
+            sid = str(session_id)
+            if correlation_id:
+                await db.execute(
+                    "UPDATE transactions SET subsystem_id=? "
+                    "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id=?",
+                    (sid, discord_id, correlation_id),
+                )
+            if payout > 0:
+                # Tag the credit txn we just inserted (most recent for this user)
+                await db.execute(
+                    "UPDATE transactions SET subsystem_id=? "
+                    "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id IS NULL "
+                    "AND amount > 0 ORDER BY txn_id DESC LIMIT 1",
+                    (sid, discord_id),
+                )
 
             # 7. Get txn_id
             txn_id = None
@@ -909,12 +928,15 @@ async def process_wager(
     }
 
 
-async def deduct_wager(discord_id: int, wager: int) -> int:
+async def deduct_wager(discord_id: int, wager: int,
+                       correlation_id: str | None = None) -> int:
     """
     Deduct wager from balance at bet placement time.
     Returns new balance.
     Raises InsufficientFundsError if balance is too low.
     Raises ValueError if wager exceeds tier limit.
+    correlation_id: optional UUID fragment to link this debit to its
+    future casino_sessions row (prevents race conditions on backlink).
     """
     balance = await flow_wallet.get_balance(discord_id)
     max_bet = CASINO_MAX_BET
@@ -928,14 +950,18 @@ async def deduct_wager(discord_id: int, wager: int) -> int:
         return await flow_wallet.debit(
             discord_id, wager, "CASINO",
             description="casino wager",
+            subsystem="CASINO",
+            subsystem_id=correlation_id,
         )
 
 
-async def refund_wager(discord_id: int, amount: int) -> int:
+async def refund_wager(discord_id: int, amount: int,
+                       correlation_id: str | None = None) -> int:
     """Refund a wager (e.g. declined PvP challenge, crash round void). Returns new balance."""
     return await flow_wallet.credit(
         discord_id, amount, "CASINO",
         description="casino refund",
+        subsystem="CASINO", subsystem_id=correlation_id,
     )
 
 

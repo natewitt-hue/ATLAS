@@ -20,6 +20,7 @@ import asyncio
 import functools
 import io
 import random
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import discord
@@ -127,6 +128,7 @@ class BlackjackSession:
     doubled:       bool = False
     split_active:  bool = False
     done:          bool = False
+    correlation_id: str = ""
 
     created_at:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -263,6 +265,7 @@ class BlackjackView(discord.ui.View):
                     payout     = total_payout,
                     multiplier = round(avg_mult, 2),
                     channel_id = s.channel_id,
+                    correlation_id = s.correlation_id or None,
                 )
             except Exception as e:
                 print(f"[blackjack] Timeout wager resolution error for {s.discord_id}: {e}")
@@ -331,7 +334,7 @@ class DoubleButton(discord.ui.Button):
             )
 
         try:
-            await deduct_wager(session.discord_id, session.wager)
+            await deduct_wager(session.discord_id, session.wager, correlation_id=session.correlation_id)
         except Exception:
             return await interaction.response.send_message(
                 "❌ Insufficient funds to double down.", ephemeral=True
@@ -356,7 +359,7 @@ class SplitButton(discord.ui.Button):
             )
 
         try:
-            await deduct_wager(session.discord_id, session.wager)
+            await deduct_wager(session.discord_id, session.wager, correlation_id=session.correlation_id)
         except Exception:
             return await interaction.response.send_message(
                 "❌ Insufficient funds to split.", ephemeral=True
@@ -464,6 +467,7 @@ async def _finish_hand(
         payout     = total_payout,
         multiplier = round(avg_mult, 2),
         channel_id = session.channel_id,
+        correlation_id = session.correlation_id or None,
     )
 
     # Check achievements
@@ -628,8 +632,9 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
     # Set sentinel BEFORE any await to prevent TOCTOU double-session
     active_sessions[uid] = "PENDING"
 
+    correlation_id = uuid.uuid4().hex[:8]
     try:
-        await deduct_wager(uid, wager)
+        await deduct_wager(uid, wager, correlation_id=correlation_id)
     except Exception as e:
         active_sessions.pop(uid, None)
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
@@ -639,6 +644,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         wager          = wager,
         channel_id     = interaction.channel_id,
         original_wager = wager,
+        correlation_id = correlation_id,
     )
     session.deal()
     active_sessions[uid] = session
@@ -659,6 +665,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             payout     = payout,
             multiplier = round(mult, 2),
             channel_id = interaction.channel_id,
+            correlation_id = correlation_id,
         )
         bal = result["new_balance"]
 

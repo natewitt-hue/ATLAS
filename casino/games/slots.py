@@ -24,6 +24,7 @@ import asyncio
 import functools
 import io
 import random
+import uuid
 
 import discord
 from atlas_colors import AtlasColors
@@ -197,8 +198,9 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
             ephemeral=True
         )
 
+    correlation_id = uuid.uuid4().hex[:8]
     try:
-        await deduct_wager(interaction.user.id, wager)
+        await deduct_wager(interaction.user.id, wager, correlation_id=correlation_id)
     except Exception as e:
         return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -249,6 +251,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         payout     = payout,
         multiplier = mult,
         channel_id = interaction.channel_id,
+        correlation_id = correlation_id,
     )
 
     # Check achievements
@@ -367,6 +370,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
             payout=free_payout,
             multiplier=free_mult,
             channel_id=interaction.channel_id,
+            correlation_id=None,
         )
 
         # Check achievements on free spin too

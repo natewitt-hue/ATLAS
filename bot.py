@@ -163,7 +163,7 @@ except ImportError:
 load_dotenv()
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.0.1"  # Quiet handling for expired interactions (10062/40060)
+ATLAS_VERSION = "4.1.0"  # Unified audit: subsystem tagging + $0 loss settlement txns
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -229,6 +229,9 @@ async def setup_hook():
     try:
         import flow_wallet
         await flow_wallet.setup_wallet_db()
+        backfilled = await flow_wallet.backfill_subsystem_tags()
+        if backfilled:
+            print(f"ATLAS: Flow wallet — backfilled {backfilled} txn subsystem tags.")
         print("ATLAS: Flow wallet system initialized.")
     except Exception as e:
         print(f"ATLAS: Flow wallet setup failed: {e}")

@@ -245,8 +245,13 @@ def _get_balance(uid: int) -> int:
     return flow_wallet.get_balance_sync(uid)
 
 
-def _update_balance(uid: int, delta: int, con=None):
-    flow_wallet.update_balance_sync(uid, delta, source="TSL_BET", con=con)
+def _update_balance(uid: int, delta: int, con=None, *,
+                    subsystem=None, subsystem_id=None, reference_key=None):
+    flow_wallet.update_balance_sync(
+        uid, delta, source="TSL_BET",
+        reference_key=reference_key,
+        con=con, subsystem=subsystem, subsystem_id=subsystem_id,
+    )
 
 
 def _is_locked(game_id: str) -> bool:
@@ -1179,9 +1184,6 @@ class BetSlipModal(discord.ui.Modal):
             try:
                 with _db_con() as con:
                     con.execute("BEGIN IMMEDIATE")
-                    new_bal = flow_wallet.update_balance_sync(
-                        interaction.user.id, -amt, source="TSL_BET", con=con,
-                    )
                     safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
                     con.execute(
                         "INSERT INTO bets_table "
@@ -1189,6 +1191,11 @@ class BetSlipModal(discord.ui.Modal):
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (int(interaction.user.id), int(self.bet_week), self.matchup_key,
                          self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
+                    )
+                    bet_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    new_bal = flow_wallet.update_balance_sync(
+                        interaction.user.id, -amt, source="TSL_BET", con=con,
+                        subsystem="TSL_BET", subsystem_id=str(bet_id),
                     )
                     con.commit()
             except flow_wallet.InsufficientFundsError:
@@ -1255,15 +1262,16 @@ class ParlayWagerModal(discord.ui.Modal):
             try:
                 with _db_con() as con:
                     con.execute("BEGIN IMMEDIATE")
-                    flow_wallet.update_balance_sync(
-                        interaction.user.id, -amt, source="TSL_BET", con=con,
-                    )
                     con.execute(
                         "INSERT INTO parlays_table "
                         "(parlay_id, discord_id, week, legs, combined_odds, wager_amount, status) "
                         "VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
                         (parlay_id, int(interaction.user.id), int(dm.CURRENT_WEEK + 1),
                          json.dumps(self.legs), int(self.combined_odds), int(amt))
+                    )
+                    flow_wallet.update_balance_sync(
+                        interaction.user.id, -amt, source="TSL_BET", con=con,
+                        subsystem="PARLAY", subsystem_id=parlay_id,
                     )
                     con.commit()
             except flow_wallet.InsufficientFundsError:
@@ -1339,13 +1347,15 @@ class PropBetModal(discord.ui.Modal):
                         return await interaction.response.send_message(
                             "❌ This prop bet is no longer open.", ephemeral=True
                         )
-                    new_bal = flow_wallet.update_balance_sync(
-                        interaction.user.id, -amt, source="TSL_BET", con=con,
-                    )
                     con.execute(
                         "INSERT INTO prop_wagers (prop_id, discord_id, pick, wager_amount, odds) "
                         "VALUES (?, ?, ?, ?, ?)",
                         (self.prop_id, int(interaction.user.id), self.pick, int(amt), int(self.odds))
+                    )
+                    wager_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    new_bal = flow_wallet.update_balance_sync(
+                        interaction.user.id, -amt, source="TSL_BET", con=con,
+                        subsystem="PROP", subsystem_id=str(wager_id),
                     )
                     con.commit()
             except flow_wallet.InsufficientFundsError:
@@ -2152,13 +2162,23 @@ class SportsbookCog(commands.Cog):
                         con.execute("UPDATE bets_table SET status='Error' WHERE bet_id=?", (bid,))
                         settled += 1
                         continue
-                    _update_balance(uid, payout, con)
+                    _update_balance(uid, payout, con,
+                                    subsystem="TSL_BET", subsystem_id=str(bid),
+                                    reference_key=f"TSL_BET_SETTLE_{bid}")
                     total_paid += payout - amt
                     wins += 1
                 elif res == "Push":
-                    _update_balance(uid, amt, con)
+                    _update_balance(uid, amt, con,
+                                    subsystem="TSL_BET", subsystem_id=str(bid),
+                                    reference_key=f"TSL_BET_PUSH_{bid}")
                     pushes += 1
                 elif res == "Lost":
+                    flow_wallet.update_balance_sync(
+                        uid, 0, source="TSL_BET",
+                        description=f"Lost: {pick} {btype} on {matchup}",
+                        reference_key=f"TSL_BET_SETTLE_{bid}",
+                        con=con, subsystem="TSL_BET", subsystem_id=str(bid),
+                    )
                     losses += 1
                 con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
                 settled += 1
@@ -2207,7 +2227,9 @@ class SportsbookCog(commands.Cog):
                         con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (pid,))
                         settled += 1
                         continue
-                    _update_balance(uid, payout, con)
+                    _update_balance(uid, payout, con,
+                                    subsystem="PARLAY", subsystem_id=str(pid),
+                                    reference_key=f"PARLAY_SETTLE_{pid}")
                     total_paid += payout - amt
                     con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
                     wins += 1
@@ -2215,13 +2237,21 @@ class SportsbookCog(commands.Cog):
                                     "bet_type": "parlay", "matchup": f"parlay_id={pid}",
                                     "wager": amt, "profit": payout - amt, "bet_id": pid})
                 elif any_lost:
+                    flow_wallet.update_balance_sync(
+                        uid, 0, source="TSL_BET",
+                        description=f"Lost: parlay {pid}",
+                        reference_key=f"PARLAY_SETTLE_{pid}",
+                        con=con, subsystem="PARLAY", subsystem_id=str(pid),
+                    )
                     con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
                     losses += 1
                     bet_log.append({"uid": uid, "result": "Lost", "pick": "parlay",
                                     "bet_type": "parlay", "matchup": f"parlay_id={pid}",
                                     "wager": amt, "profit": 0, "bet_id": pid})
                 elif any_pushed:
-                    _update_balance(uid, amt, con)
+                    _update_balance(uid, amt, con,
+                                    subsystem="PARLAY", subsystem_id=str(pid),
+                                    reference_key=f"PARLAY_PUSH_{pid}")
                     con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
                     pushes += 1
                     bet_log.append({"uid": uid, "result": "Push", "pick": "parlay",
@@ -2772,18 +2802,28 @@ class SportsbookCog(commands.Cog):
             for wid, uid, pick, amt, odds in wagers:
                 pick_lower = pick.lower().strip()
                 if result == "push":
-                    _update_balance(uid, amt, con)
+                    _update_balance(uid, amt, con,
+                                    subsystem="PROP", subsystem_id=str(wid),
+                                    reference_key=f"PROP_PUSH_{wid}")
                     con.execute("UPDATE prop_wagers SET status='Push' WHERE id=?", (wid,))
                     pushes += 1
                 else:
                     winning_pick = opt_a if result == "a" else opt_b
                     if pick_lower == winning_pick.lower().strip():
                         payout = _payout_calc(amt, int(odds))
-                        _update_balance(uid, payout, con)
+                        _update_balance(uid, payout, con,
+                                        subsystem="PROP", subsystem_id=str(wid),
+                                        reference_key=f"PROP_SETTLE_{wid}")
                         total_paid += payout - amt
                         con.execute("UPDATE prop_wagers SET status='Won' WHERE id=?", (wid,))
                         wins += 1
                     else:
+                        flow_wallet.update_balance_sync(
+                            uid, 0, source="TSL_BET",
+                            description=f"Lost: Prop #{prop_id} — {pick}",
+                            reference_key=f"PROP_SETTLE_{wid}",
+                            con=con, subsystem="PROP", subsystem_id=str(wid),
+                        )
                         con.execute("UPDATE prop_wagers SET status='Lost' WHERE id=?", (wid,))
                         losses += 1
 
