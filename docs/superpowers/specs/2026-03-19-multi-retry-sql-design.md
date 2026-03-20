@@ -128,7 +128,7 @@ async def retry_sql(
     )
     sql_2 = extract_sql(fix_result_2.text)
     if not sql_2:
-        log.warning("[retry_sql] Attempt 2: extract_sql returned None, reusing previous SQL")
+        print("[retry_sql] Attempt 2: extract_sql returned None, reusing previous SQL")
         sql_2 = sql_1
     rows, error_2 = run_sql(sql_2)
     if not error_2:
@@ -150,7 +150,7 @@ async def retry_sql(
     )
     sql_3 = extract_sql(fix_result_3.text)
     if not sql_3:
-        log.warning("[retry_sql] Attempt 3: extract_sql returned None, reusing previous SQL")
+        print("[retry_sql] Attempt 3: extract_sql returned None, reusing previous SQL")
         sql_3 = sql_2
     rows, error_3 = run_sql(sql_3)
     if not error_3:
@@ -301,7 +301,7 @@ No new files.
 
 - `retry_sql()` relies on existing module-level imports in `codex_cog.py`: `atlas_ai`, `Tier`, `validate_sql`, `extract_sql`, `run_sql`. No new imports needed.
 - `validate_sql` is always defined inside `codex_cog.py` (it's a module-level function), so no `if validate_sql` guard is needed. The guard is only needed in `oracle_cog.py` where the import may fail.
-- Logging uses the existing `log` logger in `codex_cog.py` (module-level `logging.getLogger`).
+- Diagnostics use `print()` (consistent with the rest of `codex_cog.py` — no `logging` module is imported).
 
 ---
 
