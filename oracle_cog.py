@@ -198,6 +198,7 @@ gemini_sql = None
 gemini_answer = None
 extract_sql = None
 validate_sql = None
+retry_sql = None
 KNOWN_USERS = ""
 _build_schema_fn = None
 _build_conversation_block = None
@@ -210,6 +211,7 @@ try:
         run_sql,
         extract_sql,
         validate_sql,
+        retry_sql,
         fuzzy_resolve_user,
         resolve_names_in_question,
         ai_resolve_names as _ai_resolve_names,
@@ -3208,24 +3210,13 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
                 )
                 raise _EarlyReturn()
 
-            rows, error = run_sql(sql)
+            schema = _build_schema_fn() if _build_schema_fn else ""
+            rows, sql, error, attempt, _warnings = await retry_sql(sql, schema)
             if error:
-                fix_prompt = (
-                    f"This SQLite query for a Madden database failed:\n{sql}\n\n"
-                    f"Error: {error}\n\n"
-                    f"REMINDER: ALL columns are stored as TEXT. Always use "
-                    f"CAST(col AS INTEGER) for numeric comparisons.\n"
-                    f"Fix the query. Return ONLY valid SQLite SQL, no explanation.\n\n"
-                    f"Schema:\n{_build_schema_fn() if _build_schema_fn else ''}"
+                await interaction.followup.send(
+                    "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
                 )
-                fix_result = await atlas_ai.generate(fix_prompt, tier=Tier.HAIKU, max_tokens=500, temperature=0.02)
-                sql = extract_sql(fix_result.text) or sql
-                rows, error = run_sql(sql)
-                if error:
-                    await interaction.followup.send(
-                        "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
-                    )
-                    raise _EarlyReturn()
+                raise _EarlyReturn()
 
         answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
         answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
@@ -3240,6 +3231,8 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
             )
         if conv_block:
             footer_parts.append("💬 Conversational")
+        if attempt > 1:
+            footer_parts.append("⚠️ Self-corrected" if attempt == 2 else "🧠 Opus rescue")
 
         return answer, {
             "title": "🔬 ATLAS Intelligence — TSL League",
