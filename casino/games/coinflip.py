@@ -29,6 +29,7 @@ from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
     is_casino_open, get_channel_id, get_max_bet, check_achievements,
     create_challenge, get_challenge, resolve_challenge, decline_challenge,
+    store_opponent_corr_id,
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_coinflip_card
@@ -237,6 +238,8 @@ class ChallengeView(discord.ui.View):
             return await interaction.response.send_message(
                 f"❌ Insufficient funds: {e}", ephemeral=True
             )
+        # Persist opponent corr_id for wager registry backlink (GAP 7)
+        await store_opponent_corr_id(self.challenge_id, self.opponent_correlation_id)
         # Only stop view after confirmed deduct — keeps buttons alive for retry on failure
         self.stop()
         active_challenges.pop(self.challenge_id, None)
@@ -427,6 +430,7 @@ async def send_challenge(
         opponent_id   = opponent.id,
         wager         = wager,
         channel_id    = interaction.channel_id,
+        challenger_corr_id = challenger_correlation_id,
     )
 
     view = ChallengeView(challenge_id, uid, opponent.id, wager, challenger_correlation_id=challenger_correlation_id)

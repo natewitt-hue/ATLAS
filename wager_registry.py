@@ -421,3 +421,100 @@ async def backfill_wagers() -> int:
 
         await db.commit()
     return total
+
+
+# =============================================================================
+#  GAP 7 BACKFILLS — PvP coinflip + jackpot synthetic wagers
+# =============================================================================
+
+async def backfill_pvp_wagers() -> int:
+    """
+    Reclassify PvP coinflip sessions from CASINO → CASINO_PVP in wagers table,
+    and insert any missing PvP sessions. Idempotent.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        total = 0
+
+        # Step 1: Reclassify existing CASINO entries for coinflip_pvp sessions
+        async with db.execute("""
+            SELECT w.subsystem_id, cs.outcome, cs.payout, cs.wager
+            FROM wagers w
+            JOIN casino_sessions cs ON w.subsystem_id = CAST(cs.session_id AS TEXT)
+            WHERE w.subsystem = 'CASINO'
+              AND cs.game_type = 'coinflip_pvp'
+        """) as cur:
+            rows = await cur.fetchall()
+
+        for sub_id, outcome, payout, wager in rows:
+            pvp_sub_id = f"PVP_LEGACY_{sub_id}"
+            status = "won" if outcome == "win" else "lost"
+            result_amt = (payout - wager) if outcome == "win" else -wager
+            await db.execute(
+                "UPDATE wagers SET subsystem='CASINO_PVP', subsystem_id=?, "
+                "label='Coinflip PvP', status=?, result_amount=? "
+                "WHERE subsystem='CASINO' AND subsystem_id=?",
+                (pvp_sub_id, status, result_amt, sub_id),
+            )
+            total += 1
+
+        # Step 2: Insert any PvP sessions that weren't in wagers at all
+        async with db.execute("""
+            SELECT cs.session_id, cs.discord_id, cs.wager, cs.outcome,
+                   cs.payout, cs.played_at
+            FROM casino_sessions cs
+            WHERE cs.game_type = 'coinflip_pvp'
+              AND NOT EXISTS (
+                  SELECT 1 FROM wagers w
+                  WHERE w.subsystem = 'CASINO_PVP'
+                    AND w.subsystem_id = 'PVP_LEGACY_' || CAST(cs.session_id AS TEXT)
+              )
+        """) as cur:
+            missing = await cur.fetchall()
+
+        for sid, uid, wager, outcome, payout, played in missing:
+            sub_id = f"PVP_LEGACY_{sid}"
+            status = "won" if outcome == "win" else "lost"
+            result_amt = (payout - wager) if outcome == "win" else -wager
+            await db.execute(
+                "INSERT OR IGNORE INTO wagers "
+                "(subsystem, subsystem_id, discord_id, wager_amount, "
+                "label, status, result_amount, created_at, settled_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("CASINO_PVP", sub_id, uid, wager,
+                 "Coinflip PvP", status, result_amt,
+                 played or _now(), played or _now()),
+            )
+            total += 1
+
+        await db.commit()
+    return total
+
+
+async def backfill_jackpot_wagers() -> int:
+    """
+    Insert synthetic CASINO_JACKPOT wager entries for historical jackpot payouts.
+    Idempotent via INSERT OR IGNORE + UNIQUE(subsystem, subsystem_id).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT id, tier, discord_id, amount, won_at
+            FROM casino_jackpot_log
+        """) as cur:
+            rows = await cur.fetchall()
+
+        total = 0
+        for log_id, tier, uid, amount, won_at in rows:
+            sub_id = f"JP_LEGACY_{log_id}"
+            await db.execute(
+                "INSERT OR IGNORE INTO wagers "
+                "(subsystem, subsystem_id, discord_id, wager_amount, "
+                "label, status, result_amount, created_at, settled_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("CASINO_JACKPOT", sub_id, uid, 0,
+                 f"Jackpot {tier.upper()}", "won", amount,
+                 won_at or _now(), won_at or _now()),
+            )
+            total += 1
+
+        await db.commit()
+    return total

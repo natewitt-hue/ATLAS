@@ -154,6 +154,16 @@ async def setup_casino_db() -> None:
             )
         """)
 
+        # ── PvP challenge correlation IDs (GAP 7 — wager registry link) ──
+        for _col in ("challenger_corr_id TEXT DEFAULT NULL",
+                     "opponent_corr_id TEXT DEFAULT NULL"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE coinflip_challenges ADD COLUMN {_col}"
+                )
+            except Exception:
+                pass  # column already exists
+
         # ── Progressive jackpot pools ────────────────────────────────────
         await db.execute("""
             CREATE TABLE IF NOT EXISTS casino_jackpot (
@@ -510,10 +520,17 @@ async def _award_jackpot(tier: str, discord_id: int, game_type: str, con, sessio
         WHERE tier = ?
     """, (seed_val, discord_id, amount, now, amount, tier))
 
-    # Record jackpot payout in house bank (money leaving house to player)
-    await con.execute(
-        "INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at) VALUES (?,?,?,?)",
-        ("jackpot_payout", -amount, session_id, now),
+    # House bank write removed in GAP 7 (now derived from wagers table)
+
+    # GAP 7: Register synthetic jackpot wager in unified registry
+    import wager_registry
+    jp_sub_id = f"JP_{session_id}_{tier}"
+    await wager_registry.register_wager(
+        "CASINO_JACKPOT", jp_sub_id, discord_id, 0,
+        label=f"Jackpot {tier.upper()}", created_at=now, con=con,
+    )
+    await wager_registry.settle_wager(
+        "CASINO_JACKPOT", jp_sub_id, "won", amount, con=con,
     )
 
     # Log
@@ -953,12 +970,7 @@ async def process_wager(
                 if row:
                     txn_id = row[0]
 
-            # 10. Log house bank (delta uses original wager vs final payout)
-            house_delta = wager - payout
-            await db.execute("""
-                INSERT INTO casino_house_bank (game_type, delta, session_id, recorded_at)
-                VALUES (?,?,?,?)
-            """, (game_type, house_delta, session_id, now))
+            # 10. House bank — removed in GAP 7 (now derived from wagers table)
 
             # 11. Jackpot contribution + roll
             if wager > 0 and session_id is not None:
@@ -1039,11 +1051,25 @@ async def refund_wager(discord_id: int, amount: int,
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def get_house_report() -> dict:
-    """Return P&L breakdown by game type plus totals and rolling edge stats."""
+    """Return P&L breakdown by game type plus totals and rolling edge stats.
+
+    GAP 7: Derives house P&L from wagers table instead of casino_house_bank.
+    Formula: house_profit = -SUM(result_amount) per game type.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
+        # P&L by game type — derived from wager registry (GAP 7)
         async with db.execute("""
-            SELECT game_type, SUM(delta) as pl, COUNT(*) as hands
-            FROM casino_house_bank
+            SELECT
+                CASE
+                    WHEN subsystem = 'CASINO' THEN REPLACE(LOWER(label), 'casino ', '')
+                    WHEN subsystem = 'CASINO_PVP' THEN 'coinflip_pvp'
+                    WHEN subsystem = 'CASINO_JACKPOT' THEN 'jackpot_payout'
+                END AS game_type,
+                -SUM(COALESCE(result_amount, 0)) AS pl,
+                COUNT(*) AS hands
+            FROM wagers
+            WHERE subsystem IN ('CASINO', 'CASINO_PVP', 'CASINO_JACKPOT')
+              AND status != 'open'
             GROUP BY game_type
             ORDER BY pl DESC
         """) as cur:
@@ -1345,15 +1371,18 @@ async def create_challenge(
     opponent_id:   int,
     wager:         int,
     channel_id:    int,
+    challenger_corr_id: str = "",
 ) -> int:
     """Create a PvP coin flip challenge. Returns challenge_id."""
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
             INSERT INTO coinflip_challenges
-                (challenger_id, opponent_id, wager, channel_id, created_at)
-            VALUES (?,?,?,?,?)
-        """, (challenger_id, opponent_id, wager, channel_id, now)) as cur:
+                (challenger_id, opponent_id, wager, channel_id, created_at,
+                 challenger_corr_id)
+            VALUES (?,?,?,?,?,?)
+        """, (challenger_id, opponent_id, wager, channel_id, now,
+              challenger_corr_id or None)) as cur:
             cid = cur.lastrowid
         await db.commit()
     return cid
@@ -1368,8 +1397,19 @@ async def get_challenge(challenge_id: int) -> dict | None:
     if not row:
         return None
     keys = ["challenge_id","challenger_id","opponent_id","wager",
-            "channel_id","status","winner_id","created_at","resolved_at"]
+            "channel_id","status","winner_id","created_at","resolved_at",
+            "challenger_corr_id","opponent_corr_id"]
     return dict(zip(keys, row))
+
+
+async def store_opponent_corr_id(challenge_id: int, corr_id: str) -> None:
+    """Persist opponent correlation_id on challenge accept (GAP 7)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE coinflip_challenges SET opponent_corr_id=? WHERE challenge_id=?",
+            (corr_id, challenge_id),
+        )
+        await db.commit()
 
 
 async def resolve_challenge(challenge_id: int, winner_id: int, loser_id: int, wager: int) -> int:
@@ -1377,6 +1417,8 @@ async def resolve_challenge(challenge_id: int, winner_id: int, loser_id: int, wa
     Resolve a PvP challenge. Winner gets 1.9x (slight house edge).
     Loser's wager was already deducted. Returns winner payout.
     """
+    import wager_registry
+
     # Verify the challenge wager matches the passed wager (symmetric check)
     challenge = await get_challenge(challenge_id)
     if challenge and challenge["wager"] != wager:
@@ -1386,15 +1428,27 @@ async def resolve_challenge(challenge_id: int, winner_id: int, loser_id: int, wa
     payout = int(wager * 1.9)
     now    = datetime.now(timezone.utc).isoformat()
 
+    # Determine which player is challenger vs opponent
+    challenger_id = challenge["challenger_id"] if challenge else winner_id
+    challenger_corr = (challenge or {}).get("challenger_corr_id", "")
+    opponent_corr   = (challenge or {}).get("opponent_corr_id", "")
+
+    # PvP subsystem IDs
+    c_sub_id = f"PVP_{challenge_id}_C"
+    o_sub_id = f"PVP_{challenge_id}_O"
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            # Credit winner via flow_wallet (passes con -- no commit)
+            # Credit winner via flow_wallet with subsystem tags (GAP 7)
             ref_key = f"COINFLIP_WIN_{challenge_id}"
+            winner_sub_id = c_sub_id if winner_id == challenger_id else o_sub_id
             await flow_wallet.credit(
                 winner_id, payout, "CASINO",
                 description=f"coinflip PvP win vs {loser_id}",
                 reference_key=ref_key,
+                subsystem="CASINO_PVP",
+                subsystem_id=winner_sub_id,
                 con=db,
             )
 
@@ -1417,12 +1471,61 @@ async def resolve_challenge(challenge_id: int, winner_id: int, loser_id: int, wa
                 VALUES (?,?,?,?,?,?,?)
             """, (loser_id, "coinflip_pvp", wager, "loss", 0, 0.0, now))
 
-            # House keeps the 0.1x edge (2 wagers - 1.9x payout)
-            house_delta = wager * 2 - payout
-            await db.execute("""
-                INSERT INTO casino_house_bank (game_type, delta, recorded_at)
-                VALUES (?,?,?)
-            """, ("coinflip_pvp", house_delta, now))
+            # GAP 7: Backlink debit transactions + wager registry entries
+            # Challenger
+            if challenger_corr:
+                await db.execute(
+                    "UPDATE transactions SET subsystem='CASINO_PVP', subsystem_id=? "
+                    "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id=?",
+                    (c_sub_id, challenger_id, challenger_corr),
+                )
+                await db.execute(
+                    "UPDATE wagers SET subsystem='CASINO_PVP', subsystem_id=?, label='Coinflip PvP' "
+                    "WHERE subsystem='CASINO' AND subsystem_id=?",
+                    (c_sub_id, challenger_corr),
+                )
+            else:
+                # No corr_id (pre-GAP 7 challenge) — register fresh
+                await wager_registry.register_wager(
+                    "CASINO_PVP", c_sub_id, challenger_id, wager,
+                    label="Coinflip PvP", created_at=now, con=db,
+                )
+
+            # Opponent
+            if opponent_corr:
+                await db.execute(
+                    "UPDATE transactions SET subsystem='CASINO_PVP', subsystem_id=? "
+                    "WHERE discord_id=? AND subsystem='CASINO' AND subsystem_id=?",
+                    (o_sub_id, loser_id if loser_id != challenger_id else winner_id, opponent_corr),
+                )
+                await db.execute(
+                    "UPDATE wagers SET subsystem='CASINO_PVP', subsystem_id=?, label='Coinflip PvP' "
+                    "WHERE subsystem='CASINO' AND subsystem_id=?",
+                    (o_sub_id, opponent_corr),
+                )
+            else:
+                opponent_id_resolved = loser_id if loser_id != challenger_id else winner_id
+                await wager_registry.register_wager(
+                    "CASINO_PVP", o_sub_id, opponent_id_resolved, wager,
+                    label="Coinflip PvP", created_at=now, con=db,
+                )
+
+            # Settle both wagers
+            c_is_winner = (winner_id == challenger_id)
+            await wager_registry.settle_wager(
+                "CASINO_PVP", c_sub_id,
+                "won" if c_is_winner else "lost",
+                (payout - wager) if c_is_winner else -wager,
+                con=db,
+            )
+            await wager_registry.settle_wager(
+                "CASINO_PVP", o_sub_id,
+                "lost" if c_is_winner else "won",
+                -wager if c_is_winner else (payout - wager),
+                con=db,
+            )
+
+            # House bank write removed in GAP 7 (derived from wagers table)
 
             await db.commit()
         except Exception:
