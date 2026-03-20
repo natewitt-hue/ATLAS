@@ -1043,7 +1043,7 @@ async def _run_autograde(bot) -> None:
                                     (res, pid, leg_idx),
                                 )
                             except Exception:
-                                log.debug("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
+                                log.warning("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
 
                         # A single loss kills the parlay even if other legs are unresolved
                         any_lost = "Lost" in leg_results
@@ -2301,7 +2301,7 @@ class SportsbookCog(commands.Cog):
                             (res, pid, leg_idx),
                         )
                     except Exception:
-                        log.debug("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
+                        log.warning("parlay_legs UPDATE skipped for pid=%s leg=%d", pid, leg_idx)
 
                 any_lost = "Lost" in leg_results
                 has_pending = "Pending" in leg_results
