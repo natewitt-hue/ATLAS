@@ -16,5 +16,8 @@ node_modules/
 .claude/
 SCAFFOLD_README_bak.md
 faiss_lore_db/
-assets/
+# Downloaded binary assets (logos, headshots) — too large for git
+assets/logos/
+assets/headshots/
+# Keep team_branding.json and player_headshots.json (runtime config, small)
 .worktrees/

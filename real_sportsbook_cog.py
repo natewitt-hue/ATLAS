@@ -1,7 +1,7 @@
 """
 real_sportsbook_cog.py — ATLAS Flow: Real Sports Sportsbook
 =============================================================
-Bet on real sports with TSL Bucks using live odds from TheRundown API.
+Bet on real sports with TSL Bucks using live odds from ESPN.
 
 Supported leagues: NFL, NBA, MLB, NHL, NCAAB, UFC/MMA, EPL, MLS, WNBA
 
@@ -17,19 +17,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import aiosqlite
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 
 import flow_wallet
 from flow_wallet import DB_PATH, InsufficientFundsError
-from odds_api_client import OddsAPIClient, SUPPORTED_SPORTS
+from espn_odds import ESPNOddsClient, SUPPORTED_SPORTS, LEAGUE_MAP
+from team_branding import TeamBranding
 
 log = logging.getLogger("real_sportsbook")
 
@@ -199,38 +198,50 @@ async def _grade_parlay_legs_for_event(event_id: str, home_team: str,
 class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.client = OddsAPIClient()
+        self.branding = TeamBranding("assets/team_branding.json", "assets/player_headshots.json")
+        self.client = ESPNOddsClient(branding=self.branding)
         self._ready = False
 
     async def _setup_tables(self):
-        """Create real sportsbook tables if they don't exist."""
+        """Create real sportsbook tables with flattened odds schema."""
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS real_events (
-                    event_id       TEXT PRIMARY KEY,
-                    sport_key      TEXT NOT NULL,
-                    sport_title    TEXT NOT NULL,
-                    home_team      TEXT NOT NULL,
-                    away_team      TEXT NOT NULL,
-                    commence_time  TEXT,
-                    home_score     INTEGER,
-                    away_score     INTEGER,
-                    locked         INTEGER DEFAULT 0,
-                    completed      INTEGER DEFAULT 0,
+                    event_id        TEXT PRIMARY KEY,
+                    sport_key       TEXT NOT NULL,
+                    sport_title     TEXT NOT NULL,
+                    home_team       TEXT NOT NULL,
+                    away_team       TEXT NOT NULL,
+                    home_team_abbr  TEXT,
+                    away_team_abbr  TEXT,
+                    home_team_espn_id TEXT,
+                    away_team_espn_id TEXT,
+                    commence_time   TEXT,
+                    home_score      INTEGER,
+                    away_score      INTEGER,
+                    locked          INTEGER DEFAULT 0,
+                    completed       INTEGER DEFAULT 0,
+                    -- Flattened odds (replaces real_odds table)
+                    spread_home       REAL,
+                    spread_away       REAL,
+                    spread_home_odds  INTEGER,
+                    spread_away_odds  INTEGER,
+                    moneyline_home    INTEGER,
+                    moneyline_away    INTEGER,
+                    over_under        REAL,
+                    over_odds         INTEGER,
+                    under_odds        INTEGER,
+                    win_prob_home     REAL,
+                    win_prob_away     REAL,
+                    odds_provider     TEXT DEFAULT 'Consensus',
+                    -- Branding
+                    home_color      TEXT,
+                    away_color      TEXT,
+                    home_logo_url   TEXT,
+                    away_logo_url   TEXT,
+                    -- Sync metadata
                     last_odds_sync  TEXT,
                     last_score_sync TEXT
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS real_odds (
-                    event_id      TEXT NOT NULL,
-                    bookmaker     TEXT NOT NULL,
-                    market        TEXT NOT NULL,
-                    outcome_name  TEXT NOT NULL,
-                    price         INTEGER,
-                    point         REAL,
-                    last_updated  TEXT,
-                    UNIQUE(event_id, bookmaker, market, outcome_name)
                 )
             """)
             await db.execute("""
@@ -255,7 +266,121 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                 )
             """)
             await db.commit()
+
+            # Migrate: add new columns to existing real_events if missing
+            await self._migrate_schema(db)
+
         log.info("Real sportsbook tables ready.")
+
+    async def _migrate_schema(self, db: aiosqlite.Connection):
+        """Add new flat-odds columns to real_events if upgrading from old schema.
+        Backfill from real_odds, then drop real_odds."""
+        # Check if new columns already exist
+        cursor = await db.execute("PRAGMA table_info(real_events)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+        new_cols = {
+            "home_team_abbr": "TEXT",
+            "away_team_abbr": "TEXT",
+            "home_team_espn_id": "TEXT",
+            "away_team_espn_id": "TEXT",
+            "spread_home": "REAL",
+            "spread_away": "REAL",
+            "spread_home_odds": "INTEGER",
+            "spread_away_odds": "INTEGER",
+            "moneyline_home": "INTEGER",
+            "moneyline_away": "INTEGER",
+            "over_under": "REAL",
+            "over_odds": "INTEGER",
+            "under_odds": "INTEGER",
+            "win_prob_home": "REAL",
+            "win_prob_away": "REAL",
+            "odds_provider": "TEXT",
+            "home_color": "TEXT",
+            "away_color": "TEXT",
+            "home_logo_url": "TEXT",
+            "away_logo_url": "TEXT",
+        }
+
+        added = 0
+        for col, dtype in new_cols.items():
+            if col not in columns:
+                default = " DEFAULT 'Consensus'" if col == "odds_provider" else ""
+                await db.execute(f"ALTER TABLE real_events ADD COLUMN {col} {dtype}{default}")
+                added += 1
+
+        if added:
+            log.info(f"Migration: added {added} new columns to real_events.")
+
+        # Check if old real_odds table exists → backfill + drop
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='real_odds'"
+        )
+        if await cursor.fetchone():
+            log.info("Migration: backfilling odds from real_odds into real_events...")
+            # For each event with pending bets, backfill the last known odds
+            rows = await db.execute_fetchall("""
+                SELECT DISTINCT re.event_id, re.home_team, re.away_team
+                FROM real_events re
+                JOIN real_bets rb ON rb.event_id = re.event_id
+                WHERE rb.status = 'Pending' AND re.completed = 0
+            """)
+            for event_id, home, away in rows:
+                # Moneyline
+                ml_rows = await db.execute_fetchall(
+                    "SELECT outcome_name, price FROM real_odds "
+                    "WHERE event_id = ? AND market = 'h2h' ORDER BY last_updated DESC",
+                    (event_id,),
+                )
+                ml_home = ml_away = None
+                for name, price in ml_rows:
+                    if name == home and ml_home is None:
+                        ml_home = price
+                    elif name == away and ml_away is None:
+                        ml_away = price
+
+                # Spread
+                sp_rows = await db.execute_fetchall(
+                    "SELECT outcome_name, price, point FROM real_odds "
+                    "WHERE event_id = ? AND market = 'spreads' ORDER BY last_updated DESC",
+                    (event_id,),
+                )
+                sp_home = sp_away = sp_home_odds = sp_away_odds = None
+                for name, price, point in sp_rows:
+                    if name == home and sp_home is None:
+                        sp_home = point
+                        sp_home_odds = price
+                    elif name == away and sp_away is None:
+                        sp_away = point
+                        sp_away_odds = price
+
+                # Totals
+                tot_rows = await db.execute_fetchall(
+                    "SELECT outcome_name, price, point FROM real_odds "
+                    "WHERE event_id = ? AND market = 'totals' ORDER BY last_updated DESC",
+                    (event_id,),
+                )
+                ou_total = over_odds = under_odds = None
+                for name, price, point in tot_rows:
+                    if name == "Over" and over_odds is None:
+                        ou_total = point
+                        over_odds = price
+                    elif name == "Under" and under_odds is None:
+                        under_odds = price
+
+                await db.execute("""
+                    UPDATE real_events SET
+                        moneyline_home = ?, moneyline_away = ?,
+                        spread_home = ?, spread_away = ?,
+                        spread_home_odds = ?, spread_away_odds = ?,
+                        over_under = ?, over_odds = ?, under_odds = ?
+                    WHERE event_id = ?
+                """, (ml_home, ml_away, sp_home, sp_away, sp_home_odds,
+                      sp_away_odds, ou_total, over_odds, under_odds, event_id))
+
+            await db.execute("DROP TABLE real_odds")
+            await db.commit()
+            log.info("Migration: dropped real_odds table. Flat schema active.")
 
     async def cog_load(self):
         await self._setup_tables()
@@ -323,11 +448,23 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def _sync_odds(self, sport_key: str):
-        """Fetch odds from API and upsert into real_events + real_odds."""
-        log.info(f"Syncing odds for {sport_key}...")
-        events = await self.client.fetch_odds(sport_key)
-        if not events:
-            log.warning(f"No events returned for {sport_key}.")
+        """Fetch odds from ESPN and upsert into real_events (flat schema)."""
+        league_info = LEAGUE_MAP.get(sport_key)
+        if not league_info:
+            log.warning(f"Unknown sport_key: {sport_key}")
+            return
+
+        league_key = league_info[2]  # "NFL", "NBA", etc.
+        log.info(f"Syncing odds for {sport_key} ({league_key})...")
+
+        try:
+            games = await self.client.get_upcoming_odds(league_key)
+        except Exception as e:
+            log.error(f"ESPN odds fetch failed for {sport_key}: {e}")
+            return
+
+        if not games:
+            log.warning(f"No upcoming games for {sport_key}.")
             return
 
         now = datetime.now(timezone.utc).isoformat()
@@ -335,47 +472,69 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         upserted = 0
 
         async with aiosqlite.connect(DB_PATH) as db:
-            for ev in events:
-                event_id = ev.get("id", "")
-                home = ev.get("home_team", "")
-                away = ev.get("away_team", "")
-                commence = ev.get("commence_time", "")
+            for game in games:
+                event_id = game.get("event_id", "")
+                ht = game.get("home_team", {})
+                at = game.get("away_team", {})
+                home = ht.get("display_name", "")
+                away = at.get("display_name", "")
                 if not event_id or not home or not away:
                     continue
 
-                # Upsert event
-                await db.execute("""
-                    INSERT INTO real_events
-                        (event_id, sport_key, sport_title, home_team, away_team,
-                         commence_time, last_odds_sync)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(event_id) DO UPDATE SET
-                        home_team      = excluded.home_team,
-                        away_team      = excluded.away_team,
-                        commence_time  = excluded.commence_time,
-                        last_odds_sync = excluded.last_odds_sync
-                """, (event_id, sport_key, sport_title, home, away, commence, now))
+                spread = game.get("spread", {})
+                ml = game.get("moneyline", {})
+                ou = game.get("over_under", {})
+                wp = game.get("win_probability", {})
 
-                # Upsert odds from each bookmaker
-                for bk in ev.get("bookmakers", []):
-                    bk_key = bk.get("key", "")
-                    for market in bk.get("markets", []):
-                        mkt_key = market.get("key", "")  # h2h, spreads, totals
-                        for outcome in market.get("outcomes", []):
-                            name = outcome.get("name", "")
-                            price = outcome.get("price", 0)
-                            point = outcome.get("point")
-                            await db.execute("""
-                                INSERT INTO real_odds
-                                    (event_id, bookmaker, market, outcome_name,
-                                     price, point, last_updated)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
-                                ON CONFLICT(event_id, bookmaker, market, outcome_name)
-                                DO UPDATE SET
-                                    price        = excluded.price,
-                                    point        = excluded.point,
-                                    last_updated = excluded.last_updated
-                            """, (event_id, bk_key, mkt_key, name, price, point, now))
+                await db.execute("""
+                    INSERT INTO real_events (
+                        event_id, sport_key, sport_title, home_team, away_team,
+                        home_team_abbr, away_team_abbr,
+                        home_team_espn_id, away_team_espn_id,
+                        commence_time,
+                        spread_home, spread_away, spread_home_odds, spread_away_odds,
+                        moneyline_home, moneyline_away,
+                        over_under, over_odds, under_odds,
+                        win_prob_home, win_prob_away, odds_provider,
+                        home_color, away_color, home_logo_url, away_logo_url,
+                        last_odds_sync
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(event_id) DO UPDATE SET
+                        home_team = excluded.home_team,
+                        away_team = excluded.away_team,
+                        commence_time = excluded.commence_time,
+                        spread_home = excluded.spread_home,
+                        spread_away = excluded.spread_away,
+                        spread_home_odds = excluded.spread_home_odds,
+                        spread_away_odds = excluded.spread_away_odds,
+                        moneyline_home = excluded.moneyline_home,
+                        moneyline_away = excluded.moneyline_away,
+                        over_under = excluded.over_under,
+                        over_odds = excluded.over_odds,
+                        under_odds = excluded.under_odds,
+                        win_prob_home = excluded.win_prob_home,
+                        win_prob_away = excluded.win_prob_away,
+                        odds_provider = excluded.odds_provider,
+                        home_color = excluded.home_color,
+                        away_color = excluded.away_color,
+                        home_logo_url = excluded.home_logo_url,
+                        away_logo_url = excluded.away_logo_url,
+                        last_odds_sync = excluded.last_odds_sync
+                """, (
+                    event_id, sport_key, sport_title, home, away,
+                    ht.get("abbreviation"), at.get("abbreviation"),
+                    ht.get("espn_id"), at.get("espn_id"),
+                    game.get("event_date", ""),
+                    spread.get("home"), spread.get("away"),
+                    spread.get("home_odds"), spread.get("away_odds"),
+                    ml.get("home"), ml.get("away"),
+                    ou.get("total"), ou.get("over_odds"), ou.get("under_odds"),
+                    wp.get("home"), wp.get("away"),
+                    spread.get("provider", "Consensus"),
+                    ht.get("color"), at.get("color"),
+                    ht.get("logo_url"), at.get("logo_url"),
+                    now,
+                ))
                 upserted += 1
 
             await db.commit()
@@ -387,40 +546,31 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def _sync_scores(self):
-        """Fetch scores for all sports, update events, auto-grade bets."""
+        """Fetch scores from ESPN for all sports, update events, auto-grade bets."""
         log.info("Syncing real sportsbook scores...")
-        all_scores = await self.client.fetch_all_scores(days_from=3)
+        try:
+            all_scores = await self.client.get_all_scores(days_from=3)
+        except Exception as e:
+            log.error(f"ESPN score fetch failed: {e}")
+            return
 
         graded_total = 0
-        # Hoist DB connection outside the loop to avoid reconnecting per-event
         async with aiosqlite.connect(DB_PATH) as db:
-            for sport_key, events in all_scores.items():
-                for ev in events:
-                    event_id = ev.get("id", "")
-                    completed = ev.get("completed", False)
-                    scores = ev.get("scores")
-                    if not event_id or not scores:
+            for sport_key, games in all_scores.items():
+                for game in games:
+                    event_id = game.get("event_id", "")
+                    status = game.get("status", "")
+                    if not event_id:
                         continue
 
-                    home_score = None
-                    away_score = None
-                    home_team = ev.get("home_team", "")
-                    away_team = ev.get("away_team", "")
-
-                    for s in scores:
-                        if s.get("name") == home_team:
-                            try:
-                                home_score = int(s.get("score", 0))
-                            except (ValueError, TypeError):
-                                pass
-                        elif s.get("name") == away_team:
-                            try:
-                                away_score = int(s.get("score", 0))
-                            except (ValueError, TypeError):
-                                pass
-
+                    home_score = game.get("home_score")
+                    away_score = game.get("away_score")
                     if home_score is None or away_score is None:
                         continue
+
+                    home_team = game.get("home_team", {}).get("display_name", "")
+                    away_team = game.get("away_team", {}).get("display_name", "")
+                    completed = status == "final"
 
                     now = datetime.now(timezone.utc).isoformat()
                     await db.execute("""
@@ -432,7 +582,6 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                     """, (home_score, away_score, 1 if completed else 0, now, event_id))
                     await db.commit()
 
-                    # Only grade when game is fully completed
                     if completed:
                         count = await self._grade_event(event_id, home_team, away_team,
                                                          home_score, away_score)
@@ -542,17 +691,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         embed.add_field(name="Active Events", value=str(active_events), inline=True)
         embed.add_field(name="Pending Bets", value=str(pending_bets), inline=True)
         embed.add_field(name="Last Odds Sync", value=last_sync, inline=True)
-
-        remaining = self.client.requests_remaining
-        used = self.client.requests_used
-        if remaining is not None:
-            embed.add_field(
-                name="API Quota",
-                value=f"{remaining} remaining / {used} used",
-                inline=True,
-            )
-            if self.client.emergency_mode:
-                embed.add_field(name="Mode", value="EMERGENCY (odds paused)", inline=True)
+        embed.add_field(name="Source", value="ESPN (free, no quota)", inline=True)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -687,53 +826,185 @@ class EventListView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        event_id = interaction.data["values"][0]
+        event_id = interaction.data["values"][0]  # type: ignore[index]
 
         # Find the event
         event = next((e for e in self.events if e["event_id"] == event_id), None)
         if not event:
             return await interaction.followup.send("Event not found.", ephemeral=True)
 
-        # Fetch odds for this event
+        # Fetch full event with flat odds from real_events
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT market, outcome_name, price, point "
-                "FROM real_odds WHERE event_id = ? "
-                "ORDER BY market, outcome_name",
+                "SELECT * FROM real_events WHERE event_id = ?",
                 (event_id,),
             ) as cur:
-                odds_rows = [dict(row) for row in await cur.fetchall()]
+                row = await cur.fetchone()
 
-        if not odds_rows:
+        if not row:
             return await interaction.followup.send(
                 "No odds available for this game yet.", ephemeral=True
             )
 
-        view = BetTypeView(self.cog, event, odds_rows)
+        event_row = dict(row)
+        # Check that at least one odds field is populated
+        has_odds = any(event_row.get(k) is not None for k in
+                       ("moneyline_home", "spread_home", "over_under"))
+        if not has_odds:
+            return await interaction.followup.send(
+                "No odds available for this game yet.", ephemeral=True
+            )
+
+        view = MatchCardView(event_row)
 
         from sportsbook_cards import build_real_match_detail_card, card_to_file
-        png = await build_real_match_detail_card(
-            event, odds_rows, sport_key=self.sport_key
-        )
+        png = await build_real_match_detail_card(event_row, sport_key=self.sport_key)
         file = card_to_file(png, f"match_{event_id}.png")
         await interaction.followup.send(file=file, view=view, ephemeral=True)
 
 
-class BetTypeView(discord.ui.View):
-    """Shows odds for a single event with buttons to place bets."""
+def _short_name(full_name: str, max_len: int = 12) -> str:
+    """Shorten a team name for button labels.  'Houston Cougars' → 'Houston'."""
+    parts = full_name.split()
+    if len(parts) == 1:
+        return full_name[:max_len]
+    # Keep adding words until we'd exceed max_len
+    result = parts[0]
+    for word in parts[1:]:
+        candidate = f"{result} {word}"
+        if len(candidate) > max_len:
+            break
+        result = candidate
+    return result
 
-    def __init__(self, cog, event: dict, odds_rows: list[dict]):
+
+class MatchCardView(discord.ui.View):
+    """6-button view: one button per betting line, shown below the match detail card.
+
+    Row 0 (home / Over):  [ML]  [Spread]  [Total]
+    Row 1 (away / Under): [ML]  [Spread]  [Total]
+
+    Reads from flat event dict (real_events row with flattened odds columns).
+    """
+
+    def __init__(self, event: dict):
+        super().__init__(timeout=120)
+        self.event = event
+
+        home = event["home_team"]
+        away = event["away_team"]
+        short_home = _short_name(home)
+        short_away = _short_name(away)
+
+        # Build buttons from flat odds columns
+        for side, team_full, short, row_idx in [
+            ("home", home, short_home, 0),
+            ("away", away, short_away, 1),
+        ]:
+            # Moneyline
+            ml_key = f"moneyline_{side}"
+            ml_val = event.get(ml_key)
+            if ml_val is not None:
+                label = f"{short} {int(ml_val):+d}"
+                btn = discord.ui.Button(
+                    label=label[:80], style=discord.ButtonStyle.green, row=row_idx,
+                )
+                btn.callback = self._make_line_cb(
+                    team_full, "Moneyline", int(ml_val), None,
+                )
+                self.add_item(btn)
+
+            # Spread
+            spread_key = f"spread_{side}"
+            spread_odds_key = f"spread_{side}_odds"
+            spread_val = event.get(spread_key)
+            spread_odds = event.get(spread_odds_key)
+            if spread_val is not None and spread_odds is not None:
+                point_str = f"{float(spread_val):+g}"
+                label = f"{short} {point_str} ({int(spread_odds):+d})"
+                btn = discord.ui.Button(
+                    label=label[:80], style=discord.ButtonStyle.blurple, row=row_idx,
+                )
+                btn.callback = self._make_line_cb(
+                    team_full, "Spread", int(spread_odds), float(spread_val),
+                )
+                self.add_item(btn)
+
+            # Totals (Over for home row, Under for away row)
+            ou_name = "Over" if side == "home" else "Under"
+            ou_total = event.get("over_under")
+            ou_odds_key = "over_odds" if side == "home" else "under_odds"
+            ou_odds = event.get(ou_odds_key)
+            if ou_total is not None and ou_odds is not None:
+                label = f"{ou_name} {float(ou_total)} ({int(ou_odds):+d})"
+                btn = discord.ui.Button(
+                    label=label[:80], style=discord.ButtonStyle.gray, row=row_idx,
+                )
+                btn.callback = self._make_line_cb(
+                    ou_name, ou_name, int(ou_odds), float(ou_total),
+                )
+                self.add_item(btn)
+
+    def _make_line_cb(self, pick: str, bet_type: str, odds: int, line: float | None):
+        """Factory that returns a callback for a specific betting line."""
+        event = self.event
+
+        async def callback(interaction: discord.Interaction):
+            from flow_sportsbook import WagerPresetView, _get_balance
+
+            balance = await flow_wallet.get_balance(interaction.user.id)
+            sport_key = event.get("sport_key", "")
+            source_label = SUPPORTED_SPORTS.get(
+                sport_key, sport_key.split("_")[-1].upper()
+            )
+
+            async def place_bet(inter, amt):
+                await inter.response.defer(ephemeral=True)
+                await _place_real_bet(
+                    inter, event, bet_type, pick, odds, line, amt, source_label,
+                )
+
+            view = WagerPresetView(
+                pick=pick, bet_type=bet_type, odds=odds,
+                display_info={
+                    "matchup": f"{event['away_team']} @ {event['home_team']}",
+                    "line_str": _american_to_str(odds),
+                    "source_label": source_label,
+                },
+                user_balance=balance,
+                place_bet=place_bet,
+                parlay_leg={
+                    "source": source_label,
+                    "event_id": event["event_id"],
+                    "display": f"{event['away_team']} @ {event['home_team']}",
+                    "pick": pick,
+                    "bet_type": bet_type,
+                    "line": line or 0,
+                    "odds": odds,
+                },
+                custom_modal_factory=lambda: CustomRealWagerModal(
+                    event, bet_type, pick, odds, line,
+                ),
+            )
+            embed = view._build_embed()
+            await interaction.response.send_message(
+                embed=embed, view=view, ephemeral=True,
+            )
+
+        return callback
+
+
+class BetTypeView(discord.ui.View):
+    """Shows odds for a single event with buttons to place bets.
+    (Legacy — replaced by MatchCardView, kept for backward compatibility.)
+    Now reads from flat event dict instead of odds_rows.
+    """
+
+    def __init__(self, cog, event: dict):
         super().__init__(timeout=120)
         self.cog = cog
         self.event = event
-        self.odds_rows = odds_rows
-
-        # Group odds by market
-        self.markets: dict[str, list[dict]] = {}
-        for row in odds_rows:
-            mkt = row["market"]
-            self.markets.setdefault(mkt, []).append(row)
 
     def build_embed(self) -> discord.Embed:
         ev = self.event
@@ -747,100 +1018,97 @@ class BetTypeView(discord.ui.View):
         )
 
         # Moneyline
-        h2h = self.markets.get("h2h", [])
-        if h2h:
-            ml_lines = []
-            for o in h2h:
-                ml_lines.append(f"**{o['outcome_name']}** {_american_to_str(o['price'])}")
-            embed.add_field(name="Moneyline", value="\n".join(ml_lines), inline=True)
+        ml_h, ml_a = ev.get("moneyline_home"), ev.get("moneyline_away")
+        if ml_h is not None:
+            embed.add_field(
+                name="Moneyline",
+                value=f"**{ev['home_team']}** {_american_to_str(int(ml_h))}\n"
+                      f"**{ev['away_team']}** {_american_to_str(int(ml_a or 0))}",
+                inline=True,
+            )
 
         # Spread
-        spreads = self.markets.get("spreads", [])
-        if spreads:
-            sp_lines = []
-            for o in spreads:
-                point_str = f"{o['point']:+g}" if o['point'] is not None else ""
-                sp_lines.append(
-                    f"**{o['outcome_name']}** {point_str} ({_american_to_str(o['price'])})"
-                )
-            embed.add_field(name="Spread", value="\n".join(sp_lines), inline=True)
+        sp_h = ev.get("spread_home")
+        if sp_h is not None:
+            sp_h_odds = ev.get("spread_home_odds") or -110
+            sp_a = ev.get("spread_away") or -sp_h
+            sp_a_odds = ev.get("spread_away_odds") or -110
+            embed.add_field(
+                name="Spread",
+                value=f"**{ev['home_team']}** {float(sp_h):+g} ({_american_to_str(int(sp_h_odds))})\n"
+                      f"**{ev['away_team']}** {float(sp_a):+g} ({_american_to_str(int(sp_a_odds))})",
+                inline=True,
+            )
 
         # Totals
-        totals = self.markets.get("totals", [])
-        if totals:
-            t_lines = []
-            for o in totals:
-                point_str = f"{o['point']}" if o['point'] is not None else ""
-                t_lines.append(
-                    f"**{o['outcome_name']}** {point_str} ({_american_to_str(o['price'])})"
-                )
-            embed.add_field(name="Total", value="\n".join(t_lines), inline=True)
+        ou = ev.get("over_under")
+        if ou is not None:
+            o_odds = ev.get("over_odds") or -110
+            u_odds = ev.get("under_odds") or -110
+            embed.add_field(
+                name="Total",
+                value=f"**Over** {float(ou)} ({_american_to_str(int(o_odds))})\n"
+                      f"**Under** {float(ou)} ({_american_to_str(int(u_odds))})",
+                inline=True,
+            )
 
         return embed
 
     @discord.ui.button(label="Moneyline", style=discord.ButtonStyle.green)
     async def ml_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        h2h = self.markets.get("h2h", [])
-        if not h2h:
+        if self.event.get("moneyline_home") is None:
             return await interaction.response.send_message("No moneyline odds.", ephemeral=True)
-        await self._show_pick_select(interaction, "Moneyline", h2h)
+        options = []
+        for side, team_key, ml_key in [("home", "home_team", "moneyline_home"),
+                                        ("away", "away_team", "moneyline_away")]:
+            team = self.event[team_key]
+            ml_val = self.event.get(ml_key)
+            if ml_val is not None:
+                label = f"{team} — {_american_to_str(int(ml_val))}"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                options.append(discord.SelectOption(
+                    label=label, value=f"{team}|{int(ml_val)}|",
+                ))
+        view = PickSelectView(self.cog, self.event, "Moneyline", options)
+        await interaction.response.send_message("Select your **Moneyline** pick:", view=view, ephemeral=True)
 
     @discord.ui.button(label="Spread", style=discord.ButtonStyle.blurple)
     async def spread_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        spreads = self.markets.get("spreads", [])
-        if not spreads:
+        if self.event.get("spread_home") is None:
             return await interaction.response.send_message("No spread odds.", ephemeral=True)
-        await self._show_pick_select(interaction, "Spread", spreads)
+        options = []
+        for side in ("home", "away"):
+            team = self.event[f"{side}_team"]
+            sp = self.event.get(f"spread_{side}")
+            sp_odds = self.event.get(f"spread_{side}_odds")
+            if sp is not None and sp_odds is not None:
+                label = f"{team} {float(sp):+g} ({_american_to_str(int(sp_odds))})"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                options.append(discord.SelectOption(
+                    label=label, value=f"{team}|{int(sp_odds)}|{float(sp)}",
+                ))
+        view = PickSelectView(self.cog, self.event, "Spread", options)
+        await interaction.response.send_message("Select your **Spread** pick:", view=view, ephemeral=True)
 
     @discord.ui.button(label="Over/Under", style=discord.ButtonStyle.gray)
     async def totals_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        totals = self.markets.get("totals", [])
-        if not totals:
+        ou = self.event.get("over_under")
+        if ou is None:
             return await interaction.response.send_message("No totals odds.", ephemeral=True)
-        await self._show_ou_select(interaction, totals)
-
-    async def _show_pick_select(self, interaction: discord.Interaction,
-                                 bet_type: str, outcomes: list[dict]):
-        """Show select menu for picking a team (ML or Spread)."""
         options = []
-        for o in outcomes:
-            point_str = f" ({o['point']:+g})" if o.get('point') is not None else ""
-            label = f"{o['outcome_name']}{point_str} — {_american_to_str(o['price'])}"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            options.append(discord.SelectOption(
-                label=label,
-                value=f"{o['outcome_name']}|{o['price']}|{o.get('point') or ''}",
-            ))
-
-        view = PickSelectView(self.cog, self.event, bet_type, options)
-        await interaction.response.send_message(
-            f"Select your **{bet_type}** pick:",
-            view=view,
-            ephemeral=True,
-        )
-
-    async def _show_ou_select(self, interaction: discord.Interaction, outcomes: list[dict]):
-        """Show select for Over or Under."""
-        options = []
-        for o in outcomes:
-            name = o["outcome_name"]  # "Over" or "Under"
-            bt = "Over" if name == "Over" else "Under"
-            point_str = f" {o['point']}" if o.get('point') is not None else ""
-            label = f"{name}{point_str} — {_american_to_str(o['price'])}"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            options.append(discord.SelectOption(
-                label=label,
-                value=f"{name}|{o['price']}|{o.get('point') or ''}",
-            ))
-
+        for name, odds_key in [("Over", "over_odds"), ("Under", "under_odds")]:
+            odds_val = self.event.get(odds_key)
+            if odds_val is not None:
+                label = f"{name} {float(ou)} ({_american_to_str(int(odds_val))})"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                options.append(discord.SelectOption(
+                    label=label, value=f"{name}|{int(odds_val)}|{float(ou)}",
+                ))
         view = PickSelectView(self.cog, self.event, "OU", options)
-        await interaction.response.send_message(
-            "Select **Over** or **Under**:",
-            view=view,
-            ephemeral=True,
-        )
+        await interaction.response.send_message("Select **Over** or **Under**:", view=view, ephemeral=True)
 
 
 class PickSelectView(discord.ui.View):
@@ -863,7 +1131,7 @@ class PickSelectView(discord.ui.View):
     async def _on_select(self, interaction: discord.Interaction):
         from flow_sportsbook import WagerPresetView, _get_balance
 
-        raw = interaction.data["values"][0]
+        raw = interaction.data["values"][0]  # type: ignore[index]
         parts = raw.split("|")
         pick = parts[0]
         odds = int(parts[1])

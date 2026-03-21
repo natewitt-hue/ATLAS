@@ -573,54 +573,47 @@ C_RED     = AtlasColors.ERROR
 C_BLUE    = AtlasColors.INFO
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  NFL TEAM IDENTITY  (colors + ESPN logo CDN)
+#  NFL TEAM IDENTITY  (via TeamBranding — replaces hardcoded dict)
 # ─────────────────────────────────────────────────────────────────────────────
-_NFL_IDENTITY: dict[str, dict] = {
-    "Cardinals":  {"rgb": (151,  35,  63), "abbrev": "ari"},
-    "Falcons":    {"rgb": (167,  25,  48), "abbrev": "atl"},
-    "Ravens":     {"rgb": ( 26,  25,  95), "abbrev": "bal"},
-    "Bills":      {"rgb": (  0,  51, 141), "abbrev": "buf"},
-    "Panthers":   {"rgb": (  0, 133, 202), "abbrev": "car"},
-    "Bears":      {"rgb": ( 11,  22,  42), "abbrev": "chi"},
-    "Bengals":    {"rgb": (251,  79,  20), "abbrev": "cin"},
-    "Browns":     {"rgb": ( 49,  29,   0), "abbrev": "cle"},
-    "Cowboys":    {"rgb": (  0,  34,  68), "abbrev": "dal"},
-    "Broncos":    {"rgb": (251,  79,  20), "abbrev": "den"},
-    "Lions":      {"rgb": (  0, 118, 182), "abbrev": "det"},
-    "Packers":    {"rgb": ( 24,  48,  40), "abbrev": "gb"},
-    "Texans":     {"rgb": (  3,  32,  47), "abbrev": "hou"},
-    "Colts":      {"rgb": (  0,  44,  95), "abbrev": "ind"},
-    "Jaguars":    {"rgb": (  0, 103, 120), "abbrev": "jax"},
-    "Chiefs":     {"rgb": (227,  24,  55), "abbrev": "kc"},
-    "Raiders":    {"rgb": (165, 172, 175), "abbrev": "lv"},
-    "Chargers":   {"rgb": (  0, 128, 198), "abbrev": "lac"},
-    "Rams":       {"rgb": (  0,  53, 148), "abbrev": "lar"},
-    "Dolphins":   {"rgb": (  0, 142, 151), "abbrev": "mia"},
-    "Vikings":    {"rgb": ( 79,  38, 131), "abbrev": "min"},
-    "Patriots":   {"rgb": (  0,  34,  68), "abbrev": "ne"},
-    "Saints":     {"rgb": (175, 141,  64), "abbrev": "no"},
-    "Giants":     {"rgb": (  1,  35,  82), "abbrev": "nyg"},
-    "Jets":       {"rgb": ( 18,  87,  64), "abbrev": "nyj"},
-    "Eagles":     {"rgb": (  0,  76,  84), "abbrev": "phi"},
-    "Steelers":   {"rgb": ( 16,  24,  32), "abbrev": "pit"},
-    "49ers":      {"rgb": (170,   0,   0), "abbrev": "sf"},
-    "Seahawks":   {"rgb": (  0,  34,  68), "abbrev": "sea"},
-    "Buccaneers": {"rgb": (213,  10,  10), "abbrev": "tb"},
-    "Titans":     {"rgb": ( 75, 146, 219), "abbrev": "ten"},
-    "Commanders": {"rgb": ( 90,  20,  20), "abbrev": "wsh"},
-    "Washington": {"rgb": ( 90,  20,  20), "abbrev": "wsh"},
-}
+from team_branding import TeamBranding as _TeamBranding
+
+_branding: _TeamBranding | None = None
+
+def _get_branding() -> _TeamBranding:
+    global _branding
+    if _branding is None:
+        _branding = _TeamBranding("assets/team_branding.json")
+    return _branding
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return (0, 0, 0)
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 def _team_ident(team_name: str) -> dict:
-    for key, val in _NFL_IDENTITY.items():
-        if key.lower() in team_name.lower():
-            return val
+    """Lookup team branding by nickname substring match."""
+    b = _get_branding()
+    # Try direct nickname lookup first
+    team = b.by_nickname(team_name, "NFL")
+    if not team:
+        # Fallback: search all teams for substring match
+        for t in b.all_teams("NFL"):
+            if t.get("nickname", "").lower() in team_name.lower() or team_name.lower() in t.get("nickname", "").lower():
+                team = t
+                break
+    if team:
+        rgb = _hex_to_rgb(team.get("color", "#3b82f6"))
+        return {"rgb": rgb, "abbrev": team.get("abbreviation", "").lower()}
     return {"rgb": (59, 130, 246), "abbrev": None}
 
 def _team_color(team_name: str) -> discord.Color:
     return discord.Color.from_rgb(*_team_ident(team_name)["rgb"])
 
 def _team_logo(team_name: str) -> Optional[str]:
+    logo = _get_branding().logo_url(team_name, league="NFL")
+    if logo:
+        return logo
     abbrev = _team_ident(team_name).get("abbrev")
     return f"https://a.espncdn.com/i/teamlogos/nfl/500/{abbrev}.png" if abbrev else None
 

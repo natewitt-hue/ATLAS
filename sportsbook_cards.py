@@ -772,95 +772,99 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 
 
 async def build_real_match_detail_card(
-    event: dict, odds_rows: list[dict], *, sport_key: str = ""
+    event: dict, *, sport_key: str = ""
 ) -> bytes:
     """
     Render a match detail card for real sports (NCAAB, NFL, etc.).
-    `event` has 'away_team', 'home_team', 'commence_time'.
-    `odds_rows` has dicts with 'market', 'outcome_name', 'price', 'point'.
+    `event` is a flat dict from real_events with flattened odds columns:
+      home_team, away_team, commence_time, moneyline_home, moneyline_away,
+      spread_home, spread_away, spread_home_odds, spread_away_odds,
+      over_under, over_odds, under_odds, home_color, away_color,
+      home_logo_url, away_logo_url, win_prob_home, win_prob_away.
     """
     away = esc(event.get("away_team", "Away"))
     home = esc(event.get("home_team", "Home"))
 
-    # Parse sport label from sport_key (e.g. "basketball_ncaab" → "NCAAB")
+    # Parse sport label from sport_key (e.g. "basketball_ncaab" -> "NCAAB")
     sport_label = sport_key.split("_")[-1].upper() if sport_key else "SPORTS"
 
-    # Group odds by market
-    markets: dict[str, list[dict]] = {}
-    for row in odds_rows:
-        markets.setdefault(row["market"], []).append(row)
+    # Helper to build a single odds cell
+    def _cell(team: str, value: str, juice: str = "") -> str:
+        cls = ""
+        # Try to detect favorite for ML styling
+        try:
+            v = int(value.replace("+", ""))
+            cls = "fav" if v < 0 else "dog"
+        except (ValueError, AttributeError):
+            pass
+        juice_html = f'<div class="odds-juice">({juice})</div>' if juice else ""
+        return (
+            f'<div class="odds-cell">'
+            f'<div class="odds-team">{esc(team)}</div>'
+            f'<div class="odds-value {cls}">{value}</div>'
+            f'{juice_html}</div>'
+        )
 
-    # Build ML cells
-    h2h = markets.get("h2h", [])
-    ml_cells = ""
-    for o in h2h:
-        name = esc(o["outcome_name"])
-        price = o["price"]
-        cls = "fav" if price < 0 else "dog"
-        ml_cells += f"""<div class="odds-cell">
-      <div class="odds-team">{name}</div>
-      <div class="odds-value {cls}">{american_to_str(price)}</div>
-    </div>"""
-    # Pad if only 1 or 0 outcomes
-    while ml_cells.count("odds-cell") < 2:
-        ml_cells += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+    _EMPTY = '<div class="odds-cell"><div class="odds-team">\u2014</div><div class="odds-value">\u2014</div></div>'
 
-    # Build spread cells
-    spreads = markets.get("spreads", [])
-    spread_cells = ""
-    for o in spreads:
-        name = esc(o["outcome_name"])
-        point = f"{o['point']:+g}" if o.get("point") is not None else ""
-        price = american_to_str(o["price"])
-        spread_cells += f"""<div class="odds-cell">
-      <div class="odds-team">{name}</div>
-      <div class="odds-value">{point}</div>
-      <div class="odds-juice">({price})</div>
-    </div>"""
-    while spread_cells.count("odds-cell") < 2:
-        spread_cells += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
-
-    # Build total cells
-    totals = markets.get("totals", [])
-    total_cells = ""
-    for o in totals:
-        label = esc(o["outcome_name"])  # "Over" / "Under"
-        point = f"{o['point']}" if o.get("point") is not None else ""
-        price = american_to_str(o["price"])
-        total_cells += f"""<div class="odds-cell">
-      <div class="odds-team">{label}</div>
-      <div class="odds-value">{point}</div>
-      <div class="odds-juice">({price})</div>
-    </div>"""
-    while total_cells.count("odds-cell") < 2:
-        total_cells += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
-
-    # Interleave rows: away ML, away spread, over | home ML, home spread, under
-    # We need row-by-row: [ml_0, spread_0, total_0], [ml_1, spread_1, total_1]
-    ml_list = h2h[:2] if len(h2h) >= 2 else h2h + [None] * (2 - len(h2h))
-    spread_list = spreads[:2] if len(spreads) >= 2 else spreads + [None] * (2 - len(spreads))
-    total_list = totals[:2] if len(totals) >= 2 else totals + [None] * (2 - len(totals))
-
+    # Build grid rows: Row 0 = away, Row 1 = home
     grid_rows = ""
-    for ml, sp, tot in zip(ml_list, spread_list, total_list):
-        # ML cell
-        if ml:
-            cls = "fav" if ml["price"] < 0 else "dog"
-            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(ml["outcome_name"])}</div><div class="odds-value {cls}">{american_to_str(ml["price"])}</div></div>'
+    for side, team in [("away", away), ("home", home)]:
+        # Moneyline
+        ml_val = event.get(f"moneyline_{side}")
+        if ml_val is not None:
+            grid_rows += _cell(team, american_to_str(int(ml_val)))
         else:
-            grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
-        # Spread cell
-        if sp:
-            pt = f"{sp['point']:+g}" if sp.get("point") is not None else ""
-            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(sp["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({american_to_str(sp["price"])})</div></div>'
+            grid_rows += _EMPTY
+
+        # Spread
+        sp_val = event.get(f"spread_{side}")
+        sp_odds = event.get(f"spread_{side}_odds")
+        if sp_val is not None and sp_odds is not None:
+            grid_rows += _cell(team, f"{float(sp_val):+g}", american_to_str(int(sp_odds)))
         else:
-            grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
-        # Total cell
-        if tot:
-            pt = f"{tot['point']}" if tot.get("point") is not None else ""
-            grid_rows += f'<div class="odds-cell"><div class="odds-team">{esc(tot["outcome_name"])}</div><div class="odds-value">{pt}</div><div class="odds-juice">({american_to_str(tot["price"])})</div></div>'
+            grid_rows += _EMPTY
+
+        # Totals (Over for away row, Under for home row)
+        ou_name = "Over" if side == "away" else "Under"
+        ou_total = event.get("over_under")
+        ou_odds_key = "over_odds" if side == "away" else "under_odds"
+        ou_odds = event.get(ou_odds_key)
+        if ou_total is not None and ou_odds is not None:
+            grid_rows += _cell(ou_name, str(float(ou_total)), american_to_str(int(ou_odds)))
         else:
-            grid_rows += '<div class="odds-cell"><div class="odds-team">—</div><div class="odds-value">—</div></div>'
+            grid_rows += _EMPTY
+
+    # Team logo HTML (if available from branding)
+    home_logo = event.get("home_logo_url", "")
+    away_logo = event.get("away_logo_url", "")
+    home_color = event.get("home_color", "")
+    away_color = event.get("away_color", "")
+
+    # Build matchup with optional logos and color accents
+    logo_style = "width:28px;height:28px;border-radius:4px;margin:0 6px;vertical-align:middle;"
+    away_logo_html = f'<img src="{away_logo}" style="{logo_style}">' if away_logo else ""
+    home_logo_html = f'<img src="{home_logo}" style="{logo_style}">' if home_logo else ""
+
+    # Win probability bar (if available)
+    wp_html = ""
+    wp_home = event.get("win_prob_home")
+    wp_away = event.get("win_prob_away")
+    if wp_home is not None and wp_away is not None:
+        wp_h = float(wp_home)
+        wp_a = float(wp_away)
+        h_color = home_color or "#c9a84c"
+        a_color = away_color or "#666"
+        wp_html = f"""
+<div style="padding:0 20px var(--space-sm);">
+  <div style="display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+    <span>{wp_a:.0%}</span><span style="color:var(--gold-dim);font-weight:700;">WIN PROB</span><span>{wp_h:.0%}</span>
+  </div>
+  <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:rgba(255,255,255,0.05);">
+    <div style="width:{wp_a*100:.1f}%;background:{a_color};"></div>
+    <div style="width:{wp_h*100:.1f}%;background:{h_color};"></div>
+  </div>
+</div>"""
 
     body = f"""<style>{_MATCH_DETAIL_CSS}</style>
 
@@ -881,9 +885,11 @@ async def build_real_match_detail_card(
 <!-- Matchup Hero -->
 <div class="matchup-hero">
   <div class="matchup-teams">
-    {away} <span class="at">@</span> {home}
+    {away_logo_html}{away} <span class="at">@</span> {home}{home_logo_html}
   </div>
 </div>
+
+{wp_html}
 
 <div class="gold-divider"></div>
 

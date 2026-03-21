@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "5.9.0"  # sportsbook UX overhaul — wager presets, persistent parlay cart, cross-sport parlays + accumulated fixes
+ATLAS_VERSION = "6.1.0"  # ESPN odds migration — replace TheRundown with ESPN, flatten DB schema, TeamBranding integration
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

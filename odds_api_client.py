@@ -1,11 +1,10 @@
 """
-odds_api_client.py — Async wrapper for TheRundown API
-======================================================
-Fetches live odds, scores, and sport metadata for the ATLAS real sportsbook.
+odds_api_client.py — DEPRECATED (v6.1.0)
+=========================================
+Replaced by espn_odds.py (ESPNOddsClient). This file is kept for 2-week
+fallback reference only. No modules import from this file as of v6.1.0.
 
-Adapter layer: translates TheRundown responses into the same shape that
-real_sportsbook_cog.py expects (originally designed for The Odds API v4).
-
+Original: Async wrapper for TheRundown API v2.
 Docs: https://therundown.io/api/v2
 """
 

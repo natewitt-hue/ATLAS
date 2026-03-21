@@ -54,9 +54,15 @@ from discord.ext import commands, tasks
 
 import data_manager as dm
 import flow_wallet
-from odds_api_client import SUPPORTED_SPORTS as REAL_SPORTS
-from real_sportsbook_cog import EventListView, SPORT_EMOJI
-from sportsbook_cards import build_sportsbook_card, build_stats_card, build_parlay_analytics_card, card_to_file
+from real_sportsbook_cog import (
+    EventListView, SPORT_EMOJI, SUPPORTED_SPORTS as REAL_SPORTS,
+    _parse_commence, _place_real_bet, _short_name as _real_short_name,
+    CustomRealWagerModal,
+)
+from sportsbook_cards import (
+    build_sportsbook_card, build_stats_card, build_parlay_analytics_card,
+    build_match_detail_card, build_real_match_detail_card, card_to_file,
+)
 from db_migration_snapshots import setup_snapshots_table, take_daily_snapshot, backfill_from_bets
 import logging
 
@@ -1880,6 +1886,766 @@ async def _load_tsl_week_games() -> list[dict]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  SPORTSBOOK WORKSPACE — Edit-in-place single-message drill-down
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Map short sport IDs → odds_api_client sport keys
+_SPORT_KEY_MAP: dict[str, str | None] = {
+    "tsl":   None,  # TSL uses internal data, not odds API
+    "nfl":   "americanfootball_nfl",
+    "nba":   "basketball_nba",
+    "mlb":   "baseball_mlb",
+    "nhl":   "icehockey_nhl",
+    "ncaab": "basketball_ncaab",
+    "ufc":   "mma_ufc",
+    "epl":   "soccer_epl",
+    "mls":   "soccer_mls",
+    "wnba":  "basketball_wnba",
+}
+
+# Sport buttons layout: (label, emoji, sport_id, row)
+_SPORT_BUTTONS = [
+    ("TSL",   "\U0001f3c8", "tsl",   0),
+    ("NFL",   "\U0001f3c8", "nfl",   0),
+    ("NBA",   "\U0001f3c0", "nba",   0),
+    ("MLB",   "\u26be",     "mlb",   0),
+    ("NHL",   "\U0001f3d2", "nhl",   0),
+    ("NCAAB", "\U0001f3c0", "ncaab", 1),
+    ("UFC",   "\U0001f94a", "ufc",   1),
+    ("EPL",   "\u26bd",     "epl",   1),
+    ("MLS",   "\u26bd",     "mls",   1),
+    ("WNBA",  "\U0001f3c0", "wnba",  1),
+]
+
+
+class SportsbookWorkspace(discord.ui.View):
+    """Edit-in-place workspace for sportsbook drill-downs.
+
+    All child states render into a single ephemeral message.
+    Navigation never spawns new messages — it calls _refresh().
+    """
+
+    def __init__(self, cog: "SportsbookCog", user_id: int, *, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.user_id = user_id
+        # State caches (populated by show_* methods)
+        self._cached_tsl_games: list[dict] = []
+        self._cached_real_events: list[dict] = []
+        self._current_game: dict = {}
+        self._current_event: dict = {}
+        self._current_sport_key: str = ""
+        self._pending_bet: dict = {}
+
+    # ── Core mechanics ──────────────────────────────────────────────────────
+
+    def _cart_footer(self) -> str:
+        """Build a one-line cart summary for embed footers."""
+        cart = _get_cart(self.user_id)
+        if not cart:
+            return "Cart empty \u2022 Add legs from any sport"
+        legs_str = " + ".join(
+            f"{l['pick']} ({l['bet_type']}) {_american_to_str(l['odds'])}"
+            for l in cart
+        )
+        if len(cart) >= 2:
+            combined = _combine_parlay_odds([l["odds"] for l in cart])
+            return f"\U0001f3b0 Cart [{len(cart)}]: {legs_str} | Combined: {_american_to_str(combined)} | Ready to submit"
+        return f"\U0001f3b0 Cart [{len(cart)}]: {legs_str} | Add more legs"
+
+    async def _update_workspace(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+        view: "SportsbookWorkspace",
+        *,
+        file: discord.File | None = None,
+    ):
+        """Edit the workspace message in-place."""
+        embed.set_footer(text=self._cart_footer())
+
+        kwargs: dict = {"embed": embed, "view": view}
+        if file is not None:
+            embed.set_image(url=f"attachment://{file.filename}")
+            kwargs["attachments"] = [file]
+        else:
+            embed.set_image(url=None)
+            kwargs["attachments"] = []
+
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(**kwargs)
+        else:
+            await interaction.edit_original_response(**kwargs)
+
+    def _add_cart_buttons(self, row: int):
+        """Add Submit Parlay + Clear Cart buttons if cart has legs."""
+        cart = _get_cart(self.user_id)
+        if not cart:
+            return
+        combined = _combine_parlay_odds([l["odds"] for l in cart])
+        submit = discord.ui.Button(
+            label=f"\U0001f4b0 Submit ({len(cart)}L @ {_american_to_str(combined)})",
+            style=discord.ButtonStyle.success,
+            disabled=len(cart) < 2,
+            row=row,
+        )
+        submit.callback = self._submit_parlay_cb
+        self.add_item(submit)
+
+        clear = discord.ui.Button(label="\U0001f5d1\ufe0f Clear", style=discord.ButtonStyle.danger, row=row)
+        clear.callback = self._clear_cart_cb
+        self.add_item(clear)
+
+    # ── State 1: Sport Selector ─────────────────────────────────────────────
+
+    async def show_sport_selector(self, interaction: discord.Interaction, *, is_initial: bool = False):
+        """Sport selector — the 'home' state of the workspace."""
+        self.clear_items()
+
+        balance = _get_balance(self.user_id)
+
+        embed = discord.Embed(title="\U0001f3c6  ATLAS SPORTSBOOK", color=TSL_GOLD)
+        embed.description = (
+            f"\U0001f4b0 **Balance:** ${balance:,}\n"
+            f"Select a sport to browse games."
+        )
+
+        for label, emoji, sport_id, row in _SPORT_BUTTONS:
+            btn = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=row)
+            btn.callback = self._make_sport_cb(sport_id)
+            self.add_item(btn)
+
+        # Row 2: Cart controls
+        self._add_cart_buttons(row=2)
+
+        if is_initial:
+            embed.set_footer(text=self._cart_footer())
+            await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+        else:
+            await self._update_workspace(interaction, embed, self)
+
+    # ── State 2: TSL Game List ──────────────────────────────────────────────
+
+    async def show_tsl_games(self, interaction: discord.Interaction):
+        """TSL game list with select dropdown."""
+        self.clear_items()
+
+        ui_games = self._cached_tsl_games
+        bet_week = dm.CURRENT_WEEK + 1
+        balance = _get_balance(self.user_id)
+
+        embed = discord.Embed(title="\U0001f3c8  TSL SPORTSBOOK", color=TSL_GOLD)
+        embed.description = (
+            f"```\n"
+            f"WEEK {bet_week} BOARD  \u2022  SEASON {dm.CURRENT_SEASON}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"\U0001f4b0 Your Balance:  ${balance:,}\n"
+            f"\U0001f3ae Games:         {len(ui_games)}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"SELECT A GAME TO PLACE WAGER\n"
+            f"```"
+        )
+
+        options = []
+        for i, g in enumerate(ui_games):
+            locked = "\U0001f534 " if _is_locked(g["game_id"]) else "\U0001f7e2 "
+            over = " \u26a0\ufe0f" if g.get("_overridden") else ""
+            options.append(discord.SelectOption(
+                label=f"{locked}{g['away']} @ {g['home']}{over}",
+                value=str(i),
+                description=f"Spread: {g['away']} {g['away_spread']} | O/U {g['ou_line']}"
+            ))
+
+        sel = discord.ui.Select(
+            placeholder="\u2501\u2501 SELECT A GAME \u2501\u2501",
+            options=options[:25],
+            min_values=1, max_values=1, row=0,
+        )
+        sel.callback = self._on_tsl_game_select
+        self.add_item(sel)
+
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self._back_to_sports
+        self.add_item(back)
+        self._add_cart_buttons(row=1)
+
+        await self._update_workspace(interaction, embed, self)
+
+    # ── State 3: TSL Match Detail ───────────────────────────────────────────
+
+    async def show_tsl_match(self, interaction: discord.Interaction, game: dict):
+        """TSL match detail with bet type buttons + card image."""
+        self.clear_items()
+        self._current_game = game
+
+        is_locked = _is_locked(game["game_id"])
+        png = await build_match_detail_card(game, locked=is_locked)
+        file = card_to_file(png, f"match_{game['game_id']}.png")
+
+        embed = discord.Embed(color=TSL_GOLD)
+
+        away, home = game["away"], game["home"]
+        ou = game["ou_line"]
+
+        bets = [
+            (f"{away} {game['away_spread']} (\u2212110)", away, game["away_spread_val"], -110, "Spread",    0),
+            (f"{home} {game['home_spread']} (\u2212110)", home, game["home_spread_val"], -110, "Spread",    0),
+            (f"{away} ML {game['away_ml']}",              away, 0.0,                     game["away_ml_val"], "Moneyline", 1),
+            (f"{home} ML {game['home_ml']}",              home, 0.0,                     game["home_ml_val"], "Moneyline", 1),
+            (f"OVER {ou} (\u2212110)",                    f"OVER {ou}", ou,               -110, "Over",      2),
+            (f"UNDER {ou} (\u2212110)",                   f"UNDER {ou}", ou,              -110, "Under",     2),
+        ]
+
+        for label, pick, line, odds, bet_type, row in bets:
+            btn = discord.ui.Button(
+                label=label[:80],
+                style=(discord.ButtonStyle.secondary if row == 0 else
+                       discord.ButtonStyle.primary   if row == 1 else
+                       discord.ButtonStyle.success   if "OVER" in label else
+                       discord.ButtonStyle.danger),
+                row=row,
+                disabled=is_locked,
+            )
+            btn.callback = self._make_bet_cb(game, pick, line, odds, bet_type)
+            self.add_item(btn)
+
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
+        back.callback = self._back_to_tsl_games
+        self.add_item(back)
+
+        await self._update_workspace(interaction, embed, self, file=file)
+
+    # ── State 4: Real Sport Game List ───────────────────────────────────────
+
+    async def show_real_games(self, interaction: discord.Interaction, sport_key: str):
+        """Real sports game list — select dropdown."""
+        self.clear_items()
+        self._current_sport_key = sport_key
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT event_id, sport_key, home_team, away_team, commence_time "
+                "FROM real_events WHERE sport_key = ? AND commence_time > ? "
+                "ORDER BY commence_time",
+                (sport_key, now_str),
+            ) as cur:
+                events = [dict(row) for row in await cur.fetchall()]
+
+        self._cached_real_events = events
+
+        if not events:
+            sport_name = REAL_SPORTS.get(sport_key, sport_key)
+            embed = discord.Embed(
+                description=f"No **{sport_name}** games available right now.\nOdds sync on a schedule \u2014 check back later!",
+                color=TSL_GOLD,
+            )
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back.callback = self._back_to_sports
+            self.add_item(back)
+            await self._update_workspace(interaction, embed, self)
+            return
+
+        sport_name = REAL_SPORTS.get(sport_key, sport_key)
+        emoji = SPORT_EMOJI.get(sport_key, "\U0001f3c6")
+
+        embed = discord.Embed(
+            title=f"{emoji} {sport_name} \u2014 Upcoming Games",
+            description=f"**{len(events)}** games available for betting.",
+            color=TSL_GOLD,
+        )
+
+        lines = []
+        for ev in events[:10]:
+            ct = _parse_commence(ev["commence_time"])
+            ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
+            lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** \u2014 {ts}")
+        embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
+
+        options = []
+        for ev in events[:25]:
+            ct = _parse_commence(ev["commence_time"])
+            time_str = ct.strftime("%m/%d %I:%M %p") if ct else "TBD"
+            label = f"{ev['away_team']} @ {ev['home_team']}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            options.append(discord.SelectOption(label=label, value=ev["event_id"], description=time_str))
+
+        sel = discord.ui.Select(placeholder="Select a game to bet on...", options=options, row=1)
+        sel.callback = self._on_real_game_select
+        self.add_item(sel)
+
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+        back.callback = self._back_to_sports
+        self.add_item(back)
+        self._add_cart_buttons(row=2)
+
+        await self._update_workspace(interaction, embed, self)
+
+    # ── State 5: Real Sport Match Detail (6-button grid) ────────────────────
+
+    async def show_real_match(self, interaction: discord.Interaction, event: dict):
+        """Real sport match detail — card image + 6-button grid (flat odds from real_events)."""
+        self.clear_items()
+        self._current_event = event
+        sport_key = self._current_sport_key
+
+        # Fetch full event row with flat odds columns
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM real_events WHERE event_id = ?",
+                (event["event_id"],),
+            ) as cur:
+                row = await cur.fetchone()
+
+        if not row:
+            embed = discord.Embed(description="No odds available for this game yet.", color=TSL_GOLD)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back.callback = lambda i: self._nav_real_games(i)
+            self.add_item(back)
+            await self._update_workspace(interaction, embed, self)
+            return
+
+        event_row = dict(row)
+        has_odds = any(event_row.get(k) is not None for k in
+                       ("moneyline_home", "spread_home", "over_under"))
+        if not has_odds:
+            embed = discord.Embed(description="No odds available for this game yet.", color=TSL_GOLD)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back.callback = lambda i: self._nav_real_games(i)
+            self.add_item(back)
+            await self._update_workspace(interaction, embed, self)
+            return
+
+        png = await build_real_match_detail_card(event_row, sport_key=sport_key)
+        file = card_to_file(png, f"match_{event['event_id']}.png")
+
+        embed = discord.Embed(color=TSL_GOLD)
+
+        home = event_row["home_team"]
+        away = event_row["away_team"]
+        short_home = _real_short_name(home)
+        short_away = _real_short_name(away)
+
+        # Build 6-button grid from flat odds columns
+        for side, team_full, short, row_idx in [
+            ("home", home, short_home, 0),
+            ("away", away, short_away, 1),
+        ]:
+            # Moneyline
+            ml_val = event_row.get(f"moneyline_{side}")
+            if ml_val is not None:
+                label = f"{short} {int(ml_val):+d}"
+                btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.green, row=row_idx)
+                btn.callback = self._make_real_bet_cb(event_row, team_full, "Moneyline", int(ml_val), None)
+                self.add_item(btn)
+
+            # Spread
+            sp_val = event_row.get(f"spread_{side}")
+            sp_odds = event_row.get(f"spread_{side}_odds")
+            if sp_val is not None and sp_odds is not None:
+                point_str = f"{float(sp_val):+g}"
+                label = f"{short} {point_str} ({int(sp_odds):+d})"
+                btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.blurple, row=row_idx)
+                btn.callback = self._make_real_bet_cb(event_row, team_full, "Spread", int(sp_odds), float(sp_val))
+                self.add_item(btn)
+
+            # Totals (Over for home row, Under for away row)
+            ou_name = "Over" if side == "home" else "Under"
+            ou_total = event_row.get("over_under")
+            ou_odds_key = "over_odds" if side == "home" else "under_odds"
+            ou_odds = event_row.get(ou_odds_key)
+            if ou_total is not None and ou_odds is not None:
+                label = f"{ou_name} {float(ou_total)} ({int(ou_odds):+d})"
+                btn = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.gray, row=row_idx)
+                btn.callback = self._make_real_bet_cb(event_row, ou_name, ou_name, int(ou_odds), float(ou_total))
+                self.add_item(btn)
+
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+        back.callback = lambda i: self._nav_real_games(i)
+        self.add_item(back)
+        self._add_cart_buttons(row=2)
+
+        await self._update_workspace(interaction, embed, self, file=file)
+
+    # ── State 6: Wager Presets ──────────────────────────────────────────────
+
+    async def show_wager(self, interaction: discord.Interaction, game: dict,
+                         pick: str, line, odds: int, bet_type: str):
+        """Wager amount selection — preset buttons + custom + parlay."""
+        self.clear_items()
+
+        self._pending_bet = {
+            "game": game, "pick": pick, "line": line, "odds": odds, "bet_type": bet_type,
+        }
+
+        balance = _get_balance(self.user_id)
+        source = game.get("_source_label", "TSL")
+        matchup = f"{game.get('away', game.get('away_team', ''))} @ {game.get('home', game.get('home_team', ''))}"
+
+        embed = discord.Embed(
+            title=f"\U0001f4cb  {pick} \u2014 {bet_type}", color=TSL_GOLD,
+        )
+        source_badge = f"**[{source}]** " if source not in (None, "TSL") else ""
+        embed.description = (
+            f"{source_badge}**{matchup}**\n"
+            f"Line: `{_american_to_str(odds)}`\n\n"
+            f"\U0001f4b0 Balance: **${balance:,}**"
+        )
+
+        # Row 0: Preset amount buttons
+        for amt in WAGER_PRESETS:
+            can_afford = amt <= balance
+            btn = discord.ui.Button(
+                label=f"${amt:,}",
+                style=discord.ButtonStyle.success if can_afford else discord.ButtonStyle.secondary,
+                disabled=not can_afford,
+                row=0,
+            )
+            btn.callback = self._make_place_bet_cb(amt)
+            self.add_item(btn)
+
+        # Row 1: Custom + Add to Parlay
+        custom_btn = discord.ui.Button(label="\u270f\ufe0f Custom", style=discord.ButtonStyle.secondary, row=1)
+        custom_btn.callback = self._custom_wager_cb
+        self.add_item(custom_btn)
+
+        parlay_btn = discord.ui.Button(label="\U0001f3b0 Add to Parlay", style=discord.ButtonStyle.primary, row=1)
+        parlay_btn.callback = self._add_to_parlay_cb
+        self.add_item(parlay_btn)
+
+        # Row 2: Back
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+        back.callback = self._back_to_match
+        self.add_item(back)
+
+        await self._update_workspace(interaction, embed, self)
+
+    # ── Classmethod: Open workspace from hub ────────────────────────────────
+
+    @classmethod
+    async def open_to_sport(cls, interaction: discord.Interaction, cog, sport_id: str):
+        """Create workspace and open directly to a sport's game list.
+
+        Called from SportsbookHubView button callbacks.
+        interaction must already be deferred.
+        """
+        ws = cls(cog, interaction.user.id)
+
+        if sport_id == "tsl":
+            ws._cached_tsl_games = await _load_tsl_week_games()
+            # Build the game list — we need to send the initial message
+            bet_week = dm.CURRENT_WEEK + 1
+            balance = _get_balance(interaction.user.id)
+
+            embed = discord.Embed(title="\U0001f3c8  TSL SPORTSBOOK", color=TSL_GOLD)
+            embed.description = (
+                f"```\n"
+                f"WEEK {bet_week} BOARD  \u2022  SEASON {dm.CURRENT_SEASON}\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"\U0001f4b0 Your Balance:  ${balance:,}\n"
+                f"\U0001f3ae Games:         {len(ws._cached_tsl_games)}\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"SELECT A GAME TO PLACE WAGER\n"
+                f"```"
+            )
+
+            options = []
+            for i, g in enumerate(ws._cached_tsl_games):
+                locked = "\U0001f534 " if _is_locked(g["game_id"]) else "\U0001f7e2 "
+                over = " \u26a0\ufe0f" if g.get("_overridden") else ""
+                options.append(discord.SelectOption(
+                    label=f"{locked}{g['away']} @ {g['home']}{over}",
+                    value=str(i),
+                    description=f"Spread: {g['away']} {g['away_spread']} | O/U {g['ou_line']}"
+                ))
+
+            sel = discord.ui.Select(
+                placeholder="\u2501\u2501 SELECT A GAME \u2501\u2501",
+                options=options[:25],
+                min_values=1, max_values=1, row=0,
+            )
+            sel.callback = ws._on_tsl_game_select
+            ws.add_item(sel)
+
+            back = discord.ui.Button(label="\u2190 Sports", style=discord.ButtonStyle.secondary, row=1)
+            back.callback = ws._back_to_sports
+            ws.add_item(back)
+            ws._add_cart_buttons(row=1)
+
+            embed.set_footer(text=ws._cart_footer())
+            await interaction.followup.send(embed=embed, view=ws, ephemeral=True)
+
+        else:
+            sport_key = _SPORT_KEY_MAP.get(sport_id)
+            if not sport_key:
+                return await interaction.followup.send(f"\u274c Unknown sport: `{sport_id}`", ephemeral=True)
+            ws._current_sport_key = sport_key
+
+            # Load events
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT event_id, sport_key, home_team, away_team, commence_time "
+                    "FROM real_events WHERE sport_key = ? AND commence_time > ? "
+                    "ORDER BY commence_time",
+                    (sport_key, now_str),
+                ) as cur:
+                    events = [dict(row) for row in await cur.fetchall()]
+
+            ws._cached_real_events = events
+
+            if not events:
+                sport_name = REAL_SPORTS.get(sport_key, sport_key)
+                return await interaction.followup.send(
+                    f"No **{sport_name}** games available right now.\n"
+                    f"Odds sync on a schedule \u2014 check back later!",
+                    ephemeral=True,
+                )
+
+            sport_name = REAL_SPORTS.get(sport_key, sport_key)
+            emoji = SPORT_EMOJI.get(sport_key, "\U0001f3c6")
+
+            embed = discord.Embed(
+                title=f"{emoji} {sport_name} \u2014 Upcoming Games",
+                description=f"**{len(events)}** games available for betting.",
+                color=TSL_GOLD,
+            )
+
+            lines = []
+            for ev in events[:10]:
+                ct = _parse_commence(ev["commence_time"])
+                ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
+                lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** \u2014 {ts}")
+            embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
+
+            options = []
+            for ev in events[:25]:
+                ct = _parse_commence(ev["commence_time"])
+                time_str = ct.strftime("%m/%d %I:%M %p") if ct else "TBD"
+                label = f"{ev['away_team']} @ {ev['home_team']}"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                options.append(discord.SelectOption(label=label, value=ev["event_id"], description=time_str))
+
+            sel = discord.ui.Select(placeholder="Select a game to bet on...", options=options, row=1)
+            sel.callback = ws._on_real_game_select
+            ws.add_item(sel)
+
+            back = discord.ui.Button(label="\u2190 Sports", style=discord.ButtonStyle.secondary, row=2)
+            back.callback = ws._back_to_sports
+            ws.add_item(back)
+            ws._add_cart_buttons(row=2)
+
+            embed.set_footer(text=ws._cart_footer())
+            await interaction.followup.send(embed=embed, view=ws, ephemeral=True)
+
+    # ── Callback factories ──────────────────────────────────────────────────
+
+    def _make_sport_cb(self, sport_id: str):
+        """Factory: sport button \u2192 loads game list for that sport."""
+        async def callback(interaction: discord.Interaction):
+            if sport_id == "tsl":
+                await interaction.response.defer()
+                try:
+                    self._cached_tsl_games = await _load_tsl_week_games()
+                    await self.show_tsl_games(interaction)
+                except ValueError as e:
+                    msg = str(e)
+                    if "No game data loaded" in msg:
+                        msg = "\u23f3 Game data is still loading. Try again in ~30 seconds."
+                    embed = discord.Embed(description=f"\u274c {msg}", color=TSL_GOLD)
+                    await self._update_workspace(interaction, embed, self)
+                except Exception as e:
+                    embed = discord.Embed(description=f"\u274c Error: `{e}`", color=TSL_GOLD)
+                    await self._update_workspace(interaction, embed, self)
+            else:
+                await interaction.response.defer()
+                sport_key = _SPORT_KEY_MAP.get(sport_id)
+                if sport_key:
+                    await self.show_real_games(interaction, sport_key)
+        return callback
+
+    async def _on_tsl_game_select(self, interaction: discord.Interaction):
+        """User selected a TSL game from dropdown."""
+        await interaction.response.defer()
+        idx = int(interaction.data["values"][0])
+        game = self._cached_tsl_games[idx]
+        await self.show_tsl_match(interaction, game)
+
+    def _make_bet_cb(self, game: dict, pick: str, line, odds: int, bet_type: str):
+        """Factory: TSL bet button \u2192 opens wager presets."""
+        async def callback(interaction: discord.Interaction):
+            if _is_locked(game["game_id"]):
+                embed = discord.Embed(description="\U0001f534 Game is **locked**.", color=TSL_GOLD)
+                await self._update_workspace(interaction, embed, self)
+                return
+            game["_source_label"] = "TSL"
+            await self.show_wager(interaction, game, pick, line, odds, bet_type)
+        return callback
+
+    def _make_real_bet_cb(self, event: dict, pick: str, bet_type: str, odds: int, line: float | None):
+        """Factory: real sport bet button \u2192 opens wager presets."""
+        async def callback(interaction: discord.Interaction):
+            sport_key = self._current_sport_key
+            source_label = REAL_SPORTS.get(sport_key, sport_key.split("_")[-1].upper())
+
+            game_proxy = {
+                "game_id": event["event_id"],
+                "event_id": event["event_id"],
+                "away": event["away_team"],
+                "home": event["home_team"],
+                "away_team": event["away_team"],
+                "home_team": event["home_team"],
+                "matchup_key": f"{event['away_team']} @ {event['home_team']}",
+                "bet_week": dm.CURRENT_WEEK + 1,
+                "_source_label": source_label,
+                "_is_real": True,
+                "_sport_key": sport_key,
+            }
+            await self.show_wager(interaction, game_proxy, pick, line, odds, bet_type)
+        return callback
+
+    def _make_place_bet_cb(self, amount: int):
+        """Factory: preset amount button \u2192 places straight bet."""
+        async def callback(interaction: discord.Interaction):
+            bet = self._pending_bet
+            game = bet["game"]
+
+            await interaction.response.defer(ephemeral=True)
+            try:
+                if game.get("_is_real"):
+                    await _place_real_bet(
+                        interaction, game, bet["bet_type"], bet["pick"],
+                        bet["odds"], bet.get("line"), amount,
+                        game.get("_source_label", "REAL"),
+                    )
+                else:
+                    bet_week = game.get("bet_week", dm.CURRENT_WEEK + 1)
+                    await _place_straight_bet(
+                        interaction, team=bet["pick"], line=bet["line"], odds=bet["odds"],
+                        game_id=game["game_id"], bet_type=bet["bet_type"],
+                        matchup_key=game["matchup_key"],
+                        away_name=game["away"], home_name=game["home"],
+                        bet_week=bet_week, amount=amount, already_deferred=True,
+                    )
+            except flow_wallet.InsufficientFundsError:
+                balance = _get_balance(interaction.user.id)
+                await interaction.followup.send(
+                    f"\u274c Insufficient balance. You have **${balance:,}**.", ephemeral=True
+                )
+        return callback
+
+    async def _add_to_parlay_cb(self, interaction: discord.Interaction):
+        """Add current selection to parlay cart, then back to sport selector."""
+        bet = self._pending_bet
+        game = bet["game"]
+
+        leg = {
+            "source": game.get("_source_label", "TSL"),
+            "event_id": game.get("game_id", game.get("event_id", "")),
+            "display": f"{game.get('away', game.get('away_team', ''))} @ {game.get('home', game.get('home_team', ''))}",
+            "pick": bet["pick"],
+            "bet_type": bet["bet_type"],
+            "line": bet.get("line", 0),
+            "odds": bet["odds"],
+        }
+
+        result = _add_to_cart(self.user_id, leg)
+        if result == -1:
+            embed = discord.Embed(
+                description="\u26a0\ufe0f You already have a leg from this game in your cart.", color=TSL_GOLD
+            )
+            embed.set_footer(text=self._cart_footer())
+            await self._update_workspace(interaction, embed, self)
+            return
+        if result == -2:
+            embed = discord.Embed(
+                description=f"\u26a0\ufe0f Cart is full \u2014 max **{MAX_PARLAY_LEGS}** legs.", color=TSL_GOLD
+            )
+            embed.set_footer(text=self._cart_footer())
+            await self._update_workspace(interaction, embed, self)
+            return
+
+        await self.show_sport_selector(interaction)
+
+    async def _submit_parlay_cb(self, interaction: discord.Interaction):
+        """Open parlay wager modal."""
+        cart = _get_cart(self.user_id)
+        if len(cart) < 2:
+            embed = discord.Embed(
+                description="\u274c A parlay requires at least **2 legs**.", color=TSL_GOLD
+            )
+            await self._update_workspace(interaction, embed, self)
+            return
+        combined = _combine_parlay_odds([l["odds"] for l in cart])
+        await interaction.response.send_modal(
+            ParlayWagerModal(self.user_id, cart, combined)
+        )
+
+    async def _clear_cart_cb(self, interaction: discord.Interaction):
+        """Clear parlay cart and refresh sport selector."""
+        _clear_cart(self.user_id)
+        await self.show_sport_selector(interaction)
+
+    async def _custom_wager_cb(self, interaction: discord.Interaction):
+        """Open custom wager modal (straight or real bet)."""
+        bet = self._pending_bet
+        game = bet["game"]
+
+        if game.get("_is_real"):
+            modal = CustomRealWagerModal(
+                game, bet["bet_type"], bet["pick"], bet["odds"], bet.get("line"),
+            )
+        else:
+            bet_week = game.get("bet_week", dm.CURRENT_WEEK + 1)
+            modal = CustomWagerModal(
+                team=bet["pick"], line=bet["line"], odds=bet["odds"],
+                game_id=game["game_id"], bet_type=bet["bet_type"],
+                matchup_key=game["matchup_key"],
+                away_name=game["away"], home_name=game["home"],
+                bet_week=bet_week,
+            )
+        await interaction.response.send_modal(modal)
+
+    # ── Navigation callbacks ────────────────────────────────────────────────
+
+    async def _back_to_sports(self, interaction: discord.Interaction):
+        await self.show_sport_selector(interaction)
+
+    async def _back_to_tsl_games(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.show_tsl_games(interaction)
+
+    async def _back_to_match(self, interaction: discord.Interaction):
+        """Navigate back to the appropriate match detail (TSL or real)."""
+        await interaction.response.defer()
+        game = self._pending_bet.get("game", {})
+        if game.get("_is_real"):
+            await self.show_real_match(interaction, self._current_event)
+        else:
+            await self.show_tsl_match(interaction, self._current_game)
+
+    async def _nav_real_games(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.show_real_games(interaction, self._current_sport_key)
+
+    async def _on_real_game_select(self, interaction: discord.Interaction):
+        """User selected a real sport game from dropdown."""
+        await interaction.response.defer()
+        event_id = interaction.data["values"][0]
+        event = next((e for e in self._cached_real_events if e["event_id"] == event_id), None)
+        if not event:
+            embed = discord.Embed(description="Event not found.", color=TSL_GOLD)
+            await self._update_workspace(interaction, embed, self)
+            return
+        await self.show_real_match(interaction, event)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  UNIFIED SPORTSBOOK HUB VIEW — TSL + Real Sports
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1898,36 +2664,16 @@ class SportsbookHubView(discord.ui.View):
     async def tsl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            ui_games = await _load_tsl_week_games()
+            await SportsbookWorkspace.open_to_sport(interaction, self.cog, "tsl")
         except ValueError as e:
             msg = str(e)
             if "No game data loaded" in msg:
-                msg = "⏳ Game data is still loading from the API. Please try again in ~30 seconds."
+                msg = "\u23f3 Game data is still loading from the API. Please try again in ~30 seconds."
             else:
-                msg = f"❌ {msg}"
-            return await interaction.followup.send(msg, ephemeral=True)
+                msg = f"\u274c {msg}"
+            await interaction.followup.send(msg, ephemeral=True)
         except Exception as e:
-            return await interaction.followup.send(
-                f"❌ Error loading TSL games: `{e}`", ephemeral=True
-            )
-
-        bet_week = dm.CURRENT_WEEK + 1
-        balance = _get_balance(interaction.user.id)
-        embed = discord.Embed(title="\U0001f3c8  TSL SPORTSBOOK", color=TSL_GOLD)
-        embed.description = (
-            f"```\n"
-            f"WEEK {bet_week} BOARD  •  SEASON {dm.CURRENT_SEASON}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"\U0001f4b0 Your Balance:  ${balance:,}\n"
-            f"\U0001f3ae Games:         {len(ui_games)}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELECT A GAME TO PLACE WAGER\n"
-            f"```"
-        )
-        embed.set_footer(text="Lines: Elo Rating \u00b7 Team Quality \u00b7 Home Edge")
-        await interaction.followup.send(
-            embed=embed, view=SportsbookSelectView(ui_games, self.cog), ephemeral=True
-        )
+            await interaction.followup.send(f"\u274c Error loading TSL games: `{e}`", ephemeral=True)
 
     @discord.ui.button(label="NFL", emoji="\U0001f3c8",
                        style=discord.ButtonStyle.secondary,
@@ -2001,18 +2747,6 @@ class SportsbookHubView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(label="History", emoji="\U0001f4cb",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:history", row=2)
-    async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await self.cog._bethistory_impl(interaction, weeks=99)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
     @discord.ui.button(label="Leaderboard", emoji="\U0001f3c6",
                        style=discord.ButtonStyle.danger,
                        custom_id="atlas:sportsbook:leaderboard", row=2)
@@ -2025,7 +2759,7 @@ class SportsbookHubView(discord.ui.View):
             else:
                 await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(label="Parlay", emoji="\U0001f3b0",
+    @discord.ui.button(label="Cart", emoji="\U0001f6d2",
                        style=discord.ButtonStyle.secondary,
                        custom_id="atlas:sportsbook:parlay", row=2)
     async def parlay(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2078,34 +2812,15 @@ class SportsbookHubView(discord.ui.View):
     # ── Internal: real sport drill-down ────────────────────────────────────
 
     async def _show_real_sport(self, interaction: discord.Interaction, sport_key: str):
+        """Delegate real sport drill-down to the workspace."""
         await interaction.response.defer(ephemeral=True, thinking=True)
+        # Reverse-map full sport_key to short sport_id for the workspace
+        _REVERSE_SPORT = {v: k for k, v in _SPORT_KEY_MAP.items() if v is not None}
+        sport_id = _REVERSE_SPORT.get(sport_key, sport_key)
         try:
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            async with aiosqlite.connect(DB_PATH) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    "SELECT event_id, sport_key, home_team, away_team, commence_time "
-                    "FROM real_events WHERE sport_key = ? AND commence_time > ? "
-                    "ORDER BY commence_time",
-                    (sport_key, now_str),
-                ) as cur:
-                    events = [dict(row) for row in await cur.fetchall()]
+            await SportsbookWorkspace.open_to_sport(interaction, self.cog, sport_id)
         except Exception as e:
-            return await interaction.followup.send(
-                f"❌ Error loading events: `{e}`", ephemeral=True
-            )
-
-        if not events:
-            sport_name = REAL_SPORTS.get(sport_key, sport_key)
-            return await interaction.followup.send(
-                f"No **{sport_name}** games available right now.\n"
-                f"Odds sync on a schedule \u2014 check back later!",
-                ephemeral=True,
-            )
-
-        view = EventListView(None, events, sport_key)
-        embed = view.build_embed()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            await interaction.followup.send(f"\u274c Error loading games: `{e}`", ephemeral=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

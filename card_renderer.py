@@ -81,27 +81,32 @@ def _dev_icon_uri(dev: str) -> str:
     return f"data:image/png;base64,{b64}" if b64 else ""
 
 
-# ── NFL team identity (self-contained — no cross-module import) ──────────────
+# ── NFL team identity (via TeamBranding — replaces hardcoded dict) ────────────
 
-_NFL_IDENTITY: dict[str, str] = {
-    "Cardinals": "ari", "Falcons": "atl", "Ravens": "bal", "Bills": "buf",
-    "Panthers": "car", "Bears": "chi", "Bengals": "cin", "Browns": "cle",
-    "Cowboys": "dal", "Broncos": "den", "Lions": "det", "Packers": "gb",
-    "Texans": "hou", "Colts": "ind", "Jaguars": "jax", "Chiefs": "kc",
-    "Raiders": "lv", "Chargers": "lac", "Rams": "lar", "Dolphins": "mia",
-    "Vikings": "min", "Patriots": "ne", "Saints": "no", "Giants": "nyg",
-    "Jets": "nyj", "Eagles": "phi", "Steelers": "pit", "49ers": "sf",
-    "Seahawks": "sea", "Buccaneers": "tb", "Titans": "ten",
-    "Commanders": "wsh", "Washington": "wsh",
-}
+from team_branding import TeamBranding as _TeamBranding
+
+_branding: _TeamBranding | None = None
+
+def _get_branding() -> _TeamBranding:
+    global _branding
+    if _branding is None:
+        _branding = _TeamBranding("assets/team_branding.json")
+    return _branding
 
 def _team_abbrev(name: str) -> str:
-    for key, abbrev in _NFL_IDENTITY.items():
-        if key.lower() in name.lower():
-            return abbrev
-    return ""
+    b = _get_branding()
+    team = b.by_nickname(name, "NFL")
+    if not team:
+        for t in b.all_teams("NFL"):
+            if t.get("nickname", "").lower() in name.lower() or name.lower() in t.get("nickname", "").lower():
+                team = t
+                break
+    return team["abbreviation"].lower() if team else ""
 
 def _team_logo_url(name: str) -> str:
+    logo = _get_branding().logo_url(name, league="NFL")
+    if logo:
+        return logo
     abbrev = _team_abbrev(name)
     return f"https://a.espncdn.com/i/teamlogos/nfl/500/{abbrev}.png" if abbrev else ""
 
