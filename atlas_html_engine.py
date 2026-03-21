@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import html as html_mod
+import logging
 from pathlib import Path
 
 from atlas_style_tokens import Tokens
+
+log = logging.getLogger("atlas.render")
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -69,6 +72,7 @@ def _load_font_b64(name: str) -> str:
         if path.exists():
             _FONT_CACHE[name] = base64.b64encode(path.read_bytes()).decode()
         else:
+            log.warning("Font file missing: %s", name)
             _FONT_CACHE[name] = ""
     return _FONT_CACHE[name]
 
@@ -533,32 +537,48 @@ class PagePool:
         self._scale = scale
         self._available: asyncio.Queue = asyncio.Queue()
         self._max_renders_per_page = 100
+        self._render_counts: dict[int, int] = {}
+
+    async def _new_page(self):
+        """Create a fresh page from the current browser."""
+        browser = await _get_browser()
+        return await browser.new_page(
+            viewport={"width": self._width, "height": 1200},
+            device_scale_factor=self._scale,
+        )
 
     async def warm(self):
         """Pre-create pages and add them to the pool."""
-        browser = await _get_browser()
         for _ in range(self._size):
-            page = await browser.new_page(
-                viewport={"width": self._width, "height": 1200},
-                device_scale_factor=self._scale,
-            )
+            page = await self._new_page()
             await self._available.put(page)
 
     async def acquire(self, timeout: float = 10.0):
-        """Get a page from the pool (blocks up to *timeout* seconds)."""
-        return await asyncio.wait_for(self._available.get(), timeout=timeout)
+        """Get a live page from the pool, replacing dead pages."""
+        page = await asyncio.wait_for(self._available.get(), timeout=timeout)
+        # Health check: replace zombie pages left by a browser crash
+        for _ in range(self._size):
+            if not page.is_closed():
+                return page
+            log.warning("Dead page detected in pool — replacing")
+            page = await self._new_page()
+        return page
 
     async def release(self, page):
-        """Return a page to the pool, recycling if it exceeded render limit."""
-        await page.set_viewport_size({"width": self._width, "height": 1200})
-        page._render_count = getattr(page, "_render_count", 0) + 1
-        if page._render_count >= self._max_renders_per_page:
-            await page.close()
-            browser = await _get_browser()
-            page = await browser.new_page(
-                viewport={"width": self._width, "height": 1200},
-                device_scale_factor=self._scale,
-            )
+        """Return a page to the pool, recycling dead or exhausted pages."""
+        try:
+            if page.is_closed():
+                raise RuntimeError("page closed")
+            await page.set_viewport_size({"width": self._width, "height": 1200})
+            pid = id(page)
+            self._render_counts[pid] = self._render_counts.get(pid, 0) + 1
+            if self._render_counts[pid] >= self._max_renders_per_page:
+                del self._render_counts[pid]
+                await page.close()
+                raise RuntimeError("recycling")
+        except Exception:
+            # Replace dead or recycled page with a fresh one
+            page = await self._new_page()
         await self._available.put(page)
 
     async def drain(self):
@@ -578,11 +598,16 @@ async def render_card(html: str, width: int | None = None) -> bytes:
     """Render HTML to a PNG screenshot, clipping to the .card element."""
     if _pool is None:
         raise RuntimeError("Page pool not initialised — call init_pool() first")
-    page = await _pool.acquire()
+    try:
+        page = await _pool.acquire()
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            "Render pool exhausted — all slots busy. Try again in a moment."
+        ) from None
     try:
         if width and width != Tokens.CARD_WIDTH:
             await page.set_viewport_size({"width": width, "height": 1200})
-        await page.set_content(html, wait_until="domcontentloaded")
+        await page.set_content(html, wait_until="domcontentloaded", timeout=10_000)
         card = await page.query_selector(".card")
         if card:
             box = await card.bounding_box()
@@ -599,8 +624,8 @@ async def render_card(html: str, width: int | None = None) -> bytes:
                     "width": box["width"],
                     "height": box["height"],
                 }
-                return await page.screenshot(clip=clip, type="png")
-        return await page.screenshot(type="png")
+                return await page.screenshot(clip=clip, type="png", timeout=10_000)
+        return await page.screenshot(type="png", timeout=10_000)
     finally:
         await _pool.release(page)
 

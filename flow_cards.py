@@ -487,7 +487,18 @@ def _gather_my_bets_data(user_id: int) -> dict:
             ).fetchall()
             for parlay_id, pick, status in leg_rows:
                 legs_map.setdefault(parlay_id, []).append({"pick": pick, "status": status})
-    return {"balance": balance, "straight": straight, "parlays": parlays, "legs_map": legs_map}
+        # Real sportsbook bets (NFL/NBA/MLB/NHL etc.)
+        real_bets: list = []
+        try:
+            real_bets = con.execute(
+                "SELECT sport_key, bet_type, pick, wager_amount, odds, line, status "
+                "FROM real_bets WHERE discord_id=? AND status='Pending' "
+                "ORDER BY bet_id DESC",
+                (user_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            pass  # real_bets table may not exist yet
+    return {"balance": balance, "straight": straight, "parlays": parlays, "legs_map": legs_map, "real_bets": real_bets}
 
 
 async def build_my_bets_card(user_id: int) -> bytes:
@@ -497,12 +508,14 @@ async def build_my_bets_card(user_id: int) -> bytes:
     straight = d["straight"]
     parlays = d["parlays"]
     legs_map = d["legs_map"]
+    real_bets = d["real_bets"]
 
-    pending_count = len(straight) + len(parlays)
-    total_risk = sum(b[3] for b in straight) + sum(p[3] for p in parlays)
+    pending_count = len(straight) + len(parlays) + len(real_bets)
+    total_risk = sum(b[3] for b in straight) + sum(p[3] for p in parlays) + sum(r[3] for r in real_bets)
     max_payout = (
         sum(_payout_calc(b[3], b[4]) for b in straight)
         + sum(_payout_calc(p[3], p[2]) for p in parlays)
+        + sum(_payout_calc(r[3], r[4]) for r in real_bets)
     )
 
     # Status bar
@@ -562,7 +575,35 @@ async def build_my_bets_card(user_id: int) -> bytes:
   <div class="parlay-legs">{legs_html}</div>
 </div>\n'''
 
-    if not straight and not parlays:
+    # Real sportsbook bets
+    _SPORT_LABELS = {
+        "americanfootball_nfl": "NFL", "basketball_nba": "NBA",
+        "baseball_mlb": "MLB", "icehockey_nhl": "NHL",
+        "basketball_ncaab": "NCAAB", "mma_ufc": "UFC",
+        "soccer_epl": "EPL", "soccer_mls": "MLS",
+        "basketball_wnba": "WNBA",
+    }
+    if real_bets:
+        bets_html += '<div class="section-label" style="margin-top:var(--space-sm);">REAL SPORTS</div>\n'
+        for rb in real_bets[:8]:
+            sport_key, btype, pick, wager, odds, line, _status = rb
+            potential = _payout_calc(wager, odds)
+            sport_tag = _SPORT_LABELS.get(sport_key, sport_key.split("_")[-1].upper())
+            line_str = ""
+            if btype in ("Spread",) and line is not None:
+                line_str = f" ({line:+g})"
+            elif btype in ("Over/Under", "Totals") and line is not None:
+                line_str = f" ({line})"
+            bets_html += f'''<div class="bet-row">
+  <span class="bet-team">{esc(str(pick))}</span>
+  <span class="bet-type">{esc(sport_tag)} · {esc(btype)}{esc(line_str)} {_american_to_str(int(odds))}</span>
+  <div class="bet-details">
+    <span class="bet-wager">Wager: ${wager:,}</span>
+    <span class="bet-potential">Win: ${potential:,}</span>
+  </div>
+</div>\n'''
+
+    if not straight and not parlays and not real_bets:
         bets_html = '<div class="empty-state">No active bets. Hit /sportsbook to place some!</div>'
 
     body = f"""<style>{_FLOW_CSS}{_TAB_CSS}</style>
@@ -607,7 +648,7 @@ async def build_my_bets_card(user_id: int) -> bytes:
   </div>
 </div>
 
-<div class="footer-text">TSL Sportsbook · Pending bets only</div>
+<div class="footer-text">All Sportsbooks · Pending bets only</div>
 """
 
     full_html = wrap_card(body, status_class=status_class)

@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "5.8.0"  # T5 audit: dead code cleanup — quarantine commish_cog + utilities, fix stale refs, archive docs
+ATLAS_VERSION = "5.9.0"  # sportsbook UX overhaul — wager presets, persistent parlay cart, cross-sport parlays + accumulated fixes
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

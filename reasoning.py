@@ -297,9 +297,14 @@ _SAFE_BUILTINS = {
     "len": len, "sum": sum, "min": min, "max": max,
     "abs": abs, "round": round, "pow": pow, "divmod": divmod,
     "sorted": sorted, "any": any, "all": all,
-    # Type checking
-    "isinstance": isinstance, "issubclass": issubclass, "type": type,
-    "callable": callable, "hasattr": hasattr, "getattr": getattr,
+    # Type checking (object, type, super REMOVED — sandbox escape vectors)
+    "isinstance": isinstance, "issubclass": issubclass,
+    "callable": callable, "hasattr": hasattr,
+    # Safe getattr that blocks dunder access
+    "getattr": lambda obj, name, *default: (
+        getattr(obj, name, *default) if not name.startswith("_")
+        else (default[0] if default else None)
+    ),
     # String & repr
     "repr": repr, "format": format, "chr": chr, "ord": ord,
     "hex": hex, "oct": oct, "bin": bin, "ascii": ascii,
@@ -308,7 +313,7 @@ _SAFE_BUILTINS = {
     # Misc safe
     "id": id, "hash": hash,
     "staticmethod": staticmethod, "classmethod": classmethod,
-    "property": property, "super": super, "object": object,
+    "property": property,
     # Exceptions (needed for try/except in generated code)
     "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
     "KeyError": KeyError, "IndexError": IndexError, "AttributeError": AttributeError,

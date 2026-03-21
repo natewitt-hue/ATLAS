@@ -61,7 +61,7 @@ except ImportError:
     _AE_AVAILABLE = False
 
 # ── Shared config ─────────────────────────────────────────────────────────────
-from permissions import ADMIN_USER_IDS
+from permissions import ADMIN_USER_IDS, is_commissioner
 from constants import ATLAS_ICON_URL
 
 try:
@@ -1391,12 +1391,27 @@ class TradeActionView(discord.ui.View):
         self.proposer_id = proposer_id
         self.bot_ref     = bot
 
-    def _is_commissioner(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id in ADMIN_USER_IDS:
-            return True
-        if interaction.guild:
-            return any(r.name == "Commissioner" for r in interaction.user.roles)
-        return False
+        # Dynamic custom_ids for persistent view support
+        approve = discord.ui.Button(
+            label="Approve", style=discord.ButtonStyle.success,
+            emoji="✅", custom_id=f"genesis:trade:{trade_id}:approve", row=0,
+        )
+        approve.callback = self._approve_callback
+        self.add_item(approve)
+
+        reject = discord.ui.Button(
+            label="Reject", style=discord.ButtonStyle.danger,
+            emoji="❌", custom_id=f"genesis:trade:{trade_id}:reject", row=0,
+        )
+        reject.callback = self._reject_callback
+        self.add_item(reject)
+
+        counter = discord.ui.Button(
+            label="Counter", style=discord.ButtonStyle.primary,
+            emoji="🔄", custom_id=f"genesis:trade:{trade_id}:counter", row=0,
+        )
+        counter.callback = self._counter_callback
+        self.add_item(counter)
 
     async def _update_status(
         self,
@@ -1414,6 +1429,38 @@ class TradeActionView(discord.ui.View):
             return await interaction.response.send_message(
                 f"⚠️ This trade has already been **{trade['status']}**.", ephemeral=True
             )
+
+        # ── Validate roster integrity before approval ────────────────────
+        if new_status == "approved" and dm.df_players is not None and not dm.df_players.empty:
+            stale = []
+            for side_key, team_name_key in [
+                ("players_a_data", "team_a_name"),
+                ("players_b_data", "team_b_name"),
+            ]:
+                players = trade.get(side_key) or []
+                expected_team = trade.get(team_name_key, "")
+                for p in players:
+                    rid = p.get("rosterId")
+                    if rid is None:
+                        continue
+                    match = dm.df_players[dm.df_players["rosterId"] == rid]
+                    if match.empty:
+                        stale.append(
+                            f"**{p.get('firstName', '')} {p.get('lastName', '')}** "
+                            f"— no longer on any roster"
+                        )
+                    elif match.iloc[0].get("teamName", "") != expected_team:
+                        stale.append(
+                            f"**{p.get('firstName', '')} {p.get('lastName', '')}** "
+                            f"— now on {match.iloc[0].get('teamName', 'unknown')}"
+                        )
+            if stale:
+                return await interaction.response.send_message(
+                    "❌ **Cannot approve — roster has changed since proposal:**\n"
+                    + "\n".join(f"• {s}" for s in stale)
+                    + "\n\nReject this trade and have owners resubmit.",
+                    ephemeral=True,
+                )
 
         # ── FIX: Defer immediately — buys 15 min instead of 3-second timeout.
         # Without this, the trade eval + image render below exceeds Discord's
@@ -1535,9 +1582,8 @@ class TradeActionView(discord.ui.View):
                 except Exception:
                     pass
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅", row=0)
-    async def approve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_commissioner(interaction):
+    async def _approve_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message(
                 "❌ Only commissioners can approve trades.", ephemeral=True
             )
@@ -1546,9 +1592,8 @@ class TradeActionView(discord.ui.View):
             AtlasColors.SUCCESS
         )
 
-    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji="❌", row=0)
-    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_commissioner(interaction):
+    async def _reject_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message(
                 "❌ Only commissioners can reject trades.", ephemeral=True
             )
@@ -1557,8 +1602,7 @@ class TradeActionView(discord.ui.View):
             AtlasColors.ERROR
         )
 
-    @discord.ui.button(label="Counter", style=discord.ButtonStyle.primary, emoji="🔄", row=0)
-    async def counter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _counter_callback(self, interaction: discord.Interaction):
         # Any involved owner can counter, or commissioner
         trade = _trades.get(self.trade_id)
         if not trade:
@@ -1566,7 +1610,7 @@ class TradeActionView(discord.ui.View):
 
         is_involved = (
             interaction.user.id == self.proposer_id or
-            self._is_commissioner(interaction)
+            await is_commissioner(interaction)
         )
         if not is_involved:
             # Also allow if the user owns team_a or team_b
@@ -1657,6 +1701,17 @@ class TradeCenterCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _load_trade_state()
+        # Re-register persistent TradeActionViews for pending trades
+        for tid, trade in _trades.items():
+            if trade.get("status") == "pending":
+                view = TradeActionView(
+                    trade_id=tid,
+                    team_a={"nickName": trade.get("team_a_name", ""), "id": trade.get("team_a_id", 0)},
+                    team_b={"nickName": trade.get("team_b_name", ""), "id": trade.get("team_b_id", 0)},
+                    proposer_id=trade.get("proposer_id", 0),
+                    bot=bot,
+                )
+                bot.add_view(view)
 
     @app_commands.command(
         name="trade",
@@ -2068,7 +2123,7 @@ class GenesisHubCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Re-register GenesisHubView so persistent buttons survive restarts
+        # Persistent view: routes ALL atlas:genesis:* custom_ids to this instance
         self.bot.add_view(GenesisHubView(bot))
 
     @app_commands.command(

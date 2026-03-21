@@ -34,10 +34,14 @@ def _get_db() -> sqlite3.Connection:
 
 
 def _run_sql(sql: str, params: tuple = ()) -> tuple[list[dict], str | None]:
+    stripped = sql.strip().rstrip(";").strip()
+    if not stripped.upper().startswith("SELECT"):
+        return [], "Only SELECT queries are allowed"
     try:
         conn = _get_db()
         try:
-            cur = conn.execute(sql, params)
+            conn.execute("PRAGMA query_only = ON")
+            cur = conn.execute(stripped, params)
             rows = [dict(r) for r in cur.fetchall()]
             return rows[:MAX_ROWS], None
         finally:
@@ -430,7 +434,8 @@ def _validate_where_clause(clause: str) -> None:
     upper = clause.upper().strip()
     # Block dangerous keywords
     dangerous = {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "EXEC",
-                 "EXECUTE", "UNION", "--", ";", "/*"}
+                 "EXECUTE", "UNION", "--", ";", "/*", "ATTACH", "DETACH", "PRAGMA",
+                 "REPLACE", "UPSERT"}
     for d in dangerous:
         if d in upper:
             raise ValueError(f"Unsafe SQL pattern in WHERE clause: {d}")

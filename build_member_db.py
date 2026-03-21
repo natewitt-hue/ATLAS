@@ -1308,89 +1308,87 @@ def resolve_db_username(discord_id: int | str, db_path: str = DB_PATH) -> str | 
     This replaces the old get_db_username_for_discord_id() as the primary resolver.
     """
     conn = sqlite3.connect(db_path, timeout=10)
-    sid = str(discord_id)
+    try:
+        sid = str(discord_id)
 
-    # Step 1: Check cached db_username
-    row = conn.execute(
-        "SELECT db_username, team, discord_username FROM tsl_members WHERE discord_id = ?",
-        (sid,)
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        return None
-
-    db_u, team_abbr, discord_u = row
-
-    # Already resolved — return cached value
-    if db_u:
-        conn.close()
-        return db_u
-
-    # Step 2: Look up team → teams.userName
-    if team_abbr:
-        teams_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='teams'"
+        # Step 1: Check cached db_username
+        row = conn.execute(
+            "SELECT db_username, team, discord_username FROM tsl_members WHERE discord_id = ?",
+            (sid,)
         ).fetchone()
-        if teams_exists:
-            team_row = conn.execute(
-                "SELECT userName FROM teams WHERE abbrName = ? AND userName IS NOT NULL AND userName != ''",
-                (team_abbr,)
+
+        if not row:
+            return None
+
+        db_u, team_abbr, discord_u = row
+
+        # Already resolved — return cached value
+        if db_u:
+            return db_u
+
+        # Step 2: Look up team → teams.userName
+        if team_abbr:
+            teams_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='teams'"
             ).fetchone()
-            if team_row:
-                db_u = team_row[0]
-                conn.execute(
-                    "UPDATE tsl_members SET db_username = ? WHERE discord_id = ?",
-                    (db_u, sid)
-                )
-                conn.commit()
-                conn.close()
-                print(f"[MemberDB] Auto-resolved {discord_u} → {db_u} via teams table ({team_abbr})")
-                return db_u
+            if teams_exists:
+                team_row = conn.execute(
+                    "SELECT userName FROM teams WHERE abbrName = ? AND userName IS NOT NULL AND userName != ''",
+                    (team_abbr,)
+                ).fetchone()
+                if team_row:
+                    db_u = team_row[0]
+                    conn.execute(
+                        "UPDATE tsl_members SET db_username = ? WHERE discord_id = ?",
+                        (db_u, sid)
+                    )
+                    conn.commit()
+                    print(f"[MemberDB] Auto-resolved {discord_u} → {db_u} via teams table ({team_abbr})")
+                    return db_u
 
-    # Step 3: Fuzzy match discord_username against games.homeUser/awayUser
-    if discord_u:
-        games_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='games'"
-        ).fetchone()
-        if games_exists:
-            # Get all unique usernames from games
-            game_users = conn.execute(
-                "SELECT DISTINCT homeUser FROM games WHERE homeUser != '' AND homeUser IS NOT NULL "
-                "UNION SELECT DISTINCT awayUser FROM games WHERE awayUser != '' AND awayUser IS NOT NULL"
-            ).fetchall()
-            game_user_list = [r[0] for r in game_users]
+        # Step 3: Fuzzy match discord_username against games.homeUser/awayUser
+        if discord_u:
+            games_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='games'"
+            ).fetchone()
+            if games_exists:
+                # Get all unique usernames from games
+                game_users = conn.execute(
+                    "SELECT DISTINCT homeUser FROM games WHERE homeUser != '' AND homeUser IS NOT NULL "
+                    "UNION SELECT DISTINCT awayUser FROM games WHERE awayUser != '' AND awayUser IS NOT NULL"
+                ).fetchall()
+                game_user_list = [r[0] for r in game_users]
 
-            from difflib import get_close_matches
+                from difflib import get_close_matches
 
-            # Try exact case-insensitive match first
-            for gu in game_user_list:
-                if gu.lower() == discord_u.lower():
-                    db_u = gu
-                    break
+                # Try exact case-insensitive match first
+                for gu in game_user_list:
+                    if gu.lower() == discord_u.lower():
+                        db_u = gu
+                        break
 
-            # Then fuzzy match
-            if not db_u:
-                matches = get_close_matches(
-                    discord_u.lower(),
-                    [u.lower() for u in game_user_list],
-                    n=1, cutoff=0.70
-                )
-                if matches:
-                    db_u = next(u for u in game_user_list if u.lower() == matches[0])
+                # Then fuzzy match
+                if not db_u:
+                    matches = get_close_matches(
+                        discord_u.lower(),
+                        [u.lower() for u in game_user_list],
+                        n=1, cutoff=0.70
+                    )
+                    if matches:
+                        db_u = next(u for u in game_user_list if u.lower() == matches[0])
 
-            if db_u:
-                conn.execute(
-                    "UPDATE tsl_members SET db_username = ? WHERE discord_id = ?",
-                    (db_u, sid)
-                )
-                conn.commit()
-                conn.close()
-                print(f"[MemberDB] Auto-resolved {discord_u} → {db_u} via games fuzzy match")
-                return db_u
+                if db_u:
+                    conn.execute(
+                        "UPDATE tsl_members SET db_username = ? WHERE discord_id = ?",
+                        (db_u, sid)
+                    )
+                    conn.commit()
+                    print(f"[MemberDB] Auto-resolved {discord_u} → {db_u} via games fuzzy match")
+                    return db_u
 
-    conn.close()
-    return None
+        return None
+    finally:
+        conn.close()
 
 
 def get_known_users(db_path: str = DB_PATH) -> list[str]:

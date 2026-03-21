@@ -68,7 +68,7 @@ REQUIRED_CHANNELS: list[tuple[str, str, str, bool, bool]] = [
 
 # Legacy channel name aliases for remap (old name → config_key)
 _CHANNEL_ALIASES: dict[str, str] = {
-    "askwittgpt": "ask_atlas",
+    "askwittgpt": "ask_atlas",  # TODO: Remove after all servers re-provisioned
     "real_sportsbook": "sportsbook",    # merged in v2.1
     "real-sportsbook": "sportsbook",    # display name variant
     "casino_ledger": "ledger",          # renamed in v2.3

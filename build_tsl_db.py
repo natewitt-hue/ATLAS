@@ -173,8 +173,8 @@ def _add_indexes(conn: sqlite3.Connection):
         ("idx_off_team",        "offensive_stats(teamName)"),
         ("idx_def_season",      "defensive_stats(seasonIndex)"),
         ("idx_def_player",      "defensive_stats(extendedName)"),
-        ("idx_ts_season",       "team_stats(seasonIndex)"),
-        ("idx_ts_team",         "team_stats(teamName)"),
+        ("idx_ts_season",       "team_stats(seasonIndex)"),   # only exists via CSV build, not API sync
+        ("idx_ts_team",         "team_stats(teamName)"),     # only exists via CSV build, not API sync
         ("idx_players_team",    "players(teamName)"),
         ("idx_players_pos",     "players(pos)"),
         ("idx_trades_season",   "trades(seasonIndex)"),

@@ -72,6 +72,15 @@ class PlayAgainView(discord.ui.View):
         self.btn_double.callback = self._on_double
         self.add_item(self.btn_double)
 
+        # Back to casino hub button
+        self.btn_hub = discord.ui.Button(
+            label="Casino Hub",
+            style=discord.ButtonStyle.secondary,
+            emoji="🎰",
+        )
+        self.btn_hub.callback = self._on_hub
+        self.add_item(self.btn_hub)
+
     async def _on_play(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message(
@@ -87,6 +96,7 @@ class PlayAgainView(discord.ui.View):
         # Disable buttons immediately for visual feedback before async work
         self.btn_play.disabled = True
         self.btn_double.disabled = True
+        self.btn_hub.disabled = True
         await interaction.message.edit(view=self)
 
         bal = await get_balance(self.user_id)
@@ -94,6 +104,7 @@ class PlayAgainView(discord.ui.View):
             self._used = False
             self.btn_play.disabled = False
             self.btn_double.disabled = False
+            self.btn_hub.disabled = False
             await interaction.message.edit(view=self)
             return await interaction.response.send_message(
                 f"❌ Not enough Bucks — need **${self.wager:,}**, have **${bal:,}**.",
@@ -118,6 +129,7 @@ class PlayAgainView(discord.ui.View):
         # Disable buttons immediately for visual feedback before async work
         self.btn_play.disabled = True
         self.btn_double.disabled = True
+        self.btn_hub.disabled = True
         await interaction.message.edit(view=self)
 
         # Cap at player's max bet tier
@@ -129,6 +141,7 @@ class PlayAgainView(discord.ui.View):
             self._used = False
             self.btn_play.disabled = False
             self.btn_double.disabled = False
+            self.btn_hub.disabled = False
             await interaction.message.edit(view=self)
             return await interaction.response.send_message(
                 f"❌ Not enough Bucks — need **${actual_wager:,}**, have **${bal:,}**.",
@@ -143,9 +156,29 @@ class PlayAgainView(discord.ui.View):
             # Fallback: use replay callback (wager is already bound in the partial)
             await self.replay_callback(interaction)
 
+    async def _on_hub(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(
+                "This isn't your game!", ephemeral=True
+            )
+        self._disable_all()
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        # Re-open the casino hub
+        cog = interaction.client.get_cog("CasinoCog")
+        if cog:
+            await cog.casino_hub(interaction)
+        else:
+            await interaction.response.send_message(
+                "❌ Couldn't open hub. Try `/casino`.", ephemeral=True
+            )
+
     def _disable_all(self) -> None:
         self.btn_play.disabled = True
         self.btn_double.disabled = True
+        self.btn_hub.disabled = True
         self.stop()
 
     async def on_timeout(self) -> None:

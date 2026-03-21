@@ -1,215 +1,124 @@
 """
-echo_loader.py - ATLAS Echo Persona Loader
-===========================================
-Single utility used by bot.py and all cogs to load the correct
-Echo persona based on context type.
+echo_loader.py - ATLAS Unified Persona Loader
+==============================================
+Single utility used by bot.py and all cogs to load the ATLAS persona.
 
 Import pattern (in any cog or bot.py):
-    from echo_loader import get_persona, load_all_personas, PERSONA_CASUAL
-
-Context types:
-    "casual"     - @mentions, banter, general chat
-    "official"   - rulings, announcements, governance
-    "analytical" - stats, recaps, trade analysis
+    from echo_loader import get_persona, load_all_personas
 
 Usage:
-    # Simple - get persona string for a context
-    system_prompt = get_persona("casual")
+    # Get the unified persona string
+    system_prompt = get_persona()
 
-    # Pre-load all three at startup (recommended)
+    # Pre-load at startup (recommended, runs once)
     load_all_personas()
-    system_prompt = get_persona("analytical")
 """
 
-import os
+# ── Unified ATLAS Persona ────────────────────────────────────────────────────
+# Single voice: Claude's helpful clarity with a subtle Dr Manhattan undertone.
+# Not a character — a flavor. Detached omniscience, declarative observations,
+# occasional cosmic perspective. Still grounded in real data and real names.
 
-# Persona files live in echo/ subdirectory relative to this file
-_ECHO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "echo")
+_UNIFIED_PERSONA = (
+    "You are ATLAS, the Autonomous TSL League Administration System — "
+    "the intelligence layer for The Simulation League, a Madden NFL sim league "
+    "with 31 active teams across 95+ Super Bowl seasons.\n\n"
 
-_PERSONA_FILES = {
-    "casual":     "echo_casual.txt",
-    "official":   "echo_official.txt",
-    "analytical": "echo_analytical.txt",
-}
+    "VOICE:\n"
+    "Speak with calm, clear authority. You observe this league the way a physicist "
+    "observes particles — with precise detachment and quiet certainty. Your default "
+    "mode is helpful and direct, like a brilliant analyst who happens to see the "
+    "larger pattern beneath the data. Occasionally — not always, not forced — let "
+    "a line land with the weight of someone who has watched every simulation unfold "
+    "and knows what the numbers mean before they're asked.\n\n"
 
-# In-memory cache - populated by load_all_personas() at startup
-_personas: dict = {}
+    "RULES:\n"
+    "- Refer to yourself as ATLAS in third person. Never say 'I' or 'me'.\n"
+    "- Be concise. 2-4 sentences for most responses. No bullet lists unless data demands it.\n"
+    "- Cite real names, real numbers, real outcomes. Never fabricate stats.\n"
+    "- State opinions as observations, not hedged guesses. 'The data suggests' is weak. "
+    "'The data is clear' is ATLAS.\n"
+    "- Profanity is acceptable when natural, never gratuitous.\n"
+    "- When citing rules or rulings: be definitive. LEGAL or ILLEGAL. No 'it depends.'\n"
+    "- The subtle cosmic perspective is a seasoning, not the main dish. Most responses "
+    "should be grounded and practical. One in five might carry that detached weight.\n\n"
 
-# Fallback stubs used if persona files haven't been generated yet
-_FALLBACKS = {
-    "casual": (
-        "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
-        "Speak with authority and sharp wit. Keep responses concise and direct. "
-        "Use sports slang and league-specific language naturally. "
-        "Never be boring. Never hedge. Deliver the answer."
-    ),
-    "official": (
-        "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
-        "You are in official commissioner mode. Speak with authority and finality. "
-        "Be clear, structured, and decisive. This is an official communication."
-    ),
-    "analytical": (
-        "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
-        "You are in analytical mode. Present stats and analysis with confidence and flair. "
-        "Make numbers tell a story. Deliver takes with conviction."
-    ),
-}
+    "HARD STOPS:\n"
+    "- Never use emoji in prose (okay in embed titles/footers).\n"
+    "- Never hedge with 'I think', 'maybe', 'it seems like'.\n"
+    "- Never write more than 4 sentences unless answering a complex analytical question.\n"
+    "- Never break character into generic AI assistant voice.\n"
+    "- Never apologize for being direct."
+)
 
 
 def load_all_personas() -> dict:
     """
-    Load all three persona files into memory.
-    Call this once at bot startup in _startup_load().
-    Returns dict of loaded registers.
+    Initialize the unified persona at startup.
+    Returns status dict. Called once by bot.py _startup_load().
     """
-    loaded = {}
-    for context_type, filename in _PERSONA_FILES.items():
-        path = os.path.join(_ECHO_DIR, filename)
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if content:
-                _personas[context_type] = content
-                loaded[context_type] = path
-                char_count = len(content)
-                print(f"    [Echo] {filename} loaded ({char_count:,} chars)")
-            else:
-                print(f"    [Echo] WARNING: {filename} is empty - using fallback")
-                _personas[context_type] = _FALLBACKS[context_type]
-        else:
-            print(f"    [Echo] {filename} not found - using fallback")
-            print(f"           Run: python echo_voice_extractor.py to generate")
-            _personas[context_type] = _FALLBACKS[context_type]
-
-    return loaded
+    char_count = len(_UNIFIED_PERSONA)
+    print(f"    [Echo] Unified persona loaded ({char_count:,} chars)")
+    return {"unified": "inline"}
 
 
 def get_persona(context_type: str = "casual") -> str:
     """
-    Get the system prompt for a given context type.
+    Get the ATLAS system prompt.
 
     Args:
-        context_type: "casual" | "official" | "analytical"
+        context_type: Ignored — kept for backwards compatibility.
+                      All callers receive the same unified persona.
 
     Returns:
-        System prompt string ready for Gemini system_instruction.
+        System prompt string ready for AI system_instruction.
     """
-    if context_type not in _PERSONA_FILES:
-        context_type = "casual"
-
-    # If not loaded yet, try loading on demand
-    if context_type not in _personas:
-        path = os.path.join(_ECHO_DIR, _PERSONA_FILES[context_type])
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                _personas[context_type] = f.read().strip()
-        else:
-            _personas[context_type] = _FALLBACKS[context_type]
-
-    return _personas[context_type]
+    return _UNIFIED_PERSONA
 
 
 def reload_personas() -> dict:
     """
-    Hot-reload all personas from disk without restarting the bot.
-    Called by /echorebuild after extraction completes.
+    Hot-reload personas. No-op for inline persona.
+    Kept for backwards compatibility with echo_cog.py.
     """
-    _personas.clear()
+    print("    [Echo] Unified persona is inline — nothing to reload")
     return load_all_personas()
 
 
 def get_persona_status() -> dict:
     """
-    Return status of all three persona files for diagnostics.
-    Used by /echorebuild status check.
+    Return status of the unified persona for diagnostics.
+    Used by /atlas echostatus.
     """
-    status = {}
-    for context_type, filename in _PERSONA_FILES.items():
-        path = os.path.join(_ECHO_DIR, filename)
-        exists = os.path.exists(path)
-        in_memory = context_type in _personas
-        is_fallback = _personas.get(context_type) in _FALLBACKS.values()
-        status[context_type] = {
-            "file_exists": exists,
-            "loaded": in_memory,
-            "using_fallback": is_fallback,
-            "path": path,
-            "char_count": len(_personas[context_type]) if in_memory else 0,
+    return {
+        "unified": {
+            "loaded": True,
+            "using_fallback": False,
+            "char_count": len(_UNIFIED_PERSONA),
+            "mode": "inline",
         }
-    return status
+    }
 
 
-# Context inference helper - maps command/event types to register
-_CONTEXT_MAP = {
-    # Analytical triggers
-    "stats":        "analytical",
-    "recap":        "analytical",
-    "rankings":     "analytical",
-    "grades":       "analytical",
-    "leaderboard":  "analytical",
-    "h2h":          "analytical",
-    "season":       "analytical",
-    "trade_grade":  "analytical",
-    "player":       "analytical",
-
-    # Official triggers
-    "ruling":       "official",
-    "announcement": "official",
-    "discipline":   "official",
-    "governance":   "official",
-    "trade":        "official",
-    "waiver":       "official",
-    "draft":        "official",
-    "award":        "official",
-
-    # Everything else defaults to casual
-    "mention":      "casual",
-    "banter":       "casual",
-    "general":      "casual",
-}
-
-
-def infer_context(command_name: str = None, channel_name: str = None) -> str:
+def infer_context(command_name: str | None = None, channel_name: str | None = None) -> str:
     """
-    Infer the correct persona context from a command name or channel name.
-    Fallback chain: command_name -> channel_name -> "casual"
-
-    Examples:
-        infer_context("stats")              -> "analytical"
-        infer_context(channel_name="rulings-and-decisions") -> "official"
-        infer_context("ask")               -> "casual"
+    Infer persona context. Returns 'unified' for all inputs.
+    Kept for backwards compatibility — callers still call this,
+    but get_persona() ignores the result anyway.
     """
-    # Try command name first
-    if command_name:
-        cmd = command_name.lower()
-        for key, context in _CONTEXT_MAP.items():
-            if key in cmd:
-                return context
-
-    # Try channel name
-    if channel_name:
-        ch = channel_name.lower()
-        analytical_keywords = ["stats", "recap", "rankings", "grades", "analytics", "season", "week", "scores"]
-        official_keywords   = ["announcement", "ruling", "official", "commissioner", "discipline", "trade", "draft"]
-        if any(kw in ch for kw in analytical_keywords):
-            return "analytical"
-        if any(kw in ch for kw in official_keywords):
-            return "official"
-
-    return "casual"
+    return "unified"
 
 
 # ---------------------------------------------------------------------------
-# Convenience module-level accessors (for backwards compatibility with cogs
-# that had ATLAS_PERSONA = "..." hardcoded — use get_persona() directly in
-# new code, but these provide a quick drop-in replacement).
+# Convenience module-level accessors (backwards compatibility).
+# All return the same unified persona.
 # ---------------------------------------------------------------------------
 
 def PERSONA_CASUAL() -> str:
-    return get_persona("casual")
+    return _UNIFIED_PERSONA
 
 def PERSONA_OFFICIAL() -> str:
-    return get_persona("official")
+    return _UNIFIED_PERSONA
 
 def PERSONA_ANALYTICAL() -> str:
-    return get_persona("analytical")
+    return _UNIFIED_PERSONA

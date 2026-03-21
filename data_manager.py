@@ -30,7 +30,7 @@ Helper functions:
   get_team_owner(team_name)       → string
   get_last_n_games(team, n)       → list of recent game dicts
   get_h2h_record(team_a, team_b)  → {a_wins, b_wins, ties}
-  get_weekly_results(week)        → FINAL games only (status==3) for a given week
+  get_weekly_results(week)        → completed games (status 2 or 3) for a given week
   discord_db_exists()             → bool
   get_discord_db_schema()         → schema string for LLM
   _get_discord_db(readonly)       → sqlite3.Connection
@@ -85,6 +85,7 @@ import math
 import os
 import sqlite3
 import time
+from dataclasses import dataclass, field
 import requests
 import pandas as pd
 import logging
@@ -102,30 +103,49 @@ _HEADERS = {
     "User-Agent":       "ATLAS-Bot/1.4",
 }
 
-# ── Live league state (overwritten by load_all()) ─────────────────────────────
-CURRENT_SEASON = 6
-CURRENT_WEEK   = 4
-CURRENT_STAGE  = 1
+# ── League state (atomically swapped by load_all()) ──────────────────────────
 REGULAR_STAGE  = 1     # stageIndex for regular season in this league
-
-# ── Sync timestamp ──────────────────────────────────────────────────────────
-last_sync_ts: float = 0.0   # time.time() of last successful load_all()
-
-# ── DataFrames ────────────────────────────────────────────────────────────────
-df_standings  = pd.DataFrame()
-df_teams      = pd.DataFrame()
-df_games      = pd.DataFrame()
-df_players    = pd.DataFrame()
-df_offense    = pd.DataFrame()
-df_defense    = pd.DataFrame()
-df_team_stats = pd.DataFrame()   # alias → df_standings
-df_trades     = pd.DataFrame()
-df_power      = pd.DataFrame()
-df_all_games  = pd.DataFrame()   # full season schedule with scores
+_CHAMPIONSHIP_STAGE_MIN = 200  # stageIndex >= 200 indicates championship rounds
 
 # Legacy compat shim
 DATA_DIR = ""
 BASE_URL = API_BASE
+
+
+@dataclass
+class LeagueState:
+    """All mutable league data — swapped atomically by load_all()."""
+    CURRENT_SEASON:   int = 6
+    CURRENT_WEEK:     int = 4
+    CURRENT_STAGE:    int = 1
+    last_sync_ts:     float = 0.0
+    df_standings:     pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_teams:         pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_games:         pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_players:       pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_offense:       pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_defense:       pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_team_stats:    pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_trades:        pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_power:         pd.DataFrame = field(default_factory=pd.DataFrame)
+    df_all_games:     pd.DataFrame = field(default_factory=pd.DataFrame)
+    _team_id_to_name: dict = field(default_factory=dict)
+    _team_id_to_abbr: dict = field(default_factory=dict)
+    _players_cache:   list = field(default_factory=list)
+    _abilities_cache: list = field(default_factory=list)
+    _rings_cache:     dict = field(default_factory=dict)
+    _scarcity_cache:  dict = field(default_factory=dict)
+
+
+_state = LeagueState()
+
+
+def __getattr__(name: str):
+    """Module-level __getattr__ (PEP 562) — backward compat for dm.FIELD access."""
+    if hasattr(_state, name):
+        return getattr(_state, name)
+    raise AttributeError(f"module 'data_manager' has no attribute {name}")
+
 
 # ── Normalize API nicknames → official NFL team names ─────────────────────────
 _NICK_NORMALIZE: dict[str, str] = {
@@ -149,26 +169,12 @@ def _normalize_nick(name: str) -> str:
     """Map informal API nicknames to official NFL team names."""
     return _NICK_NORMALIZE.get(name, name)
 
-# ── Internal lookup table ─────────────────────────────────────────────────────
-_team_id_to_name: dict[int, str] = {}   # teamId (int) → displayName (str)
-_team_id_to_abbr: dict[int, str] = {}   # teamId (int) → abbrName (str)
-
-# ── Ability engine caches (populated by load_all()) ───────────────────────────
-_players_cache:   list = []   # raw /export/players CSV — full roster with draft cols
-_abilities_cache: list = []   # raw /export/playerAbilities CSV
-
 # ── Discord DB path ───────────────────────────────────────────────────────────
 _DB_PATH = os.path.join(os.path.dirname(__file__), "discord_history.db")
 
 # ── Autograde callback (set by sportsbook cog after load_all fires) ───────────
 # Call signature: async def callback() — no args
 _autograde_callback = None
-
-# ── FIX #1: Rings count cache (rebuilt in load_all) ──────────────────────────
-_rings_cache: dict[int, int] = {}    # teamId → ring count
-
-# ── FIX #11: Position scarcity cache (rebuilt in load_all) ───────────────────
-_scarcity_cache: dict[str, dict] = {}  # pos → {count, expected, scarcity_class}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -259,11 +265,11 @@ def _df(records: list) -> pd.DataFrame:
 
 def team_name(team_id: int | str) -> str:
     """Resolve a teamId → nickName, e.g. 774242306 → 'Bengals'."""
-    return _team_id_to_name.get(int(team_id), str(team_id))
+    return _state._team_id_to_name.get(int(team_id), str(team_id))
 
 def team_abbr(team_id: int | str) -> str:
     """Resolve a teamId → abbreviation, e.g. 774242306 → 'CIN'."""
-    return _team_id_to_abbr.get(int(team_id), str(team_id))
+    return _state._team_id_to_abbr.get(int(team_id), str(team_id))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -285,16 +291,16 @@ def _rebuild_rings_cache(abbr_map: dict[int, str], season: int, stage: int) -> d
             return cache
 
         conn = sqlite3.connect(db_path, timeout=5)
-        # Champions are determined by winning the final game of stageIndex >= 200
+        # Champions are determined by winning the final game of championship rounds
         rows = conn.execute("""
             SELECT g.winner_team, COUNT(*) as ring_count
             FROM games g
-            WHERE CAST(g.stageIndex AS INTEGER) >= 200
+            WHERE CAST(g.stageIndex AS INTEGER) >= ?
               AND g.status IN ('2', '3')
               AND g.winner_team IS NOT NULL
               AND g.winner_team != ''
             GROUP BY g.winner_team
-        """).fetchall()
+        """, (_CHAMPIONSHIP_STAGE_MIN,)).fetchall()
         conn.close()
 
         # Map team names back to team IDs
@@ -366,21 +372,14 @@ def load_all() -> None:
     Uses local variables during fetch so the live globals are never empty.
     Swaps everything atomically at the end.
     """
-    global CURRENT_SEASON, CURRENT_WEEK, CURRENT_STAGE
-    global df_standings, df_teams, df_games, df_players
-    global df_offense, df_defense, df_team_stats, df_trades, df_power
-    global _team_id_to_name, _team_id_to_abbr
-    global _players_cache, _abilities_cache
-    global _roster_by_id
-    global df_all_games
-    global _rings_cache, _scarcity_cache
+    global _state, _roster_by_id
 
     print("--- FETCHING TSL DATA FROM MYMADDEN API ---")
 
     # ── Local staging variables — globals stay untouched until the swap ────
-    _l_season = CURRENT_SEASON
-    _l_week   = CURRENT_WEEK
-    _l_stage  = CURRENT_STAGE
+    _l_season = _state.CURRENT_SEASON
+    _l_week   = _state.CURRENT_WEEK
+    _l_stage  = _state.CURRENT_STAGE
 
     info = _get("/info")
     if info:
@@ -615,44 +614,40 @@ def load_all() -> None:
     print(f"[Scarcity] Cache built: {len(_l_scarcity_cache)} positions indexed")
 
     # ══════════════════════════════════════════════════════════════════════
-    # ATOMIC SWAP — assign everything at once so no command ever sees
-    #               partially-loaded state.
+    # ATOMIC SWAP — single pointer reassignment; GIL guarantees atomicity
     # ══════════════════════════════════════════════════════════════════════
-    CURRENT_SEASON = _l_season
-    CURRENT_WEEK   = _l_week
-    CURRENT_STAGE  = _l_stage
-
-    _team_id_to_name = _l_name_map
-    _team_id_to_abbr = _l_abbr_map
-
-    df_teams      = _l_df_teams
-    df_standings  = _l_df_standings
-    df_team_stats = _l_df_standings
-    df_games      = _l_df_games
-    df_all_games  = _l_df_all_games
-    df_power      = _l_df_power
-    df_offense    = _l_df_offense
-    df_defense    = _l_df_defense
-    df_players    = _l_df_players
-    df_trades     = _l_df_trades
-
-    _players_cache   = _l_players_cache
-    _abilities_cache = _l_abilities_cache
-    _rings_cache     = _l_rings_cache
-    _scarcity_cache  = _l_scarcity_cache
+    _state = LeagueState(
+        CURRENT_SEASON   = _l_season,
+        CURRENT_WEEK     = _l_week,
+        CURRENT_STAGE    = _l_stage,
+        last_sync_ts     = time.time(),
+        df_teams         = _l_df_teams,
+        df_standings     = _l_df_standings,
+        df_team_stats    = _l_df_standings,
+        df_games         = _l_df_games,
+        df_all_games     = _l_df_all_games,
+        df_power         = _l_df_power,
+        df_offense       = _l_df_offense,
+        df_defense       = _l_df_defense,
+        df_players       = _l_df_players,
+        df_trades        = _l_df_trades,
+        _team_id_to_name = _l_name_map,
+        _team_id_to_abbr = _l_abbr_map,
+        _players_cache   = _l_players_cache,
+        _abilities_cache = _l_abilities_cache,
+        _rings_cache     = _l_rings_cache,
+        _scarcity_cache  = _l_scarcity_cache,
+    )
 
     _rebuild_roster_index()
     print(f"     {len(_roster_by_id)} players indexed by rosterId")
 
-    global last_sync_ts
-    last_sync_ts = time.time()
-
     print(
         f"✅ Load complete — "
-        f"{len(df_players)} players | "
-        f"{len(df_games)} games | "
-        f"{len(df_standings)} teams | "
-        f"{len(df_trades)} trades"
+        f"{len(_state.df_players)} players | "
+        f"{len(_state.df_games)} games | "
+        f"{len(_state.df_standings)} teams | "
+        f"{len(_state.df_trades)} trades"
     )
 
     # NOTE: autograde callback is NOT fired here because load_all() runs in a
@@ -660,7 +655,7 @@ def load_all() -> None:
     # directly via `await dm._autograde_callback()` after load_all returns.
 
     # ── Snapshot stats for blowout_monitor delta detection ────────────────────
-    snapshot_week_stats(CURRENT_WEEK)
+    snapshot_week_stats(_state.CURRENT_WEEK)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -668,14 +663,14 @@ def load_all() -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def get_league_status() -> str:
-    return f"Season {CURRENT_SEASON} | Week {CURRENT_WEEK}"
+    return f"Season {_state.CURRENT_SEASON} | Week {_state.CURRENT_WEEK}"
 
 
 def get_sync_age_text() -> str | None:
     """Return a stale-data warning string if last sync was >30 minutes ago, else None."""
-    if last_sync_ts == 0.0:
+    if _state.last_sync_ts == 0.0:
         return "Data not yet loaded"
-    age_min = (time.time() - last_sync_ts) / 60
+    age_min = (time.time() - _state.last_sync_ts) / 60
     if age_min > 30:
         hours = int(age_min // 60)
         mins = int(age_min % 60)
@@ -687,11 +682,11 @@ def get_sync_age_text() -> str | None:
 
 def get_players() -> list:
     """Return full roster from /export/players CSV. Contains rookieYear, draftRound, dev, etc."""
-    return _players_cache
+    return _state._players_cache
 
 
 def get_player_abilities() -> list:
-    return _abilities_cache
+    return _state._abilities_cache
 
 
 def find_trades_by_player(player_name: str) -> list[dict]:
@@ -700,11 +695,11 @@ def find_trades_by_player(player_name: str) -> list[dict]:
     Returns list of dicts with keys: team1Name, team2Name, team1Sent, team2Sent,
     seasonIndex, weekIndex.  Most recent trade first.
     """
-    if df_trades.empty:
+    if _state.df_trades.empty:
         return []
     name_lower = player_name.lower()
     results = []
-    for _, row in df_trades.iterrows():
+    for _, row in _state.df_trades.iterrows():
         t1s = str(row.get("team1Sent", "")).lower()
         t2s = str(row.get("team2Sent", "")).lower()
         if name_lower in t1s or name_lower in t2s:
@@ -723,12 +718,12 @@ def find_trades_by_player(player_name: str) -> list[dict]:
 
 def get_team_record(team: str) -> str:
     """Return 'W-L-T' string for a team. '?-?-?' if not found."""
-    if df_standings.empty:
+    if _state.df_standings.empty:
         return "?-?-?"
-    mask = df_standings["teamName"].str.lower() == team.lower()
+    mask = _state.df_standings["teamName"].str.lower() == team.lower()
     if not mask.any():
         return "?-?-?"
-    row = df_standings[mask].iloc[0]
+    row = _state.df_standings[mask].iloc[0]
     w = int(row.get("totalWins",   0))
     l = int(row.get("totalLosses", 0))
     t = int(row.get("totalTies",   0))
@@ -738,20 +733,20 @@ def get_team_record(team: str) -> str:
 def get_team_owner(team_name: str) -> str:
     """Return Discord userName for a given team nickName."""
     # Check df_teams first (has userName directly)
-    if not df_teams.empty:
+    if not _state.df_teams.empty:
         for col in ("nickName", "displayName"):
-            if col in df_teams.columns:
-                mask = df_teams[col].str.lower() == team_name.lower()
+            if col in _state.df_teams.columns:
+                mask = _state.df_teams[col].str.lower() == team_name.lower()
                 if mask.any():
-                    val = df_teams[mask].iloc[0].get("userName", "")
+                    val = _state.df_teams[mask].iloc[0].get("userName", "")
                     if val:
                         return str(val)
 
     # Fallback: standings partial match
-    if not df_standings.empty and "teamName" in df_standings.columns:
-        mask = df_standings["teamName"].str.lower().str.contains(team_name.lower(), na=False)
+    if not _state.df_standings.empty and "teamName" in _state.df_standings.columns:
+        mask = _state.df_standings["teamName"].str.lower().str.contains(team_name.lower(), na=False)
         if mask.any():
-            val = df_standings[mask].iloc[0].get("userName", "")
+            val = _state.df_standings[mask].iloc[0].get("userName", "")
             if val:
                 return str(val)
 
@@ -760,17 +755,17 @@ def get_team_owner(team_name: str) -> str:
 
 def get_last_n_games(team: str, n: int = 5) -> list[dict]:
     abbr = ""
-    if not df_teams.empty:
+    if not _state.df_teams.empty:
         for col in ("nickName", "displayName"):
-            if col in df_teams.columns:
-                mask = df_teams[col].str.lower() == team.lower()
+            if col in _state.df_teams.columns:
+                mask = _state.df_teams[col].str.lower() == team.lower()
                 if mask.any():
-                    abbr = df_teams[mask].iloc[0].get("abbrName", "")
+                    abbr = _state.df_teams[mask].iloc[0].get("abbrName", "")
                     break
     if not abbr:
         return []
 
-    data = _get(f"/teams/{abbr}/games/{CURRENT_SEASON}/{CURRENT_STAGE}")
+    data = _get(f"/teams/{abbr}/games/{_state.CURRENT_SEASON}/{_state.CURRENT_STAGE}")
     if not data:
         return []
 
@@ -797,7 +792,7 @@ def get_last_n_games(team: str, n: int = 5) -> list[dict]:
 
 def get_weekly_results(week: int | None = None) -> list[dict]:
     """
-    Return FINAL games only (status == 3) for the given week.
+    Return completed games (status 2 or 3) for the given week.
     Uses df_all_games (full season load) as primary source.
     Falls back to live API call if df_all_games is empty.
 
@@ -805,13 +800,13 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
       weekIndex = week - 1 (0-based)
       seasonIndex = 1-based TSL season
       stageIndex  = 1 for Regular Season
-      status      = 1 scheduled | 2 in-progress | 3 final
+      status      = 1 scheduled | 2 completed | 3 final
       homeTeamName / awayTeamName = nickName (Ravens, Bears, etc.)
     """
-    target     = week if week is not None else CURRENT_WEEK
+    target     = week if week is not None else _state.CURRENT_WEEK
     week_index = target - 1  # weekIndex is 0-based in MM exports
 
-    src = df_all_games if not df_all_games.empty else df_games
+    src = _state.df_all_games if not _state.df_all_games.empty else _state.df_games
 
     if not src.empty:
         df = src.copy()
@@ -826,10 +821,10 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
             df = df[df["week"] == target]
 
         if "seasonIndex" in df.columns:
-            df = df[df["seasonIndex"] == CURRENT_SEASON]
+            df = df[df["seasonIndex"] == _state.CURRENT_SEASON]
 
         if "stageIndex" in df.columns:
-            df = df[df["stageIndex"] == CURRENT_STAGE]
+            df = df[df["stageIndex"] == _state.CURRENT_STAGE]
 
         # Completed games (status 2 or 3). Both have final scores.
         if "status" in df.columns:
@@ -856,7 +851,7 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
         return results
 
     # Fallback: live API call
-    raw = _get(f"/games/scores/{CURRENT_SEASON}/{CURRENT_STAGE}")
+    raw = _get(f"/games/scores/{_state.CURRENT_SEASON}/{_state.CURRENT_STAGE}")
     if isinstance(raw, dict):
         scores = raw.get("data", [])
     else:
@@ -866,7 +861,7 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
     for g in scores:
         if pd.to_numeric(g.get("weekIndex", -1), errors="coerce") != week_index:
             continue
-        if int(g.get("status", 0)) != 3:  # final only
+        if int(g.get("status", 0)) not in (2, 3):  # completed or final
             continue
         hs  = int(g.get("homeScore", 0) or 0)
         aws = int(g.get("awayScore", 0) or 0)
@@ -892,7 +887,7 @@ def get_h2h_record(team_a: str, team_b: str) -> dict:
     For all-time H2H, query tsl_history.db directly via Codex.
     """
     a_wins = b_wins = ties = 0
-    src = df_all_games if not df_all_games.empty else df_games
+    src = _state.df_all_games if not _state.df_all_games.empty else _state.df_games
     if src.empty:
         return {"a_wins": a_wins, "b_wins": b_wins, "ties": ties}
     a_l, b_l = team_a.lower(), team_b.lower()
@@ -979,7 +974,7 @@ _roster_by_id: dict[int, dict] = {}
 def _rebuild_roster_index() -> None:
     global _roster_by_id
     _roster_by_id = {}
-    for p in _players_cache:
+    for p in _state._players_cache:
         rid = p.get("rosterId") or p.get("id")
         if rid is not None:
             _roster_by_id[int(rid)] = p
@@ -1000,16 +995,16 @@ def get_contract_details(roster_id: int) -> dict:
 
 def get_team_record_dict(team_id: int) -> dict:
     default = {"wins": 0, "losses": 0, "ties": 0}
-    if df_standings.empty:
+    if _state.df_standings.empty:
         return default
-    mask = df_standings["teamId"] == team_id if "teamId" in df_standings.columns else None
+    mask = _state.df_standings["teamId"] == team_id if "teamId" in _state.df_standings.columns else None
     if mask is None or not mask.any():
-        name = _team_id_to_name.get(int(team_id), "")
-        if name and "teamName" in df_standings.columns:
-            mask = df_standings["teamName"].str.lower() == name.lower()
+        name = _state._team_id_to_name.get(int(team_id), "")
+        if name and "teamName" in _state.df_standings.columns:
+            mask = _state.df_standings["teamName"].str.lower() == name.lower()
     if mask is None or not mask.any():
         return default
-    row = df_standings[mask].iloc[0]
+    row = _state.df_standings[mask].iloc[0]
     return {
         "wins":   int(row.get("totalWins",   0) or 0),
         "losses": int(row.get("totalLosses", 0) or 0),
@@ -1024,10 +1019,10 @@ def get_position_scarcity() -> dict[str, dict]:
     uses _scarcity_cache built once during load_all().
     Falls back to live computation if cache is empty (pre-load_all).
     """
-    if _scarcity_cache:
-        return _scarcity_cache
+    if _state._scarcity_cache:
+        return _state._scarcity_cache
     # Fallback: compute live (only before first load_all)
-    return _rebuild_scarcity_cache(_players_cache)
+    return _rebuild_scarcity_cache(_state._players_cache)
 
 
 def get_rings_count(team_id: int) -> int:
@@ -1037,7 +1032,7 @@ def get_rings_count(team_id: int) -> int:
     uses _rings_cache built once during load_all().
     Falls back to 0 if cache is empty (pre-load_all).
     """
-    return _rings_cache.get(int(team_id), 0)
+    return _state._rings_cache.get(int(team_id), 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1046,12 +1041,12 @@ def get_rings_count(team_id: int) -> int:
 
 def get_week() -> int:
     """Return current league week (1-indexed)."""
-    return CURRENT_WEEK
+    return _state.CURRENT_WEEK
 
 
 def get_season() -> int:
     """Return current league season (1-indexed)."""
-    return CURRENT_SEASON
+    return _state.CURRENT_SEASON
 
 
 def get_draft_picks(team_id: int, year: int | None = None) -> list[dict]:
@@ -1088,9 +1083,14 @@ def snapshot_week_stats(week: int) -> None:
     produces a new snapshot — no manual calls needed.
     """
     snapshot: dict[str, dict] = {}
-    for p in _players_cache:
+    _warned_missing = False
+    for p in _state._players_cache:
         pid = p.get("rosterId")
         if pid:
+            if not _warned_missing and not any(f in p for f in _PADDING_STAT_FIELDS):
+                log.warning("[dm] snapshot_week_stats: player cache missing expected stat fields %s — "
+                            "values will default to 0", _PADDING_STAT_FIELDS)
+                _warned_missing = True
             snapshot[str(pid)] = {
                 f: int(p.get(f, 0) or 0) for f in _PADDING_STAT_FIELDS
             }
@@ -1128,7 +1128,7 @@ def flag_stat_padding(week: int) -> list[dict]:
         return []
 
     flags: list[dict] = []
-    for p in _players_cache:
+    for p in _state._players_cache:
         pid = p.get("rosterId")
         if not pid:
             continue

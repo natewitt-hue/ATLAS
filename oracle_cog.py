@@ -27,8 +27,11 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import functools
+import logging
 import re
 import sqlite3
+import traceback
 from collections import Counter
 from typing import Optional
 
@@ -50,6 +53,19 @@ except ImportError:
 import atlas_ai
 from atlas_ai import Tier
 
+# ── Chain memory for Oracle reply-chain conversations ─────────────────────────
+try:
+    from conversation_memory import add_chain_turn, build_chain_block, cleanup_stale_chains
+except ImportError:
+    add_chain_turn = None
+    build_chain_block = None
+    cleanup_stale_chains = None
+
+# ── Oracle reply-chain tracking (in-memory, session-scoped) ──────────────────
+_oracle_message_ids: set[int] = set()      # All Oracle response message IDs this session
+_chain_roots: dict[int, int] = {}          # Maps any Oracle msg ID → root chain ID
+_followup_counter: int = 0                 # Counter for periodic chain cache cleanup
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ORACLE · ANALYTICS HELPERS
@@ -59,13 +75,49 @@ from atlas_ai import Tier
 # _ai_blurb(), and ATLAS_ICON_URL are defined once in the Stats Hub section
 # below (lines ~800+). Do NOT duplicate them here.
 
+_log = logging.getLogger("oracle_cog")
+
+
+def _safe_interaction(func):
+    """Decorator for View button callbacks and Modal on_submit methods.
+
+    Catches any exception and sends an ephemeral error message.
+    Handles both pre-defer and post-defer states.
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        interaction = None
+        for arg in args:
+            if isinstance(arg, discord.Interaction):
+                interaction = arg
+                break
+
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            _log.error(f"[Oracle] Callback {func.__name__} failed: {e}\n{traceback.format_exc()}")
+            if interaction is None:
+                return
+            msg = f"\u274c Something broke: `{type(e).__name__}: {e}`"
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                pass  # interaction expired or already responded
+    return wrapper
+
 
 def _get_user_tier(bot: commands.Bot, user_id: int) -> str:
-    """Fetches user tier from SupportCog. Defaults to 'Elite' if missing to prevent breaks."""
+    """Fetches user tier from SupportCog.
+
+    TODO: SupportCog does not exist yet. All users default to 'Elite'
+    (full access). Build SupportCog or remove tier gating.
+    """
     support_cog = bot.get_cog("SupportCog")
     if support_cog and hasattr(support_cog, "get_user_tier"):
         return support_cog.get_user_tier(user_id)
-    # SupportCog not loaded — default to Elite so nothing breaks
     return "Elite"
 
 
@@ -105,6 +157,7 @@ class ShareToChannelView(discord.ui.View):
         self._embed = embed
 
     @discord.ui.button(label="Share to Channel", style=discord.ButtonStyle.secondary, emoji="\U0001f4e4")
+    @_safe_interaction
     async def share(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         await interaction.channel.send(embed=self._embed)
@@ -124,6 +177,7 @@ class AnalyticsNav(discord.ui.View):
         self.origin_user_id = origin_user_id
 
     @discord.ui.button(label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_hotcold(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed, _ = _build_hotcold_league()
@@ -131,6 +185,7 @@ class AnalyticsNav(discord.ui.View):
         await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="⚡ Clutch", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_clutch(self, interaction: discord.Interaction, button: discord.ui.Button):
         tier = _get_user_tier(self.bot_ref, interaction.user.id)
         if tier not in ["Pro", "Elite"]:
@@ -143,6 +198,7 @@ class AnalyticsNav(discord.ui.View):
         await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="📊 Power", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_power(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = _build_power_embed()
@@ -150,6 +206,7 @@ class AnalyticsNav(discord.ui.View):
         await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="📋 Draft History", style=discord.ButtonStyle.secondary, row=1)
+    @_safe_interaction
     async def btn_draft(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="📜 Draft Class Explorer",
@@ -165,6 +222,7 @@ class AnalyticsNav(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="📅 Recap", style=discord.ButtonStyle.secondary, row=1)
+    @_safe_interaction
     async def btn_recap(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = _build_recap_embed()
@@ -172,6 +230,7 @@ class AnalyticsNav(discord.ui.View):
         await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
 
     @discord.ui.button(label="👤 My Profile", style=discord.ButtonStyle.primary, row=1)
+    @_safe_interaction
     async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         embed = await _build_owner_embed(interaction.user, interaction.guild)
@@ -205,9 +264,7 @@ _build_conversation_block = None
 _add_conversation_turn = None
 
 try:
-    from codex_cog import (
-        gemini_sql,
-        gemini_answer,
+    from codex_utils import (
         run_sql,
         extract_sql,
         validate_sql,
@@ -215,10 +272,13 @@ try:
         fuzzy_resolve_user,
         resolve_names_in_question,
         ai_resolve_names as _ai_resolve_names,
-        build_conversation_block as _build_conversation_block,
-        add_conversation_turn as _add_conversation_turn,
         _build_schema as _build_schema_fn,
         KNOWN_USERS,
+    )
+    from codex_cog import gemini_sql, gemini_answer
+    from conversation_memory import (
+        build_conversation_block as _build_conversation_block,
+        add_conversation_turn as _add_conversation_turn,
     )
     _HISTORY_OK = True
 except ImportError:
@@ -497,122 +557,6 @@ def _dispatch_tool(name: str, args: dict) -> tuple[list[dict], str | None]:
         return fn(**args)
     except Exception as e:
         return [], str(e)
-
-
-def _build_oracle_system_prompt(caller_db: str | None = None, conv_context: str = "", affinity: str = "") -> str:
-    """Build the system prompt for Claude Oracle queries."""
-    persona = get_persona("analytical")
-
-    known_users = ""
-    try:
-        from build_member_db import get_alias_map
-        alias_map = get_alias_map()
-        known_users = ", ".join(sorted(set(alias_map.values())))
-    except Exception:
-        pass
-
-    caller_block = ""
-    if caller_db:
-        caller_block = (
-            f"\nThe person asking is TSL owner with db_username='{caller_db}'. "
-            f"When they say 'me', 'my', or 'I', use '{caller_db}' as the user parameter.\n"
-        )
-
-    return f"""{persona}
-
-You have access to tools that query the TSL database. Use them to answer questions about stats, records, rosters, trades, and league history.
-
-CURRENT CONTEXT:
-- Current season: {dm.CURRENT_SEASON}
-- Current week: {dm.CURRENT_WEEK}
-{caller_block}
-KNOWN TSL OWNERS (use these exact db_usernames in tool calls):
-{known_users}
-
-IMPORTANT RULES:
-- Always resolve owner names to their db_username before calling tools. Common nicknames: 'Witt'/'TheWitt', 'JT'/'jtcurrent32', 'Killa'/'KillaE94', etc.
-- Use resolve_team for team names — e.g. 'Baltimore' → 'Ravens'
-- For 'this season', use season={dm.CURRENT_SEASON}
-- For 'all time' / 'career', omit the season parameter
-- Call the most appropriate tool for each question. If unsure, try stat_leaders or owner_record.
-- If a tool returns an error, explain what happened — don't silently fail.
-{conv_context}{affinity}"""
-
-
-async def _claude_query(question: str, caller_db: str | None = None,
-                        conv_context: str = "", affinity: str = "") -> tuple[str, list[dict], str]:
-    """
-    Route a TSL question through Claude → QueryBuilder tools → Claude answer.
-    Returns (answer_text, rows, tool_used).
-    """
-    system = _build_oracle_system_prompt(caller_db, conv_context, affinity)
-
-    # Resolve names in the question
-    annotated = question
-    alias_map = {}
-    if resolve_names_in_question:
-        annotated, alias_map = resolve_names_in_question(question)
-
-    # Step 1: Claude picks tools
-    result = await atlas_ai.generate_with_tools(
-        annotated, tools=_ORACLE_TOOLS,
-        system=system, tier=Tier.SONNET, max_tokens=1024,
-    )
-
-    # Step 2: Execute tool calls and collect results
-    all_rows = []
-    tool_used = ""
-    tool_results = []
-
-    for tc in result.tool_calls:
-        tool_used = tc["name"]
-        rows, error = _dispatch_tool(tc["name"], tc["input"])
-        all_rows.extend(rows)
-        result_text = json.dumps(rows[:30], indent=2) if rows else f"Error: {error}" if error else "No results found."
-        tool_results.append({
-            "type": "tool_result",
-            "tool_use_id": tc["id"],
-            "content": result_text,
-        })
-
-    # If Claude didn't use any tools, return its text directly
-    if not tool_results:
-        return result.text or "ATLAS couldn't figure out how to answer that. Try rephrasing.", [], ""
-
-    # Step 3: Send tool results back for AI to synthesize an answer
-    synthesis = await atlas_ai.generate_synthesis(
-        messages=[
-            {"role": "user", "content": annotated},
-            {"role": "assistant", "content": result._raw_content},
-        ],
-        tool_result_content=tool_results,
-        system=system,
-        tools=_ORACLE_TOOLS,
-        tier=Tier.SONNET,
-        max_tokens=800,
-    )
-    answer = synthesis.text or "ATLAS pulled the data but couldn't formulate a response."
-
-    return answer, all_rows, tool_used
-
-
-async def _claude_blurb(prompt: str, max_tokens: int = 120) -> str:
-    """Short AI-generated text blurb via Claude. Replaces _ai_blurb for non-query uses."""
-    try:
-        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=max_tokens)
-        return result.text
-    except Exception:
-        return ""
-
-
-async def _claude_chat(question: str, system_prompt: str, context: str = "") -> str:
-    """General Claude chat for non-TSL modes (Open Intel, Sports Intel, Strategy)."""
-    try:
-        content = f"{context}\n\n{question}" if context else question
-        result = await atlas_ai.generate(content, system=system_prompt, tier=Tier.SONNET, max_tokens=800)
-        return result.text or "ATLAS couldn't pull a response on that one."
-    except Exception as e:
-        return f"ATLAS hit an error: {e}"
 
 
 # ── Color palette ─────────────────────────────────────────────────────────────
@@ -2865,24 +2809,28 @@ class TeamCardView(discord.ui.View):
         self.owner_username = owner_username
 
     @discord.ui.button(label="📖 History", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_history(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = _build_team_card_history(self.team_name)
         await interaction.followup.send(embed=embed, view=self, ephemeral=True)
 
     @discord.ui.button(label="🔬 Scouting", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_scouting(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = _build_team_card_scouting(self.team_name)
         await interaction.followup.send(embed=embed, view=self, ephemeral=True)
 
     @discord.ui.button(label="⚔️ Matchup", style=discord.ButtonStyle.primary, row=0)
+    @_safe_interaction
     async def btn_matchup(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(
             TeamMatchupModal(self.team_name, self.caller_team)
         )
 
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=0)
+    @_safe_interaction
     async def btn_refresh(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = await _build_team_card_snapshot(
@@ -2908,6 +2856,7 @@ class TeamMatchupModal(discord.ui.Modal, title="⚔️ Matchup Intel"):
         self.team_name   = team_name
         self.caller_team = caller_team
 
+    @_safe_interaction
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = await _build_team_matchup_embed(
@@ -2925,6 +2874,7 @@ class TeamSearchModal(discord.ui.Modal, title="🏈 Team Stats Lookup"):
         max_length=50,
     )
 
+    @_safe_interaction
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
         name = self.team_name_input.value.strip()
@@ -2958,6 +2908,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
         super().__init__()
         self.owner1.default = default_owner
 
+    @_safe_interaction
     async def on_submit(self, interaction: discord.Interaction):
         # Immediate defer — AI call will take > 3 sec
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -3060,22 +3011,27 @@ class OracleHubView(discord.ui.View):
         super().__init__(timeout=120)
 
     @discord.ui.button(label="📊 TSL League", style=discord.ButtonStyle.primary, row=0)
+    @_safe_interaction
     async def btn_tsl(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(AskTSLModal())
 
     @discord.ui.button(label="🌐 Open Intel", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_open(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(AskOpenModal())
 
     @discord.ui.button(label="🏈 Sports Intel", style=discord.ButtonStyle.secondary, row=0)
+    @_safe_interaction
     async def btn_sports(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(SportsIntelModal())
 
     @discord.ui.button(label="🎯 Player Scout", style=discord.ButtonStyle.primary, row=1)
+    @_safe_interaction
     async def btn_scout(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(PlayerScoutModal())
 
     @discord.ui.button(label="🧠 Strategy", style=discord.ButtonStyle.success, row=1)
+    @_safe_interaction
     async def btn_strategy(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(StrategyRoomModal())
 
@@ -3113,13 +3069,24 @@ class _OracleIntelModal(discord.ui.Modal):
 
     Subclasses implement _generate() which returns the answer text
     and embed configuration. The base class handles the lifecycle:
-    defer → guard → try/except → embed → send.
+    defer → guard → try/except → embed → send (public).
+
+    Responses are PUBLIC so all users can see them and reply.
+    The user's question is echoed in the embed for context.
+    Sent message IDs are tracked for reply-chain conversations.
     """
 
     _requires_history: bool = False
 
+    def _get_question_text(self) -> str:
+        """Extract the question text from the modal's TextInput.
+        Subclasses have a `question` attribute (TextInput) — access its value."""
+        if hasattr(self, "question") and hasattr(self.question, "value"):
+            return self.question.value.strip()[:200]
+        return ""
+
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=False)
 
         if self._requires_history and not _HISTORY_OK:
             await interaction.followup.send(
@@ -3129,8 +3096,26 @@ class _OracleIntelModal(discord.ui.Modal):
 
         try:
             answer, embed_kwargs = await self._generate(interaction)
-            embed = self._build_embed(answer, **embed_kwargs)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            q_text = self._get_question_text()
+            embed = self._build_embed(
+                answer,
+                asked_by=interaction.user,
+                question=q_text,
+                **embed_kwargs,
+            )
+            sent_msg = await interaction.followup.send(embed=embed, wait=True)
+            # Track for reply-chain detection
+            _oracle_message_ids.add(sent_msg.id)
+            _chain_roots[sent_msg.id] = sent_msg.id  # Root of a new chain
+            # Store initial turn in chain memory
+            if add_chain_turn:
+                await add_chain_turn(
+                    chain_id=sent_msg.id,
+                    discord_id=interaction.user.id,
+                    author_name=interaction.user.display_name,
+                    question=q_text,
+                    answer=answer[:500],
+                )
         except _EarlyReturn:
             pass  # _generate() already sent its own response
         except Exception as e:
@@ -3144,10 +3129,25 @@ class _OracleIntelModal(discord.ui.Modal):
         raise NotImplementedError
 
     @staticmethod
-    def _build_embed(answer: str, *, title: str, color, footer: str, fields: list | None = None) -> discord.Embed:
+    def _build_embed(
+        answer: str,
+        *,
+        title: str,
+        color,
+        footer: str,
+        fields: list | None = None,
+        asked_by: discord.User | discord.Member | None = None,
+        question: str = "",
+    ) -> discord.Embed:
+        # Prepend the question + who asked for public context
+        desc = _truncate_for_embed(answer)
+        if asked_by and question:
+            header = f"**{asked_by.display_name} asked:** {question}\n\n"
+            desc = header + _truncate_for_embed(answer, limit=_EMBED_DESC_LIMIT - len(header))
+
         embed = discord.Embed(
             title=title,
-            description=_truncate_for_embed(answer),
+            description=desc,
             color=color,
             timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
@@ -3712,6 +3712,7 @@ class ClutchMarginView(discord.ui.View):
             discord.SelectOption(label="≤14 pts — Broad",             value="14"),
         ],
     )
+    @_safe_interaction
     async def margin_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = _build_clutch_embed(margin=int(select.values[0]), highlight_team=self.caller_team)
@@ -3736,6 +3737,7 @@ class PlayerPositionView(discord.ui.View):
             discord.SelectOption(label="DB — Defensive Backs",value="DB", emoji="🛡️"),
         ],
     )
+    @_safe_interaction
     async def position_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         position = select.values[0]
         stats    = PLAYER_STAT_MAP.get(position, [])
@@ -3761,6 +3763,7 @@ class PlayerStatView(discord.ui.View):
         placeholder="Select stat...",
         options=[discord.SelectOption(label="Loading...", value="_placeholder")],
     )
+    @_safe_interaction
     async def stat_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         stat_col   = select.values[0]
         stat_label = next(
@@ -3787,6 +3790,7 @@ class PlayerDrillView(discord.ui.View):
         ]
 
     @discord.ui.select(placeholder="Drill into a player's Hot/Cold...", options=[])
+    @_safe_interaction
     async def player_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         player_name = select.values[0]
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -3812,6 +3816,7 @@ class DraftSeasonView(discord.ui.View):
         self.season_select.options = options[-25:]
 
     @discord.ui.select(placeholder="Select season...", options=[])
+    @_safe_interaction
     async def season_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.defer(thinking=True, ephemeral=True)
         season = int(select.values[0])
@@ -3838,6 +3843,7 @@ class WeekRecapView(discord.ui.View):
         ]
 
     @discord.ui.select(placeholder="Select a week...", options=[])
+    @_safe_interaction
     async def week_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = _build_recap_embed(week=int(select.values[0]))
@@ -3961,6 +3967,7 @@ class HubView(discord.ui.View):
         label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary,
         row=0, custom_id="hub:hotcold",
     )
+    @_safe_interaction
     async def btn_hotcold(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed, player_names = _build_hotcold_league()
@@ -3973,6 +3980,7 @@ class HubView(discord.ui.View):
         label="⚡ Clutch", style=discord.ButtonStyle.secondary,
         row=0, custom_id="hub:clutch",
     )
+    @_safe_interaction
     async def btn_clutch(self, interaction: discord.Interaction, _b: discord.ui.Button):
         _, caller_team = _resolve_owner_team(interaction)
         await interaction.response.send_message(
@@ -3985,6 +3993,7 @@ class HubView(discord.ui.View):
         label="📊 Power", style=discord.ButtonStyle.secondary,
         row=0, custom_id="hub:power",
     )
+    @_safe_interaction
     async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         await interaction.followup.send(embed=_build_power_embed(), ephemeral=True)
@@ -3993,6 +4002,7 @@ class HubView(discord.ui.View):
         label="🏆 Standings", style=discord.ButtonStyle.secondary,
         row=0, custom_id="hub:standings",
     )
+    @_safe_interaction
     async def btn_standings(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         _, caller_team = _resolve_owner_team(interaction)
@@ -4006,6 +4016,7 @@ class HubView(discord.ui.View):
         label="👤 My Profile", style=discord.ButtonStyle.primary,
         row=1, custom_id="hub:profile",
     )
+    @_safe_interaction
     async def btn_profile(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = await _build_owner_embed(interaction.user, interaction.guild)
@@ -4015,6 +4026,7 @@ class HubView(discord.ui.View):
         label="🆚 Head-to-Head", style=discord.ButtonStyle.primary,
         row=1, custom_id="oracle:h2h",
     )
+    @_safe_interaction
     async def btn_h2h(self, interaction: discord.Interaction, _b: discord.ui.Button):
         # Modal handles its own defer — send modal directly, no defer before
         # Pre-fill with resolved db_username so user sees their game identity
@@ -4029,6 +4041,7 @@ class HubView(discord.ui.View):
         label="📅 Recap", style=discord.ButtonStyle.secondary,
         row=1, custom_id="hub:recap",
     )
+    @_safe_interaction
     async def btn_recap(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = _build_recap_embed()
@@ -4038,6 +4051,7 @@ class HubView(discord.ui.View):
         label="📜 Draft", style=discord.ButtonStyle.secondary,
         row=1, custom_id="hub:draft",
     )
+    @_safe_interaction
     async def btn_draft(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         embed = await _build_draft_overview_embed()
@@ -4049,6 +4063,7 @@ class HubView(discord.ui.View):
         label="🎯 Players", style=discord.ButtonStyle.secondary,
         row=2, custom_id="hub:players",
     )
+    @_safe_interaction
     async def btn_players(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_message(
             "**🎯 Player Leaders — Select a position group:**",
@@ -4060,6 +4075,7 @@ class HubView(discord.ui.View):
         label="🏈 Team Stats", style=discord.ButtonStyle.secondary,
         row=2, custom_id="hub:teamstats",
     )
+    @_safe_interaction
     async def btn_teamstats(self, interaction: discord.Interaction, _b: discord.ui.Button):
         username, caller_team = _resolve_owner_team(interaction)
         if caller_team:
@@ -4079,6 +4095,7 @@ class HubView(discord.ui.View):
         label="🏛️ All-Time", style=discord.ButtonStyle.secondary,
         row=2, custom_id="hub:alltime",
     )
+    @_safe_interaction
     async def btn_alltime(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         await interaction.followup.send(embed=_build_alltime_embed(), ephemeral=True)
@@ -4087,6 +4104,7 @@ class HubView(discord.ui.View):
         label="📅 Season Recap", style=discord.ButtonStyle.success,
         row=2, custom_id="oracle:season_recap",
     )
+    @_safe_interaction
     async def btn_season_recap(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(SeasonRecapModal())
 
@@ -4094,6 +4112,7 @@ class HubView(discord.ui.View):
         label="🔮 Oracle Hub", style=discord.ButtonStyle.success,
         row=3, custom_id="hub:ask",
     )
+    @_safe_interaction
     async def btn_ask(self, interaction: discord.Interaction, _b: discord.ui.Button):
         embed = discord.Embed(
             title="🔮 ATLAS Oracle Hub",
@@ -4122,7 +4141,7 @@ class HubView(discord.ui.View):
 class StatsHubCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Re-register HubView on startup so persistent buttons survive restarts
+        # Persistent view: routes ALL atlas:oracle:* custom_ids to this instance
         self.bot.add_view(HubView(bot))
 
     stats = app_commands.Group(
@@ -4294,6 +4313,327 @@ class StatsHubCog(commands.Cog):
             view=OracleHubView(),
             ephemeral=True,
         )
+
+    # ── Oracle Reply-Chain Listener ───────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Detect replies to Oracle messages and handle as follow-up queries."""
+        if message.author.bot:
+            return
+        if not message.reference or not message.reference.message_id:
+            return
+        # Skip @mentions — those are handled by bot.py's on_message
+        if self.bot.user and self.bot.user.mentioned_in(message):
+            return
+
+        ref_id = message.reference.message_id
+        if ref_id not in _oracle_message_ids:
+            return
+
+        # This is a reply to an Oracle message — handle as follow-up
+        chain_id = _chain_roots.get(ref_id, ref_id)
+        await self._handle_oracle_followup(message, chain_id)
+
+    async def _handle_oracle_followup(
+        self, message: discord.Message, chain_id: int
+    ):
+        """Process a reply-chain follow-up to an Oracle response."""
+        global _followup_counter
+        _followup_counter += 1
+
+        # Periodic cleanup of stale chain caches (every 50 follow-ups)
+        if _followup_counter % 50 == 0 and cleanup_stale_chains:
+            cleanup_stale_chains()
+
+        q = message.content.strip()
+        if not q:
+            return
+
+        try:
+            async with message.channel.typing():
+                # ── Auto-classify domain ──────────────────────────
+                domain = await _classify_followup_domain(q)
+
+                # ── Build chain context ───────────────────────────
+                chain_block = ""
+                if build_chain_block:
+                    chain_block = await build_chain_block(chain_id)
+
+                # ── Affinity tone ─────────────────────────────────
+                affinity_block = ""
+                if _affinity_mod:
+                    try:
+                        score = await _affinity_mod.get_affinity(message.author.id)
+                        affinity_block = _affinity_mod.get_affinity_instruction(score)
+                    except Exception:
+                        pass
+
+                # ── Route to appropriate pipeline ─────────────────
+                answer, embed_kwargs = await _generate_followup(
+                    q, message.author, domain, chain_block, affinity_block
+                )
+
+                # ── Build + send embed ────────────────────────────
+                embed = _OracleIntelModal._build_embed(
+                    answer,
+                    asked_by=message.author,
+                    question=q[:200],
+                    **embed_kwargs,
+                )
+                sent = await message.reply(embed=embed)
+
+                # ── Track for further replies ─────────────────────
+                _oracle_message_ids.add(sent.id)
+                _chain_roots[sent.id] = chain_id  # Points to original root
+
+                # ── Store in chain memory ─────────────────────────
+                if add_chain_turn:
+                    await add_chain_turn(
+                        chain_id=chain_id,
+                        discord_id=message.author.id,
+                        author_name=message.author.display_name,
+                        question=q,
+                        answer=answer[:500],
+                    )
+
+        except Exception as e:
+            try:
+                await message.reply(f"❌ Oracle follow-up failed: `{e}`")
+            except Exception:
+                pass
+
+
+# ── Oracle Follow-up Domain Classifier ────────────────────────────────────────
+
+async def _classify_followup_domain(question: str) -> str:
+    """Classify a follow-up question into an Oracle domain using a fast AI call."""
+    try:
+        prompt = (
+            "Classify this question into exactly one category. "
+            "Reply with ONLY the category name.\n"
+            "Categories:\n"
+            "  TSL - Questions about TSL league history, records, stats, wins, losses, head-to-head\n"
+            "  SPORTS - Real-world NFL/sports news and stats\n"
+            "  SCOUT - Madden player ratings, dev traits, abilities, roster scouting\n"
+            "  STRATEGY - Trade advice, roster management, game strategy\n"
+            "  OPEN - General knowledge, anything else\n\n"
+            f"Question: {question[:300]}"
+        )
+        result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=10, temperature=0.0)
+        domain = result.text.strip().upper()
+        if domain not in ("TSL", "SPORTS", "SCOUT", "STRATEGY", "OPEN"):
+            return "OPEN"
+        return domain
+    except Exception:
+        return "OPEN"
+
+
+async def _generate_followup(
+    question: str,
+    author: discord.User | discord.Member,
+    domain: str,
+    chain_block: str,
+    affinity_block: str,
+) -> tuple[str, dict]:
+    """Generate an Oracle follow-up response, routing to the correct pipeline."""
+    context = "\n".join(filter(None, [chain_block, affinity_block]))
+    system_instruction = get_persona()
+
+    if domain == "TSL" and _HISTORY_OK and gemini_sql and gemini_answer and retry_sql:
+        return await _followup_tsl(question, author, context)
+    elif domain == "SCOUT" and _HISTORY_OK and run_sql:
+        return await _followup_scout(question, author, context)
+    elif domain == "STRATEGY":
+        return await _followup_strategy(question, author, context, system_instruction)
+    else:
+        # SPORTS and OPEN both use web search
+        return await _followup_web(question, context, system_instruction, domain)
+
+
+async def _followup_tsl(
+    question: str,
+    author: discord.User | discord.Member,
+    context: str,
+) -> tuple[str, dict]:
+    """TSL League follow-up — NL→SQL→answer pipeline."""
+    # Name resolution
+    annotated = question
+    alias_map = {}
+    if resolve_names_in_question:
+        annotated, alias_map = resolve_names_in_question(question)
+    if not alias_map and _ai_resolve_names:
+        try:
+            ai_aliases = await _ai_resolve_names(question)
+            if ai_aliases:
+                alias_map = ai_aliases
+        except Exception:
+            pass
+
+    # SQL generation
+    sql = await gemini_sql(annotated, alias_map, conv_context=context)
+    if not sql:
+        return "ATLAS couldn't generate a query for that follow-up. Try rephrasing.", {
+            "title": "🔬 ATLAS Intelligence — TSL League",
+            "color": C_DARK,
+            "footer": "Follow-up · ATLAS™ Oracle",
+        }
+
+    schema = _build_schema_fn() if _build_schema_fn else ""
+    rows, sql, error, attempt, _warnings = await retry_sql(sql, schema)
+    if error:
+        return "Couldn't pull that data on follow-up. Try a different angle.", {
+            "title": "🔬 ATLAS Intelligence — TSL League",
+            "color": C_DARK,
+            "footer": "Follow-up · ATLAS™ Oracle",
+        }
+
+    answer = await gemini_answer(question, sql, rows, conv_context=context)
+    footer_parts = [f"🔍 {len(rows)} records", "Follow-up"]
+    if attempt > 1:
+        footer_parts.append("⚠️ Self-corrected")
+
+    return answer, {
+        "title": "🔬 ATLAS Intelligence — TSL League",
+        "color": C_DARK,
+        "footer": " | ".join(footer_parts) + " · ATLAS™ Oracle",
+    }
+
+
+async def _followup_scout(
+    question: str,
+    author: discord.User | discord.Member,
+    context: str,
+) -> tuple[str, dict]:
+    """Player Scout follow-up — Madden roster SQL pipeline."""
+    # Resolve caller team
+    caller_db = None
+    team_name = None
+    if _resolve_db_username_fn:
+        caller_db = _resolve_db_username_fn(author.id)
+    if caller_db and not dm.df_teams.empty:
+        mask = dm.df_teams["userName"].str.lower() == caller_db.lower()
+        if mask.any():
+            team_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+
+    scout_schema = f"""DATABASE: tsl_history.db — Madden Player Scouting Data
+TABLE: players (current roster snapshot — {dm.CURRENT_SEASON})
+  Key columns: rosterId, firstName, lastName, pos, playerBestOvr, dev, teamName, speedRating, etc.
+  Notes: dev='Normal'|'Star'|'Superstar'|'Superstar X-Factor'. Use firstName || ' ' || lastName for full name.
+TABLE: player_abilities (X-Factor/Superstar abilities)
+  Key columns: rosterId, firstName, lastName, teamName, title, description
+RULES: ALL columns are TEXT. Use CAST(col AS INTEGER) for math. Return ONLY SQL."""
+
+    team_block = ""
+    if team_name:
+        team_block = f"\nUSER CONTEXT: User owns {team_name}. 'my team' = {team_name}.\n"
+
+    scout_prompt = f"{scout_schema}{team_block}\n{context}\nQuestion: \"{question}\""
+
+    sql_result = await atlas_ai.generate(scout_prompt, tier=Tier.SONNET, max_tokens=500)
+    sql = extract_sql(sql_result.text) if extract_sql else ""
+    if not sql:
+        return "Couldn't generate a scouting query for that follow-up.", {
+            "title": "🎯 ATLAS Intelligence — Player Scout",
+            "color": AtlasColors.TSL_BLUE,
+            "footer": "Follow-up · ATLAS™ Oracle · Scout Mode",
+        }
+
+    rows, sql, error, attempt, _ = await retry_sql(sql, scout_schema)
+    if error:
+        return "Scout query failed on follow-up. Try rephrasing.", {
+            "title": "🎯 ATLAS Intelligence — Player Scout",
+            "color": AtlasColors.TSL_BLUE,
+            "footer": "Follow-up · ATLAS™ Oracle · Scout Mode",
+        }
+
+    import json as _json
+    results_str = _json.dumps(rows[:20], indent=2)[:2500]
+    answer_prompt = f"""{get_persona()}
+
+Scout mode — Madden player ratings and abilities.
+User asked: "{question}"
+Scouting data ({len(rows)} players):
+{results_str}
+
+Lead with the answer. Use **bold** for names/ratings. Under 300 words."""
+
+    answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.HAIKU, max_tokens=400)
+    answer = answer_result.text or "No scouting data found."
+
+    return answer, {
+        "title": "🎯 ATLAS Intelligence — Player Scout",
+        "color": AtlasColors.TSL_BLUE,
+        "footer": "Follow-up · ATLAS™ Oracle · Scout Mode",
+    }
+
+
+async def _followup_strategy(
+    question: str,
+    author: discord.User | discord.Member,
+    context: str,
+    system_instruction: str,
+) -> tuple[str, dict]:
+    """Strategy Room follow-up — TSL context + optional web search."""
+    # Build lightweight TSL context
+    tsl_parts = []
+    if not dm.df_standings.empty:
+        top = dm.df_standings.head(5)
+        lines = [f"  {r.get('teamName','?')}: {r.get('totalWins','0')}-{r.get('totalLosses','0')}"
+                 for _, r in top.iterrows()]
+        tsl_parts.append("STANDINGS (Top 5):\n" + "\n".join(lines))
+
+    tsl_context = "\n\n".join(tsl_parts) if tsl_parts else ""
+    contents = f"TSL CONTEXT:\n{tsl_context}\n\n{context}\n\nUSER QUESTION: {question}" if tsl_context else f"{context}\n\n{question}"
+
+    # Default to web search for strategy follow-ups (safer)
+    result = await atlas_ai.generate_with_search(contents, system=system_instruction)
+    answer = result.text or "ATLAS couldn't formulate a strategy for that."
+
+    footer = "Follow-up · Strategy Room · ATLAS™ Oracle"
+    fields = []
+    citations = _format_citations(result)
+    if citations:
+        fields.append(("📚 Sources", citations))
+
+    return answer, {
+        "title": "🧠 ATLAS Intelligence — Strategy Room",
+        "color": AtlasColors.SUCCESS,
+        "footer": footer,
+        "fields": fields,
+    }
+
+
+async def _followup_web(
+    question: str,
+    context: str,
+    system_instruction: str,
+    domain: str,
+) -> tuple[str, dict]:
+    """Web search follow-up — Open Intel or Sports Intel."""
+    contents = f"{context}\n\n{question}" if context else question
+    result = await atlas_ai.generate_with_search(contents, system=system_instruction)
+
+    if domain == "SPORTS":
+        title = "🏈 ATLAS Intelligence — Sports Intel"
+        color = ATLAS_GOLD
+        mode_label = "Sports Intel"
+    else:
+        title = "🌐 ATLAS Intelligence — Open Intel"
+        color = C_BLUE
+        mode_label = "Open Intel"
+
+    answer = result.text or "ATLAS couldn't pull intel on that."
+    footer = f"Follow-up · {mode_label} · ATLAS™ Oracle"
+    if hasattr(result, 'fallback_used') and result.fallback_used:
+        footer += "  ·  ⚡ Gemini fallback"
+
+    fields = []
+    citations = _format_citations(result)
+    if citations:
+        fields.append(("📚 Sources", citations))
+
+    return answer, {"title": title, "color": color, "footer": footer, "fields": fields}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

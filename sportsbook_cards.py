@@ -1007,7 +1007,7 @@ async def build_parlay_confirm_card(
         bt = esc(leg.get("bet_type", ""))
         lo = leg.get("odds", 0)
         lo_str = f"+{lo}" if lo > 0 else str(lo)
-        matchup = esc(leg.get("matchup", ""))
+        matchup = esc(leg.get("matchup", "") or leg.get("display", ""))
         leg_html += f"""<div class="parlay-leg">
   <span class="leg-num">{i}.</span>
   <span class="leg-pick">{pick} ({bt})</span>

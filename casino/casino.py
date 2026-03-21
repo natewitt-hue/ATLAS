@@ -21,6 +21,7 @@ Commissioner commands:
 
 from __future__ import annotations
 
+import functools
 import logging
 import typing
 
@@ -96,31 +97,33 @@ def _is_admin(interaction: discord.Interaction) -> bool:
 #  HUB VIEW
 # ═════════════════════════════════════════════════════════════════════════════
 
-class CasinoHubModal(discord.ui.Modal):
-    """Wager input modal — used by hub buttons to collect bet amount."""
+def _compute_presets(max_bet: int) -> list[int]:
+    """Generate 4 preset wager amounts scaled to player's tier."""
+    raw = [max(1, max_bet // 10), max(1, max_bet // 4), max(1, max_bet // 2), max_bet]
+    seen: set[int] = set()
+    result: list[int] = []
+    for v in raw:
+        if v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result
 
-    def __init__(self, game: str, max_bet: int = 100):
-        super().__init__(title=f"TSL Casino — {game.capitalize()}")
+
+class CustomWagerModal(discord.ui.Modal):
+    """Minimal text modal — only used when player taps 'Custom' amount."""
+
+    def __init__(self, game: str, max_bet: int, callback):
+        super().__init__(title=f"Custom Wager — {game.capitalize()}")
         self.game = game
+        self.max_bet = max_bet
+        self._callback = callback
         self.wager_input = discord.ui.TextInput(
-            label       = "Wager ($)",
-            placeholder = f"Enter amount (max: ${max_bet:,})",
-            min_length  = 1,
-            max_length  = 6,
+            label="Wager ($)",
+            placeholder=f"1 — {max_bet:,}",
+            min_length=1,
+            max_length=6,
         )
         self.add_item(self.wager_input)
-
-        # For coinflip: add side picker directly in modal
-        if game == "coinflip":
-            self.side_input = discord.ui.TextInput(
-                label       = "Pick a side",
-                placeholder = "heads or tails",
-                min_length  = 1,
-                max_length  = 5,
-            )
-            self.add_item(self.side_input)
-        else:
-            self.side_input = None
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -129,18 +132,69 @@ class CasinoHubModal(discord.ui.Modal):
             return await interaction.response.send_message(
                 "❌ Enter a whole number (e.g. 50).", ephemeral=True
             )
-
         if wager < 1:
             return await interaction.response.send_message(
                 "❌ Wager must be at least **$1**.", ephemeral=True
             )
-        max_bet = await db.get_max_bet(interaction.user.id)
-        if wager > max_bet:
+        if wager > self.max_bet:
             return await interaction.response.send_message(
-                f"❌ Your max bet is **${max_bet:,}**. Enter a lower amount.",
-                ephemeral=True,
+                f"❌ Max bet is **${self.max_bet:,}**.", ephemeral=True
             )
+        await self._callback(interaction, wager)
 
+
+class WagerPresetView(discord.ui.View):
+    """Preset wager buttons for a specific game. Replaces the old CasinoHubModal."""
+
+    def __init__(self, game: str, max_bet: int, balance: int, user_id: int):
+        super().__init__(timeout=60)
+        self.game = game
+        self.max_bet = max_bet
+        self.balance = balance
+        self.user_id = user_id
+        self._used = False
+
+        presets = _compute_presets(max_bet)
+        for amount in presets:
+            disabled = balance < amount
+            btn = discord.ui.Button(
+                label=f"${amount:,}",
+                style=discord.ButtonStyle.success if not disabled else discord.ButtonStyle.secondary,
+                disabled=disabled,
+                row=0,
+            )
+            btn.callback = functools.partial(self._on_preset, amount=amount)
+            self.add_item(btn)
+
+        custom_btn = discord.ui.Button(
+            label="Custom",
+            style=discord.ButtonStyle.primary,
+            emoji="✏️",
+            row=0,
+        )
+        custom_btn.callback = self._on_custom
+        self.add_item(custom_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your game!", ephemeral=True)
+            return False
+        return True
+
+    async def _on_preset(self, interaction: discord.Interaction, *, amount: int):
+        if self._used:
+            return await interaction.response.send_message("Already processing...", ephemeral=True)
+        self._used = True
+        self.stop()
+        await self._launch_game(interaction, amount)
+
+    async def _on_custom(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            CustomWagerModal(self.game, self.max_bet, self._launch_game)
+        )
+
+    async def _launch_game(self, interaction: discord.Interaction, wager: int):
+        """Route to the appropriate game start function."""
         if self.game == "blackjack":
             await start_blackjack(interaction, wager)
         elif self.game == "slots":
@@ -148,17 +202,10 @@ class CasinoHubModal(discord.ui.Modal):
         elif self.game == "crash":
             await join_crash(interaction, wager, interaction.client)
         elif self.game == "coinflip":
-            # Solo coinflip — side picked in modal (2-step flow)
-            raw = (self.side_input.value or "").strip().lower()
-            if raw.startswith("h"):
-                pick = "heads"
-            elif raw.startswith("t"):
-                pick = "tails"
-            else:
-                return await interaction.response.send_message(
-                    "❌ Pick **heads** or **tails**.", ephemeral=True
-                )
-            await play_coinflip(interaction, pick, wager)
+            view = CoinPickView(wager)
+            await interaction.response.send_message(
+                "🪙 Pick a side:", view=view, ephemeral=True
+            )
 
 
 class CoinPickView(discord.ui.View):
@@ -180,36 +227,50 @@ class CoinPickView(discord.ui.View):
 
 
 class CasinoHubView(discord.ui.View):
-    """Main casino lobby buttons."""
+    """Main casino lobby buttons — persistent (survives bot restarts)."""
 
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="🃏 Blackjack", style=discord.ButtonStyle.success, row=0)
+    async def _send_wager_view(self, interaction: discord.Interaction, game: str):
+        """Shared helper — show preset wager buttons for a game."""
+        uid = interaction.user.id
+        max_bet = await db.get_max_bet(uid)
+        balance = await db.get_balance(uid)
+        view = WagerPresetView(game, max_bet, balance, uid)
+        emoji = {"blackjack": "🃏", "slots": "🎰", "crash": "🚀", "coinflip": "🪙"}.get(game, "🎲")
+        await interaction.response.send_message(
+            f"{emoji} **{game.capitalize()}** — pick your wager (Balance: ${balance:,})",
+            view=view, ephemeral=True,
+        )
+
+    @discord.ui.button(label="🃏 Blackjack", style=discord.ButtonStyle.success,
+                        custom_id="atlas:casino:blackjack", row=0)
     async def blackjack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        max_bet = await db.get_max_bet(interaction.user.id)
-        await interaction.response.send_modal(CasinoHubModal("blackjack", max_bet=max_bet))
+        await self._send_wager_view(interaction, "blackjack")
 
-    @discord.ui.button(label="🎰 Slots", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🎰 Slots", style=discord.ButtonStyle.primary,
+                        custom_id="atlas:casino:slots", row=0)
     async def slots(self, interaction: discord.Interaction, button: discord.ui.Button):
-        max_bet = await db.get_max_bet(interaction.user.id)
-        await interaction.response.send_modal(CasinoHubModal("slots", max_bet=max_bet))
+        await self._send_wager_view(interaction, "slots")
 
-    @discord.ui.button(label="🚀 Crash", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="🚀 Crash", style=discord.ButtonStyle.danger,
+                        custom_id="atlas:casino:crash", row=0)
     async def crash(self, interaction: discord.Interaction, button: discord.ui.Button):
-        max_bet = await db.get_max_bet(interaction.user.id)
-        await interaction.response.send_modal(CasinoHubModal("crash", max_bet=max_bet))
+        await self._send_wager_view(interaction, "crash")
 
-    @discord.ui.button(label="🪙 Coin Flip", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="🪙 Coin Flip", style=discord.ButtonStyle.secondary,
+                        custom_id="atlas:casino:coinflip", row=1)
     async def coinflip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        max_bet = await db.get_max_bet(interaction.user.id)
-        await interaction.response.send_modal(CasinoHubModal("coinflip", max_bet=max_bet))
+        await self._send_wager_view(interaction, "coinflip")
 
-    @discord.ui.button(label="🎟️ Daily Scratch", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="🎟️ Daily Scratch", style=discord.ButtonStyle.secondary,
+                        custom_id="atlas:casino:scratch", row=1)
     async def scratch(self, interaction: discord.Interaction, button: discord.ui.Button):
         await daily_scratch(interaction)
 
-    @discord.ui.button(label="📊 My Stats", style=discord.ButtonStyle.secondary, custom_id="casino:stats", row=1)
+    @discord.ui.button(label="📊 My Stats", style=discord.ButtonStyle.secondary,
+                        custom_id="atlas:casino:stats", row=1)
     async def my_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id
@@ -268,15 +329,6 @@ class CasinoHubView(discord.ui.View):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if hasattr(self, "message") and self.message:
-            try:
-                await self.message.edit(view=self)
-            except Exception:
-                pass
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  THE COG
@@ -293,6 +345,10 @@ class CasinoCog(commands.Cog):
         refunded = await db.reconcile_orphaned_wagers()
         if refunded:
             print(f"[Casino] Reconciled {len(refunded)} orphaned wagers")
+
+        # Register persistent view so hub buttons survive bot restarts
+        self.bot.add_view(CasinoHubView())
+
         print("[Casino] DB ready. FLOW Casino online. 🎰")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -328,16 +384,25 @@ class CasinoCog(commands.Cog):
             "type": streak.get("type", ""),
         }
 
-        from sportsbook_cards import build_casino_hub_card, card_to_file
-        png = await build_casino_hub_card(
-            balance=balance, max_bet=max_bet, tier_name=tier["name"],
-            streak=streak_dict, jackpots=jp_dict,
-        )
-        file = card_to_file(png, "casino_hub.png")
-
         view = CasinoHubView()
-        msg = await interaction.followup.send(file=file, view=view, ephemeral=True)
-        view.message = msg
+        try:
+            from sportsbook_cards import build_casino_hub_card, card_to_file
+            png = await build_casino_hub_card(
+                balance=balance, max_bet=max_bet, tier_name=tier["name"],
+                streak=streak_dict, jackpots=jp_dict,
+            )
+            file = card_to_file(png, "casino_hub.png")
+            await interaction.followup.send(file=file, view=view, ephemeral=True)
+        except Exception:
+            embed = discord.Embed(
+                title="ATLAS Casino",
+                description=(
+                    f"**Balance:** ${balance:,} | **Tier:** {tier['name']}"
+                    f" | **Max Bet:** ${max_bet:,}"
+                ),
+                color=0xD4AF37,
+            )
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  INDIVIDUAL GAME COMMANDS (channel-restricted)
@@ -349,8 +414,14 @@ class CasinoCog(commands.Cog):
         if bj_ch and interaction.channel_id != bj_ch:
             return await interaction.response.send_message(
                 f"🃏 Play blackjack in <#{bj_ch}>!", ephemeral=True)
-        max_bet = await db.get_max_bet(interaction.user.id)
-        await interaction.response.send_modal(CasinoHubModal("blackjack", max_bet=max_bet))
+        uid = interaction.user.id
+        max_bet = await db.get_max_bet(uid)
+        balance = await db.get_balance(uid)
+        view = WagerPresetView("blackjack", max_bet, balance, uid)
+        await interaction.response.send_message(
+            f"🃏 **Blackjack** — pick your wager (Balance: ${balance:,})",
+            view=view, ephemeral=True,
+        )
 
     @app_commands.command(name="slots", description="Spin the slot machine")
     async def slots_cmd(self, interaction: discord.Interaction):
@@ -358,8 +429,14 @@ class CasinoCog(commands.Cog):
         if sl_ch and interaction.channel_id != sl_ch:
             return await interaction.response.send_message(
                 f"🎰 Play slots in <#{sl_ch}>!", ephemeral=True)
-        max_bet = await db.get_max_bet(interaction.user.id)
-        await interaction.response.send_modal(CasinoHubModal("slots", max_bet=max_bet))
+        uid = interaction.user.id
+        max_bet = await db.get_max_bet(uid)
+        balance = await db.get_balance(uid)
+        view = WagerPresetView("slots", max_bet, balance, uid)
+        await interaction.response.send_message(
+            f"🎰 **Slots** — pick your wager (Balance: ${balance:,})",
+            view=view, ephemeral=True,
+        )
 
     @app_commands.command(name="crash", description="Join a crash round")
     @app_commands.describe(wager="Amount to wager")

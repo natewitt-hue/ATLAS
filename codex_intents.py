@@ -39,7 +39,7 @@ def _get_fuzzy_resolver():
     global _fuzzy_resolve
     if _fuzzy_resolve is None:
         try:
-            from codex_cog import fuzzy_resolve_user
+            from codex_utils import fuzzy_resolve_user
             _fuzzy_resolve = fuzzy_resolve_user
         except ImportError:
             _fuzzy_resolve = lambda x: None

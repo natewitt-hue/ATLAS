@@ -4,9 +4,10 @@ conversation_memory.py — Shared Conversation History for ATLAS
 Per-user conversation tracking with in-memory cache + SQLite persistence.
 
 Source configs:
-  casual — 10 turns, 24-hour TTL  (bot.py @mention chat)
-  codex  — 5 turns,  30-minute TTL (legacy, kept for old DB rows)
-  oracle — 5 turns,  30-minute TTL (Oracle modals + /ask — cross-modal sharing)
+  casual       — 10 turns, 24-hour TTL  (bot.py @mention chat)
+  codex        — 5 turns,  30-minute TTL (legacy, kept for old DB rows)
+  oracle       — 5 turns,  30-minute TTL (Oracle modals — initial queries)
+  oracle_chain — 15 turns, 1-hour TTL    (Oracle reply-chain conversations)
 """
 
 from __future__ import annotations
@@ -21,9 +22,10 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsl_history.
 
 # ── Per-source configuration ─────────────────────────────────────────────────
 _SOURCE_CONFIG: dict[str, dict] = {
-    "casual": {"max_turns": 10, "ttl_seconds": 86400},    # 24 hours
-    "codex":  {"max_turns": 5,  "ttl_seconds": 1800},     # 30 minutes (legacy)
-    "oracle": {"max_turns": 5,  "ttl_seconds": 1800},     # 30 minutes — Oracle modals + /ask
+    "casual":       {"max_turns": 10, "ttl_seconds": 86400},    # 24 hours
+    "codex":        {"max_turns": 5,  "ttl_seconds": 1800},     # 30 minutes (legacy)
+    "oracle":       {"max_turns": 5,  "ttl_seconds": 1800},     # 30 minutes — Oracle modals
+    "oracle_chain": {"max_turns": 15, "ttl_seconds": 3600},     # 1 hour — reply chains
 }
 _DEFAULT_CONFIG = {"max_turns": 10, "ttl_seconds": 86400}
 
@@ -40,10 +42,15 @@ class ConversationTurn:
     sql: str = ""
     source: str = "casual"
     timestamp: float = field(default_factory=time.time)
+    author_name: str = ""     # Display name (for chain multi-user attribution)
+    chain_id: int | None = None  # Root Oracle message ID (for reply chains)
 
 
 # ── In-memory cache: discord_id → list of recent turns ────────────────────────
 _conv_cache: dict[int, list[ConversationTurn]] = {}
+
+# ── Chain cache: chain_id → list of turns (all users) ────────────────────────
+_chain_cache: dict[int, list[ConversationTurn]] = {}
 
 # ── Lazy DB init flag ─────────────────────────────────────────────────────────
 _db_initialized = False
@@ -79,6 +86,23 @@ async def _ensure_db() -> None:
                 )
             except Exception:
                 pass  # Column already exists
+            # Migration: add chain_id + author_name columns for reply-chain support
+            try:
+                await db.execute(
+                    "ALTER TABLE conversation_history ADD COLUMN chain_id INTEGER DEFAULT NULL"
+                )
+            except Exception:
+                pass
+            try:
+                await db.execute(
+                    "ALTER TABLE conversation_history ADD COLUMN author_name TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conv_chain
+                ON conversation_history(chain_id, created_at)
+            """)
             # Always attempt backfill — safe if already done (WHERE source IS NULL finds nothing)
             await db.execute(
                 "UPDATE conversation_history SET source = 'codex' WHERE source IS NULL"
@@ -200,3 +224,129 @@ async def build_conversation_block(discord_id: int, source: str = "casual") -> s
         "being referenced. You may reuse or modify previous SQL patterns if relevant."
     )
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHAIN-BASED CONVERSATION MEMORY (Oracle reply chains)
+# ══════════════════════════════════════════════════════════════════════════════
+# Keyed by chain_id (root Oracle message ID) instead of discord_id.
+# Tracks ALL users in a reply chain for full group conversation awareness.
+
+async def add_chain_turn(
+    chain_id: int,
+    discord_id: int,
+    author_name: str,
+    question: str,
+    answer: str,
+    sql: str = "",
+) -> None:
+    """Store a turn in a reply chain (multi-user, keyed by chain root message ID)."""
+    await _ensure_db()
+    turn = ConversationTurn(
+        question=question,
+        answer=answer,
+        sql=sql,
+        source="oracle_chain",
+        author_name=author_name,
+        chain_id=chain_id,
+    )
+    chain = _chain_cache.setdefault(chain_id, [])
+    chain.append(turn)
+
+    # Trim if chain exceeds max turns
+    cfg = _config("oracle_chain")
+    if len(chain) > cfg["max_turns"]:
+        _chain_cache[chain_id] = chain[-cfg["max_turns"]:]
+
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute(
+                "INSERT INTO conversation_history "
+                "(discord_id, question, sql_query, answer, source, created_at, "
+                " chain_id, author_name) "
+                "VALUES (?, ?, ?, ?, 'oracle_chain', ?, ?, ?)",
+                (discord_id, turn.question, turn.sql, turn.answer,
+                 turn.timestamp, chain_id, author_name),
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"[ConversationMemory] Chain persist error: {e}")
+
+
+async def _load_chain_from_db(chain_id: int) -> list[ConversationTurn]:
+    """Cold-start recovery: load all turns for a chain from SQLite."""
+    await _ensure_db()
+    cfg = _config("oracle_chain")
+    cutoff = time.time() - cfg["ttl_seconds"]
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT question, sql_query, answer, author_name, created_at "
+                "FROM conversation_history "
+                "WHERE chain_id = ? AND created_at >= ? "
+                "ORDER BY created_at ASC LIMIT ?",
+                (chain_id, cutoff, cfg["max_turns"]),
+            )
+            rows = list(await cursor.fetchall())
+        return [
+            ConversationTurn(
+                question=r["question"],
+                answer=r["answer"],
+                sql=r["sql_query"] or "",
+                source="oracle_chain",
+                author_name=r["author_name"] or "",
+                chain_id=chain_id,
+                timestamp=r["created_at"],
+            )
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"[ConversationMemory] Chain DB load error for chain {chain_id}: {e}")
+        return []
+
+
+async def build_chain_block(chain_id: int) -> str:
+    """Build a multi-user conversation history string for an Oracle reply chain."""
+    cfg = _config("oracle_chain")
+    cutoff = time.time() - cfg["ttl_seconds"]
+
+    # Check in-memory cache first
+    turns = _chain_cache.get(chain_id, [])
+    turns = [t for t in turns if t.timestamp >= cutoff]
+
+    # Cold-start fallback
+    if not turns:
+        turns = await _load_chain_from_db(chain_id)
+        if turns:
+            _chain_cache[chain_id] = turns
+
+    if not turns:
+        return ""
+
+    lines = ["CONVERSATION THREAD (multiple users may be participating):"]
+    for i, t in enumerate(turns, 1):
+        name = t.author_name or "User"
+        lines.append(f"  [{name}] Q{i}: {t.question}")
+        if t.sql:
+            lines.append(f"  SQL{i}: {t.sql}")
+        lines.append(f"  [ATLAS] A{i}: {t.answer[:300]}")
+    lines.append(
+        "Use the above thread history for context. Multiple users may be asking "
+        "follow-ups. Resolve pronouns ('that', 'those', 'it', etc.) from the thread. "
+        "You may reuse or modify previous SQL patterns if relevant."
+    )
+    return "\n".join(lines)
+
+
+def cleanup_stale_chains() -> int:
+    """Remove expired chains from in-memory cache. Returns number removed."""
+    cfg = _config("oracle_chain")
+    cutoff = time.time() - cfg["ttl_seconds"]
+    stale = [
+        cid for cid, turns in _chain_cache.items()
+        if not turns or turns[-1].timestamp < cutoff
+    ]
+    for cid in stale:
+        del _chain_cache[cid]
+    return len(stale)

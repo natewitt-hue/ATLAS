@@ -66,7 +66,7 @@ def _validate_image_url(url: str) -> bool:
 
 
 # ── Shared config ─────────────────────────────────────────────────────────────
-from permissions import ADMIN_USER_IDS
+from permissions import ADMIN_USER_IDS, is_commissioner
 from constants import ATLAS_ICON_URL
 
 try:
@@ -91,6 +91,8 @@ def _admin_chat_id() -> int | None:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 STATE_PATH     = os.path.join(os.path.dirname(__file__), "complaint_state.json")
+FR_COUNTER_PATH = os.path.join(os.path.dirname(__file__), "force_request_counter.json")
+FR_STATE_PATH   = os.path.join(os.path.dirname(__file__), "force_request_state.json")
 
 # ── Categories & Penalties ────────────────────────────────────────────────────
 
@@ -142,6 +144,36 @@ def _save_complaint_state():
         os.replace(tmp, STATE_PATH)
     except Exception as e:
         print(f"[complaint_cog] State save error: {e}")
+
+
+# ── Force Request State ──────────────────────────────────────────────────────
+
+_force_requests: dict[str, dict] = {}
+
+def _load_fr_state():
+    global _force_requests
+    try:
+        with open(FR_STATE_PATH) as f:
+            _force_requests = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _force_requests = {}
+
+def _save_fr_state():
+    # Prune resolved requests older than 7 days
+    cutoff = (dt.now(timezone.utc) - datetime.timedelta(days=7)).isoformat()
+    to_remove = [
+        rid for rid, fr in _force_requests.items()
+        if fr.get("status") not in (None, "pending") and fr.get("created_at", "") < cutoff
+    ]
+    for rid in to_remove:
+        del _force_requests[rid]
+    try:
+        tmp = FR_STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_force_requests, f, indent=2)
+        os.replace(tmp, FR_STATE_PATH)
+    except Exception as e:
+        print(f"[force_request] State save error: {e}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -460,6 +492,7 @@ class PenaltySelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=options,
+            custom_id=f"sentinel:ruling:{complaint_id}:penalty",
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -539,18 +572,39 @@ class RulingPanelView(discord.ui.View):
         self._acted = False
         self.add_item(PenaltySelect(complaint_id))
 
-    def _is_commissioner(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id in ADMIN_USER_IDS:
-            return True
-        if interaction.guild:
-            return any(r.name == "Commissioner" for r in interaction.user.roles)
-        return False
+        # Dynamic custom_ids for persistent view support
+        guilty = discord.ui.Button(
+            label="Guilty", style=discord.ButtonStyle.danger,
+            emoji="⚖️", custom_id=f"sentinel:ruling:{complaint_id}:guilty", row=1,
+        )
+        guilty.callback = self._guilty_callback
+        self.add_item(guilty)
 
-    @discord.ui.button(label="Guilty", style=discord.ButtonStyle.danger, emoji="⚖️", row=1)
-    async def guilty_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        not_guilty = discord.ui.Button(
+            label="Not Guilty", style=discord.ButtonStyle.success,
+            emoji="✅", custom_id=f"sentinel:ruling:{complaint_id}:not_guilty", row=1,
+        )
+        not_guilty.callback = self._not_guilty_callback
+        self.add_item(not_guilty)
+
+        dismiss = discord.ui.Button(
+            label="Dismiss", style=discord.ButtonStyle.secondary,
+            emoji="🗑️", custom_id=f"sentinel:ruling:{complaint_id}:dismiss", row=1,
+        )
+        dismiss.callback = self._dismiss_callback
+        self.add_item(dismiss)
+
+        view_btn = discord.ui.Button(
+            label="View Complaint", style=discord.ButtonStyle.primary,
+            emoji="📋", custom_id=f"sentinel:ruling:{complaint_id}:view", row=2,
+        )
+        view_btn.callback = self._view_callback
+        self.add_item(view_btn)
+
+    async def _guilty_callback(self, interaction: discord.Interaction):
         if self._acted:
             return await interaction.response.send_message("Already ruled on.", ephemeral=True)
-        if not self._is_commissioner(interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
         c = _complaints.get(self.complaint_id)
         if not c:
@@ -563,26 +617,23 @@ class RulingPanelView(discord.ui.View):
         self._acted = True
         await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "guilty"))
 
-    @discord.ui.button(label="Not Guilty", style=discord.ButtonStyle.success, emoji="✅", row=1)
-    async def not_guilty_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _not_guilty_callback(self, interaction: discord.Interaction):
         if self._acted:
             return await interaction.response.send_message("Already ruled on.", ephemeral=True)
-        if not self._is_commissioner(interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
         self._acted = True
         await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "not_guilty"))
 
-    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary, emoji="🗑️", row=1)
-    async def dismiss_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _dismiss_callback(self, interaction: discord.Interaction):
         if self._acted:
             return await interaction.response.send_message("Already ruled on.", ephemeral=True)
-        if not self._is_commissioner(interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
         self._acted = True
         await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "dismissed"))
 
-    @discord.ui.button(label="View Complaint", style=discord.ButtonStyle.primary, emoji="📋", row=2)
-    async def view_complaint_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _view_callback(self, interaction: discord.Interaction):
         c = _complaints.get(self.complaint_id)
         if not c:
             return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
@@ -595,6 +646,10 @@ class ComplaintCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _load_state()
+        # Re-register persistent RulingPanelViews for pending complaints
+        for cid, c in _complaints.items():
+            if c.get("verdict") in (None, "pending"):
+                bot.add_view(RulingPanelView(cid))
 
     async def caseview_impl(self, interaction: discord.Interaction, case_id: str):
         c = _complaints.get(case_id.upper())
@@ -894,23 +949,62 @@ class ForceRequestAdminView(discord.ui.View):
 
     def __init__(
         self,
-        requester: discord.Member,
-        opponent_name: str,
-        note: str,
-        analysis: dict,
-        request_id: str,
-        results_channel_id: int,
+        requester: discord.Member | None = None,
+        opponent_name: str = "",
+        note: str = "",
+        analysis: dict | None = None,
+        request_id: str = "",
+        results_channel_id: int = 0,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
     ):
         super().__init__(timeout=None)
         self.requester          = requester
-        self.requester_id       = requester.id
-        self.requester_name     = requester.display_name
+        self.requester_id       = requester.id if requester else requester_id
+        self.requester_name     = requester.display_name if requester else requester_name
         self.opponent_name      = opponent_name
         self.note               = note
-        self.analysis           = analysis
+        self.analysis           = analysis or {}
         self.request_id         = request_id
         self.results_channel_id = results_channel_id
         self._acted             = False
+
+        # Dynamic custom_ids for persistent view support
+        approve_btn = discord.ui.Button(
+            label="✅ Approve AI Ruling", style=discord.ButtonStyle.success,
+            custom_id=f"sentinel:fr:{request_id}:approve", row=0,
+        )
+        approve_btn.callback = self._approve_callback
+        self.add_item(approve_btn)
+
+        fair_sim_btn = discord.ui.Button(
+            label="⚖️ Override: Fair Sim", style=discord.ButtonStyle.primary,
+            custom_id=f"sentinel:fr:{request_id}:fair_sim", row=0,
+        )
+        fair_sim_btn.callback = self._fair_sim_callback
+        self.add_item(fair_sim_btn)
+
+        opp_btn = discord.ui.Button(
+            label="🔄 Override: Opp Wins", style=discord.ButtonStyle.secondary,
+            custom_id=f"sentinel:fr:{request_id}:opp_wins", row=0,
+        )
+        opp_btn.callback = self._opp_wins_callback
+        self.add_item(opp_btn)
+
+        deny_btn = discord.ui.Button(
+            label="❌ Deny", style=discord.ButtonStyle.danger,
+            custom_id=f"sentinel:fr:{request_id}:deny", row=1,
+        )
+        deny_btn.callback = self._deny_callback
+        self.add_item(deny_btn)
+
+        info_btn = discord.ui.Button(
+            label="📎 Need More Info", style=discord.ButtonStyle.secondary,
+            custom_id=f"sentinel:fr:{request_id}:more_info", row=1,
+        )
+        info_btn.callback = self._more_info_callback
+        self.add_item(info_btn)
 
     async def _resolve_requester(self, interaction: discord.Interaction) -> discord.Member | None:
         """Re-fetch the requester member from the guild (survives stale refs)."""
@@ -921,9 +1015,6 @@ class ForceRequestAdminView(discord.ui.View):
             except discord.NotFound:
                 pass
         return self.requester
-
-    def _is_admin(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id in ADMIN_USER_IDS
 
     async def _finalize(
         self,
@@ -985,22 +1076,23 @@ class ForceRequestAdminView(discord.ui.View):
         )
         await interaction.followup.send("✅ Ruling posted and requester notified.", ephemeral=True)
 
-    # ── Button: Approve AI ruling as-is ──────────────────────────────────────
-    @discord.ui.button(label="✅ Approve AI Ruling", style=discord.ButtonStyle.success, row=0)
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_admin(interaction):
+        # Persist resolved status
+        if self.request_id in _force_requests:
+            _force_requests[self.request_id]["status"] = final_ruling
+            _save_fr_state()
+
+    async def _approve_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("🚫 Admins only.", ephemeral=True)
         await self._finalize(
             interaction,
-            final_ruling=self.analysis["ruling"],
-            winner=self.analysis["winner"],
-            loser=self.analysis["loser"],
+            final_ruling=self.analysis.get("ruling", "approved"),
+            winner=self.analysis.get("winner", "N/A"),
+            loser=self.analysis.get("loser", "N/A"),
         )
 
-    # ── Button: Override to Fair Sim ──────────────────────────────────────────
-    @discord.ui.button(label="⚖️ Override: Fair Sim", style=discord.ButtonStyle.primary, row=0)
-    async def override_fair_sim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_admin(interaction):
+    async def _fair_sim_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("🚫 Admins only.", ephemeral=True)
         await self._finalize(
             interaction,
@@ -1010,10 +1102,8 @@ class ForceRequestAdminView(discord.ui.View):
             admin_note="Commissioner overrode AI ruling to Fair Sim.",
         )
 
-    # ── Button: Override — Opponent wins ──────────────────────────────────────
-    @discord.ui.button(label="🔄 Override: Opp Wins", style=discord.ButtonStyle.secondary, row=0)
-    async def override_opponent_wins(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_admin(interaction):
+    async def _opp_wins_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("🚫 Admins only.", ephemeral=True)
         await self._finalize(
             interaction,
@@ -1023,10 +1113,8 @@ class ForceRequestAdminView(discord.ui.View):
             admin_note="Commissioner determined the opponent should receive the force win.",
         )
 
-    # ── Button: Deny request ──────────────────────────────────────────────────
-    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, row=1)
-    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_admin(interaction):
+    async def _deny_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("🚫 Admins only.", ephemeral=True)
         if self._acted:
             return await interaction.response.send_message("Already decided.", ephemeral=True)
@@ -1052,10 +1140,13 @@ class ForceRequestAdminView(discord.ui.View):
         )
         await interaction.followup.send("Request denied. Requester notified.", ephemeral=True)
 
-    # ── Button: Ask for more screenshots ─────────────────────────────────────
-    @discord.ui.button(label="📎 Need More Info", style=discord.ButtonStyle.secondary, row=1)
-    async def more_info(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._is_admin(interaction):
+        # Persist resolved status
+        if self.request_id in _force_requests:
+            _force_requests[self.request_id]["status"] = "denied"
+            _save_fr_state()
+
+    async def _more_info_callback(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("🚫 Admins only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         requester = await self._resolve_requester(interaction)
@@ -1084,12 +1175,41 @@ class ForceRequestCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot              = bot
-        # NOTE: _request_counter resets on every bot restart. IDs are session-scoped
-        # and not globally unique. For persistence, move to SQLite or a JSON file.
-        self._request_counter = 0
+        self._request_counter = self._load_counter()
+
+        # Re-register pending force request views for restart persistence
+        _load_fr_state()
+        for rid, fr in _force_requests.items():
+            if fr.get("status") == "pending":
+                view = ForceRequestAdminView(
+                    requester=None,
+                    opponent_name=fr.get("opponent_name", ""),
+                    note=fr.get("note", ""),
+                    analysis=fr.get("analysis") or {},
+                    request_id=rid,
+                    results_channel_id=fr.get("results_channel_id", 0),
+                    requester_id=fr.get("requester_id", 0),
+                    requester_name=fr.get("requester_name", ""),
+                )
+                bot.add_view(view)
+
+    @staticmethod
+    def _load_counter() -> int:
+        try:
+            with open(FR_COUNTER_PATH) as f:
+                return json.load(f).get("counter", 0)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return 0
+
+    def _save_counter(self):
+        tmp = FR_COUNTER_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"counter": self._request_counter}, f)
+        os.replace(tmp, FR_COUNTER_PATH)
 
     def _next_id(self) -> str:
         self._request_counter += 1
+        self._save_counter()
         ts = dt.now(timezone.utc).strftime("%m%d")
         return f"{ts}-{self._request_counter:03d}"
 
@@ -1194,6 +1314,19 @@ class ForceRequestCog(commands.Cog):
             request_id=request_id,
             results_channel_id=_results_channel_id() or 0,
         )
+
+        # Persist force request for restart reconstruction
+        _force_requests[request_id] = {
+            "requester_id": interaction.user.id,
+            "requester_name": interaction.user.display_name,
+            "opponent_name": opponent,
+            "note": note,
+            "analysis": analysis,
+            "request_id": request_id,
+            "results_channel_id": _results_channel_id() or 0,
+            "status": "pending",
+        }
+        _save_fr_state()
 
         admin_pings = " ".join(f"<@{uid}>" for uid in ADMIN_USER_IDS)
         await review_ch.send(
@@ -2942,6 +3075,7 @@ class SentinelHubCog(commands.Cog):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def setup(bot: commands.Bot):
+    # Persistent view: routes ALL atlas:sentinel:* custom_ids to this instance
     bot.add_view(SentinelHubView(bot))
     await bot.add_cog(ComplaintCog(bot))
     await bot.add_cog(ForceRequestCog(bot))

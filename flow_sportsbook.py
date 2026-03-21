@@ -77,7 +77,8 @@ ADMIN_ROLE_NAME   = "Commissioner"
 from permissions import ADMIN_USER_IDS
 
 STARTING_BALANCE  = 1000
-MIN_BET           = 10
+MIN_BET           = 50      # unified with real sportsbook
+WAGER_PRESETS     = [50, 100, 250, 500, 1000]
 MAX_PARLAY_LEGS   = 6
 HOME_FIELD_EDGE   = 2.0       # pts advantage — only applied when home is already favored
 SPREAD_CAP        = 21.0      # max absolute spread value (Madden has wider margins)
@@ -178,6 +179,27 @@ def setup_db():
         con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_game    ON parlay_legs(game_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_matchup ON parlay_legs(matchup)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_parlay_legs_type    ON parlay_legs(bet_type, status)")
+
+        # ── Parlay Cart (DB-backed, survives restarts) ─────────────────────
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS parlay_cart (
+                cart_leg_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id   INTEGER NOT NULL,
+                source       TEXT    NOT NULL DEFAULT 'TSL',
+                event_id     TEXT    NOT NULL,
+                display      TEXT    NOT NULL,
+                pick         TEXT    NOT NULL,
+                bet_type     TEXT    NOT NULL,
+                line         REAL    NOT NULL DEFAULT 0,
+                odds         INTEGER NOT NULL,
+                added_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_cart_user_event
+            ON parlay_cart(discord_id, source, event_id)
+        """)
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS games_state (
                 game_id TEXT PRIMARY KEY,
@@ -234,6 +256,7 @@ def setup_db():
             "ALTER TABLE users_table ADD COLUMN season_start_balance INTEGER DEFAULT 1000",
             "ALTER TABLE bets_table ADD COLUMN parlay_id TEXT DEFAULT NULL",
             "ALTER TABLE bets_table ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE parlay_legs ADD COLUMN source TEXT NOT NULL DEFAULT 'TSL'",
         ]:
             try:
                 con.execute(stmt)
@@ -843,20 +866,198 @@ def _build_game_lines(games_raw: list) -> list[dict]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  PARLAY CART
+#  PARLAY CART (DB-backed, survives restarts)
 # ═════════════════════════════════════════════════════════════════════════════
 
-_parlay_carts: dict[int, list[dict]] = {}
+def _get_cart(uid: int) -> list[dict]:
+    """Return all cart legs for a user as a list of dicts."""
+    with _db_con() as con:
+        rows = con.execute(
+            "SELECT source, event_id, display, pick, bet_type, line, odds "
+            "FROM parlay_cart WHERE discord_id = ? ORDER BY cart_leg_id",
+            (uid,),
+        ).fetchall()
+    return [
+        {"source": r[0], "event_id": r[1], "display": r[2], "pick": r[3],
+         "bet_type": r[4], "line": r[5], "odds": r[6]}
+        for r in rows
+    ]
 
-def _get_cart(uid):    return _parlay_carts.setdefault(uid, [])
-def _clear_cart(uid):  _parlay_carts[uid] = []
+
+def _clear_cart(uid: int):
+    """Remove all cart legs for a user."""
+    with _db_con() as con:
+        con.execute("DELETE FROM parlay_cart WHERE discord_id = ?", (uid,))
+
 
 def _add_to_cart(uid: int, leg: dict) -> int:
-    cart = _get_cart(uid)
-    if any(e["game_id"] == leg["game_id"] for e in cart):
-        return -1
-    cart.append(leg)
-    return len(cart)
+    """Add a leg to the user's cart. Returns leg count, -1 if duplicate, -2 if full.
+
+    Accepts normalized format (source/event_id/display) or legacy TSL format
+    (game_id/matchup) and auto-normalizes.
+    """
+    if "source" not in leg:
+        leg = {
+            "source": "TSL",
+            "event_id": leg["game_id"],
+            "display": leg.get("matchup", ""),
+            "pick": leg["pick"],
+            "bet_type": leg["bet_type"],
+            "line": leg.get("line", 0),
+            "odds": leg["odds"],
+        }
+
+    with _db_con() as con:
+        count = con.execute(
+            "SELECT COUNT(*) FROM parlay_cart WHERE discord_id = ?", (uid,)
+        ).fetchone()[0]
+        if count >= MAX_PARLAY_LEGS:
+            return -2
+
+        try:
+            con.execute(
+                "INSERT INTO parlay_cart "
+                "(discord_id, source, event_id, display, pick, bet_type, line, odds) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, leg["source"], leg["event_id"], leg["display"],
+                 leg["pick"], leg["bet_type"], leg.get("line", 0), leg["odds"]),
+            )
+        except sqlite3.IntegrityError:
+            return -1
+
+        return count + 1
+
+
+def _expire_stale_cart_legs():
+    """Remove cart legs older than 24 hours."""
+    with _db_con() as con:
+        con.execute(
+            "DELETE FROM parlay_cart WHERE added_at < datetime('now', '-24 hours')"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PARLAY SETTLEMENT (shared by TSL and real sport grading)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
+    """Check if all legs of a parlay are resolved. If so, settle it.
+
+    Returns a list of pending event dicts (for the event bus).
+    Called by both TSL grading and real sport grading after updating leg statuses.
+    """
+    own_con = con is None
+    if own_con:
+        con = _db_con().__enter__()
+
+    try:
+        parlay = con.execute(
+            "SELECT discord_id, combined_odds, wager_amount, status "
+            "FROM parlays_table WHERE parlay_id = ?",
+            (parlay_id,),
+        ).fetchone()
+        if not parlay or parlay[3] != "Pending":
+            return []
+
+        uid, combined_odds, wager_amount, _ = parlay
+
+        legs = con.execute(
+            "SELECT status, odds FROM parlay_legs WHERE parlay_id = ? ORDER BY leg_index",
+            (parlay_id,),
+        ).fetchall()
+
+        statuses = [row[0] for row in legs]
+        if not statuses:
+            return []
+
+        has_pending = "Pending" in statuses
+        any_lost = "Lost" in statuses
+        all_won = all(s == "Won" for s in statuses)
+        any_pushed = "Push" in statuses
+        any_won = "Won" in statuses
+        events = []
+
+        # A single loss kills the parlay immediately, even with pending legs
+        if any_lost:
+            con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (parlay_id,))
+            import wager_registry
+            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "lost", -wager_amount, con=con)
+            events.append({
+                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+                "bet_type": "parlay", "amount": -wager_amount,
+                "balance_after": _get_balance(uid),
+                "description": f"Lost parlay (parlay_id={parlay_id})",
+                "bet_id": parlay_id,
+            })
+            return events
+
+        # If any legs still pending, can't settle yet
+        if has_pending:
+            return []
+
+        # All legs resolved — settle
+        if all_won:
+            payout = _payout_calc(wager_amount, combined_odds)
+            if payout < 0 or payout > MAX_PAYOUT:
+                log.error(f"[PARLAY] Insane payout ${payout:,.2f} for {parlay_id} — CAPPING")
+                con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
+                return []
+            _update_balance(uid, payout, con,
+                            subsystem="PARLAY", subsystem_id=str(parlay_id),
+                            reference_key=f"PARLAY_SETTLE_{parlay_id}")
+            con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (parlay_id,))
+            import wager_registry
+            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "won", payout - wager_amount, con=con)
+            events.append({
+                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+                "bet_type": "parlay", "amount": payout - wager_amount,
+                "balance_after": _get_balance(uid),
+                "description": f"Won parlay (parlay_id={parlay_id})",
+                "bet_id": parlay_id,
+            })
+        elif any_pushed and any_won:
+            # Reduced parlay: drop pushed legs, pay on winning legs only
+            winning_odds = [int(row[1]) for row, s in zip(legs, statuses) if s == "Won"]
+            reduced_odds = _combine_parlay_odds(winning_odds)
+            payout = _payout_calc(wager_amount, reduced_odds)
+            if payout < 0 or payout > MAX_PAYOUT:
+                log.error(f"[PARLAY] Insane reduced payout ${payout:,.2f} for {parlay_id} — CAPPING")
+                con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
+                return []
+            _update_balance(uid, payout, con,
+                            subsystem="PARLAY", subsystem_id=str(parlay_id),
+                            reference_key=f"PARLAY_SETTLE_{parlay_id}")
+            con.execute("UPDATE parlays_table SET status='Won', combined_odds=? WHERE parlay_id=?",
+                        (reduced_odds, parlay_id))
+            import wager_registry
+            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "won", payout - wager_amount, con=con)
+            events.append({
+                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+                "bet_type": "parlay", "amount": payout - wager_amount,
+                "balance_after": _get_balance(uid),
+                "description": f"Won reduced parlay (parlay_id={parlay_id})",
+                "bet_id": parlay_id,
+            })
+        elif any_pushed:
+            # All legs pushed (no wins) — full refund
+            _update_balance(uid, wager_amount, con,
+                            subsystem="PARLAY", subsystem_id=str(parlay_id),
+                            reference_key=f"PARLAY_PUSH_{parlay_id}")
+            con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (parlay_id,))
+            import wager_registry
+            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "push", 0, con=con)
+            events.append({
+                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+                "bet_type": "parlay", "amount": 0,
+                "balance_after": _get_balance(uid),
+                "description": f"Push parlay (parlay_id={parlay_id})",
+                "bet_id": parlay_id,
+            })
+
+        return events
+    finally:
+        if own_con:
+            con.close()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -986,15 +1187,22 @@ async def _run_autograde(bot) -> None:
                                 con.execute("UPDATE bets_table SET status='Error' WHERE bet_id=?", (bid,))
                                 settled += 1
                                 continue
-                            _update_balance(uid, payout, con)
+                            _update_balance(uid, payout, con,
+                                            subsystem="TSL_BET", subsystem_id=str(bid),
+                                            reference_key=f"TSL_BET_{bid}_won")
                             total_paid += payout - amt
                             wins += 1
                         elif res == "Push":
-                            _update_balance(uid, amt, con)
+                            _update_balance(uid, amt, con,
+                                            subsystem="TSL_BET", subsystem_id=str(bid),
+                                            reference_key=f"TSL_BET_{bid}_push")
                             pushes += 1
                         elif res == "Lost":
                             losses += 1
                         con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
+                        import wager_registry
+                        _ra = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (0 if res == "Push" else -amt)
+                        wager_registry.settle_wager_sync("TSL_BET", str(bid), res.lower(), _ra, con=con)
                         settled += 1
                         _ev_profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (-amt if res == "Lost" else 0)
                         pending_events.append({
@@ -1017,7 +1225,7 @@ async def _run_autograde(bot) -> None:
 
                     for pid, uid, c_odds, amt in parlays:
                         legs = con.execute(
-                            "SELECT game_id, matchup, pick, bet_type, line, odds "
+                            "SELECT game_id, matchup, pick, bet_type, line, odds, source "
                             "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
                             (pid,)
                         ).fetchall()
@@ -1029,6 +1237,10 @@ async def _run_autograde(bot) -> None:
                         for leg_idx, row in enumerate(legs):
                             leg = {"game_id": row[0], "matchup": row[1], "pick": row[2],
                                    "bet_type": row[3], "line": row[4], "odds": row[5]}
+                            source = row[6] if len(row) > 6 else "TSL"
+                            if source != "TSL":
+                                leg_results.append("Pending")
+                                continue
                             gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
                             if not gd:
                                 leg_results.append("Pending")
@@ -1044,73 +1256,11 @@ async def _run_autograde(bot) -> None:
                                 (res, pid, leg_idx),
                             )
 
-                        # A single loss kills the parlay even if other legs are unresolved
-                        any_lost = "Lost" in leg_results
-                        has_pending = "Pending" in leg_results
-                        all_won = all(r == "Won" for r in leg_results)
-                        any_pushed = "Push" in leg_results
-
-                        if has_pending and not any_lost:
-                            continue
-
-                        if all_won:
-                            payout = _payout_calc(amt, c_odds)
-                            if payout < 0 or payout > MAX_PAYOUT:
-                                log.error(f"[AUTO-GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — CAPPING")
-                                con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (pid,))
-                                settled += 1
-                                continue
-                            _update_balance(uid, payout, con,
-                                            subsystem="PARLAY", subsystem_id=str(pid),
-                                            reference_key=f"PARLAY_SETTLE_{pid}")
-                            total_paid += payout - amt
-                            con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
-                            import wager_registry
-                            wager_registry.settle_wager_sync("PARLAY", str(pid), "won", payout - amt, con=con)
-                            wins += 1
-                            pending_events.append({
-                                "discord_id": uid,
-                                "guild_id": None,
-                                "source": "TSL_BET",
-                                "bet_type": "parlay",
-                                "amount": payout - amt,
-                                "balance_after": _get_balance(uid),
-                                "description": f"Won parlay (parlay_id={pid})",
-                                "bet_id": pid,
-                            })
-                        elif any_lost:
-                            con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
-                            import wager_registry
-                            wager_registry.settle_wager_sync("PARLAY", str(pid), "lost", -amt, con=con)
-                            losses += 1
-                            pending_events.append({
-                                "discord_id": uid,
-                                "guild_id": None,
-                                "source": "TSL_BET",
-                                "bet_type": "parlay",
-                                "amount": -amt,
-                                "balance_after": _get_balance(uid),
-                                "description": f"Lost parlay (parlay_id={pid})",
-                                "bet_id": pid,
-                            })
-                        elif any_pushed:
-                            _update_balance(uid, amt, con,
-                                            subsystem="PARLAY", subsystem_id=str(pid),
-                                            reference_key=f"PARLAY_PUSH_{pid}")
-                            con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
-                            import wager_registry
-                            wager_registry.settle_wager_sync("PARLAY", str(pid), "push", 0, con=con)
-                            pushes += 1
-                            pending_events.append({
-                                "discord_id": uid,
-                                "guild_id": None,
-                                "source": "TSL_BET",
-                                "bet_type": "parlay",
-                                "amount": 0,
-                                "balance_after": _get_balance(uid),
-                                "description": f"Push parlay (parlay_id={pid})",
-                                "bet_id": pid,
-                            })
+                        # Delegate settlement to shared function
+                        settle_events = _check_parlay_completion(pid, con=con)
+                        pending_events.extend(settle_events)
+                        if settle_events:
+                            settled += 1
 
                 if settled > 0 or wins + losses + pushes > 0:
                     results.append({
@@ -1171,10 +1321,11 @@ async def _run_autograde(bot) -> None:
 #  UI COMPONENTS
 # ═════════════════════════════════════════════════════════════════════════════
 
-class BetSlipModal(discord.ui.Modal):
+class CustomWagerModal(discord.ui.Modal):
+    """Text-input modal for custom (non-preset) wager amounts."""
     def __init__(self, team, line, odds, game_id, bet_type,
                  matchup_key, away_name, home_name, bet_week=None):
-        super().__init__(title=f"📋 Bet Slip — {bet_type}")
+        super().__init__(title=f"📋 Custom Wager — {bet_type}")
         self.team        = team
         self.line        = line
         self.odds        = odds
@@ -1193,75 +1344,217 @@ class BetSlipModal(discord.ui.Modal):
         self.add_item(self.amount_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        if _is_locked(self.game_id):
-            return await interaction.response.send_message(
-                "🔴 Game is **locked**.", ephemeral=True
-            )
         try:
             amt = int(self.amount_input.value.replace(",", "").replace("$", ""))
         except ValueError:
             return await interaction.response.send_message("❌ Enter a valid number.", ephemeral=True)
+        await _place_straight_bet(
+            interaction,
+            team=self.team, line=self.line, odds=self.odds,
+            game_id=self.game_id, bet_type=self.bet_type,
+            matchup_key=self.matchup_key, away_name=self.away_name,
+            home_name=self.home_name, bet_week=self.bet_week,
+            amount=amt, already_deferred=False,
+        )
 
-        if amt < MIN_BET:
-            return await interaction.response.send_message(f"❌ Minimum bet is **${MIN_BET}**.", ephemeral=True)
 
-        # Per-user lock prevents double-spend across concurrent bets
-        async with flow_wallet.get_user_lock(interaction.user.id):
-            # Atomic balance check + debit inside single transaction
+async def _place_straight_bet(
+    interaction: discord.Interaction,
+    *,
+    team: str,
+    line,
+    odds: int,
+    game_id: str,
+    bet_type: str,
+    matchup_key: str,
+    away_name: str,
+    home_name: str,
+    bet_week: int,
+    amount: int,
+    already_deferred: bool = False,
+) -> None:
+    """Shared straight-bet placement logic used by preset buttons and CustomWagerModal."""
+
+    async def _send_error(msg: str):
+        if already_deferred:
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+
+    if _is_locked(game_id):
+        return await _send_error("🔴 Game is **locked**.")
+
+    if amount < MIN_BET:
+        return await _send_error(f"❌ Minimum bet is **${MIN_BET}**.")
+
+    # Per-user lock prevents double-spend across concurrent bets
+    async with flow_wallet.get_user_lock(interaction.user.id):
+        try:
+            with _db_con() as con:
+                con.execute("BEGIN IMMEDIATE")
+                safe_line = line if isinstance(line, (int, float)) else 0.0
+                con.execute(
+                    "INSERT INTO bets_table "
+                    "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (int(interaction.user.id), int(bet_week), matchup_key,
+                     bet_type, int(amount), int(odds), team, float(safe_line))
+                )
+                bet_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+                new_bal = flow_wallet.update_balance_sync(
+                    interaction.user.id, -amount, source="TSL_BET", con=con,
+                    subsystem="TSL_BET", subsystem_id=str(bet_id),
+                )
+                import wager_registry
+                wager_registry.register_wager_sync(
+                    "TSL_BET", str(bet_id), int(interaction.user.id), int(amount),
+                    label=f"{team} {bet_type} {_american_to_str(odds)}",
+                    odds=int(odds), con=con,
+                )
+                con.commit()
+        except flow_wallet.InsufficientFundsError:
+            balance = _get_balance(interaction.user.id)
+            return await _send_error(f"❌ Insufficient balance. You have **${balance:,}**.")
+
+    profit = _payout_calc(amount, odds) - amount
+
+    if not already_deferred:
+        await interaction.response.defer(ephemeral=True)
+
+    from sportsbook_cards import build_bet_confirm_card, card_to_file
+    safe_line = line if isinstance(line, (int, float)) else None
+    png = await build_bet_confirm_card(
+        pick=team, bet_type=bet_type, odds=odds,
+        risk=amount, to_win=profit, balance=new_bal,
+        matchup=matchup_key, week=bet_week, line=safe_line,
+    )
+    file = card_to_file(png, "bet_confirm.png")
+    await interaction.followup.send(file=file, ephemeral=True)
+
+    # Post to #ledger
+    try:
+        txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+        from ledger_poster import post_transaction
+        await post_transaction(
+            interaction.client, interaction.guild_id, interaction.user.id,
+            "TSL_BET", -amount, new_bal,
+            f"Bet: {team} {bet_type} @ {_american_to_str(odds)}",
+            txn_id,
+        )
+    except Exception:
+        log.exception("Ledger post failed for straight bet")
+
+
+class WagerPresetView(discord.ui.View):
+    """DraftKings-style preset wager buttons. Works for any sport source.
+
+    Args:
+        pick: Display name of the selection (e.g., "Cowboys", "Chiefs")
+        bet_type: "Spread", "Moneyline", "Over", "Under"
+        odds: American odds (e.g., -110)
+        display_info: Dict with keys: matchup, line_str, source_label
+        user_balance: User's current TSL Bucks balance
+        place_bet: Async callable (interaction, amount) -> None.
+        parlay_leg: Normalized leg dict for _add_to_cart.
+        custom_modal_factory: Callable () -> discord.ui.Modal for Custom button.
+    """
+
+    def __init__(self, *, pick: str, bet_type: str, odds: int, display_info: dict,
+                 user_balance: int, place_bet, parlay_leg: dict, custom_modal_factory):
+        super().__init__(timeout=120)
+        self.pick = pick
+        self.bet_type = bet_type
+        self.odds = odds
+        self.display_info = display_info
+        self.user_balance = user_balance
+        self._place_bet = place_bet
+        self._parlay_leg = parlay_leg
+        self._custom_modal_factory = custom_modal_factory
+
+        # Row 0: preset amount buttons
+        for amt in WAGER_PRESETS:
+            can_afford = amt <= user_balance
+            btn = discord.ui.Button(
+                label=f"${amt:,}",
+                style=discord.ButtonStyle.success if can_afford else discord.ButtonStyle.secondary,
+                disabled=not can_afford,
+                row=0,
+            )
+            btn.callback = self._make_preset_cb(amt)
+            self.add_item(btn)
+
+        # Row 1: Custom + Add to Parlay
+        custom_btn = discord.ui.Button(
+            label="✏️ Custom",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        custom_btn.callback = self._custom_cb
+        self.add_item(custom_btn)
+
+        parlay_btn = discord.ui.Button(
+            label="🎰 Add to Parlay",
+            style=discord.ButtonStyle.primary,
+            row=1,
+        )
+        parlay_btn.callback = self._parlay_cb
+        self.add_item(parlay_btn)
+
+    def _build_embed(self) -> discord.Embed:
+        info = self.display_info
+        embed = discord.Embed(
+            title=f"📋  {self.pick} — {self.bet_type}", color=TSL_GOLD,
+        )
+        source_badge = (f"**[{info.get('source_label', 'TSL')}]** "
+                        if info.get('source_label') not in (None, 'TSL') else "")
+        embed.description = (
+            f"{source_badge}**{info['matchup']}**\n"
+            f"Line: `{info['line_str']}`\n\n"
+            f"💰 Balance: **${self.user_balance:,}**"
+        )
+        return embed
+
+    def _make_preset_cb(self, amt: int):
+        async def callback(interaction: discord.Interaction):
             try:
-                with _db_con() as con:
-                    con.execute("BEGIN IMMEDIATE")
-                    safe_line = self.line if isinstance(self.line, (int, float)) else 0.0
-                    con.execute(
-                        "INSERT INTO bets_table "
-                        "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (int(interaction.user.id), int(self.bet_week), self.matchup_key,
-                         self.bet_type, int(amt), int(self.odds), self.team, float(safe_line))
-                    )
-                    bet_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    new_bal = flow_wallet.update_balance_sync(
-                        interaction.user.id, -amt, source="TSL_BET", con=con,
-                        subsystem="TSL_BET", subsystem_id=str(bet_id),
-                    )
-                    import wager_registry
-                    wager_registry.register_wager_sync(
-                        "TSL_BET", str(bet_id), int(interaction.user.id), int(amt),
-                        label=f"{self.team} {self.bet_type} {_american_to_str(self.odds)}",
-                        odds=int(self.odds), con=con,
-                    )
-                    con.commit()
+                await self._place_bet(interaction, amt)
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
-                return await interaction.response.send_message(
-                    f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True
-                )
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True)
+                else:
+                    await interaction.followup.send(
+                        f"❌ Insufficient balance. You have **${balance:,}**.", ephemeral=True)
+        return callback
 
-        profit  = _payout_calc(amt, self.odds) - amt
+    async def _custom_cb(self, interaction: discord.Interaction):
+        modal = self._custom_modal_factory()
+        await interaction.response.send_modal(modal)
 
-        await interaction.response.defer(ephemeral=True)
-        from sportsbook_cards import build_bet_confirm_card, card_to_file
-        safe_line = self.line if isinstance(self.line, (int, float)) else None
-        png = await build_bet_confirm_card(
-            pick=self.team, bet_type=self.bet_type, odds=self.odds,
-            risk=amt, to_win=profit, balance=new_bal,
-            matchup=self.matchup_key, week=self.bet_week, line=safe_line,
-        )
-        file = card_to_file(png, "bet_confirm.png")
-        await interaction.followup.send(file=file, ephemeral=True)
-
-        # Post to #ledger
-        try:
-            txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
-            from ledger_poster import post_transaction
-            await post_transaction(
-                interaction.client, interaction.guild_id, interaction.user.id,
-                "TSL_BET", -amt, new_bal,
-                f"Bet: {self.team} {self.bet_type} @ {_american_to_str(self.odds)}",
-                txn_id,
+    async def _parlay_cb(self, interaction: discord.Interaction):
+        uid = interaction.user.id
+        result = _add_to_cart(uid, self._parlay_leg)
+        if result == -1:
+            return await interaction.response.send_message(
+                "⚠️ You already have a leg from this game in your parlay cart.", ephemeral=True
             )
-        except Exception:
-            log.exception("Ledger post failed for straight bet")
+        if result == -2:
+            return await interaction.response.send_message(
+                f"⚠️ Cart is full — max **{MAX_PARLAY_LEGS}** legs.", ephemeral=True
+            )
+        cart     = _get_cart(uid)
+        combined = _combine_parlay_odds([l["odds"] for l in cart])
+        legs_text = "\n".join(
+            f"**{i+1}.** {l['pick']} ({l['bet_type']}) @ {_american_to_str(l['odds'])}"
+            for i, l in enumerate(cart)
+        )
+        embed = discord.Embed(title="🎰 Parlay Cart", color=TSL_GOLD)
+        embed.description = legs_text
+        embed.add_field(name="Legs",          value=str(len(cart)),             inline=True)
+        embed.add_field(name="Combined Odds", value=_american_to_str(combined), inline=True)
+        view = ParlayCartView(uid, cart, combined)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class ParlayWagerModal(discord.ui.Modal):
@@ -1304,12 +1597,15 @@ class ParlayWagerModal(discord.ui.Modal):
                     )
                     # Insert normalized legs (primary data source)
                     for i, leg in enumerate(self.legs):
+                        source = leg.get("source", "TSL")
+                        event_id = leg.get("event_id", leg.get("game_id", ""))
+                        display = leg.get("display", leg.get("matchup", ""))
                         con.execute(
                             "INSERT INTO parlay_legs "
-                            "(parlay_id, leg_index, game_id, matchup, pick, bet_type, line, odds) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (parlay_id, i, leg["game_id"], leg["matchup"], leg["pick"],
-                             leg["bet_type"], leg.get("line", 0), leg["odds"]),
+                            "(parlay_id, leg_index, game_id, matchup, pick, bet_type, line, odds, source) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (parlay_id, i, event_id, display, leg["pick"],
+                             leg["bet_type"], leg.get("line", 0), leg["odds"], source),
                         )
                     flow_wallet.update_balance_sync(
                         interaction.user.id, -amt, source="TSL_BET", con=con,
@@ -1474,48 +1770,50 @@ class GameCardViewWithParlay(discord.ui.View):
             btn.callback = self._make_straight_cb(pick, line, odds, bet_type)
             self.add_item(btn)
 
-            p_btn = discord.ui.Button(label="🎰+", style=discord.ButtonStyle.secondary, row=row)
-            p_btn.callback = self._make_parlay_cb(pick, line, odds, bet_type)
-            self.add_item(p_btn)
-
     def _make_straight_cb(self, pick, line, odds, bet_type):
         game = self.game
         async def callback(interaction: discord.Interaction):
             if _is_locked(game["game_id"]):
                 return await interaction.response.send_message("🔴 Game is **locked**.", ephemeral=True)
-            modal = BetSlipModal(
-                team=pick, line=line, odds=odds, game_id=game["game_id"],
-                bet_type=bet_type, matchup_key=game["matchup_key"],
-                away_name=game["away"], home_name=game["home"],
-                bet_week=game.get("bet_week", dm.CURRENT_WEEK + 1)
-            )
-            await interaction.response.send_modal(modal)
-        return callback
+            balance = _get_balance(interaction.user.id)
+            bet_week = game.get("bet_week", dm.CURRENT_WEEK + 1)
 
-    def _make_parlay_cb(self, pick, line, odds, bet_type):
-        game = self.game
-        async def callback(interaction: discord.Interaction):
-            if _is_locked(game["game_id"]):
-                return await interaction.response.send_message("🔴 Game is **locked**.", ephemeral=True)
-            uid = interaction.user.id
-            leg = {"game_id": game["game_id"], "matchup": game["matchup_key"],
-                   "pick": pick, "line": line, "odds": odds, "bet_type": bet_type}
-            result = _add_to_cart(uid, leg)
-            if result == -1:
-                return await interaction.response.send_message(
-                    "⚠️ You already have a leg from this game in your parlay cart.", ephemeral=True
+            async def place_bet(inter, amt):
+                await inter.response.defer(ephemeral=True)
+                await _place_straight_bet(
+                    inter, team=pick, line=line, odds=odds,
+                    game_id=game["game_id"], bet_type=bet_type,
+                    matchup_key=game["matchup_key"],
+                    away_name=game["away"], home_name=game["home"],
+                    bet_week=bet_week, amount=amt, already_deferred=True,
                 )
-            cart     = _get_cart(uid)
-            combined = _combine_parlay_odds([l["odds"] for l in cart])
-            legs_text = "\n".join(
-                f"**{i+1}.** {l['pick']} ({l['bet_type']}) @ {_american_to_str(l['odds'])}"
-                for i, l in enumerate(cart)
+
+            view = WagerPresetView(
+                pick=pick, bet_type=bet_type, odds=odds,
+                display_info={
+                    "matchup": f"{game['away']} @ {game['home']}",
+                    "line_str": _american_to_str(odds),
+                    "source_label": "TSL",
+                },
+                user_balance=balance,
+                place_bet=place_bet,
+                parlay_leg={
+                    "source": "TSL",
+                    "event_id": game["game_id"],
+                    "display": f"{game['away']} @ {game['home']}",
+                    "pick": pick,
+                    "bet_type": bet_type,
+                    "line": line,
+                    "odds": odds,
+                },
+                custom_modal_factory=lambda: CustomWagerModal(
+                    team=pick, line=line, odds=odds, game_id=game["game_id"],
+                    bet_type=bet_type, matchup_key=game["matchup_key"],
+                    away_name=game["away"], home_name=game["home"],
+                    bet_week=bet_week,
+                ),
             )
-            embed = discord.Embed(title="🎰 Parlay Cart", color=TSL_GOLD)
-            embed.description = legs_text
-            embed.add_field(name="Legs",          value=str(len(cart)),             inline=True)
-            embed.add_field(name="Combined Odds", value=_american_to_str(combined), inline=True)
-            view = ParlayCartView(uid, cart, combined)
+            embed = view._build_embed()
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return callback
 
@@ -1747,9 +2045,10 @@ class SportsbookHubView(discord.ui.View):
                 description=f"**{len(cart)} Leg{'s' if len(cart) != 1 else ''}** — Combined: **{combined:+d}**",
             )
             for i, leg in enumerate(cart, 1):
+                source_badge = f"[{leg.get('source', 'TSL')}] " if leg.get('source') != 'TSL' else ""
                 embed.add_field(
-                    name=f"Leg {i}: {leg['pick']}",
-                    value=f"{leg['bet_type']} ({leg['odds']:+d})",
+                    name=f"Leg {i}: {source_badge}{leg['pick']}",
+                    value=f"{leg['bet_type']} ({leg['odds']:+d})\n{leg.get('display', '')}",
                     inline=False,
                 )
             view = ParlayCartView(uid, cart, combined)
@@ -2000,6 +2299,7 @@ class SportsbookCog(commands.Cog):
         # Set up balance snapshots table (for sparklines & weekly deltas)
         setup_snapshots_table()
         dm._autograde_callback = self._on_data_refresh
+        _expire_stale_cart_legs()
         self.auto_grade.start()
         self.daily_snapshot.start()
 
@@ -2012,6 +2312,7 @@ class SportsbookCog(commands.Cog):
     async def daily_snapshot(self):
         """Take a daily balance snapshot for sparklines and weekly deltas."""
         await asyncio.to_thread(take_daily_snapshot)
+        await asyncio.to_thread(_expire_stale_cart_legs)
 
     @daily_snapshot.before_loop
     async def before_daily_snapshot(self):
@@ -2148,7 +2449,7 @@ class SportsbookCog(commands.Cog):
             embed.add_field(
                 name="🛒 Parlay Cart",
                 value=(f"{len(cart)} leg(s) in cart | Combined: {_american_to_str(combined)}\n"
-                       "Use **🎰+** buttons in `/sportsbook` to submit."),
+                       "Tap any bet line, then **🎰 Add to Parlay**."),
                 inline=False
             )
         embed.set_footer(text="TSL Sportsbook — Pending bets only")
@@ -2345,7 +2646,7 @@ class SportsbookCog(commands.Cog):
             ).fetchall()
             for pid, uid, c_odds, amt in parlays:
                 legs = con.execute(
-                    "SELECT game_id, matchup, pick, bet_type, line, odds "
+                    "SELECT game_id, matchup, pick, bet_type, line, odds, source "
                     "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
                     (pid,)
                 ).fetchall()
@@ -2356,6 +2657,10 @@ class SportsbookCog(commands.Cog):
                 for leg_idx, row in enumerate(legs):
                     leg = {"game_id": row[0], "matchup": row[1], "pick": row[2],
                            "bet_type": row[3], "line": row[4], "odds": row[5]}
+                    source = row[6] if len(row) > 6 else "TSL"
+                    if source != "TSL":
+                        leg_results.append("Pending")
+                        continue
                     gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
                     if not gd:
                         leg_results.append("Pending")
@@ -2370,56 +2675,10 @@ class SportsbookCog(commands.Cog):
                         (res, pid, leg_idx),
                     )
 
-                any_lost = "Lost" in leg_results
-                has_pending = "Pending" in leg_results
-                all_won = all(r == "Won" for r in leg_results)
-                any_pushed = "Push" in leg_results
-
-                if has_pending and not any_lost:
-                    continue
-                if all_won:
-                    payout = _payout_calc(amt, c_odds)
-                    if payout < 0 or payout > MAX_PAYOUT:
-                        log.error(f"[GRADE] Insane parlay payout ${payout:,.2f} for parlay {pid} — CAPPING")
-                        con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (pid,))
-                        settled += 1
-                        continue
-                    _update_balance(uid, payout, con,
-                                    subsystem="PARLAY", subsystem_id=str(pid),
-                                    reference_key=f"PARLAY_SETTLE_{pid}")
-                    total_paid += payout - amt
-                    con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (pid,))
-                    import wager_registry
-                    wager_registry.settle_wager_sync("PARLAY", str(pid), "won", payout - amt, con=con)
-                    wins += 1
-                    bet_log.append({"uid": uid, "result": "Won", "pick": "parlay",
-                                    "bet_type": "parlay", "matchup": f"parlay_id={pid}",
-                                    "wager": amt, "profit": payout - amt, "bet_id": pid})
-                elif any_lost:
-                    flow_wallet.update_balance_sync(
-                        uid, 0, source="TSL_BET",
-                        description=f"Lost: parlay {pid}",
-                        reference_key=f"PARLAY_SETTLE_{pid}",
-                        con=con, subsystem="PARLAY", subsystem_id=str(pid),
-                    )
-                    con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
-                    import wager_registry
-                    wager_registry.settle_wager_sync("PARLAY", str(pid), "lost", -amt, con=con)
-                    losses += 1
-                    bet_log.append({"uid": uid, "result": "Lost", "pick": "parlay",
-                                    "bet_type": "parlay", "matchup": f"parlay_id={pid}",
-                                    "wager": amt, "profit": 0, "bet_id": pid})
-                elif any_pushed:
-                    _update_balance(uid, amt, con,
-                                    subsystem="PARLAY", subsystem_id=str(pid),
-                                    reference_key=f"PARLAY_PUSH_{pid}")
-                    con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (pid,))
-                    import wager_registry
-                    wager_registry.settle_wager_sync("PARLAY", str(pid), "push", 0, con=con)
-                    pushes += 1
-                    bet_log.append({"uid": uid, "result": "Push", "pick": "parlay",
-                                    "bet_type": "parlay", "matchup": f"parlay_id={pid}",
-                                    "wager": amt, "profit": 0, "bet_id": pid})
+                # Delegate settlement to shared function
+                settle_events = _check_parlay_completion(pid, con=con)
+                if settle_events:
+                    settled += 1
 
         embed = discord.Embed(title=f"✅  Week {week} Bets Graded", color=TSL_GOLD)
         embed.add_field(name="Settled",      value=str(settled),       inline=True)
@@ -2765,7 +3024,9 @@ class SportsbookCog(commands.Cog):
                 (key,)
             ).fetchall()
             for bid, uid, amt in pending:
-                _update_balance(uid, amt, con)
+                _update_balance(uid, amt, con,
+                                subsystem="TSL_BET", subsystem_id=str(bid),
+                                reference_key=f"TSL_BET_{bid}_cancel")
                 con.execute(
                     "UPDATE bets_table SET status='Cancelled' WHERE bet_id=?", (bid,)
                 )
@@ -2791,7 +3052,9 @@ class SportsbookCog(commands.Cog):
                 if not row:
                     continue
                 uid, amt = row
-                _update_balance(uid, amt, con)
+                _update_balance(uid, amt, con,
+                                subsystem="PARLAY", subsystem_id=str(pid),
+                                reference_key=f"PARLAY_{pid}_cancel")
                 con.execute(
                     "UPDATE parlays_table SET status='Cancelled' WHERE parlay_id=?", (pid,)
                 )
@@ -3050,5 +3313,5 @@ class SportsbookCog(commands.Cog):
 async def setup(bot: commands.Bot):
     cog = SportsbookCog(bot)
     await bot.add_cog(cog)
-    # Register persistent view so hub buttons survive bot restarts
+    # Persistent view: routes ALL atlas:sportsbook:* custom_ids to this instance
     bot.add_view(SportsbookHubView(cog))

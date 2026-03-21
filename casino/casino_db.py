@@ -293,7 +293,8 @@ async def reconcile_orphaned_wagers(max_age_minutes: int = 30) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         # Find all casino wager debits older than cutoff
         async with db.execute("""
-            SELECT t.txn_id, t.discord_id, ABS(t.amount) as wager, t.created_at
+            SELECT t.txn_id, t.discord_id, ABS(t.amount) as wager, t.created_at,
+                   t.subsystem_id
             FROM transactions t
             WHERE t.source = 'CASINO'
               AND t.description = 'casino wager'
@@ -315,13 +316,17 @@ async def reconcile_orphaned_wagers(max_age_minutes: int = 30) -> list[dict]:
         """, (cutoff,)) as cur:
             orphans = await cur.fetchall()
 
-    for txn_id, discord_id, wager, created_at in orphans:
+    for txn_id, discord_id, wager, created_at, corr_id in orphans:
         try:
             await flow_wallet.credit(
                 discord_id, wager, "CASINO",
                 description="orphan refund",
                 reference_key=f"ORPHAN_{txn_id}",
             )
+            # Void the wager registry entry if correlation_id exists
+            if corr_id:
+                import wager_registry
+                await wager_registry.settle_wager("CASINO", corr_id, "voided", 0)
             refunded.append({
                 "txn_id": txn_id,
                 "discord_id": discord_id,
@@ -560,17 +565,20 @@ async def backfill_jackpot_tags() -> int:
     Idempotent — only affects rows where subsystem IS NULL.
     """
     async with aiosqlite.connect(DB_PATH) as db:
+        # Use JOIN-based subquery — correlated subquery with julianday() on
+        # outer table columns fails in some SQLite versions.
         cursor = await db.execute("""
-            UPDATE transactions SET subsystem='CASINO', subsystem_id='JP_' || (
-                SELECT jl.id FROM casino_jackpot_log jl
-                WHERE jl.discord_id = transactions.discord_id
-                  AND jl.amount = transactions.amount
-                  AND ABS(julianday(jl.won_at) - julianday(transactions.created_at)) < 0.001
-                ORDER BY ABS(julianday(jl.won_at) - julianday(transactions.created_at))
-                LIMIT 1
-            )
-            WHERE transactions.description LIKE 'JACKPOT%'
-              AND transactions.subsystem IS NULL
+            UPDATE transactions
+            SET subsystem = 'CASINO',
+                subsystem_id = 'JP_' || (
+                    SELECT jl.id FROM casino_jackpot_log jl
+                    WHERE jl.discord_id = transactions.discord_id
+                      AND jl.amount = transactions.amount
+                    ORDER BY jl.won_at DESC
+                    LIMIT 1
+                )
+            WHERE description LIKE 'JACKPOT%'
+              AND subsystem IS NULL
         """)
         count = cursor.rowcount
         await db.commit()
@@ -1017,18 +1025,26 @@ async def deduct_wager(discord_id: int, wager: int,
     if wager > max_bet:
         raise ValueError(f"Wager ${wager:,} exceeds your tier limit of ${max_bet:,}")
     async with flow_wallet.get_user_lock(discord_id):
-        new_bal = await flow_wallet.debit(
-            discord_id, wager, "CASINO",
-            description="casino wager",
-            subsystem="CASINO",
-            subsystem_id=correlation_id,
-        )
-        # Register wager in unified registry (non-atomic — see GAP 5 spec)
-        if correlation_id:
-            import wager_registry
-            await wager_registry.register_wager(
-                "CASINO", correlation_id, discord_id, wager, label="Casino",
-            )
+        async with aiosqlite.connect(flow_wallet.DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                new_bal = await flow_wallet.debit(
+                    discord_id, wager, "CASINO",
+                    description="casino wager",
+                    subsystem="CASINO",
+                    subsystem_id=correlation_id,
+                    con=db,
+                )
+                if correlation_id:
+                    import wager_registry
+                    await wager_registry.register_wager(
+                        "CASINO", correlation_id, discord_id, wager,
+                        label="Casino", con=db,
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
         return new_bal
 
 
@@ -1218,6 +1234,17 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> dict | No
                     (discord_id, game_type, wager, outcome, payout, multiplier, played_at)
                 VALUES (?,?,?,?,?,?,?)
             """, (discord_id, "scratch", 0, "win", total_reward, 1.0, now))
+
+            # Track in unified wager registry (wager=0, like jackpots)
+            scratch_sid = f"SCRATCH_{discord_id}_{today}"
+            import wager_registry
+            await wager_registry.register_wager(
+                "CASINO", scratch_sid, discord_id, 0,
+                label="Daily Scratch", created_at=now, con=db,
+            )
+            await wager_registry.settle_wager(
+                "CASINO", scratch_sid, "won", total_reward, con=db,
+            )
 
             await db.commit()
         except Exception:
