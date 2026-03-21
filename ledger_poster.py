@@ -8,12 +8,15 @@ Centralized utility for posting transaction audit lines to the #ledger channel.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 import discord
 from discord.ext import commands
 
+log = logging.getLogger("ledger_poster")
 
 # ── Outcome → emoji mapping ───────────────────────────────────────────────
 _OUTCOME_EMOJI = {"win": "✅", "loss": "❌", "push": "➖"}
@@ -40,6 +43,8 @@ _SOURCE_LABEL = {
     "penalty":    "Penalty",
 }
 
+_MAX_RETRIES = 3
+
 
 def _resolve_channel(bot: commands.Bot, guild_id: int):
     """Resolve the #ledger channel, returns channel object or None."""
@@ -65,6 +70,20 @@ def _get_display_name(channel, discord_id: int) -> str:
 def _timestamp() -> str:
     """Return a short datetime string, e.g. 'Mar 16 14:32'."""
     return datetime.now(timezone.utc).strftime("%b %d %H:%M")
+
+
+async def _send_with_retry(channel, line: str) -> bool:
+    """Send a message with exponential backoff retry. Returns True on success."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            await channel.send(line)
+            return True
+        except discord.HTTPException:
+            if attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                raise
+    return False
 
 
 async def post_casino_result(
@@ -99,9 +118,9 @@ async def post_casino_result(
         if txn_id is not None:
             line += f" | `#{txn_id}`"
 
-        await channel.send(line)
+        await _send_with_retry(channel, line)
     except Exception as e:
-        print(f"[LEDGER] Failed to post casino result: {e}")
+        log.warning(f"[LEDGER] Failed to post casino result after {_MAX_RETRIES} attempts: {e}")
 
 
 async def post_transaction(
@@ -134,6 +153,6 @@ async def post_transaction(
         if txn_id is not None:
             line += f" | `#{txn_id}`"
 
-        await channel.send(line)
+        await _send_with_retry(channel, line)
     except Exception as e:
-        print(f"[LEDGER] Failed to post transaction: {e}")
+        log.warning(f"[LEDGER] Failed to post transaction after {_MAX_RETRIES} attempts: {e}")

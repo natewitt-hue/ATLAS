@@ -1679,6 +1679,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         # ── Pass 2b: Local DB scan — settle contracts the API pass missed ──
         await self._local_settle_pass()
 
+        # ── Pass 2c: Alert on stale markets with open contracts ──
+        await self._stale_market_alert_pass()
+
         # ── Pass 3: Gemini classification for "Other" markets (first sync only) ──
         if not self._first_sync_done:
             self._first_sync_done = True
@@ -2462,6 +2465,58 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 f"Local settle pass complete — {len(auto_resolved)} market(s) settled."
             )
             await self._announce_resolutions(auto_resolved)
+
+    async def _stale_market_alert_pass(self):
+        """Alert admin about markets with open contracts that haven't synced in >30 days."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT c.market_id, COUNT(*) as open_count,
+                       SUM(c.cost_bucks) as total_at_risk,
+                       m.title, m.last_synced
+                FROM prediction_contracts c
+                JOIN prediction_markets m ON m.market_id = c.market_id
+                WHERE c.status = 'open'
+                  AND m.resolved_by = 'pending'
+                  AND m.last_synced < datetime('now', '-30 days')
+                GROUP BY c.market_id
+            """) as cursor:
+                stale = await cursor.fetchall()
+
+        if not stale:
+            return
+
+        log.warning(f"[PREDICTIONS] {len(stale)} stale market(s) with open contracts (>30d)")
+        try:
+            from setup_cog import get_channel_id
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+            if not guild:
+                return
+            admin_ch_id = get_channel_id("admin-chat", guild.id)
+            admin_ch = self.bot.get_channel(admin_ch_id) if admin_ch_id else None
+            if not admin_ch:
+                return
+
+            lines = []
+            for row in stale[:10]:
+                title = (row["title"] or row["market_id"])[:60]
+                lines.append(
+                    f"`{row['market_id'][:12]}...` {title} — "
+                    f"{row['open_count']} contracts, ${row['total_at_risk']:,} at risk"
+                )
+
+            embed = discord.Embed(
+                title="Stale Prediction Markets (>30 days)",
+                description="\n".join(lines),
+                color=0xE74C3C,
+            )
+            embed.set_footer(
+                text=f"{len(stale)} market(s) unresolved >30d. "
+                     "Use /boss flow audit to review and void if needed."
+            )
+            await admin_ch.send(embed=embed)
+        except Exception:
+            log.exception("[PREDICTIONS] Failed to post stale market alert")
 
     async def _announce_resolutions(self, resolved: list[dict]):
         """Post a public resolution announcement for each auto-resolved market."""

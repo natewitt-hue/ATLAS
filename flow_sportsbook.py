@@ -294,8 +294,8 @@ def _get_balance(uid: int) -> int:
 
 
 def _update_balance(uid: int, delta: int, con=None, *,
-                    subsystem=None, subsystem_id=None, reference_key=None):
-    flow_wallet.update_balance_sync(
+                    subsystem=None, subsystem_id=None, reference_key=None) -> int:
+    return flow_wallet.update_balance_sync(
         uid, delta, source="TSL_BET",
         reference_key=reference_key,
         con=con, subsystem=subsystem, subsystem_id=subsystem_id,
@@ -1008,7 +1008,7 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
                 log.error(f"[PARLAY] Insane payout ${payout:,.2f} for {parlay_id} — CAPPING")
                 con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
                 return []
-            _update_balance(uid, payout, con,
+            new_bal = _update_balance(uid, payout, con,
                             subsystem="PARLAY", subsystem_id=str(parlay_id),
                             reference_key=f"PARLAY_SETTLE_{parlay_id}")
             con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (parlay_id,))
@@ -1017,7 +1017,7 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
             events.append({
                 "discord_id": uid, "guild_id": None, "source": "TSL_BET",
                 "bet_type": "parlay", "amount": payout - wager_amount,
-                "balance_after": _get_balance(uid),
+                "balance_after": new_bal,
                 "description": f"Won parlay (parlay_id={parlay_id})",
                 "bet_id": parlay_id,
             })
@@ -1030,7 +1030,7 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
                 log.error(f"[PARLAY] Insane reduced payout ${payout:,.2f} for {parlay_id} — CAPPING")
                 con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
                 return []
-            _update_balance(uid, payout, con,
+            new_bal = _update_balance(uid, payout, con,
                             subsystem="PARLAY", subsystem_id=str(parlay_id),
                             reference_key=f"PARLAY_SETTLE_{parlay_id}")
             con.execute("UPDATE parlays_table SET status='Won', combined_odds=? WHERE parlay_id=?",
@@ -1040,13 +1040,13 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
             events.append({
                 "discord_id": uid, "guild_id": None, "source": "TSL_BET",
                 "bet_type": "parlay", "amount": payout - wager_amount,
-                "balance_after": _get_balance(uid),
+                "balance_after": new_bal,
                 "description": f"Won reduced parlay (parlay_id={parlay_id})",
                 "bet_id": parlay_id,
             })
         elif any_pushed:
             # All legs pushed (no wins) — full refund
-            _update_balance(uid, wager_amount, con,
+            new_bal = _update_balance(uid, wager_amount, con,
                             subsystem="PARLAY", subsystem_id=str(parlay_id),
                             reference_key=f"PARLAY_PUSH_{parlay_id}")
             con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (parlay_id,))
@@ -1055,7 +1055,7 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
             events.append({
                 "discord_id": uid, "guild_id": None, "source": "TSL_BET",
                 "bet_type": "parlay", "amount": 0,
-                "balance_after": _get_balance(uid),
+                "balance_after": new_bal,
                 "description": f"Push parlay (parlay_id={parlay_id})",
                 "bet_id": parlay_id,
             })
@@ -1162,6 +1162,7 @@ async def _run_autograde(bot) -> None:
 
             settled = wins = losses = pushes = 0
             total_paid = 0
+            error_bets = []
 
             try:
                 with _db_con() as con:
@@ -1172,10 +1173,13 @@ async def _run_autograde(bot) -> None:
                         (week,)
                     ).fetchall()
 
+                    skipped_matchups = []
                     for b in pending:
                         bid, uid, matchup, btype, amt, odds, pick, line = b
                         gd = _fuzzy_match(matchup.lower().strip(), scores)
                         if not gd:
+                            skipped_matchups.append((bid, matchup, uid, amt))
+                            log.warning(f"[AUTO-GRADE] Fuzzy match FAILED for bet {bid}: '{matchup}' — stays Pending")
                             continue
                         try:
                             line_val = float(line)
@@ -1189,8 +1193,9 @@ async def _run_autograde(bot) -> None:
                         if res == "Won":
                             payout = _payout_calc(amt, int(odds))
                             if payout < 0 or payout > MAX_PAYOUT:
-                                log.error(f"[AUTO-GRADE] Insane payout ${payout:,.2f} for bet {bid} — CAPPING")
+                                log.error(f"[AUTO-GRADE] Insane payout ${payout:,.2f} for bet {bid} — marking Error")
                                 con.execute("UPDATE bets_table SET status='Error' WHERE bet_id=?", (bid,))
+                                error_bets.append(("bet", bid, uid, amt, int(odds), payout, matchup))
                                 settled += 1
                                 continue
                             _update_balance(uid, payout, con,
@@ -1273,6 +1278,8 @@ async def _run_autograde(bot) -> None:
                         "week": week, "settled": settled,
                         "wins": wins, "losses": losses, "pushes": pushes,
                         "total_paid": total_paid,
+                        "skipped_matchups": skipped_matchups,
+                        "error_bets": error_bets,
                     })
             except Exception:
                 try:
@@ -1321,6 +1328,43 @@ async def _run_autograde(bot) -> None:
                 await channel.send(embed=embed)
             except Exception:
                 pass
+
+        # ── Admin alerts for autograde issues ──────────────────────────
+        all_skipped = []
+        all_errors = []
+        for r in results:
+            all_skipped.extend(r.get("skipped_matchups", []))
+            all_errors.extend(r.get("error_bets", []))
+
+        if all_skipped or all_errors:
+            try:
+                from setup_cog import get_channel_id as _get_ch_id
+                admin_ch_id = _get_ch_id("admin-chat")
+                admin_ch = bot.get_channel(admin_ch_id) if admin_ch_id else None
+                if admin_ch:
+                    if all_skipped:
+                        lines = [f"bet `{bid}`: {matchup} (${amt:,})" for bid, matchup, _, amt in all_skipped[:15]]
+                        alert = discord.Embed(
+                            title="Autograde: Unmatched Bets",
+                            description="\n".join(lines),
+                            color=0xE74C3C,
+                        )
+                        alert.set_footer(text=f"{len(all_skipped)} bet(s) could not be fuzzy-matched to game results")
+                        await admin_ch.send(embed=alert)
+                    if all_errors:
+                        lines = [
+                            f"{kind} `{bid}`: ${amt:,} @ {odds} — payout ${payout:,.0f}"
+                            for kind, bid, _, amt, odds, payout, _ in all_errors[:15]
+                        ]
+                        alert = discord.Embed(
+                            title="Autograde: Error Bets (Insane Payout)",
+                            description="\n".join(lines),
+                            color=0xE74C3C,
+                        )
+                        alert.set_footer(text=f"{len(all_errors)} bet(s) marked Error — use /boss flow audit to resolve")
+                        await admin_ch.send(embed=alert)
+            except Exception:
+                log.exception("[AUTO-GRADE] Failed to post autograde alerts")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1628,7 +1672,9 @@ class ParlayWagerModal(discord.ui.Modal):
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
                 return await interaction.response.send_message(
-                    f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
+                    f"❌ Insufficient funds. Balance: **${balance:,}**.\n"
+                    f"Your parlay cart has been preserved — add funds and try again.",
+                    ephemeral=True,
                 )
 
         potential = _payout_calc(amt, self.combined_odds) - amt

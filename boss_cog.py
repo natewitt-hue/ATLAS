@@ -975,6 +975,16 @@ class TreasuryPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await cog.eco_health_impl(interaction)
 
+    @discord.ui.button(label="Flow Audit", emoji="\U0001f50d", style=discord.ButtonStyle.secondary, row=1)
+    async def flow_audit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        cog = interaction.client.get_cog("EconomyCog")
+        if not cog:
+            return await _send_cog_error(interaction, "Economy")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await cog.flow_audit_impl(interaction)
+
     @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):

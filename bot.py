@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.1.0"  # ESPN odds migration — replace TheRundown with ESPN, flatten DB schema, TeamBranding integration
+ATLAS_VERSION = "6.2.0"  # Flow audit engine — reconciliation checks, autograde alerting, ledger retry, orphan hardening
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

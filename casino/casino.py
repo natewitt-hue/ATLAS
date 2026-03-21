@@ -27,7 +27,7 @@ import typing
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from atlas_colors import AtlasColors
 
 import aiosqlite
@@ -349,7 +349,21 @@ class CasinoCog(commands.Cog):
         # Register persistent view so hub buttons survive bot restarts
         self.bot.add_view(CasinoHubView())
 
+        self._orphan_reconciliation_loop.start()
         print("[Casino] DB ready. FLOW Casino online. 🎰")
+
+    async def cog_unload(self) -> None:
+        self._orphan_reconciliation_loop.cancel()
+
+    @tasks.loop(minutes=10)
+    async def _orphan_reconciliation_loop(self):
+        refunded = await db.reconcile_orphaned_wagers()
+        if refunded:
+            log.info(f"[Casino] Periodic reconciliation: refunded {len(refunded)} orphaned wagers")
+
+    @_orphan_reconciliation_loop.before_loop
+    async def _before_reconciliation(self):
+        await self.bot.wait_until_ready()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  /casino  — Hub

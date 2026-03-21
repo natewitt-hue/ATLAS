@@ -281,10 +281,12 @@ class EconomyCog(commands.Cog):
     async def cog_load(self) -> None:
         await _setup_economy_tables()
         self.stipend_loop.start()
+        self.flow_health_loop.start()
         print("ATLAS: Economy · Money Management loaded.")
 
     def cog_unload(self):
         self.stipend_loop.cancel()
+        self.flow_health_loop.cancel()
 
     # ── Audit helper ──────────────────────────────────────────────────────
 
@@ -320,6 +322,37 @@ class EconomyCog(commands.Cog):
 
     @stipend_loop.before_loop
     async def before_stipend_loop(self):
+        await self.bot.wait_until_ready()
+
+    # ── Flow Audit Health Loop ───────────────────────────────────────────
+
+    @tasks.loop(hours=24)
+    async def flow_health_loop(self):
+        """Daily economy health check — posts to admin channel if issues found."""
+        try:
+            from flow_audit import FlowAuditor
+            auditor = FlowAuditor(DB_PATH)
+            report = await auditor.run_all()
+            log.info(report.summary_text())
+            if report.has_critical_or_high():
+                embed_data = report.to_embed_dict()
+                embed = discord.Embed(**embed_data)
+                embed.set_footer(text="Run /boss flow audit for details")
+                try:
+                    from setup_cog import get_channel_id
+                    guild = self.bot.guilds[0] if self.bot.guilds else None
+                    if guild:
+                        ch_id = get_channel_id("admin-chat", guild.id)
+                        ch = self.bot.get_channel(ch_id) if ch_id else None
+                        if ch:
+                            await ch.send(embed=embed)
+                except Exception:
+                    log.exception("[Economy] Failed to post audit alert")
+        except Exception:
+            log.exception("[Economy] Flow health check failed")
+
+    @flow_health_loop.before_loop
+    async def before_flow_health_loop(self):
         await self.bot.wait_until_ready()
 
     async def _process_stipend(self, stipend: dict) -> None:
@@ -713,6 +746,17 @@ class EconomyCog(commands.Cog):
             color=AtlasColors.ECONOMY,
         )
         embed.set_footer(text="ATLAS Flow Economy")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Flow Audit (admin impl) ───────────────────────────────────────
+
+    async def flow_audit_impl(self, interaction: discord.Interaction):
+        """Run full flow audit and display results."""
+        from flow_audit import FlowAuditor
+        auditor = FlowAuditor(DB_PATH)
+        report = await auditor.run_all()
+        embed_data = report.to_embed_dict()
+        embed = discord.Embed(**embed_data)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── Economy Health (admin impl) ──────────────────────────────────────

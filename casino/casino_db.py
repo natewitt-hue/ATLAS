@@ -275,7 +275,7 @@ async def setup_casino_db() -> None:
 #  ORPHAN WAGER RECONCILIATION
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def reconcile_orphaned_wagers(max_age_minutes: int = 30) -> list[dict]:
+async def reconcile_orphaned_wagers(max_age_minutes: int = 5) -> list[dict]:
     """
     Find casino wager debits with no matching casino_sessions entry and refund them.
     Called at startup to recover from bot crashes mid-game.
