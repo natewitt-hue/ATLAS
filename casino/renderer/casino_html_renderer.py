@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from atlas_style_tokens import Tokens
 from atlas_html_engine import (
     render_card,
     wrap_card,
@@ -258,13 +259,13 @@ _SLOT_EMOJI_FALLBACK = {
 }
 
 _SLOT_TIER_COLORS = {
-    "jackpot": "#FFDA50",
-    "legend": "#D4AF37",
-    "epic": "#C084FC",
+    "jackpot": Tokens.GOLD_LIGHT,
+    "legend": Tokens.GOLD,
+    "epic": Tokens.PURPLE,
     "wild": "#F5E6C8",
-    "rare": "#60A5FA",
-    "common": "#e8e0d0",
-    "base": "#888",
+    "rare": Tokens.BLUE_LIGHT,
+    "common": Tokens.TEXT_PRIMARY,
+    "base": Tokens.TEXT_MUTED,
 }
 
 
@@ -499,11 +500,11 @@ def _build_crash_html(
     fill_pct = min(100.0, max(0.0, math.log(max(gauge_mult, 1.001)) / math.log(max_gauge) * 100))
 
     if cashed_out:
-        fill_gradient = "linear-gradient(to top, #4ADE80, #22C55E)"
+        fill_gradient = f"linear-gradient(to top, {Tokens.WIN}, {Tokens.WIN_DARK})"
     elif crashed:
-        fill_gradient = "linear-gradient(to top, #F87171, #EF4444)"
+        fill_gradient = f"linear-gradient(to top, {Tokens.LOSS}, {Tokens.LOSS_DARK})"
     else:
-        fill_gradient = "linear-gradient(to top, #4ADE80, #D4AF37, #F87171)"
+        fill_gradient = f"linear-gradient(to top, {Tokens.WIN}, {Tokens.GOLD}, {Tokens.LOSS})"
 
     gauge_markers = ""
     for mult_val in [1, 2, 5, 10, 25]:
@@ -553,11 +554,11 @@ def _build_crash_html(
         for i, h in enumerate(history[-6:]):
             is_current = (i == len(history[-6:]) - 1) and is_live
             if h < 2.0:
-                pill_color = "#FCA5A5"
+                pill_color = Tokens.LOSS_LIGHT
             elif h < 10.0:
-                pill_color = "#4ADE80"
+                pill_color = Tokens.WIN
             else:
-                pill_color = "#FFDA50"
+                pill_color = Tokens.GOLD_LIGHT
             glow_class = "current-pill" if is_current else ""
             pills += f'<span class="history-pill {glow_class}" style="color: {pill_color};">{h:.2f}x</span>'
         history_html = f'<div class="history-row">{pills}</div>'

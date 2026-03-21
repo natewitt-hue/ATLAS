@@ -67,7 +67,7 @@ def _footer_html(player: str) -> str:
   <div style="
       font-size:12px;
       font-weight:600;
-      color:#FBBF24;
+      color:var(--push);
       font-family:var(--font-display),sans-serif;
   ">{esc(player)}</div>
   <div style="
@@ -119,7 +119,7 @@ def _wrap_card(
           font-size:var(--font-lg);flex-shrink:0;
       ">{icon_emoji}</div>
       <div>
-        <div style="font-size:var(--font-lg);font-weight:800;letter-spacing:1px;color:#e8e0d0;">
+        <div style="font-size:var(--font-lg);font-weight:800;letter-spacing:1px;color:var(--text-primary);">
           {esc(game_label)}
         </div>
         <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;letter-spacing:1.5px;">
@@ -161,14 +161,14 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
   <div style="position:absolute;bottom:0;left:0;right:0;height:1px;
       background:linear-gradient(90deg,transparent,rgba(212,175,55,0.25),transparent);"></div>
 
-  <div style="font-size:var(--font-xs);font-weight:700;color:#D4AF37;letter-spacing:4px;
+  <div style="font-size:var(--font-xs);font-weight:700;color:var(--gold);letter-spacing:4px;
       text-transform:uppercase;margin-bottom:var(--space-sm);">JACKPOT HIT</div>
 
   <div style="
       font-family:var(--font-display),sans-serif;
       font-size:58px;
       font-weight:800;
-      background:linear-gradient(180deg,#FFDA50,#D4AF37);
+      background:linear-gradient(180deg,var(--gold-light),var(--gold));
       -webkit-background-clip:text;
       -webkit-text-fill-color:transparent;
       background-clip:text;
@@ -186,19 +186,19 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
       font-family:var(--font-mono),monospace;
       font-size:var(--font-base);
       font-weight:700;
-      color:#FFDA50;
+      color:var(--gold-light);
       margin-bottom:10px;
   ">{esc(mult_str)} multiplier</div>
 
   <div style="font-size:14px;color:#b0a890;margin-top:var(--space-xs);">
-    <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> hit the progressive jackpot
+    <span style="color:var(--push);font-weight:700;">{esc(player)}</span> hit the progressive jackpot
   </div>
 </div>"""
 
     return _wrap_card(
-        status_bar_css="background:linear-gradient(90deg,#D4AF37,#FFDA50,#D4AF37);",
+        status_bar_css="background:linear-gradient(90deg,var(--gold),var(--gold-light),var(--gold));",
         icon_emoji="&#127881;",
-        icon_bg="linear-gradient(135deg,#D4AF37,#FFDA50)",
+        icon_bg="linear-gradient(135deg,var(--gold),var(--gold-light))",
         game_label="PROGRESSIVE JACKPOT",
         event_label="JACKPOT HIT · FLOW CASINO",
         body_html=body,
@@ -243,14 +243,14 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
           border:1px solid rgba(74,222,128,0.4);
           font-size:10px;
           font-weight:700;
-          color:#4ADE80;
+          color:var(--win);
           letter-spacing:1.5px;
           margin-bottom:var(--space-sm);
       ">WINNER</div>
       <div style="
           font-size:var(--font-xl);
           font-weight:800;
-          color:#e8e0d0;
+          color:var(--text-primary);
           line-height:1.2;
           word-break:break-word;
       ">{esc(winner)}</div>
@@ -258,7 +258,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
           font-family:var(--font-mono),monospace;
           font-size:20px;
           font-weight:700;
-          color:#4ADE80;
+          color:var(--win);
           margin-top:6px;
       ">+{esc(amount_str)}</div>
     </div>
@@ -284,7 +284,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
           border:1px solid rgba(248,113,113,0.35);
           font-size:10px;
           font-weight:700;
-          color:#F87171;
+          color:var(--loss);
           letter-spacing:1.5px;
           margin-bottom:var(--space-sm);
       ">ELIMINATED</div>
@@ -299,7 +299,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
           font-family:var(--font-mono),monospace;
           font-size:20px;
           font-weight:700;
-          color:#F87171;
+          color:var(--loss);
           margin-top:6px;
       ">-{esc(amount_str)}</div>
     </div>
@@ -317,14 +317,14 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
       font-size:var(--font-sm);
       color:#b0a890;
       font-family:var(--font-mono),monospace;
-  ">Pot: <span style="color:#D4AF37;font-weight:700;">{esc(amount_str)} each</span> &middot; Total moved: <span style="color:#D4AF37;font-weight:700;">{esc(f"${amount * 2:,}")}</span></div>
+  ">Pot: <span style="color:var(--gold);font-weight:700;">{esc(amount_str)} each</span> &middot; Total moved: <span style="color:var(--gold);font-weight:700;">{esc(f"${amount * 2:,}")}</span></div>
 
 </div>"""
 
     return _wrap_card(
-        status_bar_css="background:linear-gradient(90deg,#4ADE80,#22d86e,#4ADE80);",
+        status_bar_css="background:linear-gradient(90deg,var(--win),#22d86e,var(--win));",
         icon_emoji="&#129689;",
-        icon_bg="linear-gradient(135deg,#4ADE80,#22d86e)",
+        icon_bg="linear-gradient(135deg,var(--win),#22d86e)",
         game_label="PvP COINFLIP",
         event_label="HEAD-TO-HEAD RESULT · FLOW CASINO",
         body_html=body,
@@ -352,13 +352,13 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
 
     # Multiplier color: green for high, yellow for mid, red-ish for low
     if multiplier >= 10.0:
-        mult_color = "#FFDA50"
+        mult_color = "var(--gold-light)"
         mult_glow = "rgba(212,175,55,0.45)"
     elif multiplier >= 3.0:
-        mult_color = "#4ADE80"
+        mult_color = "var(--win)"
         mult_glow = "rgba(74,222,128,0.35)"
     else:
-        mult_color = "#FBBF24"
+        mult_color = "var(--push)"
         mult_glow = "rgba(251,191,36,0.30)"
 
     body = f"""
@@ -369,7 +369,7 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
     border:1px solid rgba(255,255,255,0.08);
     text-align:center;
 ">
-  <div style="font-size:var(--font-xs);font-weight:700;color:#F87171;letter-spacing:3px;
+  <div style="font-size:var(--font-xs);font-weight:700;color:var(--loss);letter-spacing:3px;
       text-transform:uppercase;margin-bottom:var(--space-md);">Last Man Standing</div>
 
   <!-- Big multiplier -->
@@ -396,18 +396,18 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
       font-family:var(--font-mono),monospace;
       font-size:22px;
       font-weight:800;
-      color:#4ADE80;
+      color:var(--win);
   ">+{esc(payout_str)}</div>
 
   <div style="font-size:14px;color:#b0a890;margin-top:14px;">
-    <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> rode it out solo — last one alive
+    <span style="color:var(--push);font-weight:700;">{esc(player)}</span> rode it out solo — last one alive
   </div>
 </div>"""
 
     return _wrap_card(
-        status_bar_css="background:linear-gradient(90deg,#F87171,#ff4d4d,#F87171);",
+        status_bar_css="background:linear-gradient(90deg,var(--loss),#ff4d4d,var(--loss));",
         icon_emoji="&#128293;",
-        icon_bg="linear-gradient(135deg,#F87171,#ff4d4d)",
+        icon_bg="linear-gradient(135deg,var(--loss),#ff4d4d)",
         game_label="CRASH",
         event_label="LAST MAN STANDING · FLOW CASINO",
         body_html=body,
@@ -439,7 +439,7 @@ def _build_prediction_html(
     payout_str = f"${payout:,}"
     is_yes = resolution.upper().startswith("Y")
     res_label = "YES" if is_yes else "NO"
-    res_color = "#4ADE80" if is_yes else "#F87171"
+    res_color = "var(--win)" if is_yes else "var(--loss)"
     res_bg = "rgba(74,222,128,0.12)" if is_yes else "rgba(248,113,113,0.12)"
     res_border = "rgba(74,222,128,0.35)" if is_yes else "rgba(248,113,113,0.35)"
 
@@ -456,7 +456,7 @@ def _build_prediction_html(
   <div style="
       font-size:17px;
       font-weight:700;
-      color:#e8e0d0;
+      color:var(--text-primary);
       line-height:1.35;
       margin-bottom:14px;
       padding-bottom:var(--space-md);
@@ -480,7 +480,7 @@ def _build_prediction_html(
       <div style="font-size:var(--font-xs);color:#9a9280;font-family:var(--font-mono),monospace;
           letter-spacing:1px;margin-bottom:3px;">RESOLVED</div>
       <div style="font-size:var(--font-sm);color:#b0a890;">
-        <span style="color:#e8e0d0;font-weight:600;">{esc(winner_text)}</span> share the pot
+        <span style="color:var(--text-primary);font-weight:600;">{esc(winner_text)}</span> share the pot
       </div>
     </div>
   </div>
@@ -502,7 +502,7 @@ def _build_prediction_html(
         font-family:var(--font-mono),monospace;
         font-size:20px;
         font-weight:800;
-        color:#D4AF37;
+        color:var(--gold);
     ">{esc(payout_str)}</div>
   </div>
 
@@ -511,7 +511,7 @@ def _build_prediction_html(
     return _wrap_card(
         status_bar_css=f"background:{res_color};",
         icon_emoji="&#128202;",
-        icon_bg="linear-gradient(135deg,#F472B6,#c044a0)",
+        icon_bg="linear-gradient(135deg,var(--pink),#c044a0)",
         game_label="PREDICTION MARKET",
         event_label="MARKET RESOLVED · FLOW PREDICTIONS",
         body_html=body,
@@ -564,12 +564,13 @@ def _build_parlay_html(
         pills = []
         for lp in leg_picks:
             icon = {"Won": "&#10003;", "Lost": "&#10007;", "Push": "&#8212;"}.get(lp["status"], "&#10003;")
-            color = {"Won": "#4ADE80", "Lost": "#EF4444", "Push": "#9a9280"}.get(lp["status"], "#4ADE80")
+            color = {"Won": "var(--win)", "Lost": "var(--loss-dark)", "Push": "#9a9280"}.get(lp["status"], "var(--win)")
+            border_c = {"Won": "rgba(74,222,128,0.2)", "Lost": "rgba(239,68,68,0.2)", "Push": "rgba(154,146,128,0.2)"}.get(lp["status"], "rgba(74,222,128,0.2)")
             label = esc(_format_leg_label(lp))
             pills.append(
                 f'<span style="display:inline-block;padding:4px 10px;margin:3px;'
                 f'border-radius:6px;background:rgba(255,255,255,0.05);'
-                f'border:1px solid {color}33;'
+                f'border:1px solid {border_c};'
                 f'font-family:var(--font-mono),monospace;font-size:var(--font-xs);'
                 f'color:{color};font-weight:600;letter-spacing:0.5px;">'
                 f'{label} {icon}</span>'
@@ -610,7 +611,7 @@ def _build_parlay_html(
           font-family:var(--font-mono),monospace;
           font-size:40px;
           font-weight:800;
-          color:#4ADE80;
+          color:var(--win);
           line-height:1.0;
       ">{legs}</div>
       <div style="font-size:var(--font-xs);color:#9a9280;margin-top:var(--space-xs);">ALL HIT</div>
@@ -630,7 +631,7 @@ def _build_parlay_html(
           font-family:var(--font-mono),monospace;
           font-size:32px;
           font-weight:800;
-          color:#D4AF37;
+          color:var(--gold);
           line-height:1.0;
       ">{esc(odds)}</div>
       <div style="font-size:var(--font-xs);color:#9a9280;margin-top:var(--space-xs);">AMERICAN</div>
@@ -658,21 +659,21 @@ def _build_parlay_html(
         font-family:var(--font-display),sans-serif;
         font-size:46px;
         font-weight:800;
-        color:#4ADE80;
+        color:var(--win);
         filter:drop-shadow(0 2px var(--space-sm) rgba(74,222,128,0.35));
         line-height:1.0;
     ">+{esc(payout_str)}</div>
     <div style="font-size:var(--font-sm);color:#b0a890;margin-top:var(--space-sm);">
-      <span style="color:#FBBF24;font-weight:700;">{esc(player)}</span> cashed a {legs}-leg parlay
+      <span style="color:var(--push);font-weight:700;">{esc(player)}</span> cashed a {legs}-leg parlay
     </div>
   </div>
 
 </div>"""
 
     return _wrap_card(
-        status_bar_css="background:linear-gradient(90deg,#4ADE80,#22d86e,#4ADE80);",
+        status_bar_css="background:linear-gradient(90deg,var(--win),#22d86e,var(--win));",
         icon_emoji="&#127936;",
-        icon_bg="linear-gradient(135deg,#4ADE80,#22d86e)",
+        icon_bg="linear-gradient(135deg,var(--win),#22d86e)",
         game_label="SPORTSBOOK PARLAY",
         event_label=f"{legs}-LEG PARLAY HIT · FLOW SPORTSBOOK",
         body_html=body,

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from atlas_html_engine import render_card as _engine_render_card, esc, _font_face_css
+from atlas_html_engine import render_card as _engine_render_card, wrap_card, esc
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
 GAME_INFO = {
@@ -36,157 +36,132 @@ SOURCE_INFO = {
 
 BIG_THRESHOLD = 500
 
-# ── Shared CSS ────────────────────────────────────────────────────────────────
+# ── Ledger-specific CSS (layered on top of engine shared CSS) ─────────────────
 
-def _css() -> str:
-    return _font_face_css() + """
-* { margin: 0; padding: 0; box-sizing: border-box; }"""
+_LEDGER_CSS = """\
+<style>
+  /* Ledger card overrides */
+  .card {
+    width: 700px;
+    border-radius: var(--space-md);
+    border: 1px solid rgba(212,175,55,0.25);
+  }
 
+  /* Gold radial glow overlay */
+  .ledger-glow {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse at 10% 10%, rgba(212,175,55,0.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 90% 90%, rgba(212,175,55,0.04) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 1;
+  }
 
-_CSS_BODY = """\
-body {
-  background: transparent;
-  font-family: var(--font-display), sans-serif;
-  display: flex;
-  justify-content: center;
-  padding: 0;
-}
-.card {
-  width: 700px;
-  border-radius: var(--space-md);
-  overflow: hidden;
-  position: relative;
-  background: #111111;
-  border: 1px solid rgba(212,175,55,0.25);
-}
-.card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse at 10% 10%, rgba(212,175,55,0.06) 0%, transparent 50%),
-    radial-gradient(ellipse at 90% 90%, rgba(212,175,55,0.04) 0%, transparent 50%);
-  pointer-events: none;
-  z-index: 1;
-}
-.card::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  pointer-events: none;
-  z-index: 2;
-}
-.card > * { position: relative; z-index: 3; }
+  /* Extra status bar classes for ledger */
+  .status-bar.credit { background: linear-gradient(90deg, var(--win-dark), #16A34A, var(--win-dark)); }
+  .status-bar.debit  { background: linear-gradient(90deg, var(--loss-dark), #DC2626, var(--loss-dark)); }
+  .status-bar.neutral{ background: linear-gradient(90deg, var(--gold), #B8962E, var(--gold)); }
 
-/* Status bar */
-.status-bar { height: 5px; width: 100%; }
-.status-bar.win    { background: linear-gradient(90deg, #22C55E, #16A34A, #22C55E); }
-.status-bar.loss   { background: linear-gradient(90deg, #EF4444, #DC2626, #EF4444); }
-.status-bar.push   { background: linear-gradient(90deg, #F59E0B, #D97706, #F59E0B); }
-.status-bar.credit { background: linear-gradient(90deg, #22C55E, #16A34A, #22C55E); }
-.status-bar.debit  { background: linear-gradient(90deg, #EF4444, #DC2626, #EF4444); }
-.status-bar.neutral{ background: linear-gradient(90deg, #D4AF37, #B8962E, #D4AF37); }
+  /* Header */
+  .ledger-header {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px 10px;
+  }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  .source-icon {
+    width: 26px; height: 26px; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+  }
+  .source-icon.casino     { background: rgba(212,175,55,0.2); color: var(--gold); }
+  .source-icon.sportsbook { background: rgba(26,115,232,0.2); color: #5B9CF5; }
+  .source-icon.admin      { background: rgba(239,68,68,0.2); color: var(--loss-dark); }
+  .source-icon.stipend    { background: rgba(34,197,94,0.2); color: var(--win-dark); }
+  .source-icon.prediction { background: rgba(168,85,247,0.2); color: #A855F7; }
 
-/* Header */
-.header {
-  display: flex; align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px 10px;
-}
-.header-left { display: flex; align-items: center; gap: 10px; }
-.source-icon {
-  width: 26px; height: 26px; border-radius: 5px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 14px; font-weight: 700;
-}
-.source-icon.casino     { background: rgba(212,175,55,0.2); color: #D4AF37; }
-.source-icon.sportsbook { background: rgba(26,115,232,0.2); color: #5B9CF5; }
-.source-icon.admin      { background: rgba(239,68,68,0.2); color: #EF4444; }
-.source-icon.stipend    { background: rgba(34,197,94,0.2); color: #22C55E; }
-.source-icon.prediction { background: rgba(168,85,247,0.2); color: #A855F7; }
+  .game-label {
+    font-weight: 700; font-size: var(--font-lg); color: var(--text-primary); letter-spacing: 1.5px;
+  }
 
-.game-label {
-  font-weight: 700; font-size: var(--font-lg); color: #e8e0d0; letter-spacing: 1.5px;
-}
+  /* Badge */
+  .badge {
+    padding: var(--space-xs) var(--space-md); border-radius: 6px;
+    font-family: var(--font-mono), monospace;
+    font-weight: 700; font-size: var(--font-sm); letter-spacing: 0.5px;
+  }
+  .badge.win    { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: var(--win); }
+  .badge.loss   { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: var(--loss); }
+  .badge.push   { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: var(--push); }
+  .badge.credit { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: var(--win); }
+  .badge.debit  { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: var(--loss); }
 
-/* Badge */
-.badge {
-  padding: var(--space-xs) var(--space-md); border-radius: 6px;
-  font-family: var(--font-mono), monospace;
-  font-weight: 700; font-size: var(--font-sm); letter-spacing: 0.5px;
-}
-.badge.win    { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: #4ADE80; }
-.badge.loss   { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #F87171; }
-.badge.push   { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #FBBF24; }
-.badge.credit { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.35); color: #4ADE80; }
-.badge.debit  { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #F87171; }
+  /* Divider */
+  .ledger-divider {
+    height: 1px; margin: 0 20px;
+    background: linear-gradient(90deg, transparent, rgba(212,175,55,0.35), transparent);
+  }
 
-/* Divider */
-.divider {
-  height: 1px; margin: 0 20px;
-  background: linear-gradient(90deg, transparent, rgba(212,175,55,0.35), transparent);
-}
+  /* Data grids */
+  .ledger-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-sm); padding: var(--space-md) 20px;
+  }
+  .ledger-grid-3 {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-sm); padding: var(--space-md) 20px;
+  }
+  .ledger-cell {
+    background: rgba(255,255,255,0.03); border-radius: var(--border-radius); padding: 10px var(--space-md);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    border-left: 1px solid rgba(255,255,255,0.04);
+    border-bottom: 1px solid rgba(0,0,0,0.3);
+    border-right: 1px solid rgba(0,0,0,0.2);
+  }
+  .ledger-label {
+    font-weight: 600; font-size: 10px; color: var(--gold-dim);
+    letter-spacing: 1.5px; margin-bottom: var(--space-xs); text-transform: uppercase;
+  }
+  .ledger-value {
+    font-family: var(--font-mono), monospace;
+    font-weight: 700; font-size: 16px; color: var(--text-primary);
+  }
+  .ledger-value.green { color: var(--win); }
+  .ledger-value.red   { color: var(--loss); }
+  .ledger-value.amber { color: var(--push); }
 
-/* Data grids */
-.data-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-sm); padding: var(--space-md) 20px;
-}
-.data-grid-3 {
-  display: grid; grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-sm); padding: var(--space-md) 20px;
-}
-.data-cell {
-  background: rgba(255,255,255,0.03); border-radius: var(--border-radius); padding: 10px var(--space-md);
-  border-top: 1px solid rgba(255,255,255,0.06);
-  border-left: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(0,0,0,0.3);
-  border-right: 1px solid rgba(0,0,0,0.2);
-}
-.data-label {
-  font-weight: 600; font-size: 10px; color: #8C7324;
-  letter-spacing: 1.5px; margin-bottom: var(--space-xs); text-transform: uppercase;
-}
-.data-value {
-  font-family: var(--font-mono), monospace;
-  font-weight: 700; font-size: 16px; color: #e8e0d0;
-}
-.data-value.green { color: #4ADE80; }
-.data-value.red   { color: #F87171; }
-.data-value.amber { color: #FBBF24; }
+  /* Footer */
+  .ledger-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: var(--space-sm) 20px var(--space-md);
+  }
+  .footer-left { display: flex; align-items: center; gap: var(--space-lg); }
+  .footer-balance {
+    font-family: var(--font-mono), monospace;
+    font-weight: 700; font-size: 12px; color: #DCDCE6;
+  }
+  .footer-txn {
+    font-family: var(--font-mono), monospace;
+    font-weight: 400; font-size: 10px; color: var(--text-dim);
+  }
+  .footer-time {
+    font-family: var(--font-mono), monospace;
+    font-weight: 400; font-size: var(--font-xs); color: var(--gold-dim);
+  }
 
-/* Footer */
-.footer {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: var(--space-sm) 20px var(--space-md);
-}
-.footer-left { display: flex; align-items: center; gap: var(--space-lg); }
-.footer-balance {
-  font-family: var(--font-mono), monospace;
-  font-weight: 700; font-size: 12px; color: #DCDCE6;
-}
-.footer-txn {
-  font-family: var(--font-mono), monospace;
-  font-weight: 400; font-size: 10px; color: #555;
-}
-.footer-time {
-  font-family: var(--font-mono), monospace;
-  font-weight: 400; font-size: var(--font-xs); color: #8C7324;
-}
+  /* Highlight bar */
+  .highlight-bar {
+    margin: 0 20px var(--space-sm); padding: 6px 14px; border-radius: 6px;
+    font-weight: 700; font-size: 12px; letter-spacing: 1px; text-align: center;
+  }
+  .highlight-bar.win  { background: rgba(34,197,94,0.08); color: var(--win); border: 1px solid rgba(34,197,94,0.15); }
+  .highlight-bar.loss { background: rgba(239,68,68,0.08); color: var(--loss); border: 1px solid rgba(239,68,68,0.15); }
+  .highlight-bar.push { background: rgba(245,158,11,0.08); color: var(--push); border: 1px solid rgba(245,158,11,0.15); }
 
-/* Highlight bar */
-.highlight-bar {
-  margin: 0 20px var(--space-sm); padding: 6px 14px; border-radius: 6px;
-  font-weight: 700; font-size: 12px; letter-spacing: 1px; text-align: center;
-}
-.highlight-bar.win  { background: rgba(34,197,94,0.08); color: #4ADE80; border: 1px solid rgba(34,197,94,0.15); }
-.highlight-bar.loss { background: rgba(239,68,68,0.08); color: #F87171; border: 1px solid rgba(239,68,68,0.15); }
-.highlight-bar.push { background: rgba(245,158,11,0.08); color: #FBBF24; border: 1px solid rgba(245,158,11,0.15); }
-
-/* Description row */
-.desc-row { padding: 6px 20px 2px; font-size: var(--font-sm); color: #aaa; }
+  /* Description row */
+  .desc-row { padding: 6px 20px 2px; font-size: var(--font-sm); color: var(--text-sub); }
+</style>
 """
 
 
@@ -252,49 +227,45 @@ def _build_casino_html(
 
     payout_color = "green" if payout > 0 and outcome == "win" else ""
 
-    return f"""\
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>{_css()}{_CSS_BODY}</style></head>
-<body>
-<div class="card">
-  <div class="status-bar {outcome}"></div>
-  <div class="header">
+    body = f"""{_LEDGER_CSS}
+  <div class="ledger-glow"></div>
+  <div class="ledger-header">
     <div class="header-left">
       <div class="source-icon casino">{_esc(game["icon"])}</div>
       <span class="game-label">{_esc(game["label"])}</span>
     </div>
     <div class="badge {outcome}">{_esc(outcome.upper())} {_esc(mult_str)}</div>
   </div>
-  <div class="divider"></div>
-  <div class="data-grid">
-    <div class="data-cell">
-      <div class="data-label">Player</div>
-      <div class="data-value">{_esc(player_name)}</div>
+  <div class="ledger-divider"></div>
+  <div class="ledger-grid">
+    <div class="ledger-cell">
+      <div class="ledger-label">Player</div>
+      <div class="ledger-value">{_esc(player_name)}</div>
     </div>
-    <div class="data-cell">
-      <div class="data-label">Wager</div>
-      <div class="data-value">{wager:,}</div>
+    <div class="ledger-cell">
+      <div class="ledger-label">Wager</div>
+      <div class="ledger-value">{wager:,}</div>
     </div>
-    <div class="data-cell">
-      <div class="data-label">Payout</div>
-      <div class="data-value {payout_color}">{payout:,}</div>
+    <div class="ledger-cell">
+      <div class="ledger-label">Payout</div>
+      <div class="ledger-value {payout_color}">{payout:,}</div>
     </div>
-    <div class="data-cell">
-      <div class="data-label">P&amp;L</div>
-      <div class="data-value {_pl_color(pl)}">{_format_amount(pl)}</div>
+    <div class="ledger-cell">
+      <div class="ledger-label">P&amp;L</div>
+      <div class="ledger-value {_pl_color(pl)}">{_format_amount(pl)}</div>
     </div>
   </div>
   {highlight_html}
-  <div class="divider"></div>
-  <div class="footer">
+  <div class="ledger-divider"></div>
+  <div class="ledger-footer">
     <div class="footer-left">
       <span class="footer-balance">BAL: {new_balance:,}</span>
       <span class="footer-txn">{_esc(txn_str)}</span>
     </div>
     <span class="footer-time">{_esc(time_str)}</span>
-  </div>
-</div>
-</body></html>"""
+  </div>"""
+
+    return wrap_card(body, outcome)
 
 
 def _build_transaction_html(
@@ -323,45 +294,41 @@ def _build_transaction_html(
     if description:
         desc_html = f'<div class="desc-row">{_esc(description)}</div>'
 
-    return f"""\
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>{_css()}{_CSS_BODY}</style></head>
-<body>
-<div class="card">
-  <div class="status-bar {status_class}"></div>
-  <div class="header">
+    body = f"""{_LEDGER_CSS}
+  <div class="ledger-glow"></div>
+  <div class="ledger-header">
     <div class="header-left">
       <div class="source-icon {info['css_class']}">{_esc(info["icon"])}</div>
       <span class="game-label">{_esc(info["label"])}</span>
     </div>
     <div class="badge {badge_class}">{_format_amount(amount)}</div>
   </div>
-  <div class="divider"></div>
+  <div class="ledger-divider"></div>
   {desc_html}
-  <div class="data-grid-3">
-    <div class="data-cell">
-      <div class="data-label">Player</div>
-      <div class="data-value">{_esc(player_name)}</div>
+  <div class="ledger-grid-3">
+    <div class="ledger-cell">
+      <div class="ledger-label">Player</div>
+      <div class="ledger-value">{_esc(player_name)}</div>
     </div>
-    <div class="data-cell">
-      <div class="data-label">{_esc(amount_label)}</div>
-      <div class="data-value {_amount_color(amount)}">{_format_amount(amount)}</div>
+    <div class="ledger-cell">
+      <div class="ledger-label">{_esc(amount_label)}</div>
+      <div class="ledger-value {_amount_color(amount)}">{_format_amount(amount)}</div>
     </div>
-    <div class="data-cell">
-      <div class="data-label">Balance</div>
-      <div class="data-value">{balance_after:,}</div>
+    <div class="ledger-cell">
+      <div class="ledger-label">Balance</div>
+      <div class="ledger-value">{balance_after:,}</div>
     </div>
   </div>
-  <div class="divider"></div>
-  <div class="footer">
+  <div class="ledger-divider"></div>
+  <div class="ledger-footer">
     <div class="footer-left">
       <span class="footer-balance">BAL: {balance_after:,}</span>
       <span class="footer-txn">{_esc(txn_str)}</span>
     </div>
     <span class="footer-time">{_esc(time_str)}</span>
-  </div>
-</div>
-</body></html>"""
+  </div>"""
+
+    return wrap_card(body, status_class)
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────

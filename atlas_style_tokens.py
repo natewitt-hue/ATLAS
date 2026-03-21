@@ -26,6 +26,14 @@ class Tokens:
     TEXT_DIM = "#555555"
     PANEL_BG = "rgba(255,255,255,0.04)"
     PANEL_BORDER = "rgba(255,255,255,0.08)"
+    BLUE_LIGHT = "#60A5FA"
+    BLUE_SKY = "#81d4fa"
+    ORANGE = "#FB923C"
+    PINK = "#F472B6"
+    LOSS_LIGHT = "#FCA5A5"
+    WIN_LIGHT = "#6EE7A0"
+    PURPLE = "#C084FC"
+    YELLOW = "#EAB308"
 
     # ── Typography ──
     FONT_DISPLAY = "Outfit"
@@ -76,6 +84,14 @@ class Tokens:
         "text-dim": TEXT_DIM,
         "panel-bg": PANEL_BG,
         "panel-border": PANEL_BORDER,
+        "blue-light": BLUE_LIGHT,
+        "blue-sky": BLUE_SKY,
+        "orange": ORANGE,
+        "pink": PINK,
+        "loss-light": LOSS_LIGHT,
+        "win-light": WIN_LIGHT,
+        "purple": PURPLE,
+        "yellow": YELLOW,
         "font-display": FONT_DISPLAY,
         "font-mono": FONT_MONO,
         "font-xs": FONT_XS,

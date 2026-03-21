@@ -987,7 +987,7 @@ async def build_bet_confirm_card(
 </div>
 
 <div class="match-footer">
-  <span>ATLAS SPORTSBOOK{' \u00b7 ' + esc(matchup) if matchup else ''}</span>
+  <span>ATLAS SPORTSBOOK · BET CONFIRMED</span>
 </div>
 """
     return await render_card(wrap_card(body, status_class="jackpot"))
@@ -1072,7 +1072,7 @@ _CASINO_HUB_CSS = """\
 .jackpot-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
 .jackpot-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px 6px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
 .jackpot-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--space-xs); }
-.jackpot-label.mini { color: #81d4fa; }
+.jackpot-label.mini { color: var(--blue-sky); }
 .jackpot-label.major { color: var(--push); }
 .jackpot-label.grand { color: var(--gold-bright); }
 .jackpot-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
@@ -1084,8 +1084,8 @@ _CASINO_HUB_CSS = """\
 .game-payout { font-family: var(--font-mono); font-weight: 600; font-size: 10px; color: var(--text-dim); }
 
 .streak-badge { font-family: var(--font-mono); font-weight: 700; font-size: var(--font-xs); letter-spacing: 1px; padding: var(--space-xs) 10px; border-radius: 12px; text-transform: uppercase; }
-.streak-badge.hot { color: #fb923c; background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.35); }
-.streak-badge.cold { color: #7dd3fc; background: rgba(125,211,252,0.12); border: 1px solid rgba(125,211,252,0.35); }
+.streak-badge.hot { color: var(--orange); background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.35); }
+.streak-badge.cold { color: var(--blue-sky); background: rgba(125,211,252,0.12); border: 1px solid rgba(125,211,252,0.35); }
 .streak-badge.neutral { color: var(--text-muted); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); }
 """
 

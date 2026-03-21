@@ -1,4 +1,11 @@
 
+# Force UTF-8 stdout/stderr on Windows to avoid cp1252 emoji encoding errors
+import sys, io
+if sys.stdout.encoding != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+if sys.stderr.encoding != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
 """
 bot.py — ATLAS Unified Intelligence v1.4.1
 ─────────────────────────────────────────────────────────────────────────────
@@ -160,10 +167,10 @@ except ImportError:
     def load_all_personas() -> dict:
         return {}
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.8.0"  # GAP 7: house bank derived from wager registry
+ATLAS_VERSION = "4.9.0"  # unified style system audit — migrate all renderers to token-based colors
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

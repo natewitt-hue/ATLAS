@@ -225,8 +225,8 @@ def _prediction_css() -> str:
   font-size: 12px;
 }
 
-.price-profit.yes { color: #6EE7A0; }
-.price-profit.no  { color: #FCA5A5; }
+.price-profit.yes { color: var(--win-light); }
+.price-profit.no  { color: var(--loss-light); }
 
 .meta-line {
   display: flex;
