@@ -2702,7 +2702,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 emoji=emoji,
             ))
 
-        view = discord.ui.View(timeout=None)
+        view = discord.ui.View(timeout=300)
         select = discord.ui.Select(
             placeholder="Select a market to bet...",
             options=options if options else [discord.SelectOption(label="None", value="none")],
@@ -3214,7 +3214,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
     async def _resolve_market_impl(self, interaction: discord.Interaction,
                                    slug: str, result: str):
-        """Delegation target for boss_cog / commish_cog. Expects deferred interaction."""
+        """Delegation target for boss_cog. Expects deferred interaction."""
         await self._ensure_db()
         slug   = slug.strip().lower()
         result = result.upper().strip()
@@ -3278,6 +3278,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 row = await cur.fetchone()
             if row and row[1] and row[1] != 'pending':
                 log.warning(f"_resolve({market_id}) — already resolved by {row[1]}, skipping")
+                await db.rollback()
                 return counts
             market_title = row[0] if row else market_id
 
@@ -3400,7 +3401,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         await self._market_status_impl(interaction)
 
     async def _market_status_impl(self, interaction: discord.Interaction):
-        """Delegation target for boss_cog / commish_cog. Expects deferred interaction."""
+        """Delegation target for boss_cog. Expects deferred interaction."""
         await self._ensure_db()
 
         # Test connectivity
@@ -3451,7 +3452,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         embed.set_footer(text="Polymarket Gamma API — No API key required")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ── Impl: refund_sports (called by commish_cog) ────
+    # ── Impl: refund_sports (called by boss_cog) ────
 
     async def refund_sports_impl(self, interaction: discord.Interaction):
         """Void all open contracts on sports-category markets and refund users."""
@@ -3499,7 +3500,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         )
 
 
-    # ── Impl: approve_market (called by commish_cog / boss_cog) ────
+    # ── Impl: approve_market (called by boss_cog) ────
 
     async def _approve_market_impl(self, interaction: discord.Interaction, slug: str):
         """Mark a market as featured/approved for betting. Expects deferred interaction."""

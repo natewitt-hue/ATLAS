@@ -100,6 +100,100 @@ def _parse_commence(ct: str) -> Optional[datetime]:
     return None
 
 
+# ── Bet evaluation (module-level for reuse) ──────────────────────────────────
+
+def _evaluate_bet(bet_type: str, pick: str, odds: int, line: float,
+                  wager: int, home_team: str, away_team: str,
+                  home_score: int, away_score: int) -> str:
+    """Evaluate a single bet. Returns 'Won', 'Lost', or 'Push'."""
+    total = home_score + away_score
+
+    if bet_type == "Moneyline":
+        if home_score == away_score:
+            return "Push"
+        if pick == home_team:
+            return "Won" if home_score > away_score else "Lost"
+        else:
+            return "Won" if away_score > home_score else "Lost"
+
+    elif bet_type == "Spread":
+        if pick == home_team:
+            adjusted = home_score + (line or 0)
+            if adjusted > away_score:
+                return "Won"
+            elif adjusted == away_score:
+                return "Push"
+            return "Lost"
+        else:
+            adjusted = away_score + (line or 0)
+            if adjusted > home_score:
+                return "Won"
+            elif adjusted == home_score:
+                return "Push"
+            return "Lost"
+
+    elif bet_type == "Over":
+        if line is None:
+            return "Lost"
+        if total > line:
+            return "Won"
+        elif total == line:
+            return "Push"
+        return "Lost"
+
+    elif bet_type == "Under":
+        if line is None:
+            return "Lost"
+        if total < line:
+            return "Won"
+        elif total == line:
+            return "Push"
+        return "Lost"
+
+    return "Lost"
+
+
+# ── Cross-sport parlay leg grading ───────────────────────────────────────────
+
+async def _grade_parlay_legs_for_event(event_id: str, home_team: str,
+                                        away_team: str, home_score: int,
+                                        away_score: int):
+    """Grade parlay legs tied to a real-sport event and settle if ready."""
+    from flow_sportsbook import _check_parlay_completion, _db_con
+
+    con = _db_con()
+    try:
+        legs = con.execute(
+            "SELECT parlay_id, leg_index, pick, bet_type, line, odds "
+            "FROM parlay_legs WHERE game_id = ? AND source != 'TSL' AND status = 'Pending'",
+            (event_id,),
+        ).fetchall()
+        if not legs:
+            return
+
+        affected_parlays = set()
+        for pid, leg_idx, pick, bet_type, line_val, odds in legs:
+            result = _evaluate_bet(
+                bet_type, pick, int(odds), float(line_val or 0),
+                0,  # wager not needed for evaluation
+                home_team, away_team, home_score, away_score,
+            )
+            con.execute(
+                "UPDATE parlay_legs SET status = ? WHERE parlay_id = ? AND leg_index = ?",
+                (result, pid, leg_idx),
+            )
+            affected_parlays.add(pid)
+
+        con.commit()
+
+        for pid in affected_parlays:
+            _check_parlay_completion(pid, con=con)
+
+        con.commit()
+    finally:
+        con.close()
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
@@ -362,7 +456,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
         graded = 0
         for bet_id, uid, bet_type, pick, odds, line, wager in bets:
-            result = self._evaluate_bet(
+            result = _evaluate_bet(
                 bet_type, pick, odds, line, wager,
                 home_team, away_team, home_score, away_score,
             )
@@ -415,65 +509,15 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                     await db.rollback()
                     raise
 
+        # Grade any cross-sport parlay legs tied to this event
+        await _grade_parlay_legs_for_event(
+            event_id, home_team, away_team, home_score, away_score,
+        )
+
         return graded
 
-    def _evaluate_bet(self, bet_type: str, pick: str, odds: int, line: float,
-                      wager: int, home_team: str, away_team: str,
-                      home_score: int, away_score: int) -> str:
-        """
-        Evaluate a single bet. Returns 'Won', 'Lost', or 'Push'.
-
-        bet_type: 'Moneyline', 'Spread', 'Over', 'Under'
-        """
-        total = home_score + away_score
-
-        if bet_type == "Moneyline":
-            if home_score == away_score:
-                return "Push"
-            if pick == home_team:
-                return "Won" if home_score > away_score else "Lost"
-            else:
-                return "Won" if away_score > home_score else "Lost"
-
-        elif bet_type == "Spread":
-            # line is from the perspective of the picked team
-            if pick == home_team:
-                adjusted = home_score + (line or 0)
-                if adjusted > away_score:
-                    return "Won"
-                elif adjusted == away_score:
-                    return "Push"
-                return "Lost"
-            else:
-                adjusted = away_score + (line or 0)
-                if adjusted > home_score:
-                    return "Won"
-                elif adjusted == home_score:
-                    return "Push"
-                return "Lost"
-
-        elif bet_type == "Over":
-            if line is None:
-                return "Lost"
-            if total > line:
-                return "Won"
-            elif total == line:
-                return "Push"
-            return "Lost"
-
-        elif bet_type == "Under":
-            if line is None:
-                return "Lost"
-            if total < line:
-                return "Won"
-            elif total == line:
-                return "Push"
-            return "Lost"
-
-        return "Lost"
-
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # IMPL METHODS (for commish_cog delegation)
+    # IMPL METHODS (for boss_cog delegation)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def status_impl(self, interaction: discord.Interaction):
@@ -817,6 +861,8 @@ class PickSelectView(discord.ui.View):
         self.add_item(select)
 
     async def _on_select(self, interaction: discord.Interaction):
+        from flow_sportsbook import WagerPresetView, _get_balance
+
         raw = interaction.data["values"][0]
         parts = raw.split("|")
         pick = parts[0]
@@ -828,19 +874,128 @@ class PickSelectView(discord.ui.View):
         if self.bet_type == "OU":
             actual_bet_type = pick  # "Over" or "Under"
 
-        modal = RealBetModal(
-            self.cog, self.event, actual_bet_type, pick, odds, line
+        event = self.event
+        balance = await flow_wallet.get_balance(interaction.user.id)
+
+        # Derive source label from sport_key
+        sport_key = event.get("sport_key", "")
+        source_label = SUPPORTED_SPORTS.get(sport_key, sport_key.split("_")[-1].upper())
+
+        async def place_bet(inter, amt):
+            await inter.response.defer(ephemeral=True)
+            await _place_real_bet(inter, event, actual_bet_type, pick, odds, line, amt, source_label)
+
+        view = WagerPresetView(
+            pick=pick, bet_type=actual_bet_type, odds=odds,
+            display_info={
+                "matchup": f"{event['away_team']} @ {event['home_team']}",
+                "line_str": _american_to_str(odds),
+                "source_label": source_label,
+            },
+            user_balance=balance,
+            place_bet=place_bet,
+            parlay_leg={
+                "source": source_label,
+                "event_id": event["event_id"],
+                "display": f"{event['away_team']} @ {event['home_team']}",
+                "pick": pick,
+                "bet_type": actual_bet_type,
+                "line": line or 0,
+                "odds": odds,
+            },
+            custom_modal_factory=lambda: CustomRealWagerModal(
+                event, actual_bet_type, pick, odds, line,
+            ),
         )
-        await interaction.response.send_modal(modal)
+        embed = view._build_embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-class RealBetModal(discord.ui.Modal):
-    """Modal to enter wager amount for a real sports bet."""
+async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, source_label):
+    """Place a real sport bet. Called by WagerPresetView preset callbacks.
 
-    def __init__(self, cog, event: dict,
+    Handles: event re-check, commence time check, debit, DB insert, confirm card.
+    Raises InsufficientFundsError if balance too low.
+    """
+    # Re-check event is still open
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT locked, completed, commence_time "
+            "FROM real_events WHERE event_id = ?",
+            (event["event_id"],),
+        ) as cur:
+            row = await cur.fetchone()
+
+    if not row:
+        if not interaction.response.is_done():
+            return await interaction.response.send_message("Event not found.", ephemeral=True)
+        return await interaction.followup.send("Event not found.", ephemeral=True)
+
+    locked, completed, commence_str = row
+    if locked or completed:
+        msg = "This game is already **locked**."
+        if not interaction.response.is_done():
+            return await interaction.response.send_message(msg, ephemeral=True)
+        return await interaction.followup.send(msg, ephemeral=True)
+
+    ct = _parse_commence(commence_str)
+    if ct and ct <= datetime.now(timezone.utc) + timedelta(minutes=5):
+        msg = "This game starts too soon to bet on."
+        if not interaction.response.is_done():
+            return await interaction.response.send_message(msg, ephemeral=True)
+        return await interaction.followup.send(msg, ephemeral=True)
+
+    uid = interaction.user.id
+
+    # Debit balance (raises InsufficientFundsError)
+    new_balance = await flow_wallet.debit(
+        uid, amt, "REAL_BET",
+        description=f"Bet: {pick} ({bet_type})",
+    )
+
+    # Insert bet
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO real_bets "
+            "(discord_id, event_id, sport_key, bet_type, pick, odds, line, wager_amount, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, event["event_id"], event.get("sport_key", ""),
+             bet_type, pick, odds, line, amt, now),
+        )
+        bet_id_rows = await db.execute_fetchall("SELECT last_insert_rowid()")
+        bet_id = bet_id_rows[0][0]
+        await db.commit()
+
+    # Register in wager registry (was missing from the old RealBetModal)
+    import wager_registry
+    await wager_registry.register_wager(
+        "REAL_BET", str(bet_id), uid, amt,
+        label=f"{pick} {bet_type} {_american_to_str(odds)}",
+        odds=odds,
+    )
+
+    profit = _profit_calc(amt, odds)
+    matchup = f"{event['away_team']} @ {event['home_team']}"
+
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    from sportsbook_cards import build_bet_confirm_card, card_to_file
+    png = await build_bet_confirm_card(
+        pick=pick, bet_type=bet_type, odds=odds,
+        risk=amt, to_win=profit, balance=new_balance,
+        matchup=matchup, line=line, source=source_label,
+    )
+    file = card_to_file(png, "bet_confirm.png")
+    await interaction.followup.send(file=file, ephemeral=True)
+
+
+class CustomRealWagerModal(discord.ui.Modal):
+    """Text-input modal for custom (non-preset) real sport wager amounts."""
+
+    def __init__(self, event: dict,
                  bet_type: str, pick: str, odds: int, line: Optional[float]):
-        super().__init__(title=f"Bet Slip — {bet_type}")
-        self.cog = cog
+        super().__init__(title=f"📋 Custom Wager — {bet_type}")
         self.event = event
         self.bet_type = bet_type
         self.pick = pick
@@ -848,8 +1003,9 @@ class RealBetModal(discord.ui.Modal):
         self.line = line
 
         line_str = f" ({line:+g})" if line is not None else ""
+        raw_label = f"Wager | {pick}{line_str} {_american_to_str(odds)}"
         self.amount_input = discord.ui.TextInput(
-            label=f"Wager | {pick}{line_str} {_american_to_str(odds)}",
+            label=raw_label[:45],
             placeholder=f"Min ${MIN_BET}",
             min_length=1,
             max_length=8,
@@ -857,91 +1013,33 @@ class RealBetModal(discord.ui.Modal):
         self.add_item(self.amount_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Validate amount
         try:
             amt = int(self.amount_input.value.replace(",", "").replace("$", ""))
         except ValueError:
-            return await interaction.response.send_message(
-                "Enter a valid number.", ephemeral=True
-            )
+            return await interaction.response.send_message("Enter a valid number.", ephemeral=True)
 
         if amt < MIN_BET:
             return await interaction.response.send_message(
-                f"Minimum bet is **${MIN_BET}**.", ephemeral=True
-            )
+                f"Minimum bet is **${MIN_BET}**.", ephemeral=True)
 
         max_bet = await _get_max_bet()
         if amt > max_bet:
             return await interaction.response.send_message(
-                f"Maximum bet is **${max_bet:,}**.", ephemeral=True
-            )
+                f"Maximum bet is **${max_bet:,}**.", ephemeral=True)
 
-        # Re-check event is still open
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT locked, completed, commence_time "
-                "FROM real_events WHERE event_id = ?",
-                (self.event["event_id"],),
-            ) as cur:
-                row = await cur.fetchone()
-
-        if not row:
-            return await interaction.response.send_message(
-                "Event not found.", ephemeral=True
-            )
-
-        locked, completed, commence_str = row
-        if locked or completed:
-            return await interaction.response.send_message(
-                "This game is already **locked**.", ephemeral=True
-            )
-
-        ct = _parse_commence(commence_str)
-        if ct and ct <= datetime.now(timezone.utc) + timedelta(minutes=5):
-            return await interaction.response.send_message(
-                "This game starts too soon to bet on.", ephemeral=True
-            )
-
-        # Debit balance
-        uid = interaction.user.id
+        source_label = SUPPORTED_SPORTS.get(
+            self.event.get("sport_key", ""),
+            self.event.get("sport_key", "SPORTS").split("_")[-1].upper(),
+        )
         try:
-            new_balance = await flow_wallet.debit(
-                uid, amt, "REAL_BET",
-                description=f"Bet: {self.pick} ({self.bet_type})",
+            await _place_real_bet(
+                interaction, self.event, self.bet_type, self.pick,
+                self.odds, self.line, amt, source_label,
             )
         except InsufficientFundsError:
-            bal = await flow_wallet.get_balance(uid)
-            return await interaction.response.send_message(
-                f"Insufficient funds. Balance: **${bal:,}**.", ephemeral=True
-            )
-
-        # Insert bet
-        now = datetime.now(timezone.utc).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO real_bets "
-                "(discord_id, event_id, sport_key, bet_type, pick, odds, line, wager_amount, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (uid, self.event["event_id"], self.event["sport_key"],
-                 self.bet_type, self.pick, self.odds, self.line, amt, now),
-            )
-            await db.commit()
-
-        profit = _profit_calc(amt, self.odds)
-        matchup = f"{self.event['away_team']} @ {self.event['home_team']}"
-
-        # Parse sport label for card
-        sport_label = self.event.get("sport_key", "").split("_")[-1].upper() or "SPORTS"
-
-        await interaction.response.defer(ephemeral=True)
-        from sportsbook_cards import build_bet_confirm_card, card_to_file
-        png = await build_bet_confirm_card(
-            pick=self.pick, bet_type=self.bet_type, odds=self.odds,
-            risk=amt, to_win=profit, balance=new_balance,
-            matchup=matchup, line=self.line, source=sport_label,
-        )
-        file = card_to_file(png, "bet_confirm.png")
-        await interaction.followup.send(file=file, ephemeral=True)
+            bal = await flow_wallet.get_balance(interaction.user.id)
+            await interaction.response.send_message(
+                f"Insufficient funds. Balance: **${bal:,}**.", ephemeral=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

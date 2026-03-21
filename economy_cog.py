@@ -4,7 +4,7 @@ economy_cog.py — ATLAS Economy · Money Management
 Provides admin balance operations (give/take/set), role-based payouts,
 and a recurring stipend system with full audit logging.
 
-All commands are accessed through /commish eco <cmd> via commish_cog.py.
+All commands are accessed through /boss eco <cmd> via boss_cog.py.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -92,10 +92,11 @@ async def _ensure_user(db, discord_id: int) -> int:
 
 
 async def admin_give(discord_id: int, amount: int, admin_id: int,
-                     reason: str = "") -> tuple[int, int]:
+                     reason: str = "", *,
+                     reference_key: str | None = None) -> tuple[int, int]:
     """Give money to a user. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
-    ref_key = f"ADMIN_GIVE_{discord_id}_{int(datetime.now(timezone.utc).timestamp())}"
+    ref_key = reference_key or f"ADMIN_GIVE_{discord_id}_{int(datetime.now(timezone.utc).timestamp())}"
     async with flow_wallet.get_user_lock(discord_id):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -123,9 +124,11 @@ async def admin_give(discord_id: int, amount: int, admin_id: int,
 
 
 async def admin_take(discord_id: int, amount: int, admin_id: int,
-                     reason: str = "") -> tuple[int, int]:
+                     reason: str = "", *,
+                     reference_key: str | None = None) -> tuple[int, int]:
     """Take money from a user. Floors at 0. Returns (old_balance, new_balance)."""
     now = datetime.now(timezone.utc).isoformat()
+    ref_key = reference_key or f"ADMIN_TAKE_{discord_id}_{int(datetime.now(timezone.utc).timestamp())}"
     async with flow_wallet.get_user_lock(discord_id):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -136,6 +139,7 @@ async def admin_take(discord_id: int, amount: int, admin_id: int,
                     new_balance = await flow_wallet.debit(
                         discord_id, actual_take, "ADMIN",
                         description=reason or "admin take",
+                        reference_key=ref_key,
                         subsystem="ADMIN",
                         con=db,
                     )
@@ -343,16 +347,22 @@ class EconomyCog(commands.Cog):
             target_name = f"<@{stipend['target_id']}>"
 
         paid_count = 0
+        last_paid = stipend.get("last_paid", "init")
         for member in members:
+            # Deterministic ref_key: same stipend + member + period = same key,
+            # so reruns after partial failure are idempotent.
+            stip_ref = f"STIPEND_{stipend['stipend_id']}_{member.id}_{last_paid}"
             if stipend["amount"] > 0:
                 old, new_bal = await admin_give(
                     member.id, stipend["amount"], stipend["created_by"],
-                    f"Stipend: {stipend['reason']}"
+                    f"Stipend: {stipend['reason']}",
+                    reference_key=stip_ref,
                 )
             else:
                 old, new_bal = await admin_take(
                     member.id, abs(stipend["amount"]), stipend["created_by"],
-                    f"Deduction: {stipend['reason']}"
+                    f"Deduction: {stipend['reason']}",
+                    reference_key=stip_ref,
                 )
             # Post to #ledger
             txn_id = await flow_wallet.get_last_txn_id(member.id)
@@ -374,7 +384,7 @@ class EconomyCog(commands.Cog):
             )
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  _impl METHODS (called by commish_cog)
+    #  _impl METHODS (called by boss_cog)
     # ═══════════════════════════════════════════════════════════════════════
 
     # ── Individual balance ────────────────────────────────────────────────
@@ -643,7 +653,7 @@ class EconomyCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
 
-    # ── _impl methods (called by hub buttons and commish_cog) ─────────
+    # ── _impl methods (called by hub buttons and boss_cog) ─────────
 
     async def _wallet_impl(self, interaction: discord.Interaction):
         """Show wallet with balance and recent transactions."""
@@ -880,6 +890,8 @@ class FlowHubView(discord.ui.View):
                 attachments=[file], embed=embed, view=self,
             )
         except discord.NotFound:
+            return
+        except Exception:
             return
 
     # ── Row 2: Contextual action callbacks ────────────────────────────

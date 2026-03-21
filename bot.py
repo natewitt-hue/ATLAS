@@ -133,7 +133,6 @@ import reasoning
 import build_tsl_db as db_builder
 import build_member_db as member_db
 import roster
-from ui_state import UIStateManager
 from conversation_memory import add_conversation_turn, build_conversation_block
 
 # Optional modules
@@ -170,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "4.9.0"  # unified style system audit — migrate all renderers to token-based colors
+ATLAS_VERSION = "5.8.0"  # T5 audit: dead code cleanup — quarantine commish_cog + utilities, fix stale refs, archive docs
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -180,13 +179,36 @@ from permissions import ADMIN_USER_IDS
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
 
 intents       = discord.Intents.all()
-bot           = commands.Bot(command_prefix="!", intents=intents)
 
-# Hub Infrastructure — persistent UI state manager
-bot.ui_state  = UIStateManager(bot)
+
+class ATLASBot(commands.Bot):
+    """Bot subclass with graceful Playwright shutdown."""
+
+    async def close(self):
+        try:
+            from atlas_html_engine import drain_pool
+            await drain_pool()
+        except Exception:
+            pass
+        await super().close()
+
+
+bot = ATLASBot(command_prefix="!", intents=intents)
 
 # ── FIX #8: Startup guard — prevents re-running load_all() on reconnect ──────
 _startup_done = False
+_data_ready   = False  # Set True after _startup_load() completes
+
+
+@bot.tree.interaction_check
+async def _data_ready_check(interaction: discord.Interaction) -> bool:
+    if not _data_ready:
+        await interaction.response.send_message(
+            "ATLAS is still loading league data. Try again in a moment.",
+            ephemeral=True,
+        )
+        return False
+    return True
 
 
 def _invalidate_caches():
@@ -221,7 +243,6 @@ async def setup_hook():
         "economy_cog",        # ATLAS Economy — money management & stipends
         "flow_live_cog",      # ATLAS Flow — live engagement system
         "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
-        # "commish_cog",      # RETIRED — replaced by boss_cog visual hub
         "boss_cog",           # ATLAS Boss — visual commissioner control room
     ]
 
@@ -266,13 +287,6 @@ async def setup_hook():
             print(f"ATLAS: Sportsbook — backfilled {backfilled_legs} parlay legs.")
     except Exception as e:
         print(f"ATLAS: Parlay legs backfill failed: {e}")
-
-    # Hub Infrastructure — persistent UI state table
-    try:
-        await bot.ui_state.init_table()
-        print("ATLAS: UI State Manager initialized.")
-    except Exception as e:
-        print(f"ATLAS: UI State init failed: {e}")
 
     # Affinity DB table setup (safe to call every startup)
     if _affinity_available:
@@ -403,7 +417,7 @@ def _startup_load():
             print(f"[MemberDB] validate_db_usernames() failed: {e}")
         # Refresh codex identity cache so newly auto-filled db_usernames are visible
         try:
-            from codex_cog import refresh_codex_identity
+            from codex_utils import refresh_codex_identity
             refresh_codex_identity()
         except Exception as e:
             print(f"[MemberDB] Codex identity refresh failed: {e}")
@@ -493,6 +507,9 @@ async def on_ready():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _startup_load)
 
+    global _data_ready
+    _data_ready = True
+
     print(f"--- ATLAS v{ATLAS_VERSION} ONLINE | {dm.get_league_status()} ---")
     print(f"--- ATLAS v{ATLAS_VERSION} | Data sourced from MaddenStats API ---")
 
@@ -519,9 +536,6 @@ async def on_ready():
     except Exception as e:
         print(f"[DISCOVERY] Auto-discovery failed: {e}")
 
-    # Restore persistent hub views from ui_state table
-    await bot.ui_state.restore_all_views()
-
     # Guard prevents spawning a duplicate task on every Discord reconnect
     if not blowout_monitor.is_running():
         blowout_monitor.start()
@@ -532,6 +546,16 @@ async def on_message(message: discord.Message):
         return
 
     if bot.user.mentioned_in(message):
+        # Skip if this is a reply to an Oracle message — the Oracle cog listener handles those
+        if message.reference and message.reference.message_id:
+            try:
+                from oracle_cog import _oracle_message_ids
+                if message.reference.message_id in _oracle_message_ids:
+                    await bot.process_commands(message)
+                    return
+            except ImportError:
+                pass
+
         user_input = re.sub(r'<@!?\d+>', '', message.content).strip()
         async with message.channel.typing():
             try:
@@ -799,18 +823,8 @@ if __name__ == "__main__":
     if not ANTHROPIC_API_KEY:
         print("⚠️  WARNING: ANTHROPIC_API_KEY not set — Oracle v3 agent will be unavailable")
 
-    export_code_snapshot()
-
-    # Clean up Playwright browser on shutdown to avoid pipe errors
-    _orig_close = bot.close
-    async def _graceful_close():
-        try:
-            from atlas_html_engine import drain_pool
-            await drain_pool()
-        except Exception:
-            pass
-        await _orig_close()
-    bot.close = _graceful_close
+    if os.getenv("ATLAS_EXPORT_SNAPSHOT", "0") == "1":
+        export_code_snapshot()
 
     bot.run(DISCORD_TOKEN)
 
