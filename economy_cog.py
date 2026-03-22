@@ -913,9 +913,7 @@ class FlowHubView(discord.ui.View):
             build_leaderboard_card,
         )
         from flow_wallet import get_theme_for_render
-        theme_id = await asyncio.get_running_loop().run_in_executor(
-            None, get_theme_for_render, self.user_id,
-        )
+        theme_id = get_theme_for_render(self.user_id)
         renderers = {
             _DASHBOARD:   lambda: build_flow_card(self.user_id),
             _MY_BETS:     lambda: build_my_bets_card(self.user_id, theme_id=theme_id),
@@ -1095,6 +1093,7 @@ class ThemeSelectView(discord.ui.View):
                     ephemeral=True,
                 )
             except Exception:
+                log.exception("Failed to re-render hub after theme change")
                 await interaction.followup.send(
                     f"Theme saved to **{display_name}**! It'll appear on your next `/flow`.",
                     ephemeral=True,

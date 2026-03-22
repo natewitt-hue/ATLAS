@@ -16,6 +16,7 @@ Sync wrappers provided for flow_sportsbook.py (sync sqlite3 pattern).
 """
 
 import asyncio
+import functools
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -101,13 +102,18 @@ def set_theme(user_id: int, theme_id: str) -> None:
                 (user_id, STARTING_BALANCE, STARTING_BALANCE, theme_id),
             )
         con.commit()
+    get_theme_for_render.cache_clear()
 
 
+@functools.lru_cache(maxsize=128)
 def get_theme_for_render(user_id: int | None) -> str | None:
     """Convenience: return theme_id if user_id provided, else None.
 
     Used by cogs/renderers that may or may not have a user context
     (e.g., server-wide dashboards pass None → base tokens).
+
+    Cached to avoid synchronous SQLite reads on the async event loop.
+    Cache is cleared on set_theme().
     """
     if user_id is None:
         return None
