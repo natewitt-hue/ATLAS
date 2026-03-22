@@ -1056,12 +1056,12 @@ class ThemeSelectView(discord.ui.View):
         super().__init__(timeout=60)
         self.hub_view = hub_view
         from atlas_themes import THEMES
-        for theme_id, theme_data in THEMES.items():
+        for idx, (theme_id, theme_data) in enumerate(THEMES.items()):
             is_current = theme_id == current_theme_id
             style = discord.ButtonStyle.primary if is_current else discord.ButtonStyle.secondary
             label = f"\u2713 {theme_data['label']}" if is_current else theme_data["label"]
             btn = discord.ui.Button(
-                label=label, emoji=theme_data["emoji"], style=style, row=0,
+                label=label, emoji=theme_data["emoji"], style=style, row=idx // 5,
             )
             btn.callback = self._make_callback(theme_id, theme_data["label"])
             self.add_item(btn)
