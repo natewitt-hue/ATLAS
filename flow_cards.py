@@ -64,24 +64,6 @@ def _get_weekly_delta(user_id: int) -> int:
     return 0
 
 
-def _get_sparkline_data(user_id: int, days: int = 7) -> list[int]:
-    with sqlite3.connect(DB_PATH) as con:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-        rows = con.execute(
-            """SELECT balance FROM balance_snapshots
-               WHERE discord_id = ? AND snapshot_date >= ?
-               ORDER BY snapshot_date ASC""",
-            (user_id, cutoff)
-        ).fetchall()
-    points = [r[0] for r in rows]
-    current = _get_balance(user_id)
-    if not points or points[-1] != current:
-        points.append(current)
-    if len(points) < 2:
-        points = [current, current]
-    return points
-
-
 def _get_lifetime_record(user_id: int) -> tuple[int, int, int]:
     """Get (wins, losses, pushes) across all settled straight bets."""
     with sqlite3.connect(DB_PATH) as con:
@@ -165,55 +147,56 @@ def _determine_status(user_id: int) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  SPARKLINE SVG HELPER
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _sparkline_svg(data: list[int], width: int = 440, height: int = 40) -> str:
-    """Convert balance history to an SVG polyline."""
-    if len(data) < 2:
-        return ""
-    min_v, max_v = min(data), max(data)
-    rng = max_v - min_v or 1
-    points = []
-    for i, v in enumerate(data):
-        x = round(i / (len(data) - 1) * width, 1)
-        y = round(height - (v - min_v) / rng * (height - 4) - 2, 1)
-        points.append(f"{x},{y}")
-    # Color based on trend
-    color = "var(--win)" if data[-1] >= data[0] else "var(--loss)"
-    return f'''<svg viewBox="0 0 {width} {height}" style="width:100%;height:{height}px;">
-      <polyline points="{' '.join(points)}" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>'''
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 #  FLOW HUB CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
 _FLOW_CSS = """\
-.hero-section { padding: 20px; text-align: center; }
-.hero-label { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
-.hero-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
-.hero-delta { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-sm); margin-top: var(--space-xs); }
-.hero-delta.positive { color: var(--win); }
-.hero-delta.negative { color: var(--loss); }
+.hero-section { padding: 24px 28px 18px; text-align: center; }
+.hero-label {
+  font-family: var(--font-display); font-weight: 700; font-size: 14px;
+  color: var(--gold-dim); letter-spacing: 2.5px; text-transform: uppercase;
+}
+.hero-value {
+  font-family: var(--font-mono); font-weight: 800; font-size: 44px;
+  color: var(--text-primary); line-height: 1.1; margin-top: 4px;
+}
+.hero-delta {
+  display: inline-block; font-family: var(--font-mono); font-weight: 600;
+  font-size: 13px; margin-top: 8px; padding: 3px 10px;
+  border-radius: 20px;
+}
+.hero-delta.positive { color: var(--win); background: rgba(52,211,153,0.08); }
+.hero-delta.negative { color: var(--loss); background: rgba(251,113,133,0.08); }
 
-.sparkline-section { padding: 0 20px var(--space-md); text-align: center; }
-.sparkline-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; }
+.stat-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px; padding: 0 28px 20px;
+}
+.stat-box {
+  background: linear-gradient(180deg, var(--panel-bg) 0%, var(--bg) 100%);
+  border-radius: var(--border-radius-sm); padding: 14px 12px;
+  text-align: center;
+  border: 1px solid var(--panel-border);
+  border-top: 1px solid var(--panel-border-top);
+}
+.stat-box-label {
+  font-family: var(--font-display); font-weight: 700; font-size: 10px;
+  color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.stat-box-value {
+  font-family: var(--font-mono); font-weight: 800; font-size: 20px;
+  color: var(--text-primary);
+}
+.stat-box-value.green { color: var(--win); }
+.stat-box-value.red { color: var(--loss); }
+.stat-box-value.gold { color: var(--gold); }
 
-.stat-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
-.stat-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: 10px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); }
-.stat-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--space-xs); }
-.stat-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-lg); color: var(--text-primary); }
-.stat-value.green { color: var(--win); }
-.stat-value.red { color: var(--loss); }
-.stat-value.gold { color: var(--gold); }
-
-.info-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 20px var(--space-md); }
-.info-cell { background: rgba(255,255,255,0.03); border-radius: var(--border-radius-sm); padding: var(--space-md); }
-.info-label { font-family: var(--font-display); font-weight: 700; font-size: 10px; color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase; }
-.info-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-xl); color: var(--text-primary); margin-top: var(--space-xs); }
-.info-sub { font-family: var(--font-display); font-weight: 600; font-size: var(--font-xs); color: var(--text-muted); margin-top: 2px; }
+.flow-footer {
+  padding: 10px 28px 14px; text-align: center;
+  font-family: var(--font-display); font-weight: 600; font-size: 10px;
+  color: var(--text-dim); letter-spacing: 1.5px; text-transform: uppercase;
+}
 """
 
 # Status bar mapping: internal status → shared CSS class
@@ -226,36 +209,39 @@ _STATUS_MAP = {
 
 def _gather_flow_data(user_id: int) -> dict:
     """Sync: collect all DB data for flow card in one executor dispatch."""
+    from flow_wallet import get_theme
     balance = _get_balance(user_id)
     wins, losses, pushes = _get_lifetime_record(user_id)
     return {
         "balance": balance,
         "delta": _get_weekly_delta(user_id),
-        "spark_data": _get_sparkline_data(user_id, days=7),
         "wins": wins, "losses": losses, "pushes": pushes,
         "total_wagered": _get_total_wagered(user_id),
         "positions": _get_active_positions(user_id),
         "rank_total": _get_leaderboard_rank(user_id),
         "status": _determine_status(user_id),
         "season_start": _get_season_start_balance(user_id),
+        "theme_id": get_theme(user_id),
     }
 
 
 async def build_flow_card(user_id: int) -> bytes:
     """
     Build the unified Flow Hub card for a user.
-    Returns PNG bytes.
+    Returns PNG bytes.  700px wide, 2× DPI, theme-aware.
     """
+    from atlas_themes import get_theme
+
     # ── Gather data (dispatched to thread pool) ───────────────────────────
     d = await asyncio.get_running_loop().run_in_executor(None, _gather_flow_data, user_id)
     balance = d["balance"]
     delta = d["delta"]
-    spark_data = d["spark_data"]
     wins, losses, pushes = d["wins"], d["losses"], d["pushes"]
     total_wagered = d["total_wagered"]
     positions = d["positions"]
     rank, total_users = d["rank_total"]
     status = d["status"]
+    theme_id = d["theme_id"]
 
     total_bets = wins + losses + pushes
     win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
@@ -280,25 +266,28 @@ async def build_flow_card(user_id: int) -> bytes:
     else:
         lb_class = ""
 
-    # ── Active positions summary ──────────────────────────────────────────
-    parts = []
-    if positions["bets"]:
-        parts.append(f"{positions['bets']} open bet{'s' if positions['bets'] != 1 else ''}")
-    if positions["contracts"]:
-        parts.append(f"{positions['contracts']} contract{'s' if positions['contracts'] != 1 else ''}")
-    if not parts:
-        parts.append("No active positions")
-    pos_summary = " \u00b7 ".join(parts)
-    pos_count = positions["bets"] + positions["contracts"]
+    # ── Open bets count ───────────────────────────────────────────────────
+    open_bets = positions["bets"] + positions["contracts"]
 
     # ── ROI color ─────────────────────────────────────────────────────────
     roi_class = "green" if roi >= 0 else "red"
 
-    # ── Sparkline SVG ─────────────────────────────────────────────────────
-    sparkline_html = _sparkline_svg(spark_data)
-
     # ── Status bar CSS class ──────────────────────────────────────────────
     status_class = _STATUS_MAP.get(status, "win")
+
+    # ── Theme-driven inline styles ────────────────────────────────────────
+    theme = get_theme(theme_id)
+    hero_class = theme.get("hero_class", "")
+    divider_bg = theme.get("divider_style", "linear-gradient(90deg, transparent, var(--gold-deep), transparent)")
+    default_border = theme.get("stat_left_border_default", "2px solid var(--gold-deep)")
+    accent_border = theme.get("stat_left_border_accent", "2px solid var(--gold)")
+    win_border = theme.get("stat_left_border_win", "2px solid var(--win)")
+    box_shadow = theme.get("stat_box_shadow", "none")
+    win_shadow = theme.get("stat_box_shadow_win", box_shadow)
+
+    # ROI box gets win glow when positive, loss border when negative
+    roi_border = win_border if roi >= 0 else "2px solid var(--loss)"
+    roi_shadow = win_shadow if roi >= 0 else box_shadow
 
     # ── Build HTML ────────────────────────────────────────────────────────
     body = f"""<style>{_FLOW_CSS}</style>
@@ -314,62 +303,53 @@ async def build_flow_card(user_id: int) -> bytes:
   </div>
 </div>
 
-<div class="gold-divider"></div>
+<div class="gold-divider" style="background:{divider_bg};"></div>
 
 <!-- Hero Balance -->
 <div class="hero-section">
   <div class="hero-label">YOUR BALANCE</div>
-  <div class="hero-value">${balance:,}</div>
+  <div class="hero-value {hero_class}">${balance:,}</div>
   <div class="hero-delta {delta_class}">{esc(delta_str)} this week</div>
 </div>
 
-<!-- Sparkline -->
-<div class="sparkline-section">
-  <div class="sparkline-label">7-DAY</div>
-  {sparkline_html}
-</div>
+<div class="gold-divider" style="background:{divider_bg};"></div>
 
-<div class="gold-divider"></div>
-
-<!-- Stat Grid (2 columns) -->
-<div class="stat-grid-2col">
-  <div class="stat-cell">
-    <div class="stat-label">LIFETIME RECORD</div>
-    <div class="stat-value">{wins}-{losses}-{pushes}</div>
+<!-- Stat Grid Row 1 -->
+<div class="stat-grid">
+  <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">RECORD</div>
+    <div class="stat-box-value">{wins}-{losses}-{pushes}</div>
   </div>
-  <div class="stat-cell">
-    <div class="stat-label">WIN RATE</div>
-    <div class="stat-value {wr_class}">{win_rate:.1f}%</div>
+  <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">WIN RATE</div>
+    <div class="stat-box-value {wr_class}">{win_rate:.1f}%</div>
   </div>
-  <div class="stat-cell">
-    <div class="stat-label">TOTAL WAGERED</div>
-    <div class="stat-value">${total_wagered:,}</div>
-  </div>
-  <div class="stat-cell">
-    <div class="stat-label">LEADERBOARD</div>
-    <div class="stat-value {lb_class}">#{rank} of {total_users}</div>
+  <div class="stat-box" style="border-left:{accent_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">RANK</div>
+    <div class="stat-box-value gold">#{rank}/{total_users}</div>
   </div>
 </div>
 
-<div class="gold-divider"></div>
-
-<!-- Info Panel -->
-<div class="info-panel">
-  <div class="info-cell">
-    <div class="info-label">ACTIVE POSITIONS</div>
-    <div class="info-value">{pos_count}</div>
-    <div class="info-sub">{esc(pos_summary)}</div>
+<!-- Stat Grid Row 2 -->
+<div class="stat-grid">
+  <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">WAGERED</div>
+    <div class="stat-box-value">${total_wagered:,}</div>
   </div>
-  <div class="info-cell">
-    <div class="info-label">ROI</div>
-    <div class="info-value {roi_class}">{roi:+.1f}%</div>
-    <div class="info-sub">from ${STARTING_BALANCE:,} start</div>
+  <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">OPEN BETS</div>
+    <div class="stat-box-value">{open_bets}</div>
+  </div>
+  <div class="stat-box" style="border-left:{roi_border};box-shadow:{roi_shadow};">
+    <div class="stat-box-label">ROI</div>
+    <div class="stat-box-value {roi_class}">{roi:+.1f}%</div>
   </div>
 </div>
 
+<div class="flow-footer">ATLAS Flow Economy</div>
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 

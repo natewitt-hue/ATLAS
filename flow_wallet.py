@@ -50,6 +50,60 @@ class InsufficientFundsError(Exception):
 
 
 # =============================================================================
+#  THEME PREFERENCES (lazy-migrated card_theme column)
+# =============================================================================
+
+_theme_col_checked = False
+
+
+def _ensure_theme_column():
+    """Add card_theme column to users_table if it doesn't exist (lazy migration)."""
+    global _theme_col_checked
+    if _theme_col_checked:
+        return
+    with sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT) as con:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(users_table)").fetchall()]
+        if "card_theme" not in cols:
+            con.execute(
+                "ALTER TABLE users_table ADD COLUMN card_theme TEXT DEFAULT 'obsidian_gold'"
+            )
+            con.commit()
+    _theme_col_checked = True
+
+
+def get_theme(user_id: int) -> str:
+    """Return user's selected card theme ID.  Defaults to 'obsidian_gold'."""
+    _ensure_theme_column()
+    with sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT) as con:
+        row = con.execute(
+            "SELECT card_theme FROM users_table WHERE discord_id = ?",
+            (user_id,),
+        ).fetchone()
+    return row[0] if row and row[0] else "obsidian_gold"
+
+
+def set_theme(user_id: int, theme_id: str) -> None:
+    """Set user's card theme preference."""
+    _ensure_theme_column()
+    with sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT) as con:
+        existing = con.execute(
+            "SELECT 1 FROM users_table WHERE discord_id = ?", (user_id,)
+        ).fetchone()
+        if existing:
+            con.execute(
+                "UPDATE users_table SET card_theme = ? WHERE discord_id = ?",
+                (theme_id, user_id),
+            )
+        else:
+            con.execute(
+                "INSERT INTO users_table (discord_id, balance, season_start_balance, card_theme) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, STARTING_BALANCE, STARTING_BALANCE, theme_id),
+            )
+        con.commit()
+
+
+# =============================================================================
 #  INTERNAL HELPERS
 # =============================================================================
 

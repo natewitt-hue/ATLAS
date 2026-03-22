@@ -34,6 +34,10 @@ class Tokens:
     WIN_LIGHT = "#6EE7A0"
     PURPLE = "#C084FC"
     YELLOW = "#EAB308"
+    GOLD_DEEP = "#5C4D28"
+    SLATE = "#94A3B8"
+    SLATE_DIM = "#64748B"
+    ROSE = "#FB7185"
 
     # ── Typography ──
     FONT_DISPLAY = "Outfit"
@@ -57,7 +61,7 @@ class Tokens:
     SECTION_GAP = "12px"
 
     # ── Layout ──
-    CARD_WIDTH = 480  # px (int for Playwright viewport)
+    CARD_WIDTH = 700  # px (int for Playwright viewport)
     DPI_SCALE = 2
     BORDER_RADIUS = "8px"
     BORDER_RADIUS_SM = "4px"
@@ -92,6 +96,10 @@ class Tokens:
         "win-light": WIN_LIGHT,
         "purple": PURPLE,
         "yellow": YELLOW,
+        "gold-deep": GOLD_DEEP,
+        "slate": SLATE,
+        "slate-dim": SLATE_DIM,
+        "rose": ROSE,
         "font-display": FONT_DISPLAY,
         "font-mono": FONT_MONO,
         "font-xs": FONT_XS,

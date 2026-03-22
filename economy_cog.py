@@ -10,6 +10,7 @@ All commands are accessed through /boss eco <cmd> via boss_cog.py.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -684,7 +685,8 @@ class EconomyCog(commands.Cog):
         embed.set_image(url="attachment://flow.png")
         embed.set_footer(text="ATLAS Flow Economy")
 
-        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+        msg = await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True, wait=True)
+        view.message = msg
 
     # ── _impl methods (called by hub buttons and boss_cog) ─────────
 
@@ -820,6 +822,7 @@ _CTX_BUTTONS = {
         ("Casino",     "\U0001f3b0", "_ctx_casino",     discord.ButtonStyle.success),
         ("Markets",    "\U0001f52e", "_ctx_markets",    discord.ButtonStyle.success),
         ("Scratch",    "\U0001f39f", "_ctx_scratch",    discord.ButtonStyle.danger),
+        ("Theme",      "\U0001f3a8", "_ctx_theme",      discord.ButtonStyle.secondary),
     ],
     _MY_BETS: [
         ("Bet History", "\U0001f4c5", "_ctx_bet_history", discord.ButtonStyle.secondary),
@@ -847,6 +850,7 @@ class FlowHubView(discord.ui.View):
         self.bot = bot
         self.user_id = user_id
         self.state = state
+        self.message: discord.Message | None = None  # set after initial send
         self._rebuild_buttons()
 
     def _rebuild_buttons(self):
@@ -1029,6 +1033,76 @@ class FlowHubView(discord.ui.View):
                 await interaction.followup.send("Economy module not loaded.", ephemeral=True)
         except discord.NotFound:
             return
+
+    async def _ctx_theme(self, interaction: discord.Interaction):
+        """Open the theme selector."""
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(
+                "This isn't your dashboard. Run `/flow` to open yours.",
+                ephemeral=True,
+            )
+        from flow_wallet import get_theme as load_theme
+        current = await asyncio.get_running_loop().run_in_executor(
+            None, load_theme, self.user_id
+        )
+        view = ThemeSelectView(hub_view=self, current_theme_id=current)
+        await interaction.response.send_message(
+            "Choose your card theme:", view=view, ephemeral=True
+        )
+
+
+class ThemeSelectView(discord.ui.View):
+    """Ephemeral theme picker — one button per available theme."""
+
+    def __init__(self, hub_view: FlowHubView, current_theme_id: str):
+        super().__init__(timeout=60)
+        self.hub_view = hub_view
+        from atlas_themes import THEMES
+        for theme_id, theme_data in THEMES.items():
+            is_current = theme_id == current_theme_id
+            style = discord.ButtonStyle.primary if is_current else discord.ButtonStyle.secondary
+            label = f"\u2713 {theme_data['label']}" if is_current else theme_data["label"]
+            btn = discord.ui.Button(
+                label=label, emoji=theme_data["emoji"], style=style, row=0,
+            )
+            btn.callback = self._make_callback(theme_id, theme_data["label"])
+            self.add_item(btn)
+
+    def _make_callback(self, theme_id: str, display_name: str):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.hub_view.user_id:
+                return await interaction.response.send_message(
+                    "This isn't your theme picker.", ephemeral=True
+                )
+            # Save theme preference
+            from flow_wallet import set_theme as save_theme
+            await asyncio.get_running_loop().run_in_executor(
+                None, save_theme, interaction.user.id, theme_id
+            )
+            # Re-render the dashboard card with new theme
+            await interaction.response.defer()
+            try:
+                from flow_cards import build_flow_card
+                png = await build_flow_card(self.hub_view.user_id)
+                file = discord.File(io.BytesIO(png), filename="flow.png")
+                embed = discord.Embed(color=AtlasColors.ECONOMY)
+                embed.set_image(url="attachment://flow.png")
+                embed.set_footer(text="ATLAS Flow Economy")
+                # Edit the original hub message if we have a reference
+                if self.hub_view.message:
+                    await self.hub_view.message.edit(
+                        attachments=[file], embed=embed, view=self.hub_view,
+                    )
+                await interaction.followup.send(
+                    f"Theme set to **{display_name}**! Card updated.",
+                    ephemeral=True,
+                )
+            except Exception:
+                await interaction.followup.send(
+                    f"Theme saved to **{display_name}**! It'll appear on your next `/flow`.",
+                    ephemeral=True,
+                )
+        return callback
 
 
 async def setup(bot: commands.Bot):

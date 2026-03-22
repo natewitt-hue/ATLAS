@@ -504,8 +504,53 @@ def build_jackpot_footer_html(jackpot_info: dict | None) -> str:
 # ---------------------------------------------------------------------------
 # wrap_card — base HTML template with token CSS injection
 # ---------------------------------------------------------------------------
-def wrap_card(body_html: str, status_class: str = "") -> str:
-    """Wrap body content in full card HTML with tokens CSS + shared styles."""
+def wrap_card(body_html: str, status_class: str = "", *, theme_id: str | None = None) -> str:
+    """Wrap body content in full card HTML with tokens CSS + shared styles.
+
+    Parameters
+    ----------
+    body_html : str
+        Inner HTML content for the card.
+    status_class : str
+        CSS class for the status bar gradient (win/loss/push/jackpot/etc.).
+    theme_id : str | None
+        Optional theme key from atlas_themes.THEMES.  When provided, theme
+        CSS variable overrides, overlay HTML, extra CSS, and status/border
+        styles are injected into the card shell.
+    """
+    # ── Theme layer (no-op when theme_id is None) ─────────────────────────
+    theme_css = ""
+    overlay_html = ""
+    extra_css = ""
+    card_border_attr = ""
+    status_bar_attr = f'class="status-bar {esc(status_class)}"'
+
+    if theme_id:
+        from atlas_themes import get_theme, get_overlay_html
+
+        theme = get_theme(theme_id)
+
+        # Merge theme CSS variable overrides (second :root block wins cascade)
+        if theme.get("vars"):
+            lines = [f"  --{k}: {v};" for k, v in theme["vars"].items()]
+            theme_css = ":root {\n" + "\n".join(lines) + "\n}"
+
+        # Overlay HTML fragments (scanlines, vignette, HUD brackets, rim light)
+        overlay_html = get_overlay_html(theme.get("overlays", []))
+
+        # Extra CSS (hero gradient classes, theme-specific overrides)
+        extra_css = theme.get("extra_css", "")
+
+        # Status bar gradient override (inline style beats CSS class)
+        sg = theme.get("status_gradient")
+        if sg:
+            status_bar_attr = f'class="status-bar" style="background:{sg};height:5px;width:100%;"'
+
+        # Card border override
+        cb = theme.get("card_border")
+        if cb:
+            card_border_attr = f' style="border:{cb}"'
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -513,12 +558,15 @@ def wrap_card(body_html: str, status_class: str = "") -> str:
 <style>
 {_font_face_css()}
 {Tokens.to_css_vars()}
+{theme_css}
 {_SHARED_CSS}
+{extra_css}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="status-bar {esc(status_class)}"></div>
+<div class="card"{card_border_attr}>
+  <div {status_bar_attr}></div>
+  {overlay_html}
   {body_html}
 </div>
 </body>
