@@ -474,9 +474,9 @@ def _implied_profit(price: float) -> str:
     return f"+{((1 / price) - 1) * 100:.0f}%"
 
 
-def _wrap_prediction_card(status_class: str, content: str) -> str:
+def _wrap_prediction_card(status_class: str, content: str, theme_id: str | None = None) -> str:
     """Wrap prediction market content with base engine CSS + prediction-specific CSS."""
-    base_html = wrap_card(content, status_class)
+    base_html = wrap_card(content, status_class, theme_id=theme_id)
     # Inject prediction-specific CSS before </head>
     return base_html.replace("</style>", f"{_prediction_css()}</style>", 1)
 
@@ -552,10 +552,11 @@ async def render_market_list_card(
     page: int,
     total_pages: int,
     filter_label: str = "All Categories",
+    theme_id: str | None = None,
 ) -> bytes:
     """Render market list browse card to PNG bytes."""
     content = _build_market_list_html(markets, page, total_pages, filter_label)
-    html = _wrap_prediction_card("active", content)
+    html = _wrap_prediction_card("active", content, theme_id=theme_id)
     return await render_card(html)
 
 
@@ -661,13 +662,14 @@ async def render_market_detail_card(
     user_position: str | None = None,
     user_contracts: int = 0,
     user_cost: int = 0,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render single-market detail card to PNG bytes."""
     content = _build_market_detail_html(
         title, category, yes_price, no_price, volume,
         liquidity, end_date, user_position, user_contracts, user_cost,
     )
-    html = _wrap_prediction_card("active", content)
+    html = _wrap_prediction_card("active", content, theme_id=theme_id)
     return await render_card(html)
 
 
@@ -685,6 +687,7 @@ async def render_bet_confirmation_card(
     balance: int,
     player_name: str,
     txn_id: str | None = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render bet confirmation card to PNG bytes."""
     outcome = "win" if side.upper() == "YES" else "loss"
@@ -733,7 +736,7 @@ async def render_bet_confirmation_card(
     {footer}
     """
 
-    html = _wrap_prediction_card(outcome, content)
+    html = _wrap_prediction_card(outcome, content, theme_id=theme_id)
     return await render_card(html)
 
 
@@ -747,6 +750,7 @@ async def render_portfolio_card(
     total_invested: int,
     total_potential: int,
     balance: int,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render portfolio card to PNG bytes.
 
@@ -816,7 +820,7 @@ async def render_portfolio_card(
     {footer}
     """
 
-    html = _wrap_prediction_card("active", content)
+    html = _wrap_prediction_card("active", content, theme_id=theme_id)
     return await render_card(html)
 
 
@@ -831,6 +835,7 @@ async def render_resolution_card(
     total_won: int,
     total_lost: int,
     total_voided: int = 0,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render market resolution announcement card to PNG bytes.
 
@@ -877,7 +882,7 @@ async def render_resolution_card(
     <div class="gold-divider"></div>
     """
 
-    html = _wrap_prediction_card(outcome, content)
+    html = _wrap_prediction_card(outcome, content, theme_id=theme_id)
     return await render_card(html)
 
 
@@ -1107,10 +1112,11 @@ def _curated_css() -> str:
 async def render_curated_list_card(
     markets: list[dict],
     filter_label: str = "Curated · All Categories",
+    theme_id: str | None = None,
 ) -> bytes:
     """Render curated 10-market list card to PNG bytes."""
     content = _build_curated_list_html(markets, filter_label)
-    base_html = wrap_card(content, "active")
+    base_html = wrap_card(content, "active", theme_id=theme_id)
     html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
     return await render_card(html)
 
@@ -1124,6 +1130,7 @@ async def render_daily_drop_card(
     supporting: list[dict],
     community: dict,
     leaderboard: list[dict],
+    theme_id: str | None = None,
 ) -> bytes:
     """Render daily drop card to PNG bytes.
 
@@ -1243,7 +1250,7 @@ async def render_daily_drop_card(
     <div class="gold-divider"></div>
     """
 
-    base_html = wrap_card(content, "jackpot")
+    base_html = wrap_card(content, "jackpot", theme_id=theme_id)
     html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
     return await render_card(html)
 
@@ -1257,6 +1264,7 @@ async def render_price_alert_card(
     old_price: float,
     new_price: float,
     holders: int = 0,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render price movement alert card to PNG bytes."""
     direction = "up" if new_price > old_price else "down"
@@ -1307,6 +1315,6 @@ async def render_price_alert_card(
     <div class="gold-divider"></div>
     """
 
-    base_html = wrap_card(content, "push")
+    base_html = wrap_card(content, "push", theme_id=theme_id)
     html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
     return await render_card(html)

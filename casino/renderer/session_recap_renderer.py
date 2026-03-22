@@ -141,6 +141,7 @@ def _build_session_recap_html(
     session: PlayerSession,
     display_name: str,
     commentary: str = "",
+    theme_id: str | None = None,
 ) -> str:
     """Build the full session recap card HTML."""
 
@@ -530,7 +531,7 @@ def _build_session_recap_html(
   {commentary_html}
 """
 
-    return wrap_card(body_html, status_class)
+    return wrap_card(body_html, status_class, theme_id=theme_id)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -539,6 +540,7 @@ async def render_session_recap(
     session: PlayerSession,
     display_name: str,
     commentary: str = "",
+    theme_id: str | None = None,
 ) -> bytes:
     """
     Render a session recap card as PNG bytes.
@@ -551,5 +553,5 @@ async def render_session_recap(
     Returns:
         PNG bytes of the rendered card.
     """
-    html = _build_session_recap_html(session, display_name, commentary)
+    html = _build_session_recap_html(session, display_name, commentary, theme_id=theme_id)
     return await render_card(html)

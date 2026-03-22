@@ -27,7 +27,6 @@ import random
 import uuid
 
 import discord
-from atlas_colors import AtlasColors
 
 from casino.casino_db import (
     deduct_wager, process_wager, get_balance,
@@ -36,7 +35,7 @@ from casino.casino_db import (
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_slots_card, render_scratch_card_v6
-from embed_helpers import casino_result_footer
+from flow_wallet import get_theme_for_render
 
 GAME_TYPE = "slots"
 
@@ -176,8 +175,14 @@ def _spin_controlled(wager: int, table=None) -> tuple[list[str], int, str, float
 #  SLOTS ENTRY POINT
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def play_slots(interaction: discord.Interaction, wager: int) -> None:
-    """Play one spin of the slot machine with animated reveal + free spin."""
+async def play_slots(
+    interaction: discord.Interaction,
+    wager: int,
+    replay_message: discord.Message | None = None,
+) -> None:
+    """Play one spin of the slot machine with animated reveal + free spin.
+    replay_message: if set, edit this message in-place instead of sending a new one.
+    """
     await interaction.response.defer()
 
     if not await is_casino_open("slots"):
@@ -210,30 +215,21 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     # ── Initial render — all spinning ─────────────────────────────────────
     bal = await get_balance(interaction.user.id)
     player_name = interaction.user.display_name
-    png = await render_slots_card(reels, revealed=0, wager=wager, balance=bal, player_name=player_name)
+    theme_id = get_theme_for_render(interaction.user.id)
+    png = await render_slots_card(reels, revealed=0, wager=wager, balance=bal, player_name=player_name, theme_id=theme_id)
     file  = discord.File(io.BytesIO(png), filename="slots.png")
-    embed = discord.Embed(
-        title = f"🎰 FLOW Casino — Slots  |  {player_name}",
-        color = AtlasColors.CASINO,
-    )
-    embed.set_image(url="attachment://slots.png")
-    embed.set_footer(text="Spinning...")
 
-    msg = await interaction.followup.send(embed=embed, file=file, wait=True)
+    if replay_message:
+        await replay_message.edit(attachments=[file])
+        msg = replay_message
+    else:
+        msg = await interaction.followup.send(file=file, wait=True)
 
     for revealed in (1, 2, 3):
         await asyncio.sleep(0.9)
-        png2  = await render_slots_card(reels, revealed=revealed, wager=wager, balance=bal, player_name=player_name)
+        png2  = await render_slots_card(reels, revealed=revealed, wager=wager, balance=bal, player_name=player_name, theme_id=theme_id)
         file2 = discord.File(io.BytesIO(png2), filename="slots.png")
-        embed2 = discord.Embed(
-            title = f"🎰 FLOW Casino — Slots  |  {player_name}",
-            color = AtlasColors.CASINO,
-        )
-        embed2.set_image(url="attachment://slots.png")
-        embed2.set_footer(
-            text="Spinning..." if revealed < 3 else "Done!"
-        )
-        await msg.edit(embed=embed2, attachments=[file2])
+        await msg.edit(attachments=[file2])
 
     # ── Determine outcome ────────────────────────────────────────────────
     if payout == wager:
@@ -273,22 +269,8 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
     )
 
     # ── Final render with result ───────────────────────────────────────────
-    total_payout = payout
-    profit = payout - wager
-
-    # Near-miss uses amber color
-    if is_near_miss:
-        embed_color = AtlasColors.WARNING
-    elif payout > 0:
-        embed_color = AtlasColors.SUCCESS
-    else:
-        embed_color = AtlasColors.ERROR
-
-    # Streak & jackpot info from result
     streak_info = result.get("streak_info")
-    jackpot_hit = result.get("jackpot_result")
 
-    profit_str = f"+${profit:,}" if profit >= 0 else f"-${abs(profit):,}"
     png3  = await render_slots_card(
         reels, revealed=3,
         wager=wager, payout=payout,
@@ -296,49 +278,9 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         result_msg=result_msg,
         player_name=player_name,
         txn_id=str(result.get("txn_id", "")),
+        theme_id=theme_id,
     )
     file3  = discord.File(io.BytesIO(png3), filename="slots.png")
-    embed3 = discord.Embed(
-        title = f"🎰 FLOW Casino — Slots  |  {player_name}",
-        color = embed_color,
-    )
-    embed3.add_field(name="Result", value=result_msg, inline=False)
-    embed3.add_field(name="Wager",   value=f"${wager:,}",              inline=True)
-    embed3.add_field(name="Payout",  value=f"${payout:,}",             inline=True)
-    embed3.add_field(name="P&L",     value=f"{profit_str}",           inline=True)
-
-    # Show streak badge
-    if streak_info and streak_info.get("len", 0) >= 3:
-        from casino.casino_db import get_streak_bonus, get_cold_streak_mercy
-        bonus = get_streak_bonus(streak_info)
-        if bonus:
-            embed3.add_field(
-                name="Momentum",
-                value=f"🔥 {bonus['label']} (W{streak_info['len']})",
-                inline=True,
-            )
-    if streak_info and streak_info.get("type") == "loss" and streak_info.get("len", 0) >= 5:
-        embed3.add_field(name="Streak", value=f"❄️ L{streak_info['len']}", inline=True)
-
-    # Show streak bonus
-    if result.get("streak_bonus"):
-        sb = result["streak_bonus"]
-        embed3.add_field(
-            name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True
-        )
-
-    # Show jackpot hit
-    if jackpot_hit:
-        embed3.add_field(
-            name=f"💎 JACKPOT {jackpot_hit['tier'].upper()}!",
-            value=f"+${jackpot_hit['amount']:,}",
-            inline=False,
-        )
-
-    embed3.set_image(url="attachment://slots.png")
-    embed3.set_footer(text=casino_result_footer(
-        result["new_balance"], result.get("txn_id"), streak_info,
-    ))
 
     replay_view = PlayAgainView(
         user_id=interaction.user.id,
@@ -348,7 +290,7 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
         streak_info=streak_info,
         near_miss_msg=result_msg if is_near_miss else None,
     )
-    await msg.edit(embed=embed3, attachments=[file3], view=replay_view)
+    await msg.edit(attachments=[file3], view=replay_view)
 
     # ── Free Spin trigger ────────────────────────────────────────────────
     if vtype in FREE_SPIN_TIERS:
@@ -394,18 +336,10 @@ async def play_slots(interaction: discord.Interaction, wager: int) -> None:
             result_msg=f"🎁 FREE SPIN! {free_msg}",
             player_name=player_name,
             txn_id=str(free_result.get("txn_id", "")),
+            theme_id=theme_id,
         )
         free_file = discord.File(io.BytesIO(free_png), filename="freespin.png")
-        free_embed = discord.Embed(
-            title=f"🎁 FREE SPIN!  |  {player_name}",
-            description=f"Your big win triggered a bonus spin!",
-            color=AtlasColors.TSL_GOLD if free_payout > 0 else AtlasColors.CODEX,
-        )
-        free_embed.add_field(name="Result", value=free_msg, inline=False)
-        free_embed.add_field(name="Bonus Payout", value=f"${free_payout:,}", inline=True)
-        free_embed.add_field(name="Balance", value=f"${free_result['new_balance']:,}", inline=True)
-        free_embed.set_image(url="attachment://freespin.png")
-        await interaction.followup.send(embed=free_embed, file=free_file)
+        await interaction.followup.send(file=free_file)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -437,6 +371,7 @@ class ScratchView(discord.ui.View):
             button.disabled = True
             button.label    = "Done!"
 
+        theme_id = get_theme_for_render(self.discord_id)
         png = await render_scratch_card_v6(
             self.tiles,
             revealed=self.revealed,
@@ -444,42 +379,10 @@ class ScratchView(discord.ui.View):
             player_name=interaction.user.display_name,
             total=self.total,
             balance=self.balance,
+            theme_id=theme_id,
         )
         file = discord.File(io.BytesIO(png), filename="scratch.png")
-        embed = _build_scratch_embed(
-            interaction.user.display_name,
-            self.tiles,
-            self.revealed,
-            self.is_match,
-        )
-        embed.set_image(url="attachment://scratch.png")
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
-
-
-def _build_scratch_embed(
-    display_name: str,
-    tiles:        list[int],
-    revealed:     int,
-    is_match:     bool,
-) -> discord.Embed:
-    if revealed < 3:
-        color = AtlasColors.CASINO
-        desc  = f"Tap **Scratch!** to reveal tiles ({3 - revealed} left)"
-    elif is_match:
-        total = tiles[0] * 3
-        color = AtlasColors.TSL_GOLD
-        desc  = f"🏆 **TRIPLE MATCH!** All tiles: **{tiles[0]:,}** × 3 = **+{total:,}!**"
-    else:
-        total = sum(tiles)
-        color = AtlasColors.SUCCESS
-        desc  = f"✅ You won **{total:,}!**"
-
-    embed = discord.Embed(
-        title       = f"🎟️ TSL Daily Scratch  |  {display_name}",
-        description = desc,
-        color       = color,
-    )
-    return embed
+        await interaction.response.edit_message(attachments=[file], view=self)
 
 
 async def daily_scratch(interaction: discord.Interaction) -> None:
@@ -527,19 +430,14 @@ async def daily_scratch(interaction: discord.Interaction) -> None:
     balance = await get_balance(uid)
 
     # Render initial card (0 tiles revealed)
+    theme_id = get_theme_for_render(uid)
     png = await render_scratch_card_v6(
         tiles, revealed=0, is_match=is_match,
         player_name=interaction.user.display_name, total=total,
         balance=balance,
+        theme_id=theme_id,
     )
     file  = discord.File(io.BytesIO(png), filename="scratch.png")
-    embed = _build_scratch_embed(interaction.user.display_name, tiles, 0, is_match)
-    embed.set_image(url="attachment://scratch.png")
-
-    footer_parts = [f"Potential win: {total:,} credited to your account"]
-    if streak > 1:
-        footer_parts.append(f"Day {streak} streak (+{int(bonus_pct*100)}% bonus!)")
-    embed.set_footer(text=" | ".join(footer_parts))
 
     view = ScratchView(uid, tiles, total=total, balance=balance)
-    await interaction.followup.send(embed=embed, file=file, view=view)
+    await interaction.followup.send(file=file, view=view)

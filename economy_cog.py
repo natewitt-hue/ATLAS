@@ -679,13 +679,12 @@ class EconomyCog(commands.Cog):
 
         view = FlowHubView(interaction.client, uid)
         png = await view.render_current()
-        file = discord.File(io.BytesIO(png), filename="flow.png")
 
-        embed = discord.Embed(color=AtlasColors.ECONOMY)
-        embed.set_image(url="attachment://flow.png")
-        embed.set_footer(text="ATLAS Flow Economy")
-
-        msg = await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True, wait=True)
+        from atlas_send import send_card
+        msg = await send_card(
+            interaction, png, filename="flow.png",
+            view=view, ephemeral=True, followup=True,
+        )
         view.message = msg
 
     # ── _impl methods (called by hub buttons and boss_cog) ─────────
@@ -907,18 +906,22 @@ class FlowHubView(discord.ui.View):
         return f"User …{str(discord_id)[-4:]}"
 
     async def render_current(self) -> bytes:
-        """Render the card for the current state."""
+        """Render the card for the current state (theme-aware)."""
         from flow_cards import (
             build_flow_card, build_my_bets_card,
             build_portfolio_card, build_wallet_card,
             build_leaderboard_card,
         )
+        from flow_wallet import get_theme_for_render
+        theme_id = await asyncio.get_running_loop().run_in_executor(
+            None, get_theme_for_render, self.user_id,
+        )
         renderers = {
             _DASHBOARD:   lambda: build_flow_card(self.user_id),
-            _MY_BETS:     lambda: build_my_bets_card(self.user_id),
-            _PORTFOLIO:   lambda: build_portfolio_card(self.user_id),
-            _WALLET:      lambda: build_wallet_card(self.user_id),
-            _LEADERBOARD: lambda: build_leaderboard_card(self.user_id, name_resolver=self._resolve_name),
+            _MY_BETS:     lambda: build_my_bets_card(self.user_id, theme_id=theme_id),
+            _PORTFOLIO:   lambda: build_portfolio_card(self.user_id, theme_id=theme_id),
+            _WALLET:      lambda: build_wallet_card(self.user_id, theme_id=theme_id),
+            _LEADERBOARD: lambda: build_leaderboard_card(self.user_id, name_resolver=self._resolve_name, theme_id=theme_id),
         }
         return await renderers[self.state]()
 
@@ -931,11 +934,8 @@ class FlowHubView(discord.ui.View):
             await interaction.response.defer()
             png = await self.render_current()
             file = discord.File(io.BytesIO(png), filename="flow.png")
-            embed = discord.Embed(color=AtlasColors.ECONOMY)
-            embed.set_image(url="attachment://flow.png")
-            embed.set_footer(text="ATLAS Flow Economy")
             await interaction.edit_original_response(
-                attachments=[file], embed=embed, view=self,
+                attachments=[file], view=self,
             )
         except discord.NotFound:
             return
@@ -1085,13 +1085,10 @@ class ThemeSelectView(discord.ui.View):
                 from flow_cards import build_flow_card
                 png = await build_flow_card(self.hub_view.user_id)
                 file = discord.File(io.BytesIO(png), filename="flow.png")
-                embed = discord.Embed(color=AtlasColors.ECONOMY)
-                embed.set_image(url="attachment://flow.png")
-                embed.set_footer(text="ATLAS Flow Economy")
                 # Edit the original hub message if we have a reference
                 if self.hub_view.message:
                     await self.hub_view.message.edit(
-                        attachments=[file], embed=embed, view=self.hub_view,
+                        attachments=[file], view=self.hub_view,
                     )
                 await interaction.followup.send(
                     f"Theme set to **{display_name}**! Card updated.",

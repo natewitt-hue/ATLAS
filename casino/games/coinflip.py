@@ -33,7 +33,7 @@ from casino.casino_db import (
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_coinflip_card
-from embed_helpers import casino_result_footer
+from flow_wallet import get_theme_for_render
 
 GAME_TYPE          = "coinflip"
 SOLO_PAYOUT_MULT   = 1.95     # 2.5% house edge (was 2.0 = 0% edge)
@@ -50,8 +50,11 @@ async def play_coinflip(
     interaction: discord.Interaction,
     pick:        str,    # "heads" or "tails"
     wager:       int,
+    replay_message: discord.Message | None = None,
 ) -> None:
-    """Instant solo coin flip. Even money (1x profit)."""
+    """Instant solo coin flip. Even money (1x profit).
+    replay_message: if set, edit this message in-place instead of sending a new one.
+    """
     await interaction.response.defer()
 
     uid = interaction.user.id
@@ -133,6 +136,7 @@ async def play_coinflip(
         near_miss_text = "The coin teetered on edge before falling..."
 
     # Render coin flip card
+    theme_id = get_theme_for_render(uid)
     png = await render_coinflip_card(
         result=result,
         player_pick=pick_clean,
@@ -141,50 +145,9 @@ async def play_coinflip(
         balance=db_result["new_balance"],
         player_name=interaction.user.display_name,
         txn_id=str(db_result.get("txn_id", "")),
+        theme_id=theme_id,
     )
     file = discord.File(io.BytesIO(png), filename="coinflip.png")
-
-    # Amber color for near-miss, green for win, red for loss
-    if edge_tease:
-        embed_color = AtlasColors.WARNING
-    elif won:
-        embed_color = AtlasColors.SUCCESS
-    else:
-        embed_color = AtlasColors.ERROR
-
-    embed = discord.Embed(
-        title = f"🪙 FLOW Casino — Coin Flip  |  {interaction.user.display_name}",
-        color = embed_color,
-    )
-    embed.add_field(name="Your Pick",  value=f"{pick_clean.capitalize()} {'✅' if won else '❌'}", inline=True)
-    embed.add_field(name="Result",     value=f"{result.capitalize()} {'🌕' if result == 'heads' else '🌑'}",     inline=True)
-    embed.add_field(name="Outcome",    value=f"**{'WIN' if won else 'LOSS'}** — {profit_str}", inline=True)
-    if near_miss_text:
-        embed.add_field(name="😬 Close Call", value=near_miss_text, inline=False)
-
-    # Streak info
-    if streak_info and streak_info.get("len", 0) >= 3:
-        from casino.casino_db import get_streak_bonus
-        bonus = get_streak_bonus(streak_info)
-        if bonus:
-            embed.add_field(name="Momentum", value=f"🔥 {bonus['label']} (W{streak_info['len']})", inline=True)
-    if streak_info and streak_info.get("type") == "loss" and streak_info.get("len", 0) >= 5:
-        embed.add_field(name="Streak", value=f"❄️ L{streak_info['len']}", inline=True)
-
-    # Streak bonus display
-    if db_result.get("streak_bonus"):
-        sb = db_result["streak_bonus"]
-        embed.add_field(name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True)
-
-    # Jackpot hit
-    if db_result.get("jackpot_result"):
-        jp = db_result["jackpot_result"]
-        embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
-
-    embed.set_image(url="attachment://coinflip.png")
-    embed.set_footer(text=casino_result_footer(
-        db_result["new_balance"], db_result.get("txn_id"), streak_info,
-    ))
 
     max_bet = await get_max_bet(uid)
     replay_view = PlayAgainView(
@@ -195,7 +158,10 @@ async def play_coinflip(
         streak_info=streak_info,
         near_miss_msg=near_miss_text,
     )
-    await interaction.followup.send(embed=embed, file=file, view=replay_view)
+    if replay_message:
+        await replay_message.edit(attachments=[file], view=replay_view)
+    else:
+        await interaction.followup.send(file=file, view=replay_view)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -270,6 +236,7 @@ class ChallengeView(discord.ui.View):
         loser_name = opponent_display if winner_id == self.challenger_id else challenger_display
 
         result_raw = "heads" if "Heads" in result_side else "tails"
+        theme_id = get_theme_for_render(self.challenger_id)
         png = await render_coinflip_card(
             result=result_raw,
             player_pick="heads",  # Challenger always picks heads
@@ -280,32 +247,12 @@ class ChallengeView(discord.ui.View):
             is_pvp=True,
             opponent_name=opponent_display,
             opponent_pick="tails",
+            theme_id=theme_id,
         )
         file = discord.File(io.BytesIO(png), filename="coinflip.png")
 
-        embed = discord.Embed(
-            title = "🪙 FLOW Casino — PvP Coin Flip",
-            color = AtlasColors.TSL_GOLD,
-        )
-        embed.add_field(
-            name  = "Coin landed on",
-            value = f"**{result_side}**",
-            inline = False
-        )
-        embed.add_field(
-            name  = "🏆 Winner",
-            value = f"{winner_mention} — **+${profit:,}** (1.9x)",
-            inline = True
-        )
-        embed.add_field(
-            name  = "❌ Loser",
-            value = f"{loser_mention} — **-${self.wager:,}**",
-            inline = True
-        )
-        embed.set_image(url="attachment://coinflip.png")
-
         self.clear_items()
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        await interaction.response.edit_message(attachments=[file], view=self)
 
         # Post to #ledger (winner + loser)
         from casino.casino import post_to_ledger

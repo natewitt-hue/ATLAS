@@ -52,6 +52,12 @@ except ImportError:
     cr = None
     _IMAGE_RENDER = False
 
+try:
+    from flow_wallet import get_theme_for_render
+except ImportError:
+    def get_theme_for_render(_uid):  # noqa: E301
+        return None
+
 # Ability engine — required for RosterHub ability audit/check buttons
 try:
     import ability_engine as ae
@@ -724,9 +730,11 @@ async def _evaluate_and_post(
 
         decline_msg = "🚫 **Trade Auto-Declined** — value gap exceeds 20%. Renegotiate with more balanced assets."
 
+        theme_id = get_theme_for_render(proposer_id)
+
         png_bytes = None
         if _IMAGE_RENDER and cr:
-            png_bytes = await cr.render_trade_card(card_data)
+            png_bytes = await cr.render_trade_card(card_data, theme_id=theme_id)
 
         if png_bytes:
             import io as _io
@@ -840,9 +848,11 @@ async def _evaluate_and_post(
         "warnings":      warnings,
     }
 
+    theme_id = get_theme_for_render(proposer_id)
+
     png_bytes = None
     if _IMAGE_RENDER and cr:
-        png_bytes = await cr.render_trade_card(card_data)
+        png_bytes = await cr.render_trade_card(card_data, theme_id=theme_id)
 
     if png_bytes:
         import io as _io
@@ -1532,7 +1542,9 @@ class TradeActionView(discord.ui.View):
                     "proposer_id":  trade.get("proposer_id", 0),
                     "warnings":     [],
                 }
-                png_bytes = await cr.render_trade_card(card_data)
+                _proposer = trade.get("proposer_id", 0)
+                _theme = get_theme_for_render(_proposer if _proposer else None)
+                png_bytes = await cr.render_trade_card(card_data, theme_id=_theme)
                 if png_bytes:
                     import io as _io
                     file = discord.File(_io.BytesIO(png_bytes), filename=f"trade_{self.trade_id}_{new_status}.png")

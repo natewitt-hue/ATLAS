@@ -112,7 +112,7 @@ class PlayAgainView(discord.ui.View):
             )
 
         self._disable_all()
-        await self.replay_callback(interaction)
+        await self.replay_callback(interaction, replay_message=interaction.message)
 
     async def _on_double(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user_id:
@@ -151,10 +151,10 @@ class PlayAgainView(discord.ui.View):
         self._disable_all()
 
         if self.double_callback:
-            await self.double_callback(interaction)
+            await self.double_callback(interaction, replay_message=interaction.message)
         else:
             # Fallback: use replay callback (wager is already bound in the partial)
-            await self.replay_callback(interaction)
+            await self.replay_callback(interaction, replay_message=interaction.message)
 
     async def _on_hub(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user_id:

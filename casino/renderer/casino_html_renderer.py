@@ -60,6 +60,7 @@ def _build_blackjack_html(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> str:
     """Build the full blackjack card HTML."""
 
@@ -220,7 +221,7 @@ def _build_blackjack_html(
     {footer}
     {jackpot_footer}"""
 
-    return wrap_card(content, status_class)
+    return wrap_card(content, status_class, theme_id=theme_id)
 
 
 async def render_blackjack_card(
@@ -238,12 +239,13 @@ async def render_blackjack_card(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a blackjack card to PNG bytes."""
     html = _build_blackjack_html(
         dealer_hand, player_hand, dealer_score, player_score,
         hide_dealer, status, wager, payout, balance, player_name, txn_id,
-        streak_info, near_miss_msg, jackpot_info,
+        streak_info, near_miss_msg, jackpot_info, theme_id=theme_id,
     )
     return await render_card(html)
 
@@ -281,6 +283,7 @@ def _build_slots_html(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> str:
     """Build the full slots card HTML."""
 
@@ -425,7 +428,7 @@ def _build_slots_html(
     {footer}
     {jackpot_footer}"""
 
-    return wrap_card(content, status_class)
+    return wrap_card(content, status_class, theme_id=theme_id)
 
 
 async def render_slots_card(
@@ -440,11 +443,12 @@ async def render_slots_card(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a slots card to PNG bytes."""
     html = _build_slots_html(
         reels, revealed, wager, payout, balance, result_msg, player_name, txn_id,
-        streak_info, near_miss_msg, jackpot_info,
+        streak_info, near_miss_msg, jackpot_info, theme_id=theme_id,
     )
     return await render_card(html)
 
@@ -471,6 +475,7 @@ def _build_crash_html(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> str:
     """Build the full crash card HTML with rocket launch theme."""
 
@@ -790,7 +795,7 @@ def _build_crash_html(
     {footer}
     {jackpot_footer}"""
 
-    return wrap_card(content, status_class)
+    return wrap_card(content, status_class, theme_id=theme_id)
 
 
 async def render_crash_card(
@@ -811,13 +816,14 @@ async def render_crash_card(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a crash card to PNG bytes."""
     html = _build_crash_html(
         current_mult, crashed, cashed_out, cashout_mult, history,
         players_in, total_wagered, wager, payout, balance,
         player_name, players, txn_id, is_live,
-        streak_info, near_miss_msg, jackpot_info,
+        streak_info, near_miss_msg, jackpot_info, theme_id=theme_id,
     )
     return await render_card(html)
 
@@ -842,6 +848,7 @@ def _build_coinflip_html(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> str:
     """Build the full coin flip card HTML."""
 
@@ -1016,7 +1023,7 @@ def _build_coinflip_html(
     {footer}
     {jackpot_footer}"""
 
-    return wrap_card(content, status_class)
+    return wrap_card(content, status_class, theme_id=theme_id)
 
 
 async def render_coinflip_card(
@@ -1033,12 +1040,13 @@ async def render_coinflip_card(
     streak_info: dict | None = None,
     near_miss_msg: str | None = None,
     jackpot_info: dict | None = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a coin flip card to PNG bytes."""
     html = _build_coinflip_html(
         result, player_pick, wager, payout, balance, player_name, txn_id,
         is_pvp, opponent_name, opponent_pick,
-        streak_info, near_miss_msg, jackpot_info,
+        streak_info, near_miss_msg, jackpot_info, theme_id=theme_id,
     )
     return await render_card(html)
 
@@ -1054,6 +1062,7 @@ def _build_scratch_html(
     player_name: str = "Player",
     total: int = 0,
     balance: int = 0,
+    theme_id: str | None = None,
 ) -> str:
     """Build scratch card HTML with V6 design. 3 tiles, sequential reveal."""
 
@@ -1235,7 +1244,7 @@ def _build_scratch_html(
     <div class="gold-divider"></div>
     {footer}"""
 
-    return wrap_card(content, status_class)
+    return wrap_card(content, status_class, theme_id=theme_id)
 
 
 async def render_scratch_card_v6(
@@ -1245,7 +1254,8 @@ async def render_scratch_card_v6(
     player_name: str = "Player",
     total: int = 0,
     balance: int = 0,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a scratch card to PNG bytes using V6 Playwright renderer."""
-    html = _build_scratch_html(tiles, revealed, is_match, player_name, total, balance)
+    html = _build_scratch_html(tiles, revealed, is_match, player_name, total, balance, theme_id=theme_id)
     return await render_card(html)

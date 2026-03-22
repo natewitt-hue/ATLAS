@@ -393,7 +393,7 @@ def _gather_sportsbook_data(user_id: int) -> dict:
     }
 
 
-async def build_sportsbook_card(user_id: int) -> bytes:
+async def build_sportsbook_card(user_id: int, *, theme_id: str | None = None) -> bytes:
     """
     Build the main sportsbook hub card for a user.
     Returns PNG bytes.
@@ -484,7 +484,7 @@ async def build_sportsbook_card(user_id: int) -> bytes:
 </div>
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -509,7 +509,7 @@ def _gather_stats_data(user_id: int) -> dict:
     }
 
 
-async def build_stats_card(user_id: int) -> bytes:
+async def build_stats_card(user_id: int, *, theme_id: str | None = None) -> bytes:
     """
     Build the detailed bettor stats card for a user.
     Returns PNG bytes.
@@ -638,7 +638,7 @@ async def build_stats_card(user_id: int) -> bytes:
 {open_bets_html}
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -671,7 +671,7 @@ _MATCH_DETAIL_CSS = """\
 """
 
 
-async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
+async def build_match_detail_card(game: dict, *, locked: bool = False, theme_id: str | None = None) -> bytes:
     """
     Render match detail card as PNG.
     `game` is a dict from _build_game_lines().
@@ -762,7 +762,7 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 </div>
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -772,7 +772,7 @@ async def build_match_detail_card(game: dict, *, locked: bool = False) -> bytes:
 
 
 async def build_real_match_detail_card(
-    event: dict, *, sport_key: str = ""
+    event: dict, *, sport_key: str = "", theme_id: str | None = None
 ) -> bytes:
     """
     Render a match detail card for real sports (NCAAB, NFL, etc.).
@@ -909,7 +909,7 @@ async def build_real_match_detail_card(
 </div>
 """
 
-    full_html = wrap_card(body, status_class="win")
+    full_html = wrap_card(body, status_class="win", theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -941,7 +941,8 @@ _BET_CONFIRM_CSS = """\
 async def build_bet_confirm_card(
     pick: str, bet_type: str, odds: int, risk: int, to_win: int,
     balance: int, *, matchup: str = "", week: int = 0,
-    line: float | None = None, source: str = "TSL"
+    line: float | None = None, source: str = "TSL",
+    theme_id: str | None = None
 ) -> bytes:
     """Render a straight bet confirmation card as PNG."""
     odds_str = f"+{odds}" if odds > 0 else str(odds)
@@ -996,12 +997,12 @@ async def build_bet_confirm_card(
   <span>ATLAS SPORTSBOOK · BET CONFIRMED</span>
 </div>
 """
-    return await render_card(wrap_card(body, status_class="jackpot"))
+    return await render_card(wrap_card(body, status_class="jackpot", theme_id=theme_id))
 
 
 async def build_parlay_confirm_card(
     legs: list[dict], combined_odds: int, risk: int, to_win: int,
-    *, week: int = 0
+    *, week: int = 0, theme_id: str | None = None
 ) -> bytes:
     """Render a parlay confirmation card as PNG."""
     odds_str = f"+{combined_odds}" if combined_odds > 0 else str(combined_odds)
@@ -1062,7 +1063,7 @@ async def build_parlay_confirm_card(
   <span>ALL LEGS MUST HIT{' \u00b7 WEEK ' + str(week) if week else ''}</span>
 </div>
 """
-    return await render_card(wrap_card(body, status_class="jackpot"))
+    return await render_card(wrap_card(body, status_class="jackpot", theme_id=theme_id))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1098,7 +1099,8 @@ _CASINO_HUB_CSS = """\
 
 async def build_casino_hub_card(
     balance: int, max_bet: int, tier_name: str,
-    streak: dict, jackpots: dict
+    streak: dict, jackpots: dict,
+    *, theme_id: str | None = None
 ) -> bytes:
     """Render the casino hub landing card as PNG."""
     # Streak badge
@@ -1184,7 +1186,7 @@ async def build_casino_hub_card(
   <span>TSL CASINO \u00b7 THE SIM LEAGUE</span>
 </div>
 """
-    return await render_card(wrap_card(body, status_class="jackpot"))
+    return await render_card(wrap_card(body, status_class="jackpot", theme_id=theme_id))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1312,7 +1314,7 @@ def _gather_parlay_analytics_data(user_id: int) -> dict:
     }
 
 
-async def build_parlay_analytics_card(user_id: int) -> bytes:
+async def build_parlay_analytics_card(user_id: int, *, theme_id: str | None = None) -> bytes:
     """Build the parlay analytics card. Returns PNG bytes."""
     d = await asyncio.get_running_loop().run_in_executor(
         None, _gather_parlay_analytics_data, user_id
@@ -1359,7 +1361,7 @@ async def build_parlay_analytics_card(user_id: int) -> bytes:
 
 <div class="empty-msg">No parlays placed yet. Build a parlay from the Sportsbook!</div>
 """
-        return await render_card(wrap_card(body, status_class="jackpot"))
+        return await render_card(wrap_card(body, status_class="jackpot", theme_id=theme_id))
 
     # ── Bar chart HTML ─────────────────────────────────────────────────────
     bars_html = ""
@@ -1465,7 +1467,7 @@ async def build_parlay_analytics_card(user_id: int) -> bytes:
 </div>
 """
 
-    return await render_card(wrap_card(body, status_class=status_class))
+    return await render_card(wrap_card(body, status_class=status_class, theme_id=theme_id))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

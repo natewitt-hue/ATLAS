@@ -201,6 +201,7 @@ def _build_casino_html(
     multiplier: float,
     new_balance: int,
     txn_id: Optional[int] = None,
+    theme_id: str | None = None,
 ) -> str:
     """Build HTML for a casino game ledger slip (4-column)."""
     game = GAME_INFO.get(game_type, {"label": game_type.upper(), "icon": "\u2B22"})
@@ -265,7 +266,7 @@ def _build_casino_html(
     <span class="footer-time">{_esc(time_str)}</span>
   </div>"""
 
-    return wrap_card(body, outcome)
+    return wrap_card(body, outcome, theme_id=theme_id)
 
 
 def _build_transaction_html(
@@ -275,6 +276,7 @@ def _build_transaction_html(
     balance_after: int,
     description: str = "",
     txn_id: Optional[int] = None,
+    theme_id: str | None = None,
 ) -> str:
     """Build HTML for a non-casino transaction slip (3-column + description)."""
     info = SOURCE_INFO.get(source, SOURCE_INFO.get("ADMIN"))
@@ -328,7 +330,7 @@ def _build_transaction_html(
     <span class="footer-time">{_esc(time_str)}</span>
   </div>"""
 
-    return wrap_card(body, status_class)
+    return wrap_card(body, status_class, theme_id=theme_id)
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
@@ -347,6 +349,7 @@ async def render_ledger_card(
     multiplier: float,
     new_balance: int,
     txn_id: Optional[int] = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """
     Render a casino game ledger slip as a PNG.
@@ -355,6 +358,7 @@ async def render_ledger_card(
     html_content = _build_casino_html(
         player_name, game_type, wager, outcome,
         payout, multiplier, new_balance, txn_id,
+        theme_id=theme_id,
     )
     return await _render_html_to_png(html_content)
 
@@ -366,6 +370,7 @@ async def render_transaction_slip(
     balance_after: int,
     description: str = "",
     txn_id: Optional[int] = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """
     Render a general transaction slip as a PNG.
@@ -374,5 +379,6 @@ async def render_transaction_slip(
     """
     html_content = _build_transaction_html(
         source, player_name, amount, balance_after, description, txn_id,
+        theme_id=theme_id,
     )
     return await _render_html_to_png(html_content)

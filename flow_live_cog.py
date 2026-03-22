@@ -28,6 +28,12 @@ try:
 except ImportError:
     flow_bus = None  # Soft fallback — cog degrades gracefully if flow_events missing
 
+try:
+    from flow_wallet import get_theme_for_render
+except ImportError:
+    def get_theme_for_render(_uid):  # noqa: E301
+        return None
+
 log = logging.getLogger(__name__)
 
 SESSION_IDLE_TIMEOUT = 300  # 5 minutes
@@ -648,7 +654,7 @@ class FlowLiveCog(commands.Cog):
 
         # Render
         import io
-        png_bytes = await render_pulse_card(data)
+        png_bytes = await render_pulse_card(data, theme_id=None)
         file = discord.File(io.BytesIO(png_bytes), filename="pulse.png")
 
         # Edit-in-place or create new
@@ -680,7 +686,8 @@ class FlowLiveCog(commands.Cog):
 
         from casino.renderer.session_recap_renderer import render_session_recap
         import io
-        png_bytes = await render_session_recap(session, display_name)
+        theme_id = get_theme_for_render(session.discord_id)
+        png_bytes = await render_session_recap(session, display_name, theme_id=theme_id)
         file = discord.File(io.BytesIO(png_bytes), filename="session_recap.png")
         await channel.send(file=file)
 
@@ -694,6 +701,10 @@ class FlowLiveCog(commands.Cog):
         png_bytes = None
         event = highlight.event
 
+        # Resolve theme for the event's user (if applicable)
+        _evt_uid = getattr(event, "discord_id", None)
+        theme_id = get_theme_for_render(_evt_uid)
+
         try:
             if hasattr(event, "game_type"):
                 # GameResultEvent
@@ -703,14 +714,14 @@ class FlowLiveCog(commands.Cog):
 
                 if event.extra.get("jackpot"):
                     from casino.renderer.highlight_renderer import render_jackpot_card
-                    png_bytes = await render_jackpot_card(player, event.payout, event.multiplier)
+                    png_bytes = await render_jackpot_card(player, event.payout, event.multiplier, theme_id=theme_id)
                 elif event.game_type == "coinflip_pvp":
                     from casino.renderer.highlight_renderer import render_pvp_card
                     loser = event.extra.get("opponent", "opponent")
-                    png_bytes = await render_pvp_card(player, loser, event.payout)
+                    png_bytes = await render_pvp_card(player, loser, event.payout, theme_id=theme_id)
                 elif event.extra.get("last_man_standing"):
                     from casino.renderer.highlight_renderer import render_crash_lms_card
-                    png_bytes = await render_crash_lms_card(player, event.multiplier, event.payout)
+                    png_bytes = await render_crash_lms_card(player, event.multiplier, event.payout, theme_id=theme_id)
 
             elif hasattr(event, "bet_type"):
                 # SportsbookEvent
@@ -724,14 +735,14 @@ class FlowLiveCog(commands.Cog):
                     leg_count, odds_str, leg_picks = await loop.run_in_executor(
                         None, get_parlay_display_info, event.bet_id
                     )
-                    png_bytes = await render_parlay_card(player, leg_count, odds_str, event.amount, leg_picks=leg_picks)
+                    png_bytes = await render_parlay_card(player, leg_count, odds_str, event.amount, leg_picks=leg_picks, theme_id=theme_id)
 
             elif hasattr(event, "market_title"):
-                # PredictionEvent
+                # PredictionEvent — no individual user, pass None
                 from casino.renderer.highlight_renderer import render_prediction_card
                 png_bytes = await render_prediction_card(
                     event.market_title, event.resolution,
-                    event.winners, event.total_payout
+                    event.winners, event.total_payout, theme_id=None
                 )
         except Exception:
             log.exception("Failed to render highlight card")

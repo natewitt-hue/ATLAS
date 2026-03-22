@@ -26,7 +26,6 @@ import io
 import logging
 
 import discord
-from atlas_colors import AtlasColors
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +37,7 @@ from casino.casino_db import (
     process_wager, check_achievements,
 )
 from casino.renderer.casino_html_renderer import render_crash_card
+from flow_wallet import get_theme_for_render
 
 if TYPE_CHECKING:
     pass
@@ -134,8 +134,10 @@ async def _run_lobby(round_obj: CrashRound, channel: discord.TextChannel) -> Non
     for remaining in range(LOBBY_SECS, 0, -5):
         if round_obj.status != "lobby":
             return
-        embed = _build_lobby_embed(round_obj, remaining)
         player_names = [p.display_name for p in round_obj.players.values()]
+        # Use theme from first player in the round
+        first_player = next(iter(round_obj.players.values()), None)
+        theme_id = get_theme_for_render(first_player.discord_id) if first_player else None
         png   = await render_crash_card(
             current_mult=1.00, crashed=False,
             history=recent_crashes.get(round_obj.channel_id, []),
@@ -143,14 +145,14 @@ async def _run_lobby(round_obj: CrashRound, channel: discord.TextChannel) -> Non
             total_wagered=round_obj.total_wagered,
             players=player_names,
             is_live=True,
+            theme_id=theme_id,
         )
         file = discord.File(io.BytesIO(png), filename="crash.png")
-        embed.set_image(url="attachment://crash.png")
         try:
             if round_obj.message is None:
-                round_obj.message = await channel.send(embed=embed, file=file)
+                round_obj.message = await channel.send(file=file)
             else:
-                await round_obj.message.edit(embed=embed, attachments=[file])
+                await round_obj.message.edit(attachments=[file])
         except discord.HTTPException as exc:
             log.warning("Crash lobby render failed: %s", exc)
             try:
@@ -185,6 +187,8 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 break
 
             player_names = [p.display_name for p in round_obj.players.values()]
+            first_player = next(iter(round_obj.players.values()), None)
+            theme_id = get_theme_for_render(first_player.discord_id) if first_player else None
             png  = await render_crash_card(
                 current_mult  = round_obj.current_mult,
                 crashed       = False,
@@ -193,15 +197,14 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
                 total_wagered = round_obj.total_wagered,
                 players       = player_names,
                 is_live       = True,
+                theme_id      = theme_id,
             )
             file  = discord.File(io.BytesIO(png), filename="crash.png")
-            embed = _build_running_embed(round_obj)
-            embed.set_image(url="attachment://crash.png")
             try:
                 if round_obj.message:
-                    await round_obj.message.edit(embed=embed, attachments=[file], view=view)
+                    await round_obj.message.edit(attachments=[file], view=view)
                 else:
-                    round_obj.message = await channel.send(embed=embed, file=file, view=view)
+                    round_obj.message = await channel.send(file=file, view=view)
             except discord.HTTPException as exc:
                 log.warning("Crash round render failed at %.2fx: %s", round_obj.current_mult, exc)
                 try:
@@ -296,6 +299,8 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
 
     # Final crashed render
     player_names = [p.display_name for p in round_obj.players.values()]
+    first_player = next(iter(round_obj.players.values()), None)
+    theme_id = get_theme_for_render(first_player.discord_id) if first_player else None
     png   = await render_crash_card(
         current_mult  = round_obj.crash_point,
         crashed       = True,
@@ -303,15 +308,14 @@ async def _run_round(round_obj: CrashRound, bot: discord.Client) -> None:
         players_in    = 0,
         total_wagered = round_obj.total_wagered,
         players       = player_names,
+        theme_id      = theme_id,
     )
     file  = discord.File(io.BytesIO(png), filename="crash.png")
-    embed = _build_crash_embed(round_obj, lms_player=lms_player)
-    embed.set_image(url="attachment://crash.png")
     try:
         if round_obj.message:
-            await round_obj.message.edit(embed=embed, attachments=[file], view=view)
+            await round_obj.message.edit(attachments=[file], view=view)
         else:
-            await channel.send(embed=embed, file=file)
+            await channel.send(file=file)
     except discord.HTTPException as exc:
         log.warning("Crash final result render failed: %s", exc)
         try:
@@ -399,89 +403,6 @@ class CrashView(discord.ui.View):
             f"— **+${profit:,}!**",
             ephemeral=False,
         )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  EMBED BUILDERS
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _build_lobby_embed(round_obj: CrashRound, remaining: int) -> discord.Embed:
-    embed = discord.Embed(
-        title       = "🚀 FLOW CRASH — Lobby Open",
-        description = (
-            f"**Round #{round_obj.round_id}** starts in **{remaining}s**\n"
-            f"Use `/crash [amount]` to join!\n\n"
-            + _players_list(round_obj)
-        ),
-        color = AtlasColors.CASINO,
-    )
-    embed.add_field(name="Players", value=str(len(round_obj.players)), inline=True)
-    embed.add_field(name="Total Wagered", value=f"${round_obj.total_wagered:,}", inline=True)
-    return embed
-
-
-def _build_running_embed(round_obj: CrashRound) -> discord.Embed:
-    embed = discord.Embed(
-        title       = f"🚀 FLOW CRASH — {round_obj.current_mult:.2f}x",
-        color       = AtlasColors.CASINO,
-    )
-    embed.add_field(name="Multiplier",    value=f"**{round_obj.current_mult:.2f}x**", inline=True)
-    embed.add_field(name="Still In",      value=str(round_obj.players_in),            inline=True)
-    embed.add_field(name="Total Wagered", value=f"${round_obj.total_wagered:,}", inline=True)
-    embed.add_field(name="Players",       value=_players_list(round_obj),             inline=False)
-    return embed
-
-
-def _build_crash_embed(round_obj: CrashRound, lms_player: "PlayerBet | None" = None) -> discord.Embed:
-    embed = discord.Embed(
-        title       = f"💥 CRASHED @ {round_obj.crash_point:.2f}x",
-        color       = AtlasColors.ERROR,
-    )
-    embed.add_field(name="Crash Point",   value=f"**{round_obj.crash_point:.2f}x**", inline=True)
-    embed.add_field(name="Seed (Proof)",  value=f"`{round_obj.seed}`",               inline=True)
-
-    # Cashouts
-    cashed = [(p, p.cashout_mult) for p in round_obj.players.values() if p.cashed_out]
-    busted = [p for p in round_obj.players.values() if not p.cashed_out]
-
-    if cashed:
-        cashout_lines = []
-        for p, m in sorted(cashed, key=lambda x: x[1], reverse=True):
-            profit = int(p.wager * m) - p.wager
-            line = f"✅ **{p.display_name}** — {m:.2f}x (+{profit:,})"
-            if lms_player and p.discord_id == lms_player.discord_id:
-                lms_bonus = int(p.wager * m * LMS_BONUS_PCT)
-                line += f" 🏆 **LAST MAN STANDING** +${lms_bonus:,}"
-            # Near-miss for close escapes
-            near_miss = _detect_crash_near_miss(p, round_obj.crash_point)
-            if near_miss:
-                line += f"\n  ⚡ *{near_miss}*"
-            cashout_lines.append(line)
-        embed.add_field(name="💰 Cashed Out", value="\n".join(cashout_lines)[:1020], inline=False)
-
-    if busted:
-        bust_lines = []
-        for p in busted:
-            line = f"❌ **{p.display_name}** — -${p.wager:,}"
-            near_miss = _detect_crash_near_miss(p, round_obj.crash_point)
-            if near_miss:
-                line += f"\n  😬 *{near_miss}*"
-            bust_lines.append(line)
-        embed.add_field(name="💥 Busted", value="\n".join(bust_lines)[:1020], inline=False)
-
-    return embed
-
-
-def _players_list(round_obj: CrashRound) -> str:
-    if not round_obj.players:
-        return "*No players yet — be the first!*"
-    lines = []
-    for p in round_obj.players.values():
-        if p.cashed_out:
-            lines.append(f"✅ {p.display_name} ({p.cashout_mult:.2f}x)")
-        else:
-            lines.append(f"🎲 {p.display_name} (${p.wager:,})")
-    return "\n".join(lines[:15])   # cap at 15 to avoid embed overflow
 
 
 # ═════════════════════════════════════════════════════════════════════════════

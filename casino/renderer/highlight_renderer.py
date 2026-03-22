@@ -88,6 +88,7 @@ def _wrap_card(
     body_html: str,
     commentary: str,
     player: str,
+    theme_id: str | None = None,
 ) -> str:
     """Build a full HTML document around the card shell.
 
@@ -136,12 +137,12 @@ def _wrap_card(
 
   </div><!-- /inner padding -->
 """
-    return wrap_card(inner_html)
+    return wrap_card(inner_html, theme_id=theme_id)
 
 
 # ── Jackpot card ──────────────────────────────────────────────────────────────
 
-def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary: str) -> str:
+def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary: str, theme_id: str | None = None) -> str:
     amount_str = f"${amount:,}"
     mult_str = f"{multiplier:,.1f}x"
 
@@ -204,6 +205,7 @@ def _build_jackpot_html(player: str, amount: int, multiplier: float, commentary:
         body_html=body,
         commentary=commentary,
         player=player,
+        theme_id=theme_id,
     )
 
 
@@ -212,15 +214,16 @@ async def render_jackpot_card(
     amount: int,
     multiplier: float,
     commentary: str = "",
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a jackpot hit highlight card to PNG bytes."""
-    doc = _build_jackpot_html(player, amount, multiplier, commentary)
+    doc = _build_jackpot_html(player, amount, multiplier, commentary, theme_id=theme_id)
     return await render_card(doc)
 
 
 # ── PvP Coinflip card ─────────────────────────────────────────────────────────
 
-def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> str:
+def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str, theme_id: str | None = None) -> str:
     amount_str = f"${amount:,}"
 
     body = f"""
@@ -330,6 +333,7 @@ def _build_pvp_html(winner: str, loser: str, amount: int, commentary: str) -> st
         body_html=body,
         commentary=commentary,
         player=winner,
+        theme_id=theme_id,
     )
 
 
@@ -338,15 +342,16 @@ async def render_pvp_card(
     loser: str,
     amount: int,
     commentary: str = "",
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a PvP coinflip result highlight card to PNG bytes."""
-    doc = _build_pvp_html(winner, loser, amount, commentary)
+    doc = _build_pvp_html(winner, loser, amount, commentary, theme_id=theme_id)
     return await render_card(doc)
 
 
 # ── Crash Last Man Standing card ──────────────────────────────────────────────
 
-def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentary: str) -> str:
+def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentary: str, theme_id: str | None = None) -> str:
     mult_str = f"{multiplier:,.2f}x"
     payout_str = f"${payout:,}"
 
@@ -413,6 +418,7 @@ def _build_crash_lms_html(player: str, multiplier: float, payout: int, commentar
         body_html=body,
         commentary=commentary,
         player=player,
+        theme_id=theme_id,
     )
 
 
@@ -421,9 +427,10 @@ async def render_crash_lms_card(
     multiplier: float,
     payout: int,
     commentary: str = "",
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a Crash Last Man Standing highlight card to PNG bytes."""
-    doc = _build_crash_lms_html(player, multiplier, payout, commentary)
+    doc = _build_crash_lms_html(player, multiplier, payout, commentary, theme_id=theme_id)
     return await render_card(doc)
 
 
@@ -435,6 +442,7 @@ def _build_prediction_html(
     winners: int,
     payout: int,
     commentary: str,
+    theme_id: str | None = None,
 ) -> str:
     payout_str = f"${payout:,}"
     is_yes = resolution.upper().startswith("Y")
@@ -517,6 +525,7 @@ def _build_prediction_html(
         body_html=body,
         commentary=commentary,
         player=f"{winners:,} winner{'s' if winners != 1 else ''}",
+        theme_id=theme_id,
     )
 
 
@@ -526,9 +535,10 @@ async def render_prediction_card(
     winners: int,
     payout: int,
     commentary: str = "",
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a prediction market resolution highlight card to PNG bytes."""
-    doc = _build_prediction_html(title, resolution, winners, payout, commentary)
+    doc = _build_prediction_html(title, resolution, winners, payout, commentary, theme_id=theme_id)
     return await render_card(doc)
 
 
@@ -555,6 +565,7 @@ def _build_parlay_html(
     payout: int,
     commentary: str,
     leg_picks: list[dict] | None = None,
+    theme_id: str | None = None,
 ) -> str:
     payout_str = f"${payout:,}"
 
@@ -679,6 +690,7 @@ def _build_parlay_html(
         body_html=body,
         commentary=commentary,
         player=player,
+        theme_id=theme_id,
     )
 
 
@@ -689,7 +701,8 @@ async def render_parlay_card(
     payout: int,
     commentary: str = "",
     leg_picks: list[dict] | None = None,
+    theme_id: str | None = None,
 ) -> bytes:
     """Render a sportsbook parlay hit highlight card to PNG bytes."""
-    doc = _build_parlay_html(player, legs, odds, payout, commentary, leg_picks=leg_picks)
+    doc = _build_parlay_html(player, legs, odds, payout, commentary, leg_picks=leg_picks, theme_id=theme_id)
     return await render_card(doc)

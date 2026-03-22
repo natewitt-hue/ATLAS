@@ -481,7 +481,7 @@ def _gather_my_bets_data(user_id: int) -> dict:
     return {"balance": balance, "straight": straight, "parlays": parlays, "legs_map": legs_map, "real_bets": real_bets}
 
 
-async def build_my_bets_card(user_id: int) -> bytes:
+async def build_my_bets_card(user_id: int, *, theme_id: str | None = None) -> bytes:
     """Build the My Bets card showing active sportsbook positions."""
     d = await asyncio.get_running_loop().run_in_executor(None, _gather_my_bets_data, user_id)
     balance = d["balance"]
@@ -631,7 +631,7 @@ async def build_my_bets_card(user_id: int) -> bytes:
 <div class="footer-text">All Sportsbooks · Pending bets only</div>
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -660,7 +660,7 @@ def _gather_portfolio_data(user_id: int) -> dict:
     return {"balance": balance, "rows": rows}
 
 
-async def build_portfolio_card(user_id: int) -> bytes:
+async def build_portfolio_card(user_id: int, *, theme_id: str | None = None) -> bytes:
     """Build the Portfolio card showing prediction market positions."""
     d = await asyncio.get_running_loop().run_in_executor(None, _gather_portfolio_data, user_id)
     balance = d["balance"]
@@ -733,7 +733,7 @@ async def build_portfolio_card(user_id: int) -> bytes:
 <div class="footer-text">ATLAS Prediction Markets</div>
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -768,7 +768,7 @@ def _gather_wallet_data(user_id: int) -> dict:
     return {"balance": balance, "delta": delta, "txns": txns}
 
 
-async def build_wallet_card(user_id: int) -> bytes:
+async def build_wallet_card(user_id: int, *, theme_id: str | None = None) -> bytes:
     """Build the Wallet/Ledger card showing balance and recent transactions."""
     d = await asyncio.get_running_loop().run_in_executor(None, _gather_wallet_data, user_id)
     balance = d["balance"]
@@ -832,7 +832,7 @@ async def build_wallet_card(user_id: int) -> bytes:
 <div class="footer-text">ATLAS Flow Economy</div>
 """
 
-    full_html = wrap_card(body, status_class=status_class)
+    full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
     return await render_card(full_html)
 
 
@@ -860,7 +860,7 @@ def _gather_leaderboard_data() -> dict:
     return {"users": users, "win_rates": win_rates}
 
 
-async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
+async def build_leaderboard_card(viewer_id: int, name_resolver=None, *, theme_id: str | None = None) -> bytes:
     """Build the Leaderboard card showing top 10 users with multi-stat columns.
 
     Args:
@@ -967,5 +967,5 @@ async def build_leaderboard_card(viewer_id: int, name_resolver=None) -> bytes:
 <div class="footer-text">ATLAS Flow Economy</div>
 """
 
-    full_html = wrap_card(body, status_class="jackpot")
+    full_html = wrap_card(body, status_class="jackpot", theme_id=theme_id)
     return await render_card(full_html)

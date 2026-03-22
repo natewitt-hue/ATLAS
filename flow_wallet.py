@@ -103,6 +103,17 @@ def set_theme(user_id: int, theme_id: str) -> None:
         con.commit()
 
 
+def get_theme_for_render(user_id: int | None) -> str | None:
+    """Convenience: return theme_id if user_id provided, else None.
+
+    Used by cogs/renderers that may or may not have a user context
+    (e.g., server-wide dashboards pass None → base tokens).
+    """
+    if user_id is None:
+        return None
+    return get_theme(user_id)
+
+
 # =============================================================================
 #  INTERNAL HELPERS
 # =============================================================================

@@ -24,7 +24,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import discord
-from atlas_colors import AtlasColors
 
 from casino.casino_db import (
     deduct_wager, process_wager, refund_wager, get_balance,
@@ -32,7 +31,7 @@ from casino.casino_db import (
 )
 from casino.play_again import PlayAgainView
 from casino.renderer.casino_html_renderer import render_blackjack_card
-from embed_helpers import casino_result_footer
+from flow_wallet import get_theme_for_render
 
 
 SUITS  = ["♠", "♥", "♦", "♣"]
@@ -386,6 +385,7 @@ async def _update_table_message(
     status:      str  = "",
 ) -> None:
     bal = await get_balance(session.discord_id)
+    theme_id = get_theme_for_render(session.discord_id)
     png = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
         player_hand  = session.active_hand,
@@ -396,30 +396,10 @@ async def _update_table_message(
         wager        = session.wager,
         balance      = bal,
         player_name  = interaction.user.display_name if hasattr(interaction, 'user') else "Player",
+        theme_id     = theme_id,
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
-    embed = discord.Embed(
-        title       = "🃏 FLOW Casino — Blackjack",
-        description = _hand_description(session),
-        color       = AtlasColors.CASINO,
-    )
-    embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"Wager: ${session.wager:,}  |  Balance: ${bal:,}")
-    await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
-
-
-def _hand_description(session: BlackjackSession) -> str:
-    p  = _hand_value(session.player_hand)
-    ph = f"**Your hand:** {_cards_str(session.player_hand)} = **{p}**"
-    if session.split_active:
-        s  = _hand_value(session.split_hand)
-        ph += f"\n**Split hand:** {_cards_str(session.split_hand)} = **{s}**"
-    ph += f"\n**Dealer:** {_cards_str(session.dealer_hand[:1])} + 🂠"
-    return ph
-
-
-def _cards_str(hand: list[tuple[str, str]]) -> str:
-    return " ".join(f"`{v}{s}`" for v, s in hand)
+    await interaction.response.edit_message(attachments=[file], view=view)
 
 
 async def _finish_hand(
@@ -516,6 +496,7 @@ async def _finish_hand(
     streak_info = result.get("streak_info")
 
     bal = result["new_balance"]
+    theme_id = get_theme_for_render(session.discord_id)
     png = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
         player_hand  = session.active_hand,
@@ -528,57 +509,9 @@ async def _finish_hand(
         balance      = bal,
         player_name  = interaction.user.display_name,
         txn_id       = str(result.get("txn_id", "")),
+        theme_id     = theme_id,
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
-
-    # Amber for near-miss, otherwise normal colors
-    if near_miss_msg:
-        color = AtlasColors.WARNING
-    elif log_outcome == "win":
-        color = AtlasColors.SUCCESS
-    elif log_outcome == "loss":
-        color = AtlasColors.ERROR
-    else:
-        color = AtlasColors.INFO
-
-    embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
-    p_val = _hand_value(session.active_hand)
-    d_val = _hand_value(session.dealer_hand)
-    embed.add_field(
-        name  = "Your Hand",
-        value = f"{_cards_str(session.active_hand)} = **{p_val}**",
-        inline = True
-    )
-    embed.add_field(
-        name  = "Dealer Hand",
-        value = f"{_cards_str(session.dealer_hand)} = **{d_val}**",
-        inline = True
-    )
-    embed.add_field(
-        name  = "Result",
-        value = f"**{status_str}**\n{profit_str}",
-        inline = True
-    )
-    if near_miss_msg:
-        embed.add_field(name="😬 Close Call", value=near_miss_msg, inline=False)
-
-    # Streak info
-    if streak_info and streak_info.get("type") == "win" and streak_info.get("len", 0) >= 3:
-        from casino.casino_db import get_streak_bonus
-        bonus = get_streak_bonus(streak_info)
-        if bonus:
-            embed.add_field(name="Momentum", value=f"🔥 {bonus['label']} (W{streak_info['len']})", inline=True)
-    if streak_info and streak_info.get("type") == "loss" and streak_info.get("len", 0) >= 5:
-        embed.add_field(name="Streak", value=f"❄️ L{streak_info['len']}", inline=True)
-    if result.get("streak_bonus"):
-        sb = result["streak_bonus"]
-        embed.add_field(name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True)
-    if result.get("jackpot_result"):
-        jp = result["jackpot_result"]
-        embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
-
-    embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=casino_result_footer(bal, result.get("txn_id"), streak_info))
 
     max_bet = await get_max_bet(session.discord_id)
     replay_view = PlayAgainView(
@@ -589,17 +522,22 @@ async def _finish_hand(
         streak_info=streak_info,
         near_miss_msg=near_miss_msg,
     )
-    await interaction.response.edit_message(embed=embed, attachments=[file], view=replay_view)
+    await interaction.response.edit_message(attachments=[file], view=replay_view)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT — called from casino.py
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
+async def start_blackjack(
+    interaction: discord.Interaction,
+    wager: int,
+    replay_message: discord.Message | None = None,
+) -> None:
     """
     Begin a new blackjack hand for the interacting user.
     Called from the casino hub or directly in #casino-blackjack.
+    replay_message: if set, edit this message in-place instead of sending a new one.
     """
     await interaction.response.defer()
 
@@ -695,6 +633,7 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         profit     = payout - wager
         profit_str = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
 
+        theme_id = get_theme_for_render(uid)
         png = await render_blackjack_card(
             dealer_hand  = session.dealer_hand,
             player_hand  = session.player_hand,
@@ -707,44 +646,10 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             balance      = bal,
             player_name  = interaction.user.display_name,
             txn_id       = str(result.get("txn_id", "")),
+            theme_id     = theme_id,
         )
         file  = discord.File(io.BytesIO(png), filename="blackjack.png")
-        color = (AtlasColors.SUCCESS if outcome == "win"
-                 else AtlasColors.ERROR if outcome == "loss"
-                 else AtlasColors.INFO)
-
-        embed = discord.Embed(title="🃏 FLOW Casino — Blackjack", color=color)
-        embed.add_field(
-            name="Your Hand",
-            value=f"{_cards_str(session.player_hand)} = **{_hand_value(session.player_hand)}**",
-            inline=True
-        )
-        embed.add_field(
-            name="Dealer Hand",
-            value=f"{_cards_str(session.dealer_hand)} = **{_hand_value(session.dealer_hand)}**",
-            inline=True
-        )
-        embed.add_field(
-            name="Result",
-            value=f"**{status_str}**\n{profit_str}",
-            inline=True
-        )
-        # Streak + jackpot info
         streak_info = result.get("streak_info")
-        if streak_info and streak_info.get("type") == "win" and streak_info.get("len", 0) >= 3:
-            from casino.casino_db import get_streak_bonus
-            bonus = get_streak_bonus(streak_info)
-            if bonus:
-                embed.add_field(name="Momentum", value=f"🔥 {bonus['label']} (W{streak_info['len']})", inline=True)
-        if result.get("streak_bonus"):
-            sb = result["streak_bonus"]
-            embed.add_field(name="Streak Bonus", value=f"+${sb['amount']:,} ({sb['label']})", inline=True)
-        if result.get("jackpot_result"):
-            jp = result["jackpot_result"]
-            embed.add_field(name=f"💎 JACKPOT {jp['tier'].upper()}!", value=f"+${jp['amount']:,}", inline=False)
-
-        embed.set_image(url="attachment://blackjack.png")
-        embed.set_footer(text=casino_result_footer(bal, result.get("txn_id"), streak_info))
         replay_view = PlayAgainView(
             user_id=uid,
             wager=wager,
@@ -752,10 +657,13 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
             double_callback=functools.partial(start_blackjack, wager=min(wager * 2, max_bet)),
             streak_info=streak_info,
         )
-        return await interaction.followup.send(embed=embed, file=file, view=replay_view)
+        if replay_message:
+            return await replay_message.edit(attachments=[file], view=replay_view)
+        return await interaction.followup.send(file=file, view=replay_view)
 
     # ── Normal deal: render and send active table ─────────────────────────
     bal  = await get_balance(uid)
+    theme_id = get_theme_for_render(uid)
     png  = await render_blackjack_card(
         dealer_hand  = session.dealer_hand,
         player_hand  = session.player_hand,
@@ -765,17 +673,14 @@ async def start_blackjack(interaction: discord.Interaction, wager: int) -> None:
         wager        = wager,
         balance      = bal,
         player_name  = interaction.user.display_name,
+        theme_id     = theme_id,
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
-    embed = discord.Embed(
-        title       = f"🃏 FLOW Casino — Blackjack  |  {interaction.user.display_name}",
-        description = _hand_description(session),
-        color       = AtlasColors.CASINO,
-    )
-    embed.set_image(url="attachment://blackjack.png")
-    embed.set_footer(text=f"Wager: ${wager:,}  |  Balance: ${bal:,}  |  5-min timeout")
 
     view = BlackjackView(session)
-    await interaction.followup.send(embed=embed, file=file, view=view)
+    if replay_message:
+        await replay_message.edit(attachments=[file], view=view)
+    else:
+        await interaction.followup.send(file=file, view=view)
 
 

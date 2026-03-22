@@ -171,7 +171,7 @@ def _pick_card_html(pk: dict) -> str:
     </div>"""
 
 
-def _build_html(data: dict) -> str:
+def _build_html(data: dict, *, theme_id: str | None = None) -> str:
     # ── Status config ────────────────────────────────────────────────────────
     status = data.get("status", "pending")
     status_cfg = {
@@ -735,18 +735,18 @@ def _build_html(data: dict) -> str:
     </div>
   </div>"""
 
-    return wrap_card(trade_css, "")
+    return wrap_card(trade_css, "", theme_id=theme_id)
 
 
 # ── Main render function ─────────────────────────────────────────────────────
 
-async def render_trade_card(data: dict) -> bytes | None:
+async def render_trade_card(data: dict, *, theme_id: str | None = None) -> bytes | None:
     """
     Render a trade card to PNG bytes.
     Returns None on failure (caller should fall back to embed).
     """
     try:
-        html = _build_html(data)
+        html = _build_html(data, theme_id=theme_id)
         return await engine_render_card(html, width=720)
     except Exception as e:
         print(f"[card_renderer] Render error: {e}")

@@ -165,7 +165,7 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
     return "\n".join(rows)
 
 
-def _build_pulse_html(data: PulseData) -> str:
+def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
     # Jackpot hero
     jackpot_str = f"${data.jackpot_amount:,}"
     if data.jackpot_last_player:
@@ -407,12 +407,12 @@ def _build_pulse_html(data: PulseData) -> str:
   </div><!-- /inner padding -->
 """
 
-    return wrap_card(body_html, status_class="jackpot")
+    return wrap_card(body_html, status_class="jackpot", theme_id=theme_id)
 
 
 # ── Renderer ─────────────────────────────────────────────────────────────────
 
-async def render_pulse_card(data: PulseData) -> bytes:
+async def render_pulse_card(data: PulseData, theme_id: str | None = None) -> bytes:
     """Render the pulse dashboard card to PNG bytes via Playwright."""
-    html = _build_pulse_html(data)
+    html = _build_pulse_html(data, theme_id=theme_id)
     return await render_card(html)

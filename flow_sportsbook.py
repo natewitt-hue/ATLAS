@@ -63,6 +63,8 @@ from sportsbook_cards import (
     build_sportsbook_card, build_stats_card, build_parlay_analytics_card,
     build_match_detail_card, build_real_match_detail_card, card_to_file,
 )
+from atlas_send import send_card
+from flow_wallet import get_theme_for_render
 from db_migration_snapshots import setup_snapshots_table, take_daily_snapshot, backfill_from_bets
 import logging
 
@@ -1471,15 +1473,16 @@ async def _place_straight_bet(
     if not already_deferred:
         await interaction.response.defer(ephemeral=True)
 
-    from sportsbook_cards import build_bet_confirm_card, card_to_file
+    from sportsbook_cards import build_bet_confirm_card
+    theme_id = get_theme_for_render(interaction.user.id)
     safe_line = line if isinstance(line, (int, float)) else None
     png = await build_bet_confirm_card(
         pick=team, bet_type=bet_type, odds=odds,
         risk=amount, to_win=profit, balance=new_bal,
         matchup=matchup_key, week=bet_week, line=safe_line,
+        theme_id=theme_id,
     )
-    file = card_to_file(png, "bet_confirm.png")
-    await interaction.followup.send(file=file, ephemeral=True)
+    await send_card(interaction, png, filename="bet_confirm.png", followup=True, ephemeral=True)
 
     # Post to #ledger
     try:
@@ -1681,13 +1684,14 @@ class ParlayWagerModal(discord.ui.Modal):
         _clear_cart(interaction.user.id)
 
         await interaction.response.defer(ephemeral=True)
-        from sportsbook_cards import build_parlay_confirm_card, card_to_file
+        from sportsbook_cards import build_parlay_confirm_card
+        theme_id = get_theme_for_render(interaction.user.id)
         png = await build_parlay_confirm_card(
             legs=self.legs, combined_odds=self.combined_odds,
             risk=amt, to_win=potential, week=dm.CURRENT_WEEK + 1,
+            theme_id=theme_id,
         )
-        file = card_to_file(png, "parlay_confirm.png")
-        await interaction.followup.send(file=file, ephemeral=True)
+        await send_card(interaction, png, filename="parlay_confirm.png", followup=True, ephemeral=True)
 
         # Post to #ledger
         try:
@@ -2125,7 +2129,8 @@ class SportsbookWorkspace(discord.ui.View):
         self._current_game = game
 
         is_locked = _is_locked(game["game_id"])
-        png = await build_match_detail_card(game, locked=is_locked)
+        theme_id = get_theme_for_render(self.user_id)
+        png = await build_match_detail_card(game, locked=is_locked, theme_id=theme_id)
         file = card_to_file(png, f"match_{game['game_id']}.png")
 
         embed = discord.Embed(color=TSL_GOLD)
@@ -2265,7 +2270,8 @@ class SportsbookWorkspace(discord.ui.View):
             await self._update_workspace(interaction, embed, self)
             return
 
-        png = await build_real_match_detail_card(event_row, sport_key=sport_key)
+        theme_id = get_theme_for_render(self.user_id)
+        png = await build_real_match_detail_card(event_row, sport_key=sport_key, theme_id=theme_id)
         file = card_to_file(png, f"match_{event['event_id']}.png")
 
         embed = discord.Embed(color=TSL_GOLD)
@@ -2785,11 +2791,9 @@ class SportsbookHubView(discord.ui.View):
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            img = await build_stats_card(interaction.user.id)
-            file = card_to_file(img, "stats.png")
-            embed = discord.Embed(color=TSL_GOLD)
-            embed.set_image(url="attachment://stats.png")
-            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+            theme_id = get_theme_for_render(interaction.user.id)
+            img = await build_stats_card(interaction.user.id, theme_id=theme_id)
+            await send_card(interaction, img, filename="stats.png", followup=True, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
@@ -2847,11 +2851,9 @@ class SportsbookHubView(discord.ui.View):
     async def parlay_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            img = await build_parlay_analytics_card(interaction.user.id)
-            file = card_to_file(img, "parlay_analytics.png")
-            embed = discord.Embed(color=TSL_GOLD)
-            embed.set_image(url="attachment://parlay_analytics.png")
-            await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+            theme_id = get_theme_for_render(interaction.user.id)
+            img = await build_parlay_analytics_card(interaction.user.id, theme_id=theme_id)
+            await send_card(interaction, img, filename="parlay_analytics.png", followup=True, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
@@ -2903,13 +2905,12 @@ class SportsbookSelectView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
 
-        from sportsbook_cards import build_match_detail_card, card_to_file
-        png = await build_match_detail_card(game, locked=is_locked)
-        file = card_to_file(png, f"match_{game['game_id']}.png")
+        from sportsbook_cards import build_match_detail_card
+        theme_id = get_theme_for_render(interaction.user.id)
+        png = await build_match_detail_card(game, locked=is_locked, theme_id=theme_id)
 
-        await interaction.followup.send(
-            file=file, view=GameCardViewWithParlay(game), ephemeral=True
-        )
+        await send_card(interaction, png, filename=f"match_{game['game_id']}.png",
+                        followup=True, ephemeral=True, view=GameCardViewWithParlay(game))
 
 
 
@@ -3124,11 +3125,10 @@ class SportsbookCog(commands.Cog):
     async def sportsbook(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            img = await build_sportsbook_card(interaction.user.id)
-            file = card_to_file(img, "sportsbook.png")
-            embed = discord.Embed(color=TSL_GOLD)
-            embed.set_image(url="attachment://sportsbook.png")
-            await interaction.followup.send(embed=embed, file=file, view=SportsbookHubView(self))
+            theme_id = get_theme_for_render(interaction.user.id)
+            img = await build_sportsbook_card(interaction.user.id, theme_id=theme_id)
+            await send_card(interaction, img, filename="sportsbook.png",
+                            followup=True, view=SportsbookHubView(self))
         except Exception as e:
             # Fallback to text embed if card rendering fails
             balance = _get_balance(interaction.user.id)

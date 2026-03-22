@@ -38,7 +38,9 @@ from format_utils import fmt_volume
 from flow_wallet import (
     DB_PATH,
     InsufficientFundsError,
+    get_theme_for_render,
 )
+from atlas_send import send_card, send_card_to_channel
 from casino.renderer.prediction_html_renderer import (
     render_market_list_card,
     render_market_detail_card,
@@ -811,16 +813,9 @@ class WagerModal(discord.ui.Modal):
                 return
 
         new_bal = balance - cost_bucks
-        color = 0x2ECC71 if self.side == "YES" else 0xE74C3C
 
         # Render V6 bet confirmation card
-        embed = discord.Embed(
-            title="Contract Purchased",
-            color=color,
-        )
-        embed.set_footer(text="Use /portfolio to view your positions · FLOW Markets")
-        embed.timestamp = datetime.now(timezone.utc)
-
+        theme_id = get_theme_for_render(interaction.user.id)
         try:
             png = await render_bet_confirmation_card(
                 market_title=self.market_title,
@@ -831,19 +826,21 @@ class WagerModal(discord.ui.Modal):
                 potential_payout=payout,
                 balance=new_bal,
                 player_name=interaction.user.display_name,
+                theme_id=theme_id,
             )
-            card_file = discord.File(io.BytesIO(png), filename="bet_confirm.png")
-            embed.set_image(url="attachment://bet_confirm.png")
-            await interaction.response.send_message(
-                embed=embed, file=card_file, ephemeral=True
-            )
+            await send_card(interaction, png, filename="bet_confirm.png", ephemeral=True)
         except Exception:
             log.exception("Failed to render bet confirmation card")
             profit = payout - cost_bucks
-            embed.description = (
-                f"**{self.market_title}**\n"
-                f"Side: **{self.side}** · Qty: **{quantity}** · Cost: **${cost_bucks:,}**\n"
-                f"Potential: **${payout:,}** · Profit: **+${profit:,}**"
+            color = 0x2ECC71 if self.side == "YES" else 0xE74C3C
+            embed = discord.Embed(
+                title="Contract Purchased",
+                color=color,
+                description=(
+                    f"**{self.market_title}**\n"
+                    f"Side: **{self.side}** · Qty: **{quantity}** · Cost: **${cost_bucks:,}**\n"
+                    f"Potential: **${payout:,}** · Profit: **+${profit:,}**"
+                ),
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1141,7 +1138,8 @@ class MarketBrowserView(discord.ui.View):
         self.state = "detail"
         self.selected_market = market
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1152,7 +1150,8 @@ class MarketBrowserView(discord.ui.View):
         self.state = "list"
         self.selected_market = None
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1164,7 +1163,8 @@ class MarketBrowserView(discord.ui.View):
         self.state = "list"
         self.selected_market = None
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1173,7 +1173,8 @@ class MarketBrowserView(discord.ui.View):
     async def _prev(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1182,7 +1183,8 @@ class MarketBrowserView(discord.ui.View):
     async def _next(self, interaction: discord.Interaction):
         self.page = min(self._max_page(), self.page + 1)
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1190,13 +1192,13 @@ class MarketBrowserView(discord.ui.View):
 
     # ── Page builders ──
 
-    async def _build_page(self) -> tuple[discord.Embed, discord.File | None]:
+    async def _build_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
         """Build embed + V6 card for the current state."""
         if self.state == "detail" and self.selected_market:
-            return await self._build_detail_page()
-        return await self._build_list_page()
+            return await self._build_detail_page(theme_id=theme_id)
+        return await self._build_list_page(theme_id=theme_id)
 
-    async def _build_list_page(self) -> tuple[discord.Embed, discord.File | None]:
+    async def _build_list_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
         """Build the market list view."""
         markets = self._filtered()
         total = len(markets)
@@ -1217,6 +1219,7 @@ class MarketBrowserView(discord.ui.View):
                     page=self.page + 1,
                     total_pages=self._max_page() + 1,
                     filter_label=cat_label,
+                    theme_id=theme_id,
                 )
                 card_file = discord.File(io.BytesIO(png), filename="markets.png")
                 embed.set_image(url="attachment://markets.png")
@@ -1242,7 +1245,7 @@ class MarketBrowserView(discord.ui.View):
         embed.timestamp = datetime.now(timezone.utc)
         return embed, card_file
 
-    async def _build_detail_page(self) -> tuple[discord.Embed, discord.File | None]:
+    async def _build_detail_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
         """Build the single-market detail view."""
         m = self.selected_market
         cat_label = m.get("category", "Other")
@@ -1262,6 +1265,7 @@ class MarketBrowserView(discord.ui.View):
                 volume=m.get("volume", 0),
                 liquidity=m.get("liquidity", 0),
                 end_date=m.get("end_date", ""),
+                theme_id=theme_id,
             )
             card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
             embed.set_image(url="attachment://market_detail.png")
@@ -1430,7 +1434,8 @@ class CuratedBrowserView(discord.ui.View):
         self.state = "detail"
         self.selected_market = market
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1440,7 +1445,8 @@ class CuratedBrowserView(discord.ui.View):
         self.state = "list"
         self.selected_market = None
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
@@ -1455,18 +1461,19 @@ class CuratedBrowserView(discord.ui.View):
                 view_mode=self.view_mode,
             )
         self._rebuild_components()
-        embed, card_file = await self._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await self._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": self, "attachments": []}
         if card_file:
             kwargs["attachments"] = [card_file]
         await interaction.response.edit_message(**kwargs)
 
-    async def _build_page(self) -> tuple[discord.Embed, discord.File | None]:
+    async def _build_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
         if self.state == "detail" and self.selected_market:
-            return await self._build_detail_page()
-        return await self._build_list_page()
+            return await self._build_detail_page(theme_id=theme_id)
+        return await self._build_list_page(theme_id=theme_id)
 
-    async def _build_list_page(self) -> tuple[discord.Embed, discord.File | None]:
+    async def _build_list_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
         total = len(self.markets)
         view_labels = {
             "curated": "Curated", "trending": "Trending",
@@ -1486,6 +1493,7 @@ class CuratedBrowserView(discord.ui.View):
                 png = await render_curated_list_card(
                     self.markets,
                     filter_label=filter_label,
+                    theme_id=theme_id,
                 )
                 card_file = discord.File(io.BytesIO(png), filename="markets.png")
                 embed.set_image(url="attachment://markets.png")
@@ -1504,7 +1512,7 @@ class CuratedBrowserView(discord.ui.View):
         embed.timestamp = datetime.now(timezone.utc)
         return embed, card_file
 
-    async def _build_detail_page(self) -> tuple[discord.Embed, discord.File | None]:
+    async def _build_detail_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
         m = self.selected_market
         embed = discord.Embed(
             title=m.get("title", "")[:80],
@@ -1521,6 +1529,7 @@ class CuratedBrowserView(discord.ui.View):
                 volume=m.get("volume", 0),
                 liquidity=m.get("liquidity", 0),
                 end_date=m.get("end_date", ""),
+                theme_id=theme_id,
             )
             card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
             embed.set_image(url="attachment://market_detail.png")
@@ -2177,7 +2186,6 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 channel = self._channel()
                 if channel:
                     try:
-                        from casino.renderer.prediction_html_renderer import render_price_alert_card
                         png = await render_price_alert_card(
                             market={
                                 "title": title, "category": category,
@@ -2186,14 +2194,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                             old_price=old_price,
                             new_price=current_price,
                             holders=holders,
+                            theme_id=None,
                         )
-                        direction = "up" if current_price > old_price else "down"
-                        embed = discord.Embed(
-                            title=f"Price Alert {'📈' if direction == 'up' else '📉'}",
-                            color=0x4ADE80 if direction == "up" else 0xF87171,
-                        )
-                        card_file = discord.File(io.BytesIO(png), filename="price_alert.png")
-                        embed.set_image(url="attachment://price_alert.png")
 
                         # Add bet button
                         view = discord.ui.View(timeout=3600)
@@ -2218,7 +2220,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                         bet_btn.callback = _alert_bet_cb
                         view.add_item(bet_btn)
 
-                        await channel.send(embed=embed, file=card_file, view=view)
+                        await send_card_to_channel(channel, png, filename="price_alert.png", view=view)
                         alerts_this_hour += 1
                     except Exception as e:
                         log.warning(f"Price alert render/post failed: {e}")
@@ -2261,31 +2263,27 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             )
             await db.commit()
 
+        theme_id = get_theme_for_render(interaction.user.id)
+        view = BetButtonView(
+            market_id=m["market_id"], slug=m["slug"], title=m["title"],
+            yes_price=m["yes_price"], no_price=m["no_price"], cog=self,
+        )
+
         try:
             png = await render_market_detail_card(
                 title=m["title"], category=m["category"],
                 yes_price=m["yes_price"], no_price=m["no_price"],
                 volume=m["volume"], liquidity=m["liquidity"],
                 end_date=m["end_date"],
+                theme_id=theme_id,
             )
-            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
-            embed = discord.Embed(color=0x3498DB)
-            embed.set_image(url="attachment://market_detail.png")
+            await send_card(interaction, png, filename="market_detail.png",
+                            followup=True, ephemeral=True, view=view)
         except Exception:
             embed = discord.Embed(title=m["title"][:80], color=0x3498DB)
             embed.add_field(name="YES", value=f"{m['yes_price']:.0%}", inline=True)
             embed.add_field(name="NO", value=f"{m['no_price']:.0%}", inline=True)
-            card_file = None
-
-        view = BetButtonView(
-            market_id=m["market_id"], slug=m["slug"], title=m["title"],
-            yes_price=m["yes_price"], no_price=m["no_price"], cog=self,
-        )
-
-        kwargs = {"embed": embed, "view": view, "ephemeral": True}
-        if card_file:
-            kwargs["file"] = card_file
-        await interaction.followup.send(**kwargs)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     async def _auto_resolve_pass(self):
         """
@@ -2584,12 +2582,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     total_won=won,
                     total_lost=lost,
                     total_voided=voided,
+                    theme_id=None,
                 )
-                card_file = discord.File(io.BytesIO(png), filename="resolution.png")
-                embed.set_image(url="attachment://resolution.png")
-                embed.set_footer(text="Winnings automatically credited · FLOW Markets")
-                embed.timestamp = datetime.now(timezone.utc)
-                await ch.send(embed=embed, file=card_file)
+                await send_card_to_channel(ch, png, filename="resolution.png")
             except Exception as e:
                 log.error(f"Resolution card render failed: {e}")
                 # Text fallback
@@ -2724,6 +2719,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 supporting=supporting,
                 community=community_data,
                 leaderboard=leaderboard,
+                theme_id=None,
             )
         except Exception as e:
             log.error(f"Daily Drop card render failed: {e}")
@@ -2734,15 +2730,6 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         if not channel:
             log.warning("Prediction channel not found — cannot post Daily Drop.")
             return
-
-        embed = discord.Embed(
-            title="🔥 Daily Drop — Today's Prediction Markets",
-            color=AtlasColors.TSL_GOLD,
-        )
-        card_file = discord.File(io.BytesIO(png), filename="daily_drop.png")
-        embed.set_image(url="attachment://daily_drop.png")
-        embed.set_footer(text="Use /markets to browse all markets · FLOW Markets")
-        embed.timestamp = datetime.now(timezone.utc)
 
         # Select menu for the 5 featured markets
         all_featured = [spotlight] + supporting
@@ -2784,7 +2771,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         select.callback = _drop_select_cb
         view.add_item(select)
 
-        msg = await channel.send(embed=embed, file=card_file, view=view)
+        msg = await send_card_to_channel(channel, png, filename="daily_drop.png", view=view)
 
         # Step 7: Store the selection
         async with aiosqlite.connect(DB_PATH) as db:
@@ -3017,7 +3004,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             filter_category=category,
         )
 
-        embed, card_file = await browser._build_page()
+        theme_id = get_theme_for_render(interaction.user.id)
+        embed, card_file = await browser._build_page(theme_id=theme_id)
         kwargs = {"embed": embed, "view": browser, "ephemeral": True}
         if card_file:
             kwargs["file"] = card_file
@@ -3212,6 +3200,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         except Exception:
             log.warning("Balance fetch failed for user %s, defaulting to 0", user_id)
 
+        theme_id = get_theme_for_render(user_id)
         try:
             png = await render_portfolio_card(
                 positions=positions,
@@ -3219,11 +3208,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 total_invested=total_invested,
                 total_potential=total_potential,
                 balance=balance,
+                theme_id=theme_id,
             )
-            card_file = discord.File(io.BytesIO(png), filename="portfolio.png")
-            embed = discord.Embed(color=0x3498DB)
-            embed.set_image(url="attachment://portfolio.png")
-            await interaction.followup.send(embed=embed, file=card_file, ephemeral=True)
+            await send_card(interaction, png, filename="portfolio.png",
+                            followup=True, ephemeral=True)
         except Exception as e:
             log.error(f"Portfolio card render failed: {e}")
             # Text fallback
