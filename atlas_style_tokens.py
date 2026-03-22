@@ -38,6 +38,12 @@ class Tokens:
     SLATE = "#94A3B8"
     SLATE_DIM = "#64748B"
     ROSE = "#FB7185"
+    TEXT_WARM = "#b0a890"       # warm tan — commentary, caption text
+    TEXT_WARM_LIGHT = "#c0b8a8" # warm gray — description text
+    TEXT_WARM_DIM = "#9a9280"   # warm muted — timestamps, labels
+    TEXT_LIGHT = "#DCDCE6"      # bright text — ledger balances
+    DISCORD_BLUE = "#5865F2"    # Discord blurple
+    SILVER = "#C0C0C0"          # metallic silver — coin tails
 
     # ── Typography ──
     FONT_DISPLAY = "Outfit"
@@ -100,6 +106,12 @@ class Tokens:
         "slate": SLATE,
         "slate-dim": SLATE_DIM,
         "rose": ROSE,
+        "text-warm": TEXT_WARM,
+        "text-warm-light": TEXT_WARM_LIGHT,
+        "text-warm-dim": TEXT_WARM_DIM,
+        "text-light": TEXT_LIGHT,
+        "discord-blue": DISCORD_BLUE,
+        "silver": SILVER,
         "font-display": FONT_DISPLAY,
         "font-mono": FONT_MONO,
         "font-xs": FONT_XS,

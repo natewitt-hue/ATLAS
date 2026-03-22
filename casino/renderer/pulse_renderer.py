@@ -138,7 +138,7 @@ _NOISE_SVG = (
 def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
     if not highlights:
         return (
-            '<div style="padding:10px 0;text-align:center;color:#9a9280;'
+            '<div style="padding:10px 0;text-align:center;color:var(--text-warm-dim);'
             'font-size:12px;font-family:var(--font-mono),monospace;">'
             "No recent activity</div>"
         )
@@ -153,10 +153,10 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
 <div style="display:grid;grid-template-columns:26px 1fr 84px 48px;align-items:center;
     gap:6px;padding:6px var(--space-sm);border-radius:var(--border-radius-sm);{row_bg}margin-bottom:3px;">
   <div style="font-size:var(--font-lg);text-align:center;">{h.icon}</div>
-  <div style="font-size:var(--font-sm);color:#c0b8a8;line-height:1.3;">{h.description_html}</div>
+  <div style="font-size:var(--font-sm);color:var(--text-warm-light);line-height:1.3;">{h.description_html}</div>
   <div style="font-family:var(--font-mono),monospace;font-size:var(--font-sm);font-weight:700;
       color:{amount_color};text-align:right;">{esc(h.amount_html)}</div>
-  <div style="font-size:var(--font-xs);color:#9a9280;text-align:right;
+  <div style="font-size:var(--font-xs);color:var(--text-warm-dim);text-align:right;
       font-family:var(--font-mono),monospace;">{esc(h.time_ago)}</div>
 </div>""")
     return "\n".join(rows)
@@ -181,14 +181,14 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
             f' on a {data.bj_streak_count}-win streak'
         )
     else:
-        bj_streak_line = '<span style="color:#9a9280;">No active streak</span>'
+        bj_streak_line = '<span style="color:var(--text-warm-dim);">No active streak</span>'
 
     if data.bj_players:
         bj_players_line = ", ".join(esc(p) for p in data.bj_players[:4])
         if len(data.bj_players) > 4:
             bj_players_line += f" +{len(data.bj_players) - 4}"
     else:
-        bj_players_line = '<span style="color:#9a9280;">No active games</span>'
+        bj_players_line = '<span style="color:var(--text-warm-dim);">No active games</span>'
 
     # Slots sub-line
     if data.slots_top_player:
@@ -197,7 +197,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
             f' ${data.slots_top_amount:,} ({data.slots_top_mult}x)'
         )
     else:
-        slots_sub = '<span style="color:#9a9280;">No spins yet today</span>'
+        slots_sub = '<span style="color:var(--text-warm-dim);">No spins yet today</span>'
 
     # Sportsbook sub-line
     if data.sb_hot_player and data.sb_hot_desc:
@@ -206,7 +206,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
             f' {esc(data.sb_hot_desc)}'
         )
     else:
-        sb_sub = '<span style="color:#9a9280;">No active bets</span>'
+        sb_sub = '<span style="color:var(--text-warm-dim);">No active bets</span>'
 
     # Predictions sub-line
     if data.pred_hot_title:
@@ -216,7 +216,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
             f' &middot; ${data.pred_volume:,} volume'
         )
     else:
-        pred_title_html = '<div style="font-size:14px;font-weight:600;color:#9a9280;margin-bottom:var(--space-xs);">No active markets</div>'
+        pred_title_html = '<div style="font-size:14px;font-weight:600;color:var(--text-warm-dim);margin-bottom:var(--space-xs);">No active markets</div>'
         pred_sub = ""
 
     highlights_html = _highlight_rows_html(data.highlights)
@@ -244,7 +244,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
             font-size:var(--font-base);">&#9889;</div>
         <div>
           <div style="font-size:17px;font-weight:800;letter-spacing:1px;color:var(--text-primary);">FLOW PULSE</div>
-          <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;letter-spacing:1px;">LIVE ACTIVITY DASHBOARD</div>
+          <div style="font-size:10px;color:var(--text-warm-dim);font-family:var(--font-mono),monospace;letter-spacing:1px;">LIVE ACTIVITY DASHBOARD</div>
         </div>
       </div>
       <!-- LIVE indicator -->
@@ -287,8 +287,8 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
           line-height:1.1;
           margin-bottom:6px;
       ">{jackpot_str}</div>
-      <div style="font-size:12px;color:#b0a890;">{last_hit_line}</div>
-      <div style="font-size:var(--font-xs);color:#9a9280;margin-top:2px;
+      <div style="font-size:12px;color:var(--text-warm);">{last_hit_line}</div>
+      <div style="font-size:var(--font-xs);color:var(--text-warm-dim);margin-top:2px;
           font-family:var(--font-mono),monospace;">{jackpot_ago}</div>
     </div>
 
@@ -310,8 +310,8 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
         </div>
         <div style="font-family:var(--font-mono),monospace;font-size:20px;font-weight:700;
             color:var(--gold);margin-bottom:var(--space-xs);">{data.active_bj} active</div>
-        <div style="font-size:var(--font-xs);color:#c0b8a8;margin-bottom:2px;">{bj_streak_line}</div>
-        <div style="font-size:10px;color:#9a9280;">{bj_players_line}</div>
+        <div style="font-size:var(--font-xs);color:var(--text-warm-light);margin-bottom:2px;">{bj_streak_line}</div>
+        <div style="font-size:10px;color:var(--text-warm-dim);">{bj_players_line}</div>
       </div>
 
       <!-- Slots -->
@@ -329,7 +329,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
         </div>
         <div style="font-family:var(--font-mono),monospace;font-size:20px;font-weight:700;
             color:var(--gold);margin-bottom:var(--space-xs);">{data.slots_spins_today:,} spins today</div>
-        <div style="font-size:var(--font-xs);color:#c0b8a8;">{slots_sub}</div>
+        <div style="font-size:var(--font-xs);color:var(--text-warm-light);">{slots_sub}</div>
       </div>
 
       <!-- Sportsbook -->
@@ -351,7 +351,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
         </div>
         <div style="font-family:var(--font-mono),monospace;font-size:var(--font-lg);font-weight:700;
             color:var(--gold);margin-bottom:var(--space-xs);">{data.sb_bets} bets &middot; ${data.sb_volume:,} vol</div>
-        <div style="font-size:var(--font-xs);color:#c0b8a8;">{sb_sub}</div>
+        <div style="font-size:var(--font-xs);color:var(--text-warm-light);">{sb_sub}</div>
       </div>
 
       <!-- Predictions -->
@@ -372,7 +372,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
               padding:2px 5px;border-radius:var(--border-radius-sm);font-family:var(--font-mono),monospace;">{data.pred_open} OPEN</div>
         </div>
         {pred_title_html}
-        <div style="font-size:10px;color:#9a9280;font-family:var(--font-mono),monospace;">{pred_sub}</div>
+        <div style="font-size:10px;color:var(--text-warm-dim);font-family:var(--font-mono),monospace;">{pred_sub}</div>
       </div>
 
     </div><!-- /game grid -->
@@ -391,7 +391,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
     <!-- ── Footer ─────────────────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;
         padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">
-      <div style="font-size:10px;color:#a8a090;font-family:var(--font-mono),monospace;">
+      <div style="font-size:10px;color:var(--text-warm-dim);font-family:var(--font-mono),monospace;">
         FLOW PULSE v1.1 &middot; Updates every 60s
       </div>
       <div style="display:flex;gap:var(--space-md);">

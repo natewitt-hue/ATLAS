@@ -106,4 +106,4 @@ Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` 
 
 ## Current Version
 
-**v6.8.0** — Prediction market curation overhaul: 6-layer garbage filter eliminates crypto/sports spam from Polymarket, reweighted curation scoring (tension 28%, audience fit 20%, urgency 18%), internal bet velocity boost, staleness rotation penalty, AI-curated daily drops.
+**v6.8.1** — Token migration: standardized all render widths to 700px (fixed 720px violations in trade/ledger cards), added warm text palette tokens (TEXT_WARM, TEXT_WARM_LIGHT, TEXT_WARM_DIM, TEXT_LIGHT, DISCORD_BLUE, SILVER), migrated ~45 hardcoded hex colors across 8 renderer files to use Tokens system.

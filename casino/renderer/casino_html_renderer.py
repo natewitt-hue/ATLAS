@@ -190,7 +190,7 @@ _BLACKJACK_CSS = """<style>
   font-size: 15px;
   letter-spacing: 0.24em;
   text-transform: uppercase;
-  background: linear-gradient(135deg, #FFDF73 0%, #D4AF37 40%, #FFF3A1 50%, #B8860B 60%, #FFDF73 100%);
+  background: linear-gradient(135deg, #FFDF73 0%, var(--gold) 40%, #FFF3A1 50%, #B8860B 60%, #FFDF73 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   filter: drop-shadow(0px 2px 8px rgba(255, 215, 0, 0.3));
@@ -710,7 +710,7 @@ _BLACKJACK_CSS = """<style>
 }
 .bj-r-big.bj-rb-bj {
   font-size: 54px;
-  background: linear-gradient(135deg, #FFDF73 0%, #D4AF37 40%, #FFF3A1 50%, #B8860B 60%, #FFDF73 100%);
+  background: linear-gradient(135deg, #FFDF73 0%, var(--gold) 40%, #FFF3A1 50%, #B8860B 60%, #FFDF73 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   filter: drop-shadow(0px 2px 8px rgba(255, 215, 0, 0.3)) drop-shadow(0px 0px 30px rgba(255, 215, 0, 0.2));
@@ -1217,7 +1217,7 @@ def _build_slots_html(
     # Result message
     result_html = ""
     if result_msg and revealed == 3:
-        result_color = "#FFDA50" if is_triple else "var(--win)" if is_win else "var(--text-muted)"
+        result_color = Tokens.GOLD_LIGHT if is_triple else "var(--win)" if is_win else "var(--text-muted)"
         result_html = f'<div class="slots-result" style="color: {result_color};">{esc(result_msg)}</div>'
 
     data_grid = build_data_grid_html(wager, payout, balance) if revealed == 3 else ""
@@ -1751,8 +1751,8 @@ def _build_coinflip_html(
     # Coin visual
     is_heads = result == "heads"
     coin_letter = "H" if is_heads else "T"
-    coin_gradient = "linear-gradient(135deg, #D4AF37, #FFDA50, #B8942D)" if is_heads else "linear-gradient(135deg, #C0C0C0, #E8E8E8, #A0A0A0)"
-    coin_rim = "var(--gold)" if is_heads else "#C0C0C0"
+    coin_gradient = f"linear-gradient(135deg, var(--gold), var(--gold-light), #B8942D)" if is_heads else f"linear-gradient(135deg, var(--silver), #E8E8E8, #A0A0A0)"
+    coin_rim = "var(--gold)" if is_heads else "var(--silver)"
 
     # Player pick indicator
     pick_icon = "✓" if won else "✗"

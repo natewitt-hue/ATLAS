@@ -40,6 +40,7 @@ import base64
 from pathlib import Path
 
 from atlas_html_engine import render_card as engine_render_card, wrap_card, esc
+from atlas_style_tokens import Tokens
 
 
 def _esc(text) -> str:
@@ -179,7 +180,7 @@ def _build_html(data: dict, *, theme_id: str | None = None) -> str:
         "approved":  ("rgba(74,222,128,0.4)",   "var(--win)",    "rgba(74,222,128,0.06)",  "✅ APPROVED"),
         "rejected":  ("rgba(248,113,113,0.4)",  "var(--loss)",   "rgba(248,113,113,0.06)", "❌ REJECTED"),
         "declined":  ("rgba(248,113,113,0.4)",  "var(--loss)",   "rgba(248,113,113,0.06)", "🚫 AUTO-DECLINED"),
-        "countered": ("rgba(88,101,242,0.4)",   "#5865F2",       "rgba(88,101,242,0.06)",  "🔄 COUNTER OFFERED"),
+        "countered": ("rgba(88,101,242,0.4)",   Tokens.DISCORD_BLUE, "rgba(88,101,242,0.06)",  "🔄 COUNTER OFFERED"),
     }
     border_c, text_c, bg_c, badge_text = status_cfg.get(status, status_cfg["pending"])
 
@@ -263,7 +264,7 @@ def _build_html(data: dict, *, theme_id: str | None = None) -> str:
     # ── Trade-specific CSS (layered on top of engine shared CSS) ─────────────
     trade_css = f"""<style>
   /* Trade card overrides */
-  .card {{ border-radius: 20px; width: 700px; }}
+  .card {{ border-radius: 20px; width: {Tokens.CARD_WIDTH}px; }}
   .inner {{ position: relative; z-index: 2; background: var(--bg); }}
 
   /* Status bar */
@@ -747,7 +748,7 @@ async def render_trade_card(data: dict, *, theme_id: str | None = None) -> bytes
     """
     try:
         html = _build_html(data, theme_id=theme_id)
-        return await engine_render_card(html, width=720)
+        return await engine_render_card(html)
     except Exception as e:
         print(f"[card_renderer] Render error: {e}")
         return None

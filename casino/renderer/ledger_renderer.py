@@ -42,7 +42,7 @@ _LEDGER_CSS = """\
 <style>
   /* Ledger card overrides */
   .card {
-    width: 700px;
+    width: var(--card-width);
     border-radius: var(--space-md);
     border: 1px solid rgba(212,175,55,0.25);
   }
@@ -59,9 +59,9 @@ _LEDGER_CSS = """\
   }
 
   /* Extra status bar classes for ledger */
-  .status-bar.credit { background: linear-gradient(90deg, var(--win-dark), #16A34A, var(--win-dark)); }
-  .status-bar.debit  { background: linear-gradient(90deg, var(--loss-dark), #DC2626, var(--loss-dark)); }
-  .status-bar.neutral{ background: linear-gradient(90deg, var(--gold), #B8962E, var(--gold)); }
+  .status-bar.credit { background: linear-gradient(90deg, var(--win-dark), var(--win-dark), var(--win-dark)); }
+  .status-bar.debit  { background: linear-gradient(90deg, var(--loss-dark), var(--loss-dark), var(--loss-dark)); }
+  .status-bar.neutral{ background: linear-gradient(90deg, var(--gold), var(--gold-dim), var(--gold)); }
 
   /* Header */
   .ledger-header {
@@ -76,10 +76,10 @@ _LEDGER_CSS = """\
     font-size: 14px; font-weight: 700;
   }
   .source-icon.casino     { background: rgba(212,175,55,0.2); color: var(--gold); }
-  .source-icon.sportsbook { background: rgba(26,115,232,0.2); color: #5B9CF5; }
+  .source-icon.sportsbook { background: rgba(26,115,232,0.2); color: var(--blue-light); }
   .source-icon.admin      { background: rgba(239,68,68,0.2); color: var(--loss-dark); }
   .source-icon.stipend    { background: rgba(34,197,94,0.2); color: var(--win-dark); }
-  .source-icon.prediction { background: rgba(168,85,247,0.2); color: #A855F7; }
+  .source-icon.prediction { background: rgba(168,85,247,0.2); color: var(--purple); }
 
   .game-label {
     font-weight: 700; font-size: var(--font-lg); color: var(--text-primary); letter-spacing: 1.5px;
@@ -139,7 +139,7 @@ _LEDGER_CSS = """\
   .footer-left { display: flex; align-items: center; gap: var(--space-lg); }
   .footer-balance {
     font-family: var(--font-mono), monospace;
-    font-weight: 700; font-size: 12px; color: #DCDCE6;
+    font-weight: 700; font-size: 12px; color: var(--text-light);
   }
   .footer-txn {
     font-family: var(--font-mono), monospace;
@@ -337,7 +337,7 @@ def _build_transaction_html(
 
 async def _render_html_to_png(html_content: str) -> bytes:
     """Render HTML string to PNG bytes via unified engine."""
-    return await _engine_render_card(html_content, width=720)
+    return await _engine_render_card(html_content)
 
 
 async def render_ledger_card(

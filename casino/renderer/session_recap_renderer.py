@@ -453,7 +453,7 @@ def _build_session_recap_html(
 .win-rate-bar-fill {{
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, #4ADE80, #22C55E);
+  background: linear-gradient(90deg, var(--win), var(--win-dark));
 }}
 .win-rate-pct {{
   font-family: var(--font-mono), monospace;

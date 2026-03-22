@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.8.0"  # Prediction market curation overhaul — 6-layer garbage filter + reweighted scoring
+ATLAS_VERSION = "6.8.1"  # Token migration — standardize render widths + migrate hardcoded colors to Tokens
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

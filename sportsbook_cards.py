@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 from atlas_html_engine import render_card, wrap_card, esc, icon_pill
+from atlas_style_tokens import Tokens
 from odds_utils import american_to_str, payout_calc
 
 # ── Sport icon mapping ────────────────────────────────────────────────────────
@@ -853,7 +854,7 @@ async def build_real_match_detail_card(
     if wp_home is not None and wp_away is not None:
         wp_h = float(wp_home)
         wp_a = float(wp_away)
-        h_color = home_color or "#c9a84c"
+        h_color = home_color or Tokens.GOLD
         a_color = away_color or "#666"
         wp_html = f"""
 <div style="padding:0 20px var(--space-sm);">
