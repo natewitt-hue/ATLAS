@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.8.1"  # Token migration — standardize render widths + migrate hardcoded colors to Tokens
+ATLAS_VERSION = "6.9.0"  # Edit-in-place UX — hub views edit messages instead of posting new ones
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

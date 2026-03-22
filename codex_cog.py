@@ -335,7 +335,7 @@ class CodexCog(commands.Cog):
             annotated_question, alias_map = resolve_names_in_question(f"{caller_context} {question}")
             sql = await gemini_sql(annotated_question, alias_map)
             if not sql:
-                await interaction.followup.send("❌ No SQL generated.")
+                await interaction.followup.send("❌ No SQL generated.", ephemeral=True)
                 return
 
             rows, error = await run_sql_async(sql)
@@ -364,10 +364,10 @@ class CodexCog(commands.Cog):
                     inline=False
                 )
             embed.set_footer(text="ATLAS™ Codex Module · Debug · Admin only")
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception as e:
-            await interaction.followup.send(f"Debug error: `{e}`")
+            await interaction.followup.send(f"Debug error: `{e}`", ephemeral=True)
 
     # ── H2H and Season Recap _impl methods (called by oracle HubView buttons) ──
 
@@ -379,10 +379,10 @@ class CodexCog(commands.Cog):
         u2 = fuzzy_resolve_user(owner2)
 
         if not u1:
-            await interaction.followup.send(f"Couldn't find an owner matching `{owner1}`.")
+            await interaction.followup.send(f"Couldn't find an owner matching `{owner1}`.", ephemeral=True)
             return
         if not u2:
-            await interaction.followup.send(f"Couldn't find an owner matching `{owner2}`.")
+            await interaction.followup.send(f"Couldn't find an owner matching `{owner2}`.", ephemeral=True)
             return
 
         if get_h2h_sql_and_params:
@@ -411,7 +411,8 @@ class CodexCog(commands.Cog):
         rows, error = await run_sql_async(sql, params)
         if error or not rows:
             await interaction.followup.send(
-                f"No completed regular season games found between **{u1}** and **{u2}**."
+                f"No completed regular season games found between **{u1}** and **{u2}**.",
+                ephemeral=True,
             )
             return
 
@@ -462,7 +463,7 @@ note any sweep seasons, and make it entertaining.
         await interaction.response.defer(thinking=True)
 
         if season < 1 or season > dm.CURRENT_SEASON:
-            await interaction.followup.send(f"Valid seasons are 1 through {dm.CURRENT_SEASON}.")
+            await interaction.followup.send(f"Valid seasons are 1 through {dm.CURRENT_SEASON}.", ephemeral=True)
             return
 
         sql = """

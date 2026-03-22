@@ -106,4 +106,4 @@ Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` 
 
 ## Current Version
 
-**v6.8.1** — Token migration: standardized all render widths to 700px (fixed 720px violations in trade/ledger cards), added warm text palette tokens (TEXT_WARM, TEXT_WARM_LIGHT, TEXT_WARM_DIM, TEXT_LIGHT, DISCORD_BLUE, SILVER), migrated ~45 hardcoded hex colors across 8 renderer files to use Tokens system.
+**v6.9.0** — Edit-in-place UX: hub view interactions now edit the existing message instead of posting new ones, eliminating ephemeral message clutter across Oracle (AnalyticsNav, TeamCardView, DraftClassView, PlayerDrillView, DraftSeasonView, WeekRecapView, ClutchMarginView), Genesis (Pending Trades, Lottery with Back button), and Codex (ephemeral error/validation messages).

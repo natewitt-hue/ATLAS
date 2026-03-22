@@ -1972,6 +1972,20 @@ def _build_genesis_hub_embed() -> discord.Embed:
 
 # ── Genesis Hub View ───────────────────────────────────────────────────────────
 
+class _GenesisBackView(discord.ui.View):
+    """Temporary view with a Back button that returns to the Genesis Hub."""
+
+    def __init__(self, bot: commands.Bot, embed: discord.Embed):
+        super().__init__(timeout=120)
+        self._bot = bot
+        self._embed = embed
+
+    @discord.ui.button(label="↩ Back to Hub", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        hub_embed = _build_genesis_hub_embed()
+        await interaction.response.edit_message(embed=hub_embed, view=GenesisHubView(self._bot))
+
+
 class GenesisHubView(discord.ui.View):
     """
     Persistent button panel for /genesis.
@@ -2020,7 +2034,12 @@ class GenesisHubView(discord.ui.View):
 
         pending = [t for t in _trades.values() if t.get("status") == "pending"]
         if not pending:
-            return await interaction.response.send_message("✅ No pending trades.", ephemeral=True)
+            embed = discord.Embed(
+                title="💱 Pending Trades",
+                description="✅ No pending trades.",
+                color=AtlasColors.INFO,
+            )
+            return await interaction.response.edit_message(embed=embed, view=_GenesisBackView(self.bot, embed))
 
         embed = discord.Embed(
             title="💱 Pending Trades",
@@ -2039,7 +2058,7 @@ class GenesisHubView(discord.ui.View):
                 inline=False,
             )
         embed.set_footer(text="Use 🔍 Trade Lookup in /genesis for full details.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(embed=embed, view=_GenesisBackView(self.bot, embed))
 
     @discord.ui.button(
         label="🔍 Trade Lookup", style=discord.ButtonStyle.secondary,
@@ -2055,12 +2074,17 @@ class GenesisHubView(discord.ui.View):
         row=1, custom_id="genesis:lottery",
     )
     async def btn_lottery(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         cornerstones = _state.get("cornerstones", {})
 
         try:
             if dm.df_standings.empty:
-                return await interaction.followup.send("⚠️ No standings data. Run `/wittsync` first.", ephemeral=True)
+                embed = discord.Embed(
+                    title="🎰 Lottery Standings",
+                    description="⚠️ No standings data. Run `/wittsync` first.",
+                    color=discord.Color.purple(),
+                )
+                return await interaction.edit_original_response(embed=embed, view=_GenesisBackView(self.bot, embed))
 
             # Build set of team names that have a cornerstone designated
             cs_teams = {v.get("team") for v in cornerstones.values() if v.get("team")}
@@ -2080,9 +2104,14 @@ class GenesisHubView(discord.ui.View):
                 color=discord.Color.purple(),
             )
             embed.set_footer(text="Run /runlottery to execute · ATLAS™ Genesis")
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.edit_original_response(embed=embed, view=_GenesisBackView(self.bot, embed))
         except Exception as e:
-            await interaction.followup.send(f"❌ Lottery data error: `{e}`", ephemeral=True)
+            embed = discord.Embed(
+                title="🎰 Lottery Standings",
+                description=f"❌ Lottery data error: `{e}`",
+                color=discord.Color.red(),
+            )
+            await interaction.edit_original_response(embed=embed, view=_GenesisBackView(self.bot, embed))
 
 
 

@@ -179,10 +179,10 @@ class AnalyticsNav(discord.ui.View):
     @discord.ui.button(label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary, row=0)
     @_safe_interaction
     async def btn_hotcold(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         embed, _ = _build_hotcold_league()
         _apply_stale_footer(embed)
-        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="⚡ Clutch", style=discord.ButtonStyle.secondary, row=0)
     @_safe_interaction
@@ -192,18 +192,18 @@ class AnalyticsNav(discord.ui.View):
             await interaction.response.send_message("🔒 **Pro Tier Required.** Use `/membership info` to unlock Clutch Rankings.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         embed = _build_clutch_embed()
         _apply_stale_footer(embed)
-        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="📊 Power", style=discord.ButtonStyle.secondary, row=0)
     @_safe_interaction
     async def btn_power(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         embed = _build_power_embed()
         _apply_stale_footer(embed)
-        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="📋 Draft History", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
@@ -219,23 +219,23 @@ class AnalyticsNav(discord.ui.View):
         )
         embed.set_footer(text="ATLAS™ Oracle · Draft Class Explorer", icon_url=ATLAS_ICON_URL)
         view = DraftClassView(self.bot_ref)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="📅 Recap", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
     async def btn_recap(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         embed = _build_recap_embed()
         _apply_stale_footer(embed)
-        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="👤 My Profile", style=discord.ButtonStyle.primary, row=1)
     @_safe_interaction
     async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         embed = await _build_owner_embed(interaction.user, interaction.guild)
         _apply_stale_footer(embed)
-        await interaction.followup.send(embed=embed, view=ShareToChannelView(embed), ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1796,7 +1796,7 @@ class DraftTradeView(discord.ui.View):
     def _make_callback(player_name: str):
         async def callback(interaction: discord.Interaction):
             embed = _build_trade_card_embed(player_name)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.edit_message(embed=embed)
         return callback
 
 
@@ -1890,7 +1890,7 @@ class DraftClassView(discord.ui.View):
             await interaction.response.defer()
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         embed = await _build_team_draft_embed(
             self._selected_team_abbr,
             self._selected_team_nick or self._selected_team_abbr,
@@ -1903,9 +1903,9 @@ class DraftClassView(discord.ui.View):
 
         if traded:
             trade_view = DraftTradeView(traded)
-            await interaction.followup.send(embed=embed, view=trade_view, ephemeral=True)
+            await interaction.edit_original_response(embed=embed, view=trade_view)
         else:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.edit_original_response(embed=embed, view=self)
 
 
 # ── Player Leaders ────────────────────────────────────────────────────────────
@@ -2804,16 +2804,16 @@ class TeamCardView(discord.ui.View):
     @discord.ui.button(label="📖 History", style=discord.ButtonStyle.secondary, row=0)
     @_safe_interaction
     async def btn_history(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         embed = _build_team_card_history(self.team_name)
-        await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="🔬 Scouting", style=discord.ButtonStyle.secondary, row=0)
     @_safe_interaction
     async def btn_scouting(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         embed = _build_team_card_scouting(self.team_name)
-        await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="⚔️ Matchup", style=discord.ButtonStyle.primary, row=0)
     @_safe_interaction
@@ -2825,15 +2825,11 @@ class TeamCardView(discord.ui.View):
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=0)
     @_safe_interaction
     async def btn_refresh(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         embed = await _build_team_card_snapshot(
             self.team_name, self.caller_team, self.owner_username
         )
-        await interaction.followup.send(
-            embed=embed,
-            view=TeamCardView(self.team_name, self.caller_team, self.owner_username),
-            ephemeral=True,
-        )
+        await interaction.edit_original_response(embed=embed, view=self)
 
 
 class TeamMatchupModal(discord.ui.Modal, title="⚔️ Matchup Intel"):
@@ -3707,9 +3703,9 @@ class ClutchMarginView(discord.ui.View):
     )
     @_safe_interaction
     async def margin_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         embed = _build_clutch_embed(margin=int(select.values[0]), highlight_team=self.caller_team)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.edit_original_response(content=None, embed=embed, view=self)
 
 
 class PlayerPositionView(discord.ui.View):
@@ -3734,10 +3730,10 @@ class PlayerPositionView(discord.ui.View):
     async def position_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         position = select.values[0]
         stats    = PLAYER_STAT_MAP.get(position, [])
-        await interaction.response.send_message(
-            f"**🎯 {position} — Choose a stat category:**",
+        await interaction.response.edit_message(
+            content=f"**🎯 {position} — Choose a stat category:**",
+            embed=None,
             view=PlayerStatView(position, stats),
-            ephemeral=True,
         )
 
 
@@ -3763,13 +3759,13 @@ class PlayerStatView(discord.ui.View):
             (label for col, label in PLAYER_STAT_MAP.get(self.position, []) if col == stat_col),
             stat_col,
         )
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
 
         embed, player_names = _build_player_leaders_embed(self.position, stat_col, stat_label)
         if player_names:
-            await interaction.followup.send(embed=embed, view=PlayerDrillView(player_names), ephemeral=True)
+            await interaction.edit_original_response(content=None, embed=embed, view=PlayerDrillView(player_names))
         else:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.edit_original_response(content=None, embed=embed, view=None)
 
 
 class PlayerDrillView(discord.ui.View):
@@ -3786,15 +3782,15 @@ class PlayerDrillView(discord.ui.View):
     @_safe_interaction
     async def player_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         player_name = select.values[0]
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
 
         data = ig.get_hot_cold(player_name, last_n=3)
         if "error" in data:
-            await interaction.followup.send(f"❌ {data['error']}", ephemeral=True)
+            await interaction.edit_original_response(content=f"❌ {data['error']}", embed=None, view=self)
             return
 
         embed = _build_hotcold_single(data)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=self)
 
 
 class DraftSeasonView(discord.ui.View):
@@ -3811,14 +3807,14 @@ class DraftSeasonView(discord.ui.View):
     @discord.ui.select(placeholder="Select season...", options=[])
     @_safe_interaction
     async def season_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         season = int(select.values[0])
         if season == 0:
             embed  = await _build_draft_overview_embed()
             embeds = [embed]
         else:
             embeds = await _build_draft_season_embeds(season)
-        await interaction.followup.send(embeds=embeds, view=DraftSeasonView(), ephemeral=True)
+        await interaction.edit_original_response(embeds=embeds, view=DraftSeasonView())
 
 
 class WeekRecapView(discord.ui.View):
@@ -3838,9 +3834,9 @@ class WeekRecapView(discord.ui.View):
     @discord.ui.select(placeholder="Select a week...", options=[])
     @_safe_interaction
     async def week_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer()
         embed = _build_recap_embed(week=int(select.values[0]))
-        await interaction.followup.send(embed=embed, view=WeekRecapView(), ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=WeekRecapView())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
