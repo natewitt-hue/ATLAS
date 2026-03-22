@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.5.0"  # Blackjack UI redesign — CSS-rendered cards, cinematic result screen, shoe indicator
+ATLAS_VERSION = "6.5.1"  # Fix owner rankings — tenure filters, win% for worst-owner queries, AI prompt guardrails
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

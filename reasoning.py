@@ -420,6 +420,18 @@ RULES:
 11. ONLY output Python code. No explanation. No markdown. No imports. Just raw executable Python.
 12. If unsure, compute multiple angles and combine them into result.
 13. Do NOT use import statements — all libraries (pd, np) and functions are pre-loaded.
+14. OWNER QUALIFICATION: When ranking owners (best/worst/most wins/fewest wins):
+    - Only include owners with 3+ seasons AND 30+ career games played.
+    - For "worst" queries, rank by win PERCENTAGE not raw totals.
+    - Use df_games to compute career stats, filtering for completed games (status in ['2','3']).
+    - A member who played 2 games and left is NOT an "owner" worth ranking.
+15. TSL IDENTITY MAP — always use db_username (right side) in DataFrame filters, never the nickname (left side):
+    JT=TrombettaThanYou, Killa=KillaE94, Nova=PLAYERNOVA1, Witt=TheWitt,
+    Ken=KJJ205, Jo=OLIVEIRAYOURFACE, MrCanada=MR_C-A-N-A-D-A, John=AFFINIZE,
+    Jorge=NUTSONJORGE, Baez=SBAEZ, Chok=Chokolate_Thunda, Ron=Ronfk,
+    Rahj=Rahjeet, Bdiddy=BDiddy86, Keem=KEEM, PNick=PNick12,
+    Neff=NEFF, Khaled=Khaled, Eric=ERIC, KG=THE_KG_518
+    The homeUser/awayUser columns in df_games use these db_usernames.
 
 IMPORTANT COLUMN NOTES:
 - df_offense has passAtt (NOT passAtts), passCompPct is already a float

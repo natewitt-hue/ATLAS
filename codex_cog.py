@@ -214,6 +214,13 @@ RULES:
 9. For draft queries, use player_draft_map — NEVER players.teamName.
 10. Limit results to 30 rows unless the user needs more.
 11. Never use DROP, INSERT, UPDATE, DELETE, or any DDL.
+12. For owner ranking queries ("best/worst owner", "winningest", "owner with most/fewest wins"):
+    - ALWAYS JOIN owner_tenure and require COUNT(DISTINCT seasonIndex) >= 3 AND SUM(games_played) >= 30.
+      This excludes drive-by members who played a few games and left.
+    - For "worst" queries: rank by win PERCENTAGE (wins/total_games*100), not raw win count.
+    - For "best" queries: raw win count is fine, but still require the minimum games threshold.
+13. owner_tenure has columns: teamName, userName, seasonIndex, games_played.
+    It tracks every owner's game count per team per season. Use it for career-span queries.
 
 COMMON MISTAKES TO AVOID:
 - Forgetting status IN ('2','3') → includes unplayed/scheduled games → wrong counts.
@@ -244,6 +251,9 @@ SQL: SELECT drafting_team, COUNT(*) AS picks, ROUND(AVG(CAST(playerBestOvr AS RE
 
 Q: "Who has the best record as an away team across all seasons?"
 SQL: SELECT awayUser AS owner, SUM(CASE WHEN winner_user=awayUser THEN 1 ELSE 0 END) AS away_wins, COUNT(*) AS away_games, ROUND(CAST(SUM(CASE WHEN winner_user=awayUser THEN 1 ELSE 0 END) AS REAL)/COUNT(*)*100,1) AS win_pct FROM games WHERE status IN ('2','3') AND stageIndex='1' AND awayUser != '' GROUP BY awayUser HAVING COUNT(*) >= 10 ORDER BY win_pct DESC LIMIT 10
+
+Q: "Who are the worst owners of all time?"
+SQL: SELECT ot_agg.userName AS owner, SUM(CASE WHEN g.winner_user=ot_agg.userName THEN 1 ELSE 0 END) AS wins, COUNT(*) AS total_games, ROUND(CAST(SUM(CASE WHEN g.winner_user=ot_agg.userName THEN 1 ELSE 0 END) AS REAL)/COUNT(*)*100,1) AS win_pct FROM (SELECT userName, COUNT(DISTINCT seasonIndex) AS seasons, SUM(games_played) AS career_games FROM owner_tenure GROUP BY userName HAVING COUNT(DISTINCT seasonIndex) >= 3 AND SUM(games_played) >= 30) ot_agg JOIN games g ON g.status IN ('2','3') AND g.stageIndex='1' AND (g.homeUser=ot_agg.userName OR g.awayUser=ot_agg.userName) GROUP BY ot_agg.userName ORDER BY win_pct ASC LIMIT 10
 
 Now generate a query for this question:
 "{question}"
