@@ -30,7 +30,7 @@ from casino.casino_db import (
     is_casino_open, get_channel_id, get_max_bet, check_achievements,
 )
 from casino.play_again import PlayAgainView
-from casino.renderer.casino_html_renderer import render_blackjack_card
+from casino.renderer.casino_html_renderer import render_blackjack_card, render_blackjack_result
 from flow_wallet import get_theme_for_render
 
 
@@ -397,6 +397,7 @@ async def _update_table_message(
         balance      = bal,
         player_name  = interaction.user.display_name if hasattr(interaction, 'user') else "Player",
         theme_id     = theme_id,
+        shoe_remaining = len(session.shoe),
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
     await interaction.response.edit_message(attachments=[file], view=view)
@@ -510,6 +511,7 @@ async def _finish_hand(
         player_name  = interaction.user.display_name,
         txn_id       = str(result.get("txn_id", "")),
         theme_id     = theme_id,
+        shoe_remaining = len(session.shoe),
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
 
@@ -523,6 +525,26 @@ async def _finish_hand(
         near_miss_msg=near_miss_msg,
     )
     await interaction.response.edit_message(attachments=[file], view=replay_view)
+
+    # Cinematic result screen — send as followup for decisive outcomes
+    if log_outcome in ("win", "loss") and not session.split_active:
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.5)
+        result_type = "blackjack" if _is_blackjack(session.player_hand) and log_outcome == "win" else log_outcome
+        result_png = await render_blackjack_result(
+            player_name  = interaction.user.display_name,
+            dealer_cards = session.dealer_hand,
+            player_cards = session.active_hand,
+            dealer_total = _hand_value(session.dealer_hand),
+            player_total = _hand_value(session.active_hand),
+            result       = result_type,
+            pnl          = total_payout - total_wager,
+            wager        = total_wager,
+            balance      = bal,
+            theme_id     = theme_id,
+        )
+        result_file = discord.File(io.BytesIO(result_png), filename="blackjack_result.png")
+        await interaction.followup.send(file=result_file, ephemeral=False)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -647,6 +669,7 @@ async def start_blackjack(
             player_name  = interaction.user.display_name,
             txn_id       = str(result.get("txn_id", "")),
             theme_id     = theme_id,
+            shoe_remaining = len(session.shoe),
         )
         file  = discord.File(io.BytesIO(png), filename="blackjack.png")
         streak_info = result.get("streak_info")
@@ -674,6 +697,7 @@ async def start_blackjack(
         balance      = bal,
         player_name  = interaction.user.display_name,
         theme_id     = theme_id,
+        shoe_remaining = len(session.shoe),
     )
     file  = discord.File(io.BytesIO(png), filename="blackjack.png")
 
