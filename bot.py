@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.10.0"  # 6 new card themes: Midnight Circuit, Venom Strike, Arctic Fox, Shadow Broker, Glacier Mint, Blackout Protocol
+ATLAS_VERSION = "6.10.1"  # fix: ThemeSelectView row overflow when theme count > 5
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
