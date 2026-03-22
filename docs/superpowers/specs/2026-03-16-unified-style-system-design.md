@@ -19,7 +19,7 @@ Five changes, layered on each other:
 2. **Full HTML Migration** — move all Pillow renders to Playwright/HTML
 3. **High-DPI Rendering** — `deviceScaleFactor: 2` for crisp text on all devices
 4. **Page Pool Optimizer** — pre-warmed browser pages for fast renders
-5. **Mobile-First Design Defaults** — 480px card width, larger fonts
+5. **Mobile-First Design Defaults** — 700px card width, larger fonts
 
 ---
 
@@ -75,7 +75,7 @@ A single Python module that defines all visual constants and generates CSS custo
 **Layout:**
 | Token | Value | Previous |
 |-------|-------|----------|
-| `card_width` | `480px` | 700-800px |
+| `card_width` | `700px` | 700-800px |
 | `dpi_scale` | `2` | 1 (implicit) |
 | `border_radius` | `8px` | varies |
 | `border_radius_sm` | `4px` | varies |
@@ -87,7 +87,7 @@ A single Python module that defines all visual constants and generates CSS custo
 ```python
 class Tokens:
     # All constants as class attributes
-    CARD_WIDTH = 480
+    CARD_WIDTH = 700
     DPI_SCALE = 2
     GOLD = "#D4AF37"
     FONT_SIZE_BASE = 15
@@ -125,7 +125,7 @@ Replaces the current split rendering pipeline with a single module.
 
 ```python
 class PagePool:
-    def __init__(self, size: int = 4, width: int = 480, scale: int = 2):
+    def __init__(self, size: int = 4, width: int = 700, scale: int = 2):
         self._size = size
         self._width = width
         self._scale = scale
@@ -289,11 +289,11 @@ Current code uses `wait_until="networkidle"` which waits for all network activit
 
 | Phase | Group | Cards | Work Required |
 |-------|-------|-------|---------------|
-| 2a | D | Pulse Dashboard, Session Recap | Tokenize CSS, use `render_card()`, 480px (Pulse already 480px) |
-| 2b | C | 5 Highlight cards | Tokenize CSS, use `render_card()`, 700px → 480px |
-| 2c | E | 5 Prediction Market cards | Tokenize CSS, use `render_card()`, 480px |
+| 2a | D | Pulse Dashboard, Session Recap | Tokenize CSS, use `render_card()`, 700px |
+| 2b | C | 5 Highlight cards | Tokenize CSS, use `render_card()`, 700px |
+| 2c | E | 5 Prediction Market cards | Tokenize CSS, use `render_card()`, 700px |
 | 2d | B | Blackjack, Slots, Crash, Coinflip, Scratch | Tokenize CSS, use `render_card()`. Already HTML v6 — just swap engine + tokens |
-| 2e | F | Trade Card, Ledger | Tokenize CSS, use `render_card()`, 720px → 480px. Ledger uses `_render_html_to_png()` |
+| 2e | F | Trade Card, Ledger | Tokenize CSS, use `render_card()`, 700px. Ledger uses `_render_html_to_png()` |
 | 2f | A | Flow Hub, Sportsbook Hub, Stats, Trade Stats | **Full rewrite**: ATLASCard (Pillow) → HTML templates + `render_card()` |
 
 ### Per-card migration pattern:
@@ -302,7 +302,7 @@ Current code uses `wait_until="networkidle"` which waits for all network activit
 1. Replace inline CSS color/font values with `var(--token-name)` references
 2. Replace boilerplate HTML wrapper with `wrap_card(body_html)`
 3. Replace `_render_card_html()` / `_render_html_to_png()` calls with `render_card()` from engine
-4. Update `width` parameter to 480 (or use default)
+4. Update `width` parameter to 700 (or use default)
 5. Verify visual parity + performance
 
 **For Group A (Pillow → HTML):**
@@ -330,9 +330,9 @@ Current code uses `wait_until="networkidle"` which waits for all network activit
 |------|--------|
 | `bot.py` | Call `init_pool()` in `setup_hook()`, `drain_pool()` on shutdown, version bump |
 | `casino/renderer/casino_html_renderer.py` | Tokenize all 5 game card CSS (BJ, slots, crash, coinflip, scratch), use `render_card()` |
-| `casino/renderer/session_recap_renderer.py` | Tokenize CSS, use `render_card()`, 700px → 480px |
-| `casino/renderer/pulse_renderer.py` | Tokenize CSS, use `render_card()` (already 480px) |
-| `casino/renderer/highlight_renderer.py` | Tokenize all 5 highlight cards CSS, use `render_card()`, 700px → 480px |
+| `casino/renderer/session_recap_renderer.py` | Tokenize CSS, use `render_card()`, 700px |
+| `casino/renderer/pulse_renderer.py` | Tokenize CSS, use `render_card()`, 700px |
+| `casino/renderer/highlight_renderer.py` | Tokenize all 5 highlight cards CSS, use `render_card()`, 700px |
 | `casino/renderer/prediction_html_renderer.py` | Tokenize all 5 prediction cards CSS, use `render_card()` |
 | `casino/renderer/ledger_renderer.py` | Tokenize CSS, replace `_render_html_to_png()` with `render_card()` |
 | `card_renderer.py` (root) | Move browser singleton + font/asset loaders to engine, tokenize trade card |

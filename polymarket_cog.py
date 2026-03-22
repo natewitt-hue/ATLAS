@@ -50,6 +50,7 @@ from casino.renderer.prediction_html_renderer import (
     render_curated_list_card,
     render_daily_drop_card,
     render_price_alert_card,
+    render_sell_confirmation_card,
 )
 import io
 
@@ -364,7 +365,88 @@ async def init_prediction_db(db_path: str = DB_PATH):
             except Exception:
                 pass  # Column already exists
 
+        # Migration v2: expand CHECK constraint to include 'sold' status + sell columns
+        await _migrate_contracts_sold_status(db)
+
     log.info("Prediction market DB tables ready.")
+
+
+async def _migrate_contracts_sold_status(db):
+    """Add 'sold' to the status CHECK constraint and add sell columns.
+
+    SQLite doesn't support ALTER CHECK, so we recreate the table if needed.
+    """
+    # Quick probe: can we insert 'sold' status?
+    try:
+        await db.execute("SAVEPOINT sold_probe")
+        await db.execute(
+            "INSERT INTO prediction_contracts "
+            "(user_id, market_id, slug, side, buy_price, quantity, cost_bucks, "
+            "potential_payout, status, created_at) "
+            "VALUES ('__probe__', '__probe__', '__probe__', 'YES', 0, 0, 0, 0, 'sold', '')"
+        )
+        await db.execute(
+            "DELETE FROM prediction_contracts WHERE user_id = '__probe__'"
+        )
+        await db.execute("RELEASE sold_probe")
+        # Probe succeeded — table already has 'sold' in CHECK.
+        # Still ensure sell columns exist.
+        for col_def in [
+            "sell_price REAL",
+            "sell_bucks INTEGER",
+            "sold_at TEXT",
+        ]:
+            col_name = col_def.split()[0]
+            try:
+                await db.execute(
+                    f"ALTER TABLE prediction_contracts ADD COLUMN {col_def}"
+                )
+            except Exception:
+                pass
+        return
+    except Exception:
+        await db.execute("ROLLBACK TO sold_probe")
+        await db.execute("RELEASE sold_probe")
+
+    # CHECK constraint blocks 'sold' — recreate table
+    log.info("Migrating prediction_contracts to support 'sold' status…")
+    await db.executescript("""
+        CREATE TABLE IF NOT EXISTS prediction_contracts_v2 (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         TEXT NOT NULL,
+            market_id       TEXT NOT NULL,
+            slug            TEXT NOT NULL,
+            side            TEXT NOT NULL CHECK(side IN ('YES','NO')),
+            buy_price       REAL NOT NULL,
+            quantity        INTEGER NOT NULL DEFAULT 1,
+            cost_bucks      INTEGER NOT NULL,
+            potential_payout INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open'
+                            CHECK(status IN ('open','won','lost','voided','sold')),
+            created_at      TEXT NOT NULL,
+            resolved_at     TEXT,
+            sell_price      REAL,
+            sell_bucks      INTEGER,
+            sold_at         TEXT,
+            FOREIGN KEY (market_id) REFERENCES prediction_markets(market_id)
+        );
+
+        INSERT OR IGNORE INTO prediction_contracts_v2
+            (id, user_id, market_id, slug, side, buy_price, quantity,
+             cost_bucks, potential_payout, status, created_at, resolved_at)
+        SELECT id, user_id, market_id, slug, side, buy_price, quantity,
+               cost_bucks, potential_payout, status, created_at, resolved_at
+        FROM prediction_contracts;
+
+        DROP TABLE prediction_contracts;
+        ALTER TABLE prediction_contracts_v2 RENAME TO prediction_contracts;
+
+        CREATE INDEX IF NOT EXISTS idx_pred_contracts_user
+            ON prediction_contracts(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_pred_contracts_market
+            ON prediction_contracts(market_id, status);
+    """)
+    log.info("prediction_contracts migrated to v2 (sold status + sell columns).")
 
 
 # ─────────────────────────────────────────────
@@ -391,6 +473,193 @@ async def update_balance(user_id, delta: int, *, contract_id=None):
         await flow_wallet.debit(uid, abs(delta), "PREDICTION",
                                 description="prediction market",
                                 subsystem="PREDICTION", subsystem_id=sid)
+
+
+# ─────────────────────────────────────────────
+# PREDICTION BUY / SELL EXECUTION
+# ─────────────────────────────────────────────
+
+PREDICTION_WAGER_PRESETS = [50, 100, 250, 500, 1000]
+
+
+async def _execute_prediction_buy(
+    user_id: int,
+    market_id: str,
+    slug: str,
+    side: str,
+    price: float,
+    quantity: int,
+    title: str,
+) -> dict:
+    """Execute an atomic prediction market buy.
+
+    Returns dict: {contract_id, cost, payout, new_balance}
+    Raises: ValueError on validation failure, InsufficientFundsError on low balance.
+    """
+    cost_bucks = price_to_bucks(price) * quantity
+    payout = PAYOUT_SCALE * quantity
+
+    async with flow_wallet.get_user_lock(user_id):
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+
+            # Guard: market must still be active
+            async with db.execute(
+                "SELECT status FROM prediction_markets WHERE market_id = ?",
+                (market_id,),
+            ) as cur:
+                mkt_row = await cur.fetchone()
+            if not mkt_row or mkt_row[0] != "active":
+                raise ValueError("This market is no longer active.")
+
+            # Check balance
+            balance = await flow_wallet.get_balance(user_id, con=db)
+            if balance < cost_bucks:
+                raise flow_wallet.InsufficientFundsError(
+                    f"You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**."
+                )
+
+            # Insert contract
+            await db.execute(
+                "INSERT INTO prediction_contracts "
+                "(user_id, market_id, slug, side, buy_price, quantity, "
+                "cost_bucks, potential_payout, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+                (user_id, market_id, slug, side, price, quantity, cost_bucks, payout, now),
+            )
+            async with db.execute("SELECT last_insert_rowid()") as cur:
+                contract_id = (await cur.fetchone())[0]
+
+            # Debit wallet
+            await flow_wallet.debit(
+                user_id, cost_bucks, "PREDICTION",
+                description="prediction market bet",
+                subsystem="PREDICTION", subsystem_id=str(contract_id),
+                con=db,
+            )
+
+            # Wager registry
+            import wager_registry
+            await wager_registry.register_wager(
+                "PREDICTION", str(contract_id), int(user_id), cost_bucks,
+                label=f"{slug}: {side} @ ${price:.2f}",
+                con=db,
+            )
+            await db.commit()
+
+    new_bal = balance - cost_bucks
+    return {
+        "contract_id": contract_id,
+        "cost": cost_bucks,
+        "payout": payout,
+        "new_balance": new_bal,
+        "quantity": quantity,
+    }
+
+
+async def _execute_prediction_sell(
+    user_id: int,
+    contract_id: int,
+    sell_quantity: int,
+    current_price: float,
+) -> dict:
+    """Sell (close) prediction contracts at current market price.
+
+    For partial sells, the original contract row is reduced and a new 'sold' row
+    is created for the sold portion to preserve audit trail.
+
+    Returns dict: {proceeds, new_balance, profit_loss, sold_id}
+    Raises: ValueError on validation failure.
+    """
+    sell_bucks_per = price_to_bucks(current_price)
+    proceeds = sell_bucks_per * sell_quantity
+
+    async with flow_wallet.get_user_lock(user_id):
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+
+            # Load contract
+            async with db.execute(
+                "SELECT user_id, market_id, slug, side, buy_price, quantity, "
+                "cost_bucks, potential_payout, status "
+                "FROM prediction_contracts WHERE id = ?",
+                (contract_id,),
+            ) as cur:
+                row = await cur.fetchone()
+
+            if not row:
+                raise ValueError("Contract not found.")
+            (c_uid, c_mid, c_slug, c_side, c_buy_price, c_qty,
+             c_cost, c_payout, c_status) = row
+
+            if str(c_uid) != str(user_id):
+                raise ValueError("Contract does not belong to you.")
+            if c_status != "open":
+                raise ValueError("Contract is not open.")
+            if sell_quantity > c_qty:
+                raise ValueError(
+                    f"Can't sell {sell_quantity} — you only have {c_qty} contracts."
+                )
+
+            # Calculate cost basis for the sold portion (proportional)
+            cost_basis = (c_cost * sell_quantity) // c_qty if c_qty > 0 else 0
+            profit_loss = proceeds - cost_basis
+
+            if sell_quantity == c_qty:
+                # Full sell — update in place
+                await db.execute(
+                    "UPDATE prediction_contracts SET status = 'sold', "
+                    "sell_price = ?, sell_bucks = ?, sold_at = ? WHERE id = ?",
+                    (current_price, proceeds, now, contract_id),
+                )
+                sold_id = contract_id
+            else:
+                # Partial sell — reduce original, insert sold row
+                remaining_qty = c_qty - sell_quantity
+                remaining_cost = c_cost - cost_basis
+                remaining_payout = (c_payout * remaining_qty) // c_qty
+
+                # Shrink original contract
+                await db.execute(
+                    "UPDATE prediction_contracts SET quantity = ?, "
+                    "cost_bucks = ?, potential_payout = ? WHERE id = ?",
+                    (remaining_qty, remaining_cost, remaining_payout, contract_id),
+                )
+
+                # Insert sold portion
+                await db.execute(
+                    "INSERT INTO prediction_contracts "
+                    "(user_id, market_id, slug, side, buy_price, quantity, "
+                    "cost_bucks, potential_payout, status, created_at, "
+                    "sell_price, sell_bucks, sold_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sold', ?, ?, ?, ?)",
+                    (user_id, c_mid, c_slug, c_side, c_buy_price,
+                     sell_quantity, cost_basis, PAYOUT_SCALE * sell_quantity,
+                     now, current_price, proceeds, now),
+                )
+                async with db.execute("SELECT last_insert_rowid()") as cur:
+                    sold_id = (await cur.fetchone())[0]
+
+            # Credit wallet with proceeds
+            await flow_wallet.credit(
+                user_id, proceeds, "PREDICTION",
+                description=f"sell {sell_quantity} contracts",
+                subsystem="PREDICTION", subsystem_id=str(sold_id),
+                con=db,
+            )
+            await db.commit()
+
+        balance = await flow_wallet.get_balance(user_id)
+
+    return {
+        "proceeds": proceeds,
+        "new_balance": balance,
+        "profit_loss": profit_loss,
+        "sold_id": sold_id,
+        "cost_basis": cost_basis,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -713,583 +982,17 @@ def truncate_slug(slug: str, max_len: int = 35) -> str:
     return slug[:max_len - 3] + "..."
 
 
-# ─────────────────────────────────────────────
-# DISCORD UI COMPONENTS
-# ─────────────────────────────────────────────
-
-class WagerModal(discord.ui.Modal):
-    """Modal that asks the user how many contracts to buy."""
-
-    amount_input = discord.ui.TextInput(
-        label="Contracts to buy (1 contract = 1 Buck)",
-        placeholder="e.g. 10",
-        min_length=1,
-        max_length=6,
-        required=True,
-    )
-
-    def __init__(self, market_id: str, slug: str, side: str, price: float, title: str):
-        super().__init__(title=f"Buy {side} — {title[:34]}")
-        self.market_id    = market_id
-        self.slug         = slug
-        self.side         = side
-        self.price        = price
-        self.market_title = title
-
-    async def on_submit(self, interaction: discord.Interaction):
-        raw = self.amount_input.value.strip()
-        if not raw.isdigit() or int(raw) < 1:
-            await interaction.response.send_message(
-                "❌ Please enter a whole number ≥ 1.", ephemeral=True
-            )
-            return
-
-        quantity    = int(raw)
-        cost_bucks  = price_to_bucks(self.price) * quantity
-        payout      = PAYOUT_SCALE * quantity
-        user_id     = interaction.user.id
-
-        # Per-user lock prevents double-spend across concurrent bets
-        async with flow_wallet.get_user_lock(user_id):
-            # Atomic debit + contract creation in single transaction
-            now = datetime.now(timezone.utc).isoformat()
-            try:
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("BEGIN IMMEDIATE")
-
-                    # Guard: market must still be active
-                    async with db.execute(
-                        "SELECT status FROM prediction_markets WHERE market_id = ?",
-                        (self.market_id,)
-                    ) as cur:
-                        mkt_row = await cur.fetchone()
-                    if not mkt_row or mkt_row[0] != 'active':
-                        await interaction.response.send_message(
-                            "This market is no longer active.", ephemeral=True)
-                        return
-
-                    # Check balance and debit atomically
-                    balance = await flow_wallet.get_balance(user_id, con=db)
-                    if balance < cost_bucks:
-                        await interaction.response.send_message(
-                            f"❌ You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**.",
-                            ephemeral=True,
-                        )
-                        return
-
-                    # Write contract first to get ID for audit link
-                    await db.execute("""
-                        INSERT INTO prediction_contracts
-                            (user_id, market_id, slug, side, buy_price,
-                             quantity, cost_bucks, potential_payout, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-                    """, (
-                        user_id, self.market_id, self.slug,
-                        self.side, self.price,
-                        quantity, cost_bucks, payout, now,
-                    ))
-                    async with db.execute("SELECT last_insert_rowid()") as cur:
-                        contract_id = (await cur.fetchone())[0]
-                    await flow_wallet.debit(
-                        user_id, cost_bucks, "PREDICTION",
-                        description="prediction market bet",
-                        subsystem="PREDICTION", subsystem_id=str(contract_id),
-                        con=db,
-                    )
-                    import wager_registry
-                    await wager_registry.register_wager(
-                        "PREDICTION", str(contract_id), int(user_id), cost_bucks,
-                        label=f"{self.slug}: {self.side} @ ${self.price:.2f}",
-                        con=db,
-                    )
-                    await db.commit()
-            except flow_wallet.InsufficientFundsError as e:
-                await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-                return
-            except Exception as e:
-                await interaction.response.send_message(
-                    f"❌ Failed to place bet: {e}", ephemeral=True
-                )
-                return
-
-        new_bal = balance - cost_bucks
-
-        # Render V6 bet confirmation card
-        theme_id = get_theme_for_render(interaction.user.id)
-        try:
-            png = await render_bet_confirmation_card(
-                market_title=self.market_title,
-                side=self.side,
-                price=self.price,
-                quantity=quantity,
-                cost=cost_bucks,
-                potential_payout=payout,
-                balance=new_bal,
-                player_name=interaction.user.display_name,
-                theme_id=theme_id,
-            )
-            await send_card(interaction, png, filename="bet_confirm.png", ephemeral=True)
-        except Exception:
-            log.exception("Failed to render bet confirmation card")
-            profit = payout - cost_bucks
-            color = 0x2ECC71 if self.side == "YES" else 0xE74C3C
-            embed = discord.Embed(
-                title="Contract Purchased",
-                color=color,
-                description=(
-                    f"**{self.market_title}**\n"
-                    f"Side: **{self.side}** · Qty: **{quantity}** · Cost: **${cost_bucks:,}**\n"
-                    f"Potential: **${payout:,}** · Profit: **+${profit:,}**"
-                ),
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        # Post to #ledger
-        try:
-            new_bal = await flow_wallet.get_balance(user_id)
-            txn_id = await flow_wallet.get_last_txn_id(user_id)
-            from ledger_poster import post_transaction
-            await post_transaction(
-                interaction.client, interaction.guild_id, user_id,
-                "PREDICTION", -cost_bucks, new_bal,
-                f"Buy {quantity} {self.side} — {self.market_title[:50]}",
-                txn_id,
-            )
-        except Exception:
-            pass
-
-
-class BetButtonView(discord.ui.View):
-    """YES / NO buttons on the /bet embed — fetches live odds before modal."""
-
-    def __init__(self, market_id: str, slug: str, title: str,
-                 yes_price: float, no_price: float,
-                 cog=None):
-        super().__init__(timeout=300)
-        self.market_id = market_id
-        self.slug      = slug
-        self.title     = title
-        self.yes_price = yes_price
-        self.no_price  = no_price
-        self.cog       = cog
-
-    async def _fetch_live_price(self, side: str) -> float:
-        """Fetch live price from API with 2-second timeout; fallback to cached.
-        NOTE: Not called from button handlers to avoid interaction timeout.
-        Kept for potential background refresh use."""
-        if not self.cog:
-            return self.yes_price if side == "YES" else self.no_price
-        try:
-            live = await asyncio.wait_for(
-                self.cog.client.fetch_market_by_id(self.market_id),
-                timeout=2.0,
-            )
-            if live:
-                prices = extract_prices(live)
-                # Update DB cache
-                now = datetime.now(timezone.utc).isoformat()
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        "UPDATE prediction_markets SET yes_price=?, no_price=?, last_synced=? "
-                        "WHERE market_id=?",
-                        (prices["yes_price"], prices["no_price"], now, self.market_id),
-                    )
-                    await db.commit()
-                return prices["yes_price"] if side == "YES" else prices["no_price"]
-        except Exception:
-            log.warning("Live price fetch failed for market %s, using cached", self.market_id)
-        return self.yes_price if side == "YES" else self.no_price
-
-    @discord.ui.button(label="Buy YES ✅", style=discord.ButtonStyle.success)
-    async def buy_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Use cached price to avoid API timeout before modal response
-        modal = WagerModal(
-            market_id=self.market_id, slug=self.slug, side="YES",
-            price=self.yes_price, title=self.title,
-        )
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="Buy NO ❌", style=discord.ButtonStyle.danger)
-    async def buy_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Use cached price to avoid API timeout before modal response
-        modal = WagerModal(
-            market_id=self.market_id, slug=self.slug, side="NO",
-            price=self.no_price, title=self.title,
-        )
-        await interaction.response.send_modal(modal)
-
-
-class CategorySelect(discord.ui.Select):
-    """Dropdown to filter markets by category."""
-
-    def __init__(self, categories: list[str], parent_view,
-                 category_counts: dict | None = None):
-        counts = category_counts or {}
-        total = sum(counts.values()) if counts else 0
-
-        options = [discord.SelectOption(
-            label="All Categories",
-            value="all",
-            description=f"{total} markets" if total else None,
-            default=True,
-        )]
-        for cat in categories:
-            count = counts.get(cat, 0)
-            options.append(discord.SelectOption(
-                label=cat,
-                value=cat,
-                description=f"{count} markets" if count else None,
-            ))
-        super().__init__(
-            placeholder="Filter by category…",
-            options=options[:25],
-            min_values=1,
-            max_values=1,
-            row=0,
-        )
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        chosen = self.values[0]
-        await self.parent_view.apply_filter(interaction, chosen)
-
-
-class MarketSelect(discord.ui.Select):
-    """Dropdown to select a specific market from the current page."""
-
-    def __init__(self, markets: list[dict], parent_view):
-        options = []
-        for m in markets[:25]:
-            title = m.get("title", "Untitled")
-            yes_p = m.get("yes_price", 0.5)
-            cat = m.get("category", "Other")
-            options.append(discord.SelectOption(
-                label=title[:100],
-                value=m.get("market_id", ""),
-                description=f"YES {yes_p:.0%} | {cat}",
-            ))
-        if not options:
-            options = [discord.SelectOption(label="No markets", value="none")]
-        super().__init__(
-            placeholder="Select a market to view details…",
-            options=options,
-            min_values=1,
-            max_values=1,
-            row=1,
-        )
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        chosen_id = self.values[0]
-        if chosen_id == "none":
-            return
-        await self.parent_view.select_market(interaction, chosen_id)
-
-
-class MarketBrowserView(discord.ui.View):
-    """Drill-down market browser: list → detail → bet."""
-
-    def __init__(self, all_markets: list[dict], categories: list[str],
-                 category_counts: dict | None = None,
-                 cog=None):
-        super().__init__(timeout=600)
-        self.all_markets     = all_markets
-        self.categories      = categories
-        self.category_counts = category_counts or {}
-        self.filter          = "all"
-        self.page            = 0
-        self.state           = "list"       # "list" or "detail"
-        self.selected_market = None         # dict when in detail state
-        self.cog             = cog
-
-        self._rebuild_components()
-
-    # ── Filtering / Pagination helpers ──
-
-    def _filtered(self) -> list[dict]:
-        if self.filter == "all":
-            # Apply per-category cap for diversity
-            seen: dict[str, int] = {}
-            result = []
-            for m in self.all_markets:  # already sorted by score
-                cat = m.get("category", "Other")
-                seen[cat] = seen.get(cat, 0) + 1
-                if seen[cat] <= MAX_PER_CATEGORY:
-                    result.append(m)
-            return result
-        return [m for m in self.all_markets if m.get("category") == self.filter]
-
-    def _max_page(self) -> int:
-        return max(0, (len(self._filtered()) - 1) // MARKETS_PER_PAGE)
-
-    def _current_chunk(self) -> list[dict]:
-        markets = self._filtered()
-        start = self.page * MARKETS_PER_PAGE
-        return markets[start : start + MARKETS_PER_PAGE]
-
-    # ── Component rebuilding ──
-
-    def _rebuild_components(self):
-        """Clear all components and rebuild for the current state."""
-        self.clear_items()
-
-        if self.state == "list":
-            self._build_list_components()
-        else:
-            self._build_detail_components()
-
-    def _build_list_components(self):
-        """Build components for list view: CategorySelect + MarketSelect + nav."""
-        # Row 0: Category filter
-        cat_select = CategorySelect(
-            self.categories, parent_view=self,
-            category_counts=self.category_counts,
-        )
-        self.add_item(cat_select)
-
-        # Row 1: Market select dropdown
-        chunk = self._current_chunk()
-        market_select = MarketSelect(chunk, parent_view=self)
-        self.add_item(market_select)
-
-        # Row 2: Navigation
-        prev_btn = discord.ui.Button(
-            label="◀ Prev",
-            style=discord.ButtonStyle.secondary,
-            custom_id="nav_prev",
-            disabled=self.page == 0,
-            row=2,
-        )
-        page_btn = discord.ui.Button(
-            label=f"{self.page + 1}/{self._max_page() + 1}",
-            style=discord.ButtonStyle.secondary,
-            custom_id="nav_page",
-            disabled=True,
-            row=2,
-        )
-        next_btn = discord.ui.Button(
-            label="Next ▶",
-            style=discord.ButtonStyle.secondary,
-            custom_id="nav_next",
-            disabled=self.page >= self._max_page(),
-            row=2,
-        )
-        prev_btn.callback = self._prev
-        next_btn.callback = self._next
-        self.add_item(prev_btn)
-        self.add_item(page_btn)
-        self.add_item(next_btn)
-
-    def _build_detail_components(self):
-        """Build components for detail view: Back + YES + NO."""
-        back_btn = discord.ui.Button(
-            label="🔙 Back to List",
-            style=discord.ButtonStyle.secondary,
-            custom_id="back_list",
-            row=0,
-        )
-        back_btn.callback = self._back_to_list
-        self.add_item(back_btn)
-
-        if self.selected_market:
-            yes_btn = discord.ui.Button(
-                label="Bet YES ✅",
-                style=discord.ButtonStyle.success,
-                custom_id="detail_yes",
-                row=1,
-            )
-            no_btn = discord.ui.Button(
-                label="Bet NO ❌",
-                style=discord.ButtonStyle.danger,
-                custom_id="detail_no",
-                row=1,
-            )
-            yes_btn.callback = self._make_bet_cb(self.selected_market, "YES")
-            no_btn.callback = self._make_bet_cb(self.selected_market, "NO")
-            self.add_item(yes_btn)
-            self.add_item(no_btn)
-
-    def _make_bet_cb(self, market: dict, side: str):
-        """Closure-safe callback: cached odds → open wager modal."""
-        async def callback(interaction: discord.Interaction):
-            price = market["yes_price"] if side == "YES" else market["no_price"]
-            modal = WagerModal(
-                market_id=market["market_id"],
-                slug=market["slug"],
-                side=side,
-                price=price,
-                title=market["title"],
-            )
-            await interaction.response.send_modal(modal)
-        return callback
-
-    # ── State transitions ──
-
-    async def select_market(self, interaction: discord.Interaction, market_id: str):
-        """Transition from list → detail view for a specific market."""
-        # Find the market in our data
-        market = next(
-            (m for m in self.all_markets if m.get("market_id") == market_id), None
-        )
-        if not market:
-            await interaction.response.defer()
-            return
-
-        self.state = "detail"
-        self.selected_market = market
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
-
-    async def _back_to_list(self, interaction: discord.Interaction):
-        """Transition from detail → list view."""
-        self.state = "list"
-        self.selected_market = None
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
-
-    async def apply_filter(self, interaction: discord.Interaction, cat: str):
-        self.filter = cat
-        self.page = 0
-        self.state = "list"
-        self.selected_market = None
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
-
-    async def _prev(self, interaction: discord.Interaction):
-        self.page = max(0, self.page - 1)
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
-
-    async def _next(self, interaction: discord.Interaction):
-        self.page = min(self._max_page(), self.page + 1)
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
-
-    # ── Page builders ──
-
-    async def _build_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
-        """Build embed + V6 card for the current state."""
-        if self.state == "detail" and self.selected_market:
-            return await self._build_detail_page(theme_id=theme_id)
-        return await self._build_list_page(theme_id=theme_id)
-
-    async def _build_list_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
-        """Build the market list view."""
-        markets = self._filtered()
-        total = len(markets)
-        chunk = self._current_chunk()
-
-        cat_label = "All Categories" if self.filter == "all" else self.filter
-        embed = discord.Embed(
-            title="FLOW Prediction Markets",
-            description=f"**{total}** markets · Select one below to view details",
-            color=CATEGORY_COLORS.get(cat_label, AtlasColors.TSL_GOLD.value),
-        )
-
-        card_file = None
-        if chunk:
-            try:
-                png = await render_market_list_card(
-                    chunk,
-                    page=self.page + 1,
-                    total_pages=self._max_page() + 1,
-                    filter_label=cat_label,
-                    theme_id=theme_id,
-                )
-                card_file = discord.File(io.BytesIO(png), filename="markets.png")
-                embed.set_image(url="attachment://markets.png")
-            except Exception:
-                log.exception("Failed to render market list card")
-                for m in chunk:
-                    yes_p = m.get("yes_price", 0.5)
-                    no_p = m.get("no_price", 0.5)
-                    cat = m.get("category", "Other")
-                    embed.add_field(
-                        name=f"{cat}  {m['title'][:55]}",
-                        value=f"YES {yes_p:.0%}  |  NO {no_p:.0%}",
-                        inline=False,
-                    )
-        else:
-            embed.add_field(
-                name="No markets found",
-                value="Try a different category or check back later.",
-                inline=False,
-            )
-
-        embed.set_footer(text="FLOW Markets · Powered by Polymarket")
-        embed.timestamp = datetime.now(timezone.utc)
-        return embed, card_file
-
-    async def _build_detail_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
-        """Build the single-market detail view."""
-        m = self.selected_market
-        cat_label = m.get("category", "Other")
-
-        embed = discord.Embed(
-            title=m.get("title", "")[:80],
-            color=CATEGORY_COLORS.get(cat_label, AtlasColors.TSL_GOLD.value),
-        )
-
-        card_file = None
-        try:
-            png = await render_market_detail_card(
-                title=m.get("title", ""),
-                category=m.get("category", "Other"),
-                yes_price=m.get("yes_price", 0.5),
-                no_price=m.get("no_price", 0.5),
-                volume=m.get("volume", 0),
-                liquidity=m.get("liquidity", 0),
-                end_date=m.get("end_date", ""),
-                theme_id=theme_id,
-            )
-            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
-            embed.set_image(url="attachment://market_detail.png")
-        except Exception:
-            log.exception("Failed to render market detail card")
-            yes_p = m.get("yes_price", 0.5)
-            no_p = m.get("no_price", 0.5)
-            embed.add_field(name="YES", value=f"{yes_p:.0%}", inline=True)
-            embed.add_field(name="NO", value=f"{no_p:.0%}", inline=True)
-
-        embed.set_footer(text="FLOW Markets · Click YES or NO below to bet")
-        embed.timestamp = datetime.now(timezone.utc)
-        return embed, card_file
 
 
 # ─────────────────────────────────────────────
-# CURATED BROWSER VIEW (replaces MarketBrowserView for /markets)
+# PREDICTION WORKSPACE (sportsbook-parity UX)
 # ─────────────────────────────────────────────
 
-class CuratedMarketSelect(discord.ui.Select):
-    """Select menu for drilling into a curated market."""
+class _WorkspaceMarketSelect(discord.ui.Select):
+    """Dropdown for selecting a market in the workspace."""
 
-    def __init__(self, markets: list[dict], parent_view):
-        self._parent = parent_view
+    def __init__(self, markets: list[dict], workspace: "PredictionWorkspace"):
+        self._ws = workspace
         options = []
         for i, m in enumerate(markets[:25]):
             cat = m.get("category", "Other")
@@ -1308,113 +1011,262 @@ class CuratedMarketSelect(discord.ui.Select):
                 emoji=emoji,
             ))
         if not options:
-            options = [discord.SelectOption(label="No markets", value="none")]
-        super().__init__(
-            placeholder="Select a market to view details...",
-            options=options,
-            row=0,
-        )
+            options = [discord.SelectOption(label="No markets available", value="none")]
+        super().__init__(placeholder="Select a market...", options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction):
         market_id = self.values[0]
         if market_id == "none":
             await interaction.response.defer()
             return
-        if self._parent is None:
-            await interaction.response.send_message("This view has expired. Please re-open the market browser.", ephemeral=True)
+        await self._ws._on_market_select(interaction, market_id)
+
+
+class _WorkspacePositionSelect(discord.ui.Select):
+    """Dropdown for selecting a position to sell in the workspace."""
+
+    def __init__(self, positions: list[dict], workspace: "PredictionWorkspace"):
+        self._ws = workspace
+        options = []
+        for i, pos in enumerate(positions[:25]):
+            side_emoji = "✅" if pos["side"] == "YES" else "❌"
+            label = f"{side_emoji} {pos['title'][:80]}"
+            desc = f"{pos['side']} × {pos['qty']} · Cost: ${pos['cost']:,}"
+            options.append(discord.SelectOption(
+                label=label[:100],
+                value=str(pos.get("contract_id", i)),
+                description=desc[:100],
+            ))
+        if not options:
+            options = [discord.SelectOption(label="No open positions", value="none")]
+        super().__init__(placeholder="Select a position to sell...", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        val = self.values[0]
+        if val == "none":
+            await interaction.response.defer()
             return
-        await self._parent.select_market(interaction, market_id)
+        await self._ws._on_position_select(interaction, int(val))
 
 
-class CuratedBrowserView(discord.ui.View):
-    """Curated market browser with weighted rotation."""
+class CustomPredictionWagerModal(discord.ui.Modal):
+    """Custom wager modal — input is total Bucks to spend."""
 
-    def __init__(
-        self,
-        markets: list[dict],
-        categories: list[str],
-        category_counts: dict | None = None,
-        cog=None,
-        view_mode: str = "curated",
-        filter_category: str | None = None,
-    ):
-        super().__init__(timeout=600)
-        self.markets = markets
-        self.categories = categories
-        self.category_counts = category_counts or {}
-        self.cog = cog
-        self.view_mode = view_mode
-        self.filter_category = filter_category
-        self.state = "list"
-        self.selected_market = None
+    amount_input = discord.ui.TextInput(
+        label="Total Bucks to spend",
+        placeholder="e.g. 200",
+        min_length=1,
+        max_length=8,
+        required=True,
+    )
 
-        self._rebuild_components()
+    def __init__(self, workspace: "PredictionWorkspace"):
+        market = workspace._selected_market
+        side = workspace._pending_side or "YES"
+        super().__init__(title=f"Buy {side} — {market['title'][:34]}")
+        self._ws = workspace
 
-    def _rebuild_components(self):
-        self.clear_items()
-        if self.state == "list":
-            self._build_list_components()
-        else:
-            self._build_detail_components()
-
-    def _build_list_components(self):
-        # Row 0: Market select
-        select = CuratedMarketSelect(self.markets, parent_view=self)
-        self.add_item(select)
-
-        # Row 1: Refresh button
-        refresh_btn = discord.ui.Button(
-            label="🔄 Refresh",
-            style=discord.ButtonStyle.secondary,
-            custom_id="curated_refresh",
-            row=1,
-        )
-        refresh_btn.callback = self._refresh
-        self.add_item(refresh_btn)
-
-    def _build_detail_components(self):
-        back_btn = discord.ui.Button(
-            label="🔙 Back to List",
-            style=discord.ButtonStyle.secondary,
-            custom_id="curated_back",
-            row=0,
-        )
-        back_btn.callback = self._back_to_list
-        self.add_item(back_btn)
-
-        if self.selected_market:
-            yes_btn = discord.ui.Button(
-                label="Bet YES ✅",
-                style=discord.ButtonStyle.success,
-                custom_id="curated_yes",
-                row=1,
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.amount_input.value.strip().replace(",", "")
+        if not raw.isdigit() or int(raw) < 1:
+            await interaction.response.send_message(
+                "❌ Please enter a whole number ≥ 1.", ephemeral=True
             )
-            no_btn = discord.ui.Button(
-                label="Bet NO ❌",
-                style=discord.ButtonStyle.danger,
-                custom_id="curated_no",
-                row=1,
-            )
-            yes_btn.callback = self._make_bet_cb(self.selected_market, "YES")
-            no_btn.callback = self._make_bet_cb(self.selected_market, "NO")
-            self.add_item(yes_btn)
-            self.add_item(no_btn)
+            return
 
-    def _make_bet_cb(self, market: dict, side: str):
-        async def callback(interaction: discord.Interaction):
-            price = market["yes_price"] if side == "YES" else market["no_price"]
-            modal = WagerModal(
+        amount = int(raw)
+        market = self._ws._selected_market
+        side = self._ws._pending_side
+        price = market["yes_price"] if side == "YES" else market["no_price"]
+        cost_per = price_to_bucks(price)
+        quantity = amount // cost_per if cost_per > 0 else 0
+
+        if quantity < 1:
+            await interaction.response.send_message(
+                f"❌ Minimum cost per contract is **${cost_per:,}**. "
+                f"You entered **${amount:,}**.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await _execute_prediction_buy(
+                user_id=interaction.user.id,
                 market_id=market["market_id"],
                 slug=market["slug"],
                 side=side,
                 price=price,
+                quantity=quantity,
                 title=market["title"],
             )
-            await interaction.response.send_modal(modal)
-        return callback
+        except (ValueError, flow_wallet.InsufficientFundsError) as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to place bet: {e}", ephemeral=True)
+            return
 
-    async def select_market(self, interaction: discord.Interaction, market_id: str):
-        market = next((m for m in self.markets if m.get("market_id") == market_id), None)
+        # Show confirmation
+        theme_id = get_theme_for_render(interaction.user.id)
+        try:
+            png = await render_bet_confirmation_card(
+                market_title=market["title"],
+                side=side,
+                price=price,
+                quantity=result["quantity"],
+                cost=result["cost"],
+                potential_payout=result["payout"],
+                balance=result["new_balance"],
+                player_name=interaction.user.display_name,
+                theme_id=theme_id,
+            )
+            await send_card(interaction, png, filename="bet_confirm.png",
+                            followup=True, ephemeral=True)
+        except Exception:
+            log.exception("Failed to render bet confirmation card")
+            await interaction.followup.send(
+                f"✅ Bought **{result['quantity']}** {side} contracts for "
+                f"**${result['cost']:,}**. Balance: **${result['new_balance']:,}**",
+                ephemeral=True,
+            )
+
+        # Post to #ledger
+        try:
+            new_bal = await flow_wallet.get_balance(interaction.user.id)
+            txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+            from ledger_poster import post_transaction
+            await post_transaction(
+                interaction.client, interaction.guild_id, interaction.user.id,
+                "PREDICTION", -result["cost"], new_bal,
+                f"Buy {result['quantity']} {side} — {market['title'][:50]}",
+                txn_id,
+            )
+        except Exception:
+            pass
+
+
+class PredictionWorkspace(discord.ui.View):
+    """Edit-in-place workspace for prediction markets.
+
+    All states render into a single ephemeral message.
+    Mirrors SportsbookWorkspace pattern from flow_sportsbook.py.
+    """
+
+    def __init__(self, cog, user_id: int, *, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.user_id = user_id
+        # State
+        self._tab = "markets"           # "markets" or "portfolio"
+        self._markets: list[dict] = []
+        self._selected_market: dict | None = None
+        self._pending_side: str | None = None
+        self._pending_price: float = 0.0
+        self._positions: list[dict] = []
+        self._selected_position: dict | None = None
+        self._state = "market_list"     # tracks sub-state for back navigation
+
+    # ── Core: edit-in-place ──────────────────────────────────────────────────
+
+    async def _update_workspace(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+        *,
+        file: discord.File | None = None,
+        is_initial: bool = False,
+    ):
+        """Edit the workspace message in-place."""
+        kwargs: dict = {"embed": embed, "view": self}
+        if file is not None:
+            embed.set_image(url=f"attachment://{file.filename}")
+            kwargs["attachments"] = [file]
+        else:
+            embed.set_image(url=None)
+            kwargs["attachments"] = []
+
+        if is_initial:
+            if interaction.response.is_done():
+                await interaction.followup.send(**kwargs, ephemeral=True)
+            else:
+                await interaction.response.send_message(**kwargs, ephemeral=True)
+        elif not interaction.response.is_done():
+            await interaction.response.edit_message(**kwargs)
+        else:
+            await interaction.edit_original_response(**kwargs)
+
+    def _balance_footer(self) -> str:
+        """Build a balance footer (populated lazily by show_ methods)."""
+        return "FLOW Markets · Powered by Polymarket"
+
+    # ── State: Market List ───────────────────────────────────────────────────
+
+    async def show_market_list(self, interaction: discord.Interaction, *, is_initial: bool = False):
+        """Show market list with dropdown + tab buttons."""
+        self._state = "market_list"
+        self._selected_market = None
+        self._tab = "markets"
+        self.clear_items()
+
+        # Row 0: Tab buttons
+        markets_btn = discord.ui.Button(
+            label="📊 Markets", style=discord.ButtonStyle.primary, row=0,
+        )
+        markets_btn.callback = lambda i: self.show_market_list(i)
+        markets_btn.disabled = True  # already on this tab
+        self.add_item(markets_btn)
+
+        portfolio_btn = discord.ui.Button(
+            label="📋 Portfolio", style=discord.ButtonStyle.secondary, row=0,
+        )
+        portfolio_btn.callback = lambda i: self.show_portfolio(i)
+        self.add_item(portfolio_btn)
+
+        refresh_btn = discord.ui.Button(
+            label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=0,
+        )
+        refresh_btn.callback = self._refresh_markets
+        self.add_item(refresh_btn)
+
+        # Row 1: Market select dropdown
+        if self._markets:
+            self.add_item(_WorkspaceMarketSelect(self._markets, self))
+
+        # Build embed + card
+        theme_id = get_theme_for_render(self.user_id)
+        embed = discord.Embed(
+            title="FLOW Prediction Markets",
+            description=f"**{len(self._markets)}** markets · Select one to view details & bet",
+            color=AtlasColors.TSL_GOLD,
+        )
+        card_file = None
+        if self._markets:
+            try:
+                png = await render_curated_list_card(
+                    self._markets, filter_label="Curated · All Categories",
+                    theme_id=theme_id,
+                )
+                card_file = discord.File(io.BytesIO(png), filename="markets.png")
+            except Exception:
+                log.exception("Failed to render curated list card")
+
+        embed.set_footer(text=self._balance_footer())
+        embed.timestamp = datetime.now(timezone.utc)
+        await self._update_workspace(interaction, embed, file=card_file, is_initial=is_initial)
+
+    async def _refresh_markets(self, interaction: discord.Interaction):
+        """Refresh market list with new curated selection."""
+        await interaction.response.defer()
+        if self.cog:
+            self._markets = await self.cog._get_curated_selection(
+                count=MARKETS_PER_PAGE,
+            )
+        await self.show_market_list(interaction)
+
+    async def _on_market_select(self, interaction: discord.Interaction, market_id: str):
+        """User selected a market from the dropdown."""
+        market = next((m for m in self._markets if m.get("market_id") == market_id), None)
         if not market:
             await interaction.response.defer()
             return
@@ -1424,128 +1276,519 @@ class CuratedBrowserView(discord.ui.View):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
-                    "VALUES (?, 'view', ?, 'markets_cmd', ?)",
+                    "VALUES (?, 'view', ?, 'workspace', ?)",
                     (market_id, str(interaction.user.id), datetime.now(timezone.utc).isoformat()),
                 )
                 await db.commit()
         except Exception:
             pass
 
-        self.state = "detail"
-        self.selected_market = market
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
+        await self.show_market_detail(interaction, market)
 
-    async def _back_to_list(self, interaction: discord.Interaction):
-        self.state = "list"
-        self.selected_market = None
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
+    # ── State: Market Detail ─────────────────────────────────────────────────
 
-    async def _refresh(self, interaction: discord.Interaction):
-        """Refresh with a new curated selection."""
-        if self.cog:
-            self.markets = await self.cog._get_curated_selection(
-                count=MARKETS_PER_PAGE,
-                category=self.filter_category,
-                view_mode=self.view_mode,
+    async def show_market_detail(self, interaction: discord.Interaction, market: dict, *, is_initial: bool = False):
+        """Show market detail with YES/NO buttons."""
+        self._state = "market_detail"
+        self._selected_market = market
+        self.clear_items()
+
+        # Row 0: Back + Portfolio tab
+        back_btn = discord.ui.Button(
+            label="← Markets", style=discord.ButtonStyle.secondary, row=0,
+        )
+        back_btn.callback = lambda i: self.show_market_list(i)
+        self.add_item(back_btn)
+
+        portfolio_btn = discord.ui.Button(
+            label="📋 Portfolio", style=discord.ButtonStyle.secondary, row=0,
+        )
+        portfolio_btn.callback = lambda i: self.show_portfolio(i)
+        self.add_item(portfolio_btn)
+
+        # Row 1: Buy YES / Buy NO
+        yes_btn = discord.ui.Button(
+            label="Buy YES ✅", style=discord.ButtonStyle.success, row=1,
+        )
+        yes_btn.callback = self._make_side_cb("YES")
+        self.add_item(yes_btn)
+
+        no_btn = discord.ui.Button(
+            label="Buy NO ❌", style=discord.ButtonStyle.danger, row=1,
+        )
+        no_btn.callback = self._make_side_cb("NO")
+        self.add_item(no_btn)
+
+        # Build embed + card
+        theme_id = get_theme_for_render(self.user_id)
+        embed = discord.Embed(
+            title=market.get("title", "")[:80],
+            color=0x3498DB,
+        )
+        card_file = None
+        try:
+            png = await render_market_detail_card(
+                title=market.get("title", ""),
+                category=market.get("category", "Other"),
+                yes_price=market.get("yes_price", 0.5),
+                no_price=market.get("no_price", 0.5),
+                volume=market.get("volume", 0),
+                liquidity=market.get("liquidity", 0),
+                end_date=market.get("end_date", ""),
+                theme_id=theme_id,
             )
-        self._rebuild_components()
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await self._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": self, "attachments": []}
-        if card_file:
-            kwargs["attachments"] = [card_file]
-        await interaction.response.edit_message(**kwargs)
+            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
+        except Exception:
+            log.exception("Failed to render market detail card")
+            embed.add_field(name="YES", value=f"{market.get('yes_price', 0.5):.0%}", inline=True)
+            embed.add_field(name="NO", value=f"{market.get('no_price', 0.5):.0%}", inline=True)
 
-    async def _build_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
-        if self.state == "detail" and self.selected_market:
-            return await self._build_detail_page(theme_id=theme_id)
-        return await self._build_list_page(theme_id=theme_id)
+        embed.set_footer(text="FLOW Markets · Select YES or NO to bet")
+        embed.timestamp = datetime.now(timezone.utc)
+        await self._update_workspace(interaction, embed, file=card_file, is_initial=is_initial)
 
-    async def _build_list_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
-        total = len(self.markets)
-        view_labels = {
-            "curated": "Curated", "trending": "Trending",
-            "popular": "Popular", "new": "New",
-        }
-        filter_label = self.filter_category or f"{view_labels.get(self.view_mode, 'Curated')} · All Categories"
+    def _make_side_cb(self, side: str):
+        """Factory: YES/NO button → opens wager presets."""
+        async def callback(interaction: discord.Interaction):
+            market = self._selected_market
+            price = market["yes_price"] if side == "YES" else market["no_price"]
+            self._pending_side = side
+            self._pending_price = price
+            await self.show_wager_presets(interaction)
+        return callback
+
+    # ── State: Wager Presets ─────────────────────────────────────────────────
+
+    async def show_wager_presets(self, interaction: discord.Interaction):
+        """Show preset amount buttons — sportsbook parity."""
+        self._state = "wager_presets"
+        self.clear_items()
+
+        market = self._selected_market
+        side = self._pending_side
+        price = self._pending_price
+        cost_per = price_to_bucks(price)
+
+        balance = await flow_wallet.get_balance(self.user_id)
+
+        # Row 0: Preset buttons (up to 5)
+        for amt in PREDICTION_WAGER_PRESETS:
+            qty = amt // cost_per if cost_per > 0 else 0
+            can_buy = qty >= 1 and amt <= balance
+            btn = discord.ui.Button(
+                label=f"${amt:,}",
+                style=discord.ButtonStyle.success if can_buy else discord.ButtonStyle.secondary,
+                disabled=not can_buy,
+                row=0,
+            )
+            btn.callback = self._make_buy_preset_cb(amt)
+            self.add_item(btn)
+
+        # Row 1: Custom + Back
+        custom_btn = discord.ui.Button(
+            label="✏️ Custom", style=discord.ButtonStyle.secondary, row=1,
+        )
+        custom_btn.callback = self._custom_wager_cb
+        self.add_item(custom_btn)
+
+        back_btn = discord.ui.Button(
+            label="← Back", style=discord.ButtonStyle.secondary, row=1,
+        )
+        back_btn.callback = lambda i: self.show_market_detail(i, market)
+        self.add_item(back_btn)
+
+        # Build embed
+        embed = discord.Embed(
+            title=f"📋  {side} — {market['title'][:60]}",
+            color=0x2ECC71 if side == "YES" else 0xE74C3C,
+        )
+        embed.description = (
+            f"**Price:** {price:.0%} · **Cost per contract:** ${cost_per:,}\n"
+            f"**Payout per contract:** ${PAYOUT_SCALE:,}\n\n"
+            f"💰 Balance: **${balance:,}**"
+        )
+        embed.set_footer(text="FLOW Markets · Select an amount or enter custom")
+        await self._update_workspace(interaction, embed)
+
+    def _make_buy_preset_cb(self, amount: int):
+        """Factory: preset button → execute buy."""
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+            market = self._selected_market
+            side = self._pending_side
+            price = self._pending_price
+            cost_per = price_to_bucks(price)
+            quantity = amount // cost_per if cost_per > 0 else 0
+
+            try:
+                result = await _execute_prediction_buy(
+                    user_id=interaction.user.id,
+                    market_id=market["market_id"],
+                    slug=market["slug"],
+                    side=side,
+                    price=price,
+                    quantity=quantity,
+                    title=market["title"],
+                )
+            except (ValueError, flow_wallet.InsufficientFundsError) as e:
+                embed = discord.Embed(description=f"❌ {e}", color=0xE74C3C)
+                await self._update_workspace(interaction, embed)
+                return
+            except Exception as e:
+                embed = discord.Embed(description=f"❌ Failed: {e}", color=0xE74C3C)
+                await self._update_workspace(interaction, embed)
+                return
+
+            # Show confirmation card in workspace
+            theme_id = get_theme_for_render(interaction.user.id)
+            self.clear_items()
+
+            # Add navigation buttons on confirmation
+            back_markets = discord.ui.Button(
+                label="← Markets", style=discord.ButtonStyle.secondary, row=0,
+            )
+            back_markets.callback = lambda i: self.show_market_list(i)
+            self.add_item(back_markets)
+
+            portfolio_btn = discord.ui.Button(
+                label="📋 Portfolio", style=discord.ButtonStyle.secondary, row=0,
+            )
+            portfolio_btn.callback = lambda i: self.show_portfolio(i)
+            self.add_item(portfolio_btn)
+
+            card_file = None
+            embed = discord.Embed(
+                title="✅ Contract Purchased",
+                description=(
+                    f"**{market['title'][:60]}**\n"
+                    f"{side} × {result['quantity']} · Cost: **${result['cost']:,}**\n"
+                    f"Potential: **${result['payout']:,}**"
+                ),
+                color=0x2ECC71 if side == "YES" else 0xE74C3C,
+            )
+            try:
+                png = await render_bet_confirmation_card(
+                    market_title=market["title"],
+                    side=side,
+                    price=price,
+                    quantity=result["quantity"],
+                    cost=result["cost"],
+                    potential_payout=result["payout"],
+                    balance=result["new_balance"],
+                    player_name=interaction.user.display_name,
+                    theme_id=theme_id,
+                )
+                card_file = discord.File(io.BytesIO(png), filename="bet_confirm.png")
+            except Exception:
+                log.exception("Failed to render bet confirmation card")
+
+            embed.set_footer(text=f"Balance: ${result['new_balance']:,}")
+            await self._update_workspace(interaction, embed, file=card_file)
+
+            # Post to #ledger (fire-and-forget)
+            try:
+                new_bal = await flow_wallet.get_balance(interaction.user.id)
+                txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+                from ledger_poster import post_transaction
+                await post_transaction(
+                    interaction.client, interaction.guild_id, interaction.user.id,
+                    "PREDICTION", -result["cost"], new_bal,
+                    f"Buy {result['quantity']} {side} — {market['title'][:50]}",
+                    txn_id,
+                )
+            except Exception:
+                pass
+        return callback
+
+    async def _custom_wager_cb(self, interaction: discord.Interaction):
+        """Open custom wager modal — must NOT defer first."""
+        modal = CustomPredictionWagerModal(self)
+        await interaction.response.send_modal(modal)
+
+    # ── State: Portfolio List ────────────────────────────────────────────────
+
+    async def _load_positions(self):
+        """Load open positions from DB."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("""
+                SELECT pc.id, pc.market_id, pm.title, pc.side, pc.buy_price,
+                       pc.quantity, pc.cost_bucks, pc.potential_payout,
+                       pm.yes_price, pm.no_price
+                FROM prediction_contracts pc
+                LEFT JOIN prediction_markets pm ON pm.market_id = pc.market_id
+                WHERE pc.user_id = ? AND pc.status = 'open'
+                ORDER BY pc.created_at DESC
+                LIMIT 25
+            """, (self.user_id,)) as cursor:
+                rows = await cursor.fetchall()
+
+        self._positions = []
+        for (cid, mid, title, side, buy_price, qty, cost, payout,
+             yes_p, no_p) in rows:
+            current_price = (yes_p if side == "YES" else no_p) or buy_price
+            self._positions.append({
+                "contract_id": cid,
+                "market_id": mid,
+                "title": title or mid,
+                "side": side,
+                "buy_price": buy_price,
+                "qty": qty,
+                "cost": cost,
+                "payout": payout,
+                "current_price": current_price,
+            })
+
+    async def show_portfolio(self, interaction: discord.Interaction, *, is_initial: bool = False):
+        """Show portfolio with position select dropdown."""
+        self._state = "portfolio_list"
+        self._selected_position = None
+        self._tab = "portfolio"
+        self.clear_items()
+
+        await self._load_positions()
+
+        # Row 0: Tab buttons
+        markets_btn = discord.ui.Button(
+            label="📊 Markets", style=discord.ButtonStyle.secondary, row=0,
+        )
+        markets_btn.callback = lambda i: self.show_market_list(i)
+        self.add_item(markets_btn)
+
+        portfolio_btn = discord.ui.Button(
+            label="📋 Portfolio", style=discord.ButtonStyle.primary, row=0,
+        )
+        portfolio_btn.callback = lambda i: self.show_portfolio(i)
+        portfolio_btn.disabled = True  # already on this tab
+        self.add_item(portfolio_btn)
+
+        # Row 1: Position select dropdown (if positions exist)
+        if self._positions:
+            self.add_item(_WorkspacePositionSelect(self._positions, self))
+
+        # Build embed + card
+        balance = await flow_wallet.get_balance(self.user_id)
+        theme_id = get_theme_for_render(self.user_id)
+
+        if not self._positions:
+            embed = discord.Embed(
+                title="📋 Portfolio",
+                description="You have no open prediction market positions.\nBrowse **Markets** to place your first bet!",
+                color=AtlasColors.TSL_GOLD,
+            )
+            embed.set_footer(text=f"Balance: ${balance:,}")
+            await self._update_workspace(interaction, embed, is_initial=is_initial)
+            return
+
+        total_invested = sum(p["cost"] for p in self._positions)
+        total_potential = sum(p["payout"] for p in self._positions)
 
         embed = discord.Embed(
-            title="FLOW Prediction Markets",
-            description=f"**{total}** markets · Select one below to view details & bet",
+            title="📋 Portfolio",
+            description=(
+                f"**{len(self._positions)}** open positions · "
+                f"Invested: **${total_invested:,}** · Potential: **${total_potential:,}**"
+            ),
             color=AtlasColors.TSL_GOLD,
         )
 
         card_file = None
-        if self.markets:
-            try:
-                png = await render_curated_list_card(
-                    self.markets,
-                    filter_label=filter_label,
-                    theme_id=theme_id,
-                )
-                card_file = discord.File(io.BytesIO(png), filename="markets.png")
-                embed.set_image(url="attachment://markets.png")
-            except Exception:
-                log.exception("Failed to render curated list card")
-                for m in self.markets:
-                    yes_p = m.get("yes_price", 0.5)
-                    no_p = m.get("no_price", 0.5)
-                    embed.add_field(
-                        name=f"{m.get('category', '')}  {m['title'][:55]}",
-                        value=f"YES {yes_p:.0%}  |  NO {no_p:.0%}",
-                        inline=False,
-                    )
-
-        embed.set_footer(text="FLOW Markets · Powered by Polymarket")
-        embed.timestamp = datetime.now(timezone.utc)
-        return embed, card_file
-
-    async def _build_detail_page(self, *, theme_id: str | None = None) -> tuple[discord.Embed, discord.File | None]:
-        m = self.selected_market
-        embed = discord.Embed(
-            title=m.get("title", "")[:80],
-            color=0x3498DB,
-        )
-
-        card_file = None
         try:
-            png = await render_market_detail_card(
-                title=m.get("title", ""),
-                category=m.get("category", "Other"),
-                yes_price=m.get("yes_price", 0.5),
-                no_price=m.get("no_price", 0.5),
-                volume=m.get("volume", 0),
-                liquidity=m.get("liquidity", 0),
-                end_date=m.get("end_date", ""),
+            png = await render_portfolio_card(
+                positions=self._positions,
+                player_name=(interaction.user.display_name
+                             if hasattr(interaction, "user") else "Unknown"),
+                total_invested=total_invested,
+                total_potential=total_potential,
+                balance=balance,
                 theme_id=theme_id,
             )
-            card_file = discord.File(io.BytesIO(png), filename="market_detail.png")
-            embed.set_image(url="attachment://market_detail.png")
+            card_file = discord.File(io.BytesIO(png), filename="portfolio.png")
         except Exception:
-            log.exception("Failed to render market detail card")
-            embed.add_field(name="YES", value=f"{m.get('yes_price', 0.5):.0%}", inline=True)
-            embed.add_field(name="NO", value=f"{m.get('no_price', 0.5):.0%}", inline=True)
+            log.exception("Failed to render portfolio card")
 
-        # Add sentiment info
-        sentiment = m.get("sentiment", {})
-        if sentiment.get("total", 0) > 0:
-            embed.description = f"🏛️ {sentiment['label']}"
-
-        embed.set_footer(text="FLOW Markets · Click YES or NO below to bet")
+        embed.set_footer(text=f"Balance: ${balance:,} · Select a position to sell")
         embed.timestamp = datetime.now(timezone.utc)
-        return embed, card_file
+        await self._update_workspace(interaction, embed, file=card_file, is_initial=is_initial)
+
+    async def _on_position_select(self, interaction: discord.Interaction, contract_id: int):
+        """User selected a position to view sell options."""
+        pos = next((p for p in self._positions if p["contract_id"] == contract_id), None)
+        if not pos:
+            await interaction.response.defer()
+            return
+        await self.show_position_detail(interaction, pos)
+
+    # ── State: Position Detail (sell options) ────────────────────────────────
+
+    async def show_position_detail(self, interaction: discord.Interaction, position: dict):
+        """Show sell buttons for a specific position."""
+        self._state = "position_detail"
+        self._selected_position = position
+        self.clear_items()
+
+        # Try live price fetch with timeout
+        current_price = position["current_price"]
+        if self.cog:
+            try:
+                live = await asyncio.wait_for(
+                    self.cog.client.fetch_market_by_id(position["market_id"]),
+                    timeout=2.0,
+                )
+                if live:
+                    prices = extract_prices(live)
+                    current_price = (
+                        prices["yes_price"] if position["side"] == "YES"
+                        else prices["no_price"]
+                    )
+                    position["current_price"] = current_price
+            except Exception:
+                pass  # use cached price
+
+        sell_price_bucks = price_to_bucks(current_price)
+        qty = position["qty"]
+        cost_basis = position["cost"]
+        current_value = sell_price_bucks * qty
+        pnl = current_value - cost_basis
+
+        # Row 0: Back to portfolio
+        back_btn = discord.ui.Button(
+            label="← Portfolio", style=discord.ButtonStyle.secondary, row=0,
+        )
+        back_btn.callback = lambda i: self.show_portfolio(i)
+        self.add_item(back_btn)
+
+        markets_btn = discord.ui.Button(
+            label="📊 Markets", style=discord.ButtonStyle.secondary, row=0,
+        )
+        markets_btn.callback = lambda i: self.show_market_list(i)
+        self.add_item(markets_btn)
+
+        # Row 1: Sell buttons
+        # Sell All
+        sell_all_btn = discord.ui.Button(
+            label=f"Sell All ({qty})", style=discord.ButtonStyle.danger, row=1,
+        )
+        sell_all_btn.callback = self._make_sell_cb(position, qty)
+        self.add_item(sell_all_btn)
+
+        # Sell 50% (only if qty >= 2)
+        if qty >= 2:
+            half = qty // 2
+            sell_half_btn = discord.ui.Button(
+                label=f"Sell {half}", style=discord.ButtonStyle.secondary, row=1,
+            )
+            sell_half_btn.callback = self._make_sell_cb(position, half)
+            self.add_item(sell_half_btn)
+
+        # Sell 1 (only if qty > 1, since Sell All covers qty==1)
+        if qty > 1:
+            sell_one_btn = discord.ui.Button(
+                label="Sell 1", style=discord.ButtonStyle.secondary, row=1,
+            )
+            sell_one_btn.callback = self._make_sell_cb(position, 1)
+            self.add_item(sell_one_btn)
+
+        # Build embed
+        pnl_str = f"+${pnl:,}" if pnl >= 0 else f"-${abs(pnl):,}"
+        pnl_emoji = "📈" if pnl >= 0 else "📉"
+        side_emoji = "✅" if position["side"] == "YES" else "❌"
+
+        embed = discord.Embed(
+            title=f"{side_emoji} {position['title'][:70]}",
+            color=0x2ECC71 if pnl >= 0 else 0xE74C3C,
+        )
+        embed.description = (
+            f"**Side:** {position['side']} · **Quantity:** {qty}\n"
+            f"**Bought at:** {position['buy_price']:.0%} · **Current:** {current_price:.0%}\n\n"
+            f"**Cost basis:** ${cost_basis:,}\n"
+            f"**Current value:** ${current_value:,}\n"
+            f"{pnl_emoji} **P/L:** {pnl_str}"
+        )
+        embed.set_footer(text=f"Sell price: ${sell_price_bucks:,}/contract")
+        await self._update_workspace(interaction, embed)
+
+    def _make_sell_cb(self, position: dict, quantity: int):
+        """Factory: sell button → execute sell."""
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+            try:
+                result = await _execute_prediction_sell(
+                    user_id=interaction.user.id,
+                    contract_id=position["contract_id"],
+                    sell_quantity=quantity,
+                    current_price=position["current_price"],
+                )
+            except (ValueError, flow_wallet.InsufficientFundsError) as e:
+                embed = discord.Embed(description=f"❌ {e}", color=0xE74C3C)
+                await self._update_workspace(interaction, embed)
+                return
+            except Exception as e:
+                embed = discord.Embed(description=f"❌ Failed: {e}", color=0xE74C3C)
+                await self._update_workspace(interaction, embed)
+                return
+
+            # Show sell confirmation
+            self.clear_items()
+            back_portfolio = discord.ui.Button(
+                label="📋 Portfolio", style=discord.ButtonStyle.secondary, row=0,
+            )
+            back_portfolio.callback = lambda i: self.show_portfolio(i)
+            self.add_item(back_portfolio)
+
+            markets_btn = discord.ui.Button(
+                label="📊 Markets", style=discord.ButtonStyle.secondary, row=0,
+            )
+            markets_btn.callback = lambda i: self.show_market_list(i)
+            self.add_item(markets_btn)
+
+            pnl = result["profit_loss"]
+            pnl_str = f"+${pnl:,}" if pnl >= 0 else f"-${abs(pnl):,}"
+            pnl_emoji = "📈" if pnl >= 0 else "📉"
+
+            card_file = None
+            try:
+                theme_id = get_theme_for_render(interaction.user.id)
+                png = await render_sell_confirmation_card(
+                    market_title=position["title"],
+                    side=position["side"],
+                    sell_quantity=quantity,
+                    sell_price=position["current_price"],
+                    proceeds=result["proceeds"],
+                    cost_basis=result["cost_basis"],
+                    profit_loss=pnl,
+                    balance=result["new_balance"],
+                    player_name=interaction.user.display_name,
+                    theme_id=theme_id,
+                )
+                card_file = discord.File(io.BytesIO(png), filename="sell_confirm.png")
+            except Exception:
+                log.exception("Failed to render sell confirmation card")
+
+            embed = discord.Embed(
+                title="💰 Contracts Sold",
+                description=(
+                    f"**{position['title'][:60]}**\n"
+                    f"Sold **{quantity}** {position['side']} contracts\n"
+                    f"Proceeds: **${result['proceeds']:,}** · {pnl_emoji} P/L: **{pnl_str}**"
+                ),
+                color=0x2ECC71 if pnl >= 0 else 0xE74C3C,
+            )
+            embed.set_footer(text=f"Balance: ${result['new_balance']:,}")
+            await self._update_workspace(interaction, embed, file=card_file)
+
+            # Post to #ledger
+            try:
+                txn_id = await flow_wallet.get_last_txn_id(interaction.user.id)
+                from ledger_poster import post_transaction
+                await post_transaction(
+                    interaction.client, interaction.guild_id, interaction.user.id,
+                    "PREDICTION", result["proceeds"], result["new_balance"],
+                    f"Sell {quantity} {position['side']} — {position['title'][:50]}",
+                    txn_id,
+                )
+            except Exception:
+                pass
+        return callback
 
 
 # ─────────────────────────────────────────────
@@ -2263,27 +2506,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             )
             await db.commit()
 
-        theme_id = get_theme_for_render(interaction.user.id)
-        view = BetButtonView(
-            market_id=m["market_id"], slug=m["slug"], title=m["title"],
-            yes_price=m["yes_price"], no_price=m["no_price"], cog=self,
-        )
-
-        try:
-            png = await render_market_detail_card(
-                title=m["title"], category=m["category"],
-                yes_price=m["yes_price"], no_price=m["no_price"],
-                volume=m["volume"], liquidity=m["liquidity"],
-                end_date=m["end_date"],
-                theme_id=theme_id,
-            )
-            await send_card(interaction, png, filename="market_detail.png",
-                            followup=True, ephemeral=True, view=view)
-        except Exception:
-            embed = discord.Embed(title=m["title"][:80], color=0x3498DB)
-            embed.add_field(name="YES", value=f"{m['yes_price']:.0%}", inline=True)
-            embed.add_field(name="NO", value=f"{m['no_price']:.0%}", inline=True)
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        # Open workspace directly to market detail
+        ws = PredictionWorkspace(self, interaction.user.id)
+        ws._markets = [m]
+        await ws.show_market_detail(interaction, m, is_initial=True)
 
     async def _auto_resolve_pass(self):
         """
@@ -2982,34 +3208,9 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             )
             return
 
-        # Category counts for the select menu
-        category_counts: dict[str, int] = {}
-        async with aiosqlite.connect(DB_PATH) as db:
-            blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
-            async with db.execute(f"""
-                SELECT category, COUNT(*) FROM prediction_markets
-                WHERE status = 'active' AND category NOT IN ({blocked_ph})
-                GROUP BY category
-            """, tuple(BLOCKED_CATEGORIES)) as cursor:
-                for cat, cnt in await cursor.fetchall():
-                    category_counts[cat] = cnt
-
-        categories = sorted(category_counts.keys())
-        browser = CuratedBrowserView(
-            markets=markets,
-            categories=categories,
-            category_counts=category_counts,
-            cog=self,
-            view_mode=view,
-            filter_category=category,
-        )
-
-        theme_id = get_theme_for_render(interaction.user.id)
-        embed, card_file = await browser._build_page(theme_id=theme_id)
-        kwargs = {"embed": embed, "view": browser, "ephemeral": True}
-        if card_file:
-            kwargs["file"] = card_file
-        await interaction.followup.send(**kwargs)
+        ws = PredictionWorkspace(self, interaction.user.id)
+        ws._markets = markets
+        await ws.show_market_list(interaction, is_initial=True)
 
     # ── Slash: /bet <slug> ──────────────────
 
@@ -3088,50 +3289,21 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         except Exception:
             log.warning("Price sync failed for market %s, using cached", market_id)
 
-        yes_bucks = price_to_bucks(yes_price)
-        no_bucks  = price_to_bucks(no_price)
-
-        color = CATEGORY_COLORS.get(category, AtlasColors.TSL_GOLD.value)
-        try:
-            end_dt  = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-            end_str = f"<t:{int(end_dt.timestamp())}:R>"
-        except Exception:
-            end_str = end_date or "No expiry"
-
-        embed = discord.Embed(
-            title=f"📊 {title[:70]}",
-            color=color,
-        )
-        embed.description = (
-            f"```\n{category.upper()}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n```\n"
-            f"Ends: {end_str}  ·  Volume: {fmt_volume(volume)}\n"
-            f"Each contract pays **{PAYOUT_SCALE} TSL Bucks** if your side wins."
-        )
-        embed.add_field(
-            name="✅ Buy YES",
-            value=(
-                f"**{yes_bucks} TSL Bucks** / contract\n"
-                f"Implied probability: **{yes_price:.1%}**"
-            ),
-            inline=True,
-        )
-        embed.add_field(
-            name="❌ Buy NO",
-            value=(
-                f"**{no_bucks} TSL Bucks** / contract\n"
-                f"Implied probability: **{no_price:.1%}**"
-            ),
-            inline=True,
-        )
-        embed.set_footer(text="💡 Odds fetched live · Click a button below · ATLAS Flow Casino")
-        embed.timestamp = datetime.now(timezone.utc)
-
-        view = BetButtonView(
-            market_id=market_id, slug=mkt_slug, title=title,
-            yes_price=yes_price, no_price=no_price, cog=self,
-        )
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        # Open workspace directly to market detail
+        market_dict = {
+            "market_id": market_id,
+            "slug": mkt_slug,
+            "title": title,
+            "category": category,
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "volume": volume,
+            "end_date": end_date,
+            "status": status,
+        }
+        ws = PredictionWorkspace(self, interaction.user.id)
+        ws._markets = [market_dict]
+        await ws.show_market_detail(interaction, market_dict, is_initial=True)
 
     # ── Slash: /portfolio ─────────────────────
 
@@ -3145,92 +3317,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         except discord.NotFound:
             return
         await self._ensure_db()
-        user_id = interaction.user.id
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("""
-                SELECT pc.market_id, pm.title, pc.side, pc.buy_price,
-                       pc.quantity, pc.cost_bucks, pc.potential_payout,
-                       pc.status, pc.created_at
-                FROM prediction_contracts pc
-                LEFT JOIN prediction_markets pm ON pm.market_id = pc.market_id
-                WHERE pc.user_id = ?
-                ORDER BY pc.created_at DESC
-                LIMIT 20
-            """, (user_id,)) as cursor:
-                rows = await cursor.fetchall()
-
-        if not rows:
-            await interaction.followup.send(
-                "You have no prediction market contracts. Use `/bet` to place one!",
-                ephemeral=True,
-            )
-            return
-
-        # Build position dicts for V6 card
-        positions = []
-        total_invested = 0
-        total_potential = 0
-        for mid, title, side, buy_price, qty, cost, payout, status, created in rows:
-            if status != "open":
-                continue
-            positions.append({
-                "title": title or mid,
-                "side": side,
-                "qty": qty,
-                "cost": cost,
-                "payout": payout,
-                "buy_price": buy_price,
-            })
-            total_invested += cost
-            total_potential += payout
-
-        if not positions:
-            await interaction.followup.send(
-                "You have no open prediction market positions.",
-                ephemeral=True,
-            )
-            return
-
-        # Get user balance
-        balance = 0
-        try:
-            from flow_wallet import get_balance
-            balance = await get_balance(user_id)
-        except Exception:
-            log.warning("Balance fetch failed for user %s, defaulting to 0", user_id)
-
-        theme_id = get_theme_for_render(user_id)
-        try:
-            png = await render_portfolio_card(
-                positions=positions,
-                player_name=interaction.user.display_name,
-                total_invested=total_invested,
-                total_potential=total_potential,
-                balance=balance,
-                theme_id=theme_id,
-            )
-            await send_card(interaction, png, filename="portfolio.png",
-                            followup=True, ephemeral=True)
-        except Exception as e:
-            log.error(f"Portfolio card render failed: {e}")
-            # Text fallback
-            embed = discord.Embed(
-                title="📋 Your Prediction Market Portfolio",
-                color=0x3498DB,
-            )
-            for pos in positions:
-                sym = "✅" if pos["side"] == "YES" else "❌"
-                embed.add_field(
-                    name=f"{sym} {pos['title'][:50]}",
-                    value=(
-                        f"**{pos['side']}** · {pos['qty']} contract(s)\n"
-                        f"Paid: **{pos['cost']:,}** · "
-                        f"Potential: **{pos['payout']:,}**"
-                    ),
-                    inline=False,
-                )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        ws = PredictionWorkspace(self, interaction.user.id)
+        # Also load markets so the Markets tab works from portfolio
+        ws._markets = await self._get_curated_selection(count=MARKETS_PER_PAGE)
+        await ws.show_portfolio(interaction, is_initial=True)
 
     # ── Slash: /resolve_market (admin) ────────
 

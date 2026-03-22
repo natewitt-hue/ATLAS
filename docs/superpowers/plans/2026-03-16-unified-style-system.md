@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Unify all 21 card renders under a single style token system, HTML rendering engine with page pool, 2x DPI, and 480px mobile-first width.
+**Goal:** Unify all 21 card renders under a single style token system, HTML rendering engine with page pool, 2x DPI, and 700px width.
 
 **Architecture:** Create `atlas_style_tokens.py` (single source of truth for all visual constants) and `atlas_html_engine.py` (page pool + unified render API). Migrate all cards to use tokens via CSS custom properties. Existing HTML cards get tokenized in-place; Pillow-based ATLASCard hub cards get rewritten as HTML templates.
 
@@ -73,7 +73,7 @@ class Tokens:
     SECTION_GAP = "12px"
 
     # ── Layout ──
-    CARD_WIDTH = 480  # px (int for Playwright viewport)
+    CARD_WIDTH = 700  # px (int for Playwright viewport)
     DPI_SCALE = 2
     BORDER_RADIUS = "8px"
     BORDER_RADIUS_SM = "4px"
@@ -251,7 +251,7 @@ All cards in Groups B-F are already HTML-rendered via Playwright. The migration 
 2. Replace `_wrap_card()` calls with `wrap_card()` from `atlas_html_engine` (which injects tokens CSS)
 3. Remove the local `_base_css()` / `_wrap_card()` / `_render_card_html()` functions
 4. Remove local `_font_face_css()` / `_load_font_b64()` imports (now in engine)
-5. Update the render width from 700/720 to 480 (default in engine)
+5. Update the render width to 700 (default in engine)
 
 **The CSS token replacement is NOT needed per-card.** Since `_base_css()` is a shared function in `casino_html_renderer.py`, tokenizing it once (in Task 2 when building `wrap_card()`) automatically applies to all cards that use it. Per-card game-specific CSS that uses hardcoded colors should also be updated to use `var(--*)` references.
 
@@ -301,7 +301,7 @@ And include the status bar div in the template:
 
 - [ ] **Step 4: Update render calls**
 
-Replace all `await _render_card_html(html)` with `await render_card(html)`. The default width in the engine is 480, which replaces the old 720.
+Replace all `await _render_card_html(html)` with `await render_card(html)`. The default width in the engine is 700.
 
 For each of the 5 render functions:
 - `render_blackjack_card()` line 798: `return await render_card(html)`
@@ -343,7 +343,7 @@ asyncio.run(test())
 ```
 
 Run: `python test_render.py`
-Expected: `test_bj_unified.png` created, visually matches current design but at 480px width
+Expected: `test_bj_unified.png` created, visually matches current design at 700px width
 
 - [ ] **Step 7: Commit**
 
@@ -389,13 +389,13 @@ git commit -m "refactor: migrate highlight cards to unified engine + tokens"
 - Modify: `casino/renderer/session_recap_renderer.py`
 - Modify: `casino/renderer/pulse_renderer.py`
 
-- [ ] **Step 1: Session recap — update imports, remove local render, tokenize CSS, 700→480**
+- [ ] **Step 1: Session recap — update imports, remove local render, tokenize CSS, 700px**
 
 Same pattern: import from engine, remove local duplicates, replace render calls, tokenize inline CSS, update width.
 
 - [ ] **Step 2: Pulse — update imports, remove local render, tokenize CSS**
 
-Pulse is already 480px. Just tokenize and swap to engine.
+Pulse uses 700px. Just tokenize and swap to engine.
 
 - [ ] **Step 3: Commit**
 
@@ -564,7 +564,7 @@ Expected: All 21 PNGs created, all render times <100ms, no errors
 - [ ] **Step 3: Visual inspection**
 
 Open each PNG and verify:
-- Card is 480px wide (960px at 2x DPI)
+- Card is 700px wide (1400px at 2x DPI)
 - Text is readable — no labels smaller than 11px
 - Colors match token definitions
 - Card assets (playing cards, slot icons) render correctly

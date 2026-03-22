@@ -21,7 +21,7 @@ It has a **five-game casino** — six-deck blackjack, 3-reel slots with progress
 
 It pulls live **prediction markets from Polymarket**, scores them with a 6-factor curation algorithm (velocity, tension, freshness, urgency, liquidity, diversity), and drops a daily spotlight with AI-written editorial analysis.
 
-It **renders every interaction as a custom image** — HTML pages converted to PNG via a Playwright browser pool. Dark luxury aesthetic. Gold accents. Procedural noise textures. Base64-embedded fonts. 480px at 2x DPI for crisp mobile display.
+It **renders every interaction as a custom image** — HTML pages converted to PNG via a Playwright browser pool. Dark luxury aesthetic. Gold accents. Procedural noise textures. Base64-embedded fonts. 700px at 2x DPI for crisp mobile display.
 
 It **enforces league rules autonomously** — blowout detection every 15 minutes, 20+ banned position change transitions with attribute validation, a formal complaint system with five penalty tiers, force request tracking with screenshot evidence analysis.
 

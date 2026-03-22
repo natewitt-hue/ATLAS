@@ -145,7 +145,7 @@ def _bj_shoe_html(shoe_remaining: int | None, shoe_total: int = 312) -> str:
     )
 
 
-# ── Blackjack v6 CSS (700px, scaled from 480px reference) ──────────────────
+# ── Blackjack v6 CSS (700px) ───────────────────────────────────────────────
 
 _BLACKJACK_CSS = """<style>
 /* ═══ BLACKJACK v6 — Photorealistic Card Design ═══ */

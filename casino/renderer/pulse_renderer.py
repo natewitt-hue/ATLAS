@@ -1,12 +1,9 @@
 """
 pulse_renderer.py — ATLAS FLOW · Pulse Dashboard Renderer
 ──────────────────────────────────────────────────────────────────────────────
-Renders the live Flow Pulse dashboard card — a 480px wide, mobile-optimized
-summary of all active casino/sportsbook/prediction-market activity.
-
-V7 design: narrower single-column layout so Discord mobile doesn't shrink
-text to unreadable sizes. (Discord renders images at chat width ~375px;
-a 480px source image scales to ~78% vs the old 700px scaling to ~54%.)
+Renders the live Flow Pulse dashboard card — a 700px wide summary of all
+active casino/sportsbook/prediction-market activity, rendered at 2x DPI
+via the unified atlas_html_engine pipeline.
 
 Usage:
     from casino.renderer.pulse_renderer import build_pulse_data, render_pulse_card

@@ -86,7 +86,7 @@ Pull from these when you need specific numbers:
 | Curation scoring factors | 6 (velocity, tension, freshness, urgency, liquidity, diversity) |
 | Render pipeline | Playwright HTML to PNG |
 | Render DPI | 2x scale |
-| Card width | 480px |
+| Card width | 700px |
 | Browser page pool | 4 pre-warmed pages |
 | Page recycle interval | Every 100 renders |
 | AI personas | 3 (casual, official, analytical) |

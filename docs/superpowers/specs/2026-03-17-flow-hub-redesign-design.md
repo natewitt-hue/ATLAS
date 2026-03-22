@@ -115,7 +115,7 @@ FlowHubView
 
 ## Card Designs
 
-All cards render through `atlas_html_engine` (`wrap_card()` → `render_card()`), 480px width, 2x DPI, using `atlas_style_tokens` CSS variables.
+All cards render through `atlas_html_engine` (`wrap_card()` → `render_card()`), 700px width, 2x DPI, using `atlas_style_tokens` CSS variables.
 
 ### 1. Dashboard Card (existing, minor updates)
 
@@ -285,4 +285,4 @@ async def build_my_bets_card(user_id: int, db_path: str) -> bytes:
 6. **Admin buttons:** Verify Eco Health button only appears for commissioners
 7. **Module launchers:** Verify Sportsbook/Casino/Markets/Scratch buttons still open their sub-hubs correctly
 8. **Timeout:** Let view expire after 5 min — verify graceful degradation
-9. **Mobile:** Verify 480px cards render readable on mobile Discord (the whole point of the redesign)
+9. **Mobile:** Verify 700px cards render readable on mobile Discord (the whole point of the redesign)

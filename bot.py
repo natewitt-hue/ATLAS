@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.6.0"  # Flow Store Phase 1 — store engine, effects API, purchase/activate/lootbox logic
+ATLAS_VERSION = "6.7.0"  # Prediction Market UX overhaul — workspace, preset wagers, sell/close positions
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

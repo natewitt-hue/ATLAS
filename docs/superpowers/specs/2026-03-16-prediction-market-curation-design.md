@@ -206,7 +206,7 @@ If the Gemini call fails (malformed JSON, timeout, rate limit), fall back to:
 **Rendered as a single composite card** (like existing `render_market_list_card` but upgraded):
 - Each row: index number, category badge, title, YES/NO price bar, community sentiment indicator
 - Uses unified style tokens (dark theme, Outfit + JetBrains Mono, WIN/LOSS colors for YES/NO)
-- 480px width, 2x DPI, Playwright render via page pool
+- 700px width, 2x DPI, Playwright render via page pool
 
 **Below the card:** A `discord.ui.Select` menu with all 10 markets as options. Selecting one opens a **full detail card** for that market with:
 - Title and category (the `title` field from `prediction_markets` — this IS the question, no separate description column needed)
@@ -334,7 +334,7 @@ All new card renders MUST use the unified pipeline:
 - **Prediction renderer:** `casino/renderer/prediction_html_renderer.py` (extend with new card types)
 - **Fonts:** Outfit (display) + JetBrains Mono (data)
 - **Colors:** YES = `Tokens.WIN` (#4ADE80), NO = `Tokens.LOSS` (#F87171), category colors from `CATEGORY_COLORS` dict
-- **Dimensions:** 480px width, 2x DPI, `domcontentloaded` wait
+- **Dimensions:** 700px width, 2x DPI, `domcontentloaded` wait
 
 ### New Render Functions Needed
 

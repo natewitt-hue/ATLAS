@@ -1318,3 +1318,87 @@ async def render_price_alert_card(
     base_html = wrap_card(content, "push", theme_id=theme_id)
     html = base_html.replace("</style>", f"{_prediction_css()}{_curated_css()}</style>", 1)
     return await render_card(html)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SELL CONFIRMATION CARD
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def render_sell_confirmation_card(
+    market_title: str,
+    side: str,
+    sell_quantity: int,
+    sell_price: float,
+    proceeds: int,
+    cost_basis: int,
+    profit_loss: int,
+    balance: int,
+    player_name: str,
+    theme_id: str | None = None,
+) -> bytes:
+    """Render sell confirmation card to PNG bytes."""
+    outcome = "win" if profit_loss >= 0 else "loss"
+    pnl_class = "yes" if profit_loss >= 0 else "no"
+    pnl_sign = "+" if profit_loss >= 0 else "-"
+    pnl_display = f"{pnl_sign}${abs(profit_loss):,}"
+
+    header = build_header_html(
+        icon=icon_pill("predictions", "💰"),
+        title="CONTRACTS SOLD",
+        players=[player_name],
+        outcome=outcome,
+        badge_text=f"SOLD {side.upper()}",
+        subtitle="FLOW Markets",
+    )
+
+    body = f"""
+    <div class="bet-detail-body">
+      <div class="bet-market-title">{esc(market_title)}</div>
+      <div class="bet-info-grid">
+        <div class="bet-info-cell">
+          <div class="bet-info-label">Side</div>
+          <div class="bet-info-value {'yes' if side.upper() == 'YES' else 'no'}">{side.upper()}</div>
+        </div>
+        <div class="bet-info-cell">
+          <div class="bet-info-label">Sell Price</div>
+          <div class="bet-info-value">{sell_price:.0%}</div>
+        </div>
+        <div class="bet-info-cell">
+          <div class="bet-info-label">Qty Sold</div>
+          <div class="bet-info-value">×{sell_quantity}</div>
+        </div>
+      </div>
+    </div>
+    """
+
+    data_grid = f"""
+    <div class="data-grid">
+      <div class="data-row">
+        <span class="data-label">Cost Basis</span>
+        <span class="data-value">${cost_basis:,}</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Proceeds</span>
+        <span class="data-value">${proceeds:,}</span>
+      </div>
+      <div class="data-row highlight">
+        <span class="data-label">P/L</span>
+        <span class="data-value {pnl_class}">{pnl_display}</span>
+      </div>
+    </div>
+    """
+
+    footer = build_footer_html(balance)
+
+    content = f"""
+    {header}
+    <div class="gold-divider"></div>
+    {body}
+    <div class="gold-divider"></div>
+    {data_grid}
+    <div class="gold-divider"></div>
+    {footer}
+    """
+
+    html = _wrap_prediction_card(outcome, content, theme_id=theme_id)
+    return await render_card(html)

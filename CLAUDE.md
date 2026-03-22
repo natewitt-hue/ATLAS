@@ -119,7 +119,7 @@ All card renders use a single pipeline:
 | Hub Cards | `flow_cards.py`, `sportsbook_cards.py` | Flow Hub, Sportsbook Hub, Stats Card |
 
 Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` → PNG bytes
-Width: 480px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
+Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 
 **Quarantined (do not import):** `QUARANTINE/atlas_card_renderer.py` (Pillow hub card renderer, replaced), `QUARANTINE/card_renderer.py` (legacy Pillow casino renderer, superseded by HTML v6)
 

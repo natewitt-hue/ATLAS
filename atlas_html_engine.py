@@ -579,7 +579,7 @@ def wrap_card(body_html: str, status_class: str = "", *, theme_id: str | None = 
 class PagePool:
     """Pool of Playwright pages for concurrent rendering."""
 
-    def __init__(self, size: int = 4, width: int = 480, scale: int = 2):
+    def __init__(self, size: int = 4, width: int = 700, scale: int = 2):
         self._size = size
         self._width = width
         self._scale = scale
