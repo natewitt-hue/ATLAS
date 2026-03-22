@@ -788,6 +788,17 @@ def _build_game_lines(games_raw: list) -> list[dict]:
         if s == 0: return "PK"
         return f"+{s}" if s > 0 else str(s)
 
+    # Deduplicate by gameId — prefer records with gameTime populated
+    seen = {}
+    for rg in games_raw:
+        gid = str(rg.get("gameId", rg.get("id", "")))
+        if gid and gid in seen:
+            if not seen[gid].get("gameTime") and rg.get("gameTime"):
+                seen[gid] = rg
+        else:
+            seen[gid] = rg
+    games_raw = list(seen.values())
+
     ui_games = []
 
     for rg in games_raw:
@@ -2097,12 +2108,12 @@ class SportsbookWorkspace(discord.ui.View):
         )
 
         options = []
-        for i, g in enumerate(ui_games):
+        for g in ui_games:
             locked = "\U0001f534 " if _is_locked(g["game_id"]) else "\U0001f7e2 "
             over = " \u26a0\ufe0f" if g.get("_overridden") else ""
             options.append(discord.SelectOption(
                 label=f"{locked}{g['away']} @ {g['home']}{over}",
-                value=str(i),
+                value=str(g["game_id"]),
                 description=f"Spread: {g['away']} {g['away_spread']} | O/U {g['ou_line']}"
             ))
 
@@ -2405,12 +2416,12 @@ class SportsbookWorkspace(discord.ui.View):
             )
 
             options = []
-            for i, g in enumerate(ws._cached_tsl_games):
+            for g in ws._cached_tsl_games:
                 locked = "\U0001f534 " if _is_locked(g["game_id"]) else "\U0001f7e2 "
                 over = " \u26a0\ufe0f" if g.get("_overridden") else ""
                 options.append(discord.SelectOption(
                     label=f"{locked}{g['away']} @ {g['home']}{over}",
-                    value=str(i),
+                    value=str(g["game_id"]),
                     description=f"Spread: {g['away']} {g['away_spread']} | O/U {g['ou_line']}"
                 ))
 
@@ -2524,8 +2535,8 @@ class SportsbookWorkspace(discord.ui.View):
     async def _on_tsl_game_select(self, interaction: discord.Interaction):
         """User selected a TSL game from dropdown."""
         await interaction.response.defer()
-        idx = int(interaction.data["values"][0])
-        game = self._cached_tsl_games[idx]
+        selected_id = interaction.data["values"][0]
+        game = next(g for g in self._cached_tsl_games if str(g["game_id"]) == selected_id)
         await self.show_tsl_match(interaction, game)
 
     def _make_bet_cb(self, game: dict, pick: str, line, odds: int, bet_type: str):

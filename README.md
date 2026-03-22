@@ -30,6 +30,7 @@ Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog
 | **Codex** | `codex_cog.py`, `build_tsl_db.py`, `build_member_db.py` | Historical NL→SQL→NL queries via Gemini, member identity registry |
 | **Genesis** | `genesis_cog.py`, `ability_engine.py`, `trade_engine.py` | Trades, roster management, draft class explorer, ability audits |
 | **Flow** | `economy_cog.py`, `flow_sportsbook.py`, `casino/` | Economy (TSL Bucks), Elo-based sportsbook, casino games |
+| **Predictions** | `polymarket_cog.py` | Real-world prediction markets via Polymarket — 6-layer garbage filter, AI-curated daily drops, audience-tuned scoring |
 | **Echo** | `echo_cog.py`, `echo_loader.py`, `affinity.py` | Commissioner persona system with per-user affinity tracking |
 | **Boss** | `boss_cog.py` | Commissioner Control Room — visual hub for all admin commands |
 | **Awards** | `awards_cog.py` | Awards and voting system |
@@ -65,8 +66,8 @@ Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog
 ## External Integrations
 
 - **MaddenStats API** — `https://mymadden.com/api/lg/tsl` — league data source
-- **Gemini AI** (`gemini-2.0-flash`) — Text-to-SQL, analytics narration, persona voice
-- **Polymarket** — real-world prediction market data (`polymarket_cog.py`)
+- **Claude AI** (primary) + **Gemini AI** (fallback) — Text-to-SQL, analytics narration, persona voice via `atlas_ai.py`
+- **Polymarket Gamma API** — real-world prediction markets with 6-layer curation filter (`polymarket_cog.py`)
 
 ## Setup
 
@@ -78,6 +79,7 @@ Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog
 2. Create a `.env` file:
    ```
    DISCORD_TOKEN=your_discord_bot_token
+   ANTHROPIC_API_KEY=your_claude_api_key
    GEMINI_API_KEY=your_gemini_api_key
    ADMIN_USER_IDS=comma_separated_discord_ids
    ORACLE_DB_PATH=path_to_tsl_history.db
@@ -88,6 +90,20 @@ Bot runs locally on Windows. Python 3.14, discord.py 2.3+ with app_commands, cog
    python bot.py
    ```
 
+## Rendering Stack
+
+All visual cards use a unified HTML-to-PNG pipeline:
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Style Tokens | `atlas_style_tokens.py` | Single source of truth for colors, fonts, spacing |
+| HTML Engine | `atlas_html_engine.py` | Playwright page pool + `render_card()` / `wrap_card()` |
+| Casino | `casino/renderer/casino_html_renderer.py` | Blackjack, Slots, Crash, Coinflip, Scratch |
+| Predictions | `casino/renderer/prediction_html_renderer.py` | Market List, Detail, Bet, Portfolio, Resolution, Daily Drop |
+| Highlights | `casino/renderer/highlight_renderer.py` | Jackpot, PvP, Crash LMS, Prediction, Parlay |
+
+Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` → PNG bytes (700px, 2x DPI, 4-page pool)
+
 ## Current Version
 
-**v2.1.0** — Hub-based UI with interactive views and select menus, Elo sportsbook v3, commissioner control room, draft class explorer, Echo persona system with affinity tracking.
+**v6.8.0** — Prediction market curation overhaul: 6-layer garbage filter eliminates crypto/sports spam from Polymarket, reweighted curation scoring (tension 28%, audience fit 20%, urgency 18%), internal bet velocity boost, staleness rotation penalty, AI-curated daily drops.

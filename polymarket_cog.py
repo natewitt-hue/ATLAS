@@ -24,11 +24,11 @@ import asyncio
 import logging
 import math
 import random
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import os
-import re
 
 import atlas_ai
 from atlas_ai import Tier
@@ -51,6 +51,7 @@ from casino.renderer.prediction_html_renderer import (
     render_daily_drop_card,
     render_price_alert_card,
     render_sell_confirmation_card,
+    render_position_detail_card,
 )
 import io
 
@@ -191,37 +192,168 @@ BLOCKED_CATEGORIES = {
 
 MAX_PER_CATEGORY = 4  # Cap per category in "All" view for diversity
 
+# ── Six-Layer Garbage Filter Constants ──────────────────────────────
+BLOCKED_TAG_SLUGS = {
+    # Crypto (degen noise)
+    "crypto", "crypto-prices", "up-or-down", "bitcoin", "ethereum",
+    "solana", "xrp", "ripple", "5m", "recurring",
+    "hide-from-new",  # Polymarket itself hides these
+    "defi", "nft", "memecoin", "altcoin",
+    # Sports (use /sportsbook instead)
+    "sports", "nba", "nfl", "mlb", "nhl", "soccer", "mma", "ufc",
+    "boxing", "chess", "esports", "gaming", "epl", "premier-league",
+    "motorsports", "nascar", "f1",
+}
+
+GARBAGE_SLUG_PATTERNS = [
+    re.compile(r"btc-?up-?down"),
+    re.compile(r"eth-?up-?down"),
+    re.compile(r"sol-?up-?down"),
+    re.compile(r"xrp-?up-?down"),
+    re.compile(r"doge-?up-?down"),
+    re.compile(r"-up-?down-\d+[mh]-"),   # any crypto up/down with timestamp
+    re.compile(r"^crypto-"),
+    re.compile(r"bitcoin-price-"),
+    re.compile(r"ethereum-price-"),
+    re.compile(r"solana-price-"),
+]
+
+TITLE_KILL_PATTERNS = [
+    re.compile(r"Up or Down", re.IGNORECASE),
+    re.compile(r"tweet.*elon|elon.*tweet", re.IGNORECASE),
+    re.compile(r"\bX post\b", re.IGNORECASE),
+    re.compile(r"Truth Social", re.IGNORECASE),
+    re.compile(r"Instagram.*follow", re.IGNORECASE),
+    re.compile(r"subscriber.*count", re.IGNORECASE),
+    re.compile(r"token.*launch", re.IGNORECASE),
+    re.compile(r"airdrop", re.IGNORECASE),
+    re.compile(r"memecoin", re.IGNORECASE),
+    re.compile(r"gas fee", re.IGNORECASE),
+    re.compile(r"market\s*cap.*\$", re.IGNORECASE),
+    re.compile(r"price.*(?:above|below|over|under).*\$\d+", re.IGNORECASE),
+]
+
+BLOCKED_SERIES_SLUGS = {
+    "btc-up-or-down-5m", "btc-up-or-down-1h",
+    "eth-up-or-down-5m", "eth-up-or-down-1h",
+    "sol-up-or-down-5m", "sol-up-or-down-1h",
+    "xrp-up-or-down-5m", "xrp-up-or-down-1h",
+    "doge-up-or-down-5m", "doge-up-or-down-1h",
+}
+
+MIN_VOLUME = 1_000       # Total volume < $1K = nobody's trading
+MIN_LIQUIDITY = 500      # Liquidity < $500 = meaningless prices
+
+# ── Audience Affinity for TSL demographic (18-35 male, sports-adjacent) ─
+CATEGORY_AFFINITY = {
+    # Tier 1 — TSL audience loves these (1.5x → 20 pts max)
+    "🗳️ Elections": 1.5,
+    "🌟 Pop Culture": 1.5,
+    "🤖 AI": 1.5,
+    "🎬 Entertainment": 1.4,
+    # Tier 2 — Neutral (1.0x → ~13 pts)
+    "🏛️ Government": 1.0,
+    "📈 Economics": 1.0,
+    "💻 Tech": 1.0,
+    "🌍 World": 0.9,
+    # Tier 3 — Low engagement (0.5x → ~7 pts)
+    "🔬 Science": 0.5,
+    "🌐 Other": 0.4,
+}
+
+
+# ── Six-Layer Garbage Filter ────────────────────────────────────────
+def _is_garbage_market(event: dict, mkt: dict) -> bool:
+    """Return True if market is spam/noise that should never be stored.
+
+    Six layers, short-circuit on first match:
+      1. Tag blocklist        4. Volume/liquidity thresholds
+      2. Slug pattern block   5. Title/question pattern block
+      3. Restricted flag      6. Series slug blocklist
+    """
+    # Layer 1 — Tag blocklist
+    for tag in event.get("tags", []):
+        if isinstance(tag, dict) and tag.get("slug", "").lower() in BLOCKED_TAG_SLUGS:
+            return True
+
+    # Layer 2 — Slug pattern blocklist
+    slug = mkt.get("slug", "")
+    for pat in GARBAGE_SLUG_PATTERNS:
+        if pat.search(slug):
+            return True
+
+    # Layer 3 — Restricted flag
+    if mkt.get("restricted") or event.get("restricted"):
+        return True
+
+    # Layer 4 — Minimum thresholds
+    try:
+        volume = float(mkt.get("volumeNum") or mkt.get("volume") or 0)
+    except (ValueError, TypeError):
+        volume = 0
+    try:
+        liquidity = float(mkt.get("liquidityNum") or mkt.get("liquidity") or 0)
+    except (ValueError, TypeError):
+        liquidity = 0
+
+    if volume < MIN_VOLUME or liquidity < MIN_LIQUIDITY:
+        return True
+    if mkt.get("enableOrderBook") is False:
+        return True
+
+    # Layer 5 — Title/question pattern blocklist
+    title = mkt.get("question", "") or mkt.get("title", "")
+    for pat in TITLE_KILL_PATTERNS:
+        if pat.search(title):
+            return True
+
+    # Layer 6 — Series slug blocklist
+    series_slug = event.get("seriesSlug", "")
+    if series_slug and series_slug.lower() in BLOCKED_SERIES_SLUGS:
+        return True
+
+    return False
+
 
 def _compute_curation_score(
     market: dict,
     days_in_pool: float,
     same_category_count: int,
+    internal_bet_users: int = 0,
+    recently_featured: bool = False,
 ) -> tuple[float, dict]:
-    """Compute 0-100 curation score for a market.
+    """Compute 0-100+ curation score for a market.
 
     Returns (score, breakdown_dict).
-    Signals:
-      - velocity (25%): log10 of 24hr volume, percentile-ranked
-      - tension  (20%): how close to 50/50
-      - freshness(20%): new markets boosted, decays over 20 days
-      - urgency  (15%): time-to-close bonus (peak at 7 days)
-      - liquidity(10%): higher = more trustworthy odds
-      - diversity(10%): penalizes over-represented categories
+    Signals (base 100):
+      - tension       (28%): sharp bell curve, near-zero past 75/25
+      - audience_fit  (20%): category affinity for TSL demographic
+      - urgency       (18%): deadline FOMO, peak at 0-3 days
+      - freshness     (12%): 5-day decay (not 20)
+      - velocity      (10%): log10 of 24hr volume (tiebreaker)
+      - liquidity     ( 7%): price accuracy signal
+      - diversity     ( 5%): penalize over-represented categories
+    Bonuses/penalties:
+      - bet_boost    (+8 max): TSL users already betting on this
+      - staleness    (-15):    appeared in daily drop last 2 days
     """
     vol_24h = market.get("volume_24hr", 0) or 0
     yes_p = market.get("yes_price", 0.5) or 0.5
     liquidity = market.get("liquidity", 0) or 0
+    category = market.get("category", "🌐 Other")
 
-    # ── Velocity (0-25): log10 of absolute 24hr volume ──
-    velocity = min(math.log10(max(vol_24h, 1)) / 7.0, 1.0) * 25  # 7 = log10(10M)
+    # ── Tension (0-28): sharp bell curve, peaks at 50/50 ──
+    deviation = abs(yes_p - 0.5)
+    if deviation >= 0.3:
+        tension = 0.0
+    else:
+        tension = 28 * (1 - (deviation / 0.3) ** 1.5)
 
-    # ── Tension (0-20): closer to 50/50 = more interesting ──
-    tension = (1 - abs(yes_p - 0.5) * 2) * 20
+    # ── Audience Fit (0-20): category affinity for TSL demo ──
+    affinity_mult = CATEGORY_AFFINITY.get(category, 0.5)
+    audience_fit = min(20, 13.3 * affinity_mult)
 
-    # ── Freshness (0-20): new markets boosted, decays 1pt/day ──
-    freshness = max(0, 20 - days_in_pool)
-
-    # ── Urgency (0-15): peak at 7 days out ──
+    # ── Urgency (0-18): deadline FOMO, peak at 0-3 days ──
     end_date = market.get("end_date", "")
     urgency = 0.0
     if end_date:
@@ -231,33 +363,83 @@ def _compute_curation_score(
             if days_left < 0:
                 urgency = 0
             elif days_left <= 3:
-                urgency = 15  # maximum urgency
+                urgency = 18                                    # resolves soon — max
             elif days_left <= 7:
-                urgency = 15  # peak zone
+                urgency = 18 * (1 - (days_left - 3) / 8)       # decay 18 → ~9
             elif days_left <= 30:
-                urgency = 15 * (1 - (days_left - 7) / 23)  # linear decay 7→30 days
-            elif days_left <= 90:
-                urgency = 15 * 0.2 * (1 - (days_left - 30) / 60)  # slow decay
-            # >90 days → 0
+                urgency = 9 * (1 - (days_left - 7) / 23)       # slow decay → ~0
+            # >30 days → 0
         except (ValueError, TypeError):
             urgency = 5  # fallback: some urgency
 
-    # ── Liquidity (0-10) ──
-    liq_score = min(liquidity / 100_000, 1.0) * 10
+    # ── Freshness (0-12): 5-day full decay ──
+    freshness = max(0, 12 - days_in_pool * 2.4)
 
-    # ── Diversity (0-10): penalize over-represented categories ──
-    diversity = max(0, 10 - same_category_count * 2)
+    # ── Velocity (0-10): log10 of 24hr volume — tiebreaker ──
+    velocity = min(math.log10(max(vol_24h, 1)) / 7.0, 1.0) * 10
 
-    score = velocity + tension + freshness + urgency + liq_score + diversity
+    # ── Liquidity (0-7): price accuracy signal ──
+    liq_score = min(liquidity / 100_000, 1.0) * 7
+
+    # ── Diversity (0-5): penalize over-represented categories ──
+    diversity = max(0, 5 - same_category_count)
+
+    # ── Internal Bet Velocity Boost (+0 to +8) ──
+    bet_boost = min(8, internal_bet_users * 2.5)
+
+    # ── Staleness Penalty (-15) ──
+    staleness_penalty = 15 if recently_featured else 0
+
+    score = (tension + audience_fit + urgency + freshness
+             + velocity + liq_score + diversity
+             + bet_boost - staleness_penalty)
+    score = max(0, score)
+
     breakdown = {
-        "velocity": round(velocity, 1),
         "tension": round(tension, 1),
-        "freshness": round(freshness, 1),
+        "audience_fit": round(audience_fit, 1),
         "urgency": round(urgency, 1),
+        "freshness": round(freshness, 1),
+        "velocity": round(velocity, 1),
         "liquidity": round(liq_score, 1),
         "diversity": round(diversity, 1),
+        "bet_boost": round(bet_boost, 1),
+        "staleness": round(-staleness_penalty, 1),
     }
     return round(score, 2), breakdown
+
+
+# ── Pre-fetch helpers for curation scoring ──────────────────────────
+async def _get_internal_bet_counts(db) -> dict[str, int]:
+    """Return {market_id: distinct_user_count} for markets with open bets."""
+    async with db.execute("""
+        SELECT market_id, COUNT(DISTINCT user_id)
+        FROM prediction_contracts
+        WHERE status = 'open'
+        GROUP BY market_id
+    """) as cursor:
+        return {r[0]: r[1] for r in await cursor.fetchall()}
+
+
+async def _get_recently_featured_ids(db, days: int = 2) -> set[str]:
+    """Return market_ids that appeared in daily drops within the last N days."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    featured: set[str] = set()
+    async with db.execute(
+        "SELECT spotlight_market_id, supporting FROM daily_drops WHERE drop_date >= ?",
+        (cutoff,),
+    ) as cursor:
+        async for row in cursor:
+            if row[0]:
+                featured.add(row[0])
+            if row[1]:
+                try:
+                    for s in json.loads(row[1]):
+                        if isinstance(s, dict) and "market_id" in s:
+                            featured.add(s["market_id"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    return featured
 
 
 # ─────────────────────────────────────────────
@@ -1513,7 +1695,7 @@ class PredictionWorkspace(discord.ui.View):
             async with db.execute("""
                 SELECT pc.id, pc.market_id, pm.title, pc.side, pc.buy_price,
                        pc.quantity, pc.cost_bucks, pc.potential_payout,
-                       pm.yes_price, pm.no_price
+                       pm.yes_price, pm.no_price, pc.slug
                 FROM prediction_contracts pc
                 LEFT JOIN prediction_markets pm ON pm.market_id = pc.market_id
                 WHERE pc.user_id = ? AND pc.status = 'open'
@@ -1524,12 +1706,13 @@ class PredictionWorkspace(discord.ui.View):
 
         self._positions = []
         for (cid, mid, title, side, buy_price, qty, cost, payout,
-             yes_p, no_p) in rows:
+             yes_p, no_p, slug) in rows:
             current_price = (yes_p if side == "YES" else no_p) or buy_price
             self._positions.append({
                 "contract_id": cid,
                 "market_id": mid,
                 "title": title or mid,
+                "slug": slug or "",
                 "side": side,
                 "buy_price": buy_price,
                 "qty": qty,
@@ -1688,24 +1871,29 @@ class PredictionWorkspace(discord.ui.View):
             sell_one_btn.callback = self._make_sell_cb(position, 1)
             self.add_item(sell_one_btn)
 
-        # Build embed
-        pnl_str = f"+${pnl:,}" if pnl >= 0 else f"-${abs(pnl):,}"
-        pnl_emoji = "📈" if pnl >= 0 else "📉"
-        side_emoji = "✅" if position["side"] == "YES" else "❌"
+        # Render position detail card (v3)
+        theme_id = get_theme_for_render(interaction.user.id)
+        balance = await flow_wallet.get_balance(interaction.user.id)
+        card_file = None
+        try:
+            png = await render_position_detail_card(
+                position=position,
+                sell_qty=0,
+                user_balance=balance,
+                player_name=interaction.user.display_name,
+                theme_id=theme_id,
+            )
+            card_file = discord.File(io.BytesIO(png), filename="position_detail.png")
+        except Exception:
+            log.exception("Failed to render position detail card")
 
+        pnl_str = f"+${pnl:,}" if pnl >= 0 else f"-${abs(pnl):,}"
         embed = discord.Embed(
-            title=f"{side_emoji} {position['title'][:70]}",
+            title=f"{position['title'][:70]}",
             color=0x2ECC71 if pnl >= 0 else 0xE74C3C,
         )
-        embed.description = (
-            f"**Side:** {position['side']} · **Quantity:** {qty}\n"
-            f"**Bought at:** {position['buy_price']:.0%} · **Current:** {current_price:.0%}\n\n"
-            f"**Cost basis:** ${cost_basis:,}\n"
-            f"**Current value:** ${current_value:,}\n"
-            f"{pnl_emoji} **P/L:** {pnl_str}"
-        )
-        embed.set_footer(text=f"Sell price: ${sell_price_bucks:,}/contract")
-        await self._update_workspace(interaction, embed)
+        embed.set_footer(text=f"Sell price: ${sell_price_bucks:,}/contract · P/L: {pnl_str}")
+        await self._update_workspace(interaction, embed, file=card_file)
 
     def _make_sell_cb(self, position: dict, quantity: int):
         """Factory: sell button → execute sell."""
@@ -1832,7 +2020,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         log.info("Syncing Polymarket markets…")
 
         # ── Pass 1: Fetch active events with nested markets ──────────────
-        events = await self.client.fetch_active_events(limit=100)
+        events = await self.client.fetch_active_events(limit=200)
         if not events:
             log.warning("Polymarket sync returned 0 events — trying direct markets fetch.")
             # Fallback: fetch markets directly
@@ -1842,6 +2030,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         now = datetime.now(timezone.utc).isoformat()
         upserted = 0
+        garbage_count = 0
 
         async with aiosqlite.connect(DB_PATH) as db:
             for event in events:
@@ -1856,6 +2045,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     market_id = str(mkt.get("id", ""))
                     slug = mkt.get("slug", "")
                     if not market_id or not slug:
+                        continue
+
+                    # Six-layer garbage filter on raw API data
+                    if _is_garbage_market(event, mkt):
+                        garbage_count += 1
                         continue
 
                     prices = extract_prices(mkt)
@@ -1923,7 +2117,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 log.info(f"Purged {cursor.rowcount} stale sports markets from prediction DB.")
                 await db.commit()
 
-        log.info(f"Polymarket sync complete — {upserted} active markets upserted.")
+        log.info(f"Polymarket sync complete — {upserted} upserted, {garbage_count} garbage-filtered.")
 
         # ── Pass 2: Auto-resolve closed markets ──────────────────────────
         await self._auto_resolve_pass()
@@ -2059,6 +2253,10 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             ) as cursor:
                 existing = {r[0]: r[1] for r in await cursor.fetchall()}
 
+            # Pre-fetch internal bet velocity + recent daily drop features
+            bet_counts = await _get_internal_bet_counts(db)
+            recent_featured = await _get_recently_featured_ids(db)
+
             # Count markets per category for diversity scoring
             cat_counts: dict[str, int] = {}
             for r in rows:
@@ -2074,6 +2272,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     "yes_price": r[4], "no_price": r[5],
                     "volume": r[6], "liquidity": r[7],
                     "volume_24hr": r[8], "end_date": r[9],
+                    "category": category,
                 }
 
                 # Calculate days in pool
@@ -2088,7 +2287,11 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                     days_in_pool = 0
 
                 same_cat = cat_counts.get(category or "Other", 0)
-                score, breakdown = _compute_curation_score(market, days_in_pool, same_cat)
+                score, breakdown = _compute_curation_score(
+                    market, days_in_pool, same_cat,
+                    internal_bet_users=bet_counts.get(market_id, 0),
+                    recently_featured=market_id in recent_featured,
+                )
 
                 # Dedup by event_id: keep highest score per event
                 cluster = event_id or market_id

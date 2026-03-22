@@ -1,8 +1,9 @@
 """
-prediction_html_renderer.py — FLOW Prediction Markets · V6 HTML Card Renderer
+prediction_html_renderer.py — FLOW Prediction Markets · V3 HTML Card Renderer
 ──────────────────────────────────────────────────────────────────────────────
 Playwright HTML → PNG renderer for prediction market cards.
-Reuses V6 shared infrastructure from casino_html_renderer.py.
+V3: Jewel-glow badges, neon-tube probability bars, recessed wells, left-stripe
+portfolio rows, and a new position-detail card.
 
 Usage:
     from casino.renderer.prediction_html_renderer import render_market_list_card
@@ -40,6 +41,15 @@ except ImportError:
 
 _DEFAULT_CATEGORY_COLOR = "#95A5A6"
 
+# Category → data-cat mapping for jewel-glow CSS
+_CAT_DATA_MAP: dict[str, str] = {
+    "Elections": "pol", "Government": "pol", "Politics": "pol",
+    "Economics": "econ", "Finance": "econ", "Business": "econ",
+    "Pop Culture": "ent", "Entertainment": "ent", "Sports": "ent",
+    "Tech": "econ", "AI": "econ", "Science": "econ",
+    "World": "pol", "Other": "other",
+}
+
 
 def _category_color(category: str) -> str:
     """Get hex color for a category label like '🏛️ Politics'."""
@@ -48,406 +58,562 @@ def _category_color(category: str) -> str:
     return CATEGORY_COLORS_HEX.get(name, _DEFAULT_CATEGORY_COLOR)
 
 
-# ── Prediction-specific CSS ──────────────────────────────────────────────────
+def _cat_data(category: str) -> str:
+    """Map category to data-cat attribute for jewel-glow CSS."""
+    parts = category.split(" ", 1)
+    name = parts[1] if len(parts) > 1 else parts[0]
+    return _CAT_DATA_MAP.get(name, "other")
+
+
+def _jewel_badge(text: str, category: str) -> str:
+    """Build a jewel-glow category badge."""
+    data = _cat_data(category)
+    return f'<span class="category-badge" data-cat="{data}">{esc(text)}</span>'
+
+
+# ── Prediction-specific CSS (v3 — jewel-glow, neon-tube, recessed wells) ─────
 
 def _prediction_css() -> str:
     return """
 
-/* ── Market list row ── */
-.market-list-row {
+/* ══ V3 Prediction Header ══ */
+.pred-header {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 20px;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  align-items: flex-start;
+  padding: 14px 20px 10px;
+  gap: 12px;
 }
-.market-list-row:last-child { border-bottom: none; }
-
-.market-index {
+.pred-header-left { display: flex; align-items: flex-start; gap: 12px; flex: 1; }
+.pred-header-right { text-align: right; flex-shrink: 0; }
+.pred-header-right .stat-value {
   font-family: var(--font-mono), monospace;
-  font-weight: 700;
-  font-size: var(--font-sm);
-  color: var(--text-dim);
-  width: 20px;
-  text-align: center;
-  flex-shrink: 0;
+  font-weight: 600; font-size: 14px; color: var(--text-primary);
 }
-
-.category-badge {
-  display: inline-block;
-  padding: 2px var(--space-sm);
-  border-radius: var(--border-radius-sm);
+.pred-header-right .stat-label {
   font-family: var(--font-display), sans-serif;
-  font-weight: 700;
-  font-size: 10px;
-  color: #fff;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  white-space: nowrap;
-  flex-shrink: 0;
+  font-weight: 500; font-size: 12px; color: var(--text-muted);
 }
 
+.globe-icon {
+  width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 40% 35%, rgba(124,138,255,0.2), rgba(124,138,255,0.06));
+  border: 1px solid rgba(124,138,255,0.12);
+  position: relative; overflow: hidden;
+}
+.globe-icon::before, .globe-icon::after {
+  content: ''; position: absolute;
+  background: rgba(124,138,255,0.25);
+}
+.globe-icon::before { width: 1px; height: 60%; top: 20%; left: 50%; }
+.globe-icon::after { width: 60%; height: 1px; top: 50%; left: 20%; }
+
+.pf-icon {
+  width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 40% 35%, rgba(212,175,55,0.2), rgba(212,175,55,0.06));
+  border: 1px solid rgba(212,175,55,0.12);
+  font-size: 18px;
+}
+
+.pred-title {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 600; font-size: 14px; letter-spacing: 2.5px;
+  color: rgba(255,255,255,0.6); text-transform: uppercase;
+}
+.pred-subtitle {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 12px; color: var(--text-muted);
+}
+.page-pill {
+  display: inline-block; margin-top: 4px;
+  font-family: var(--font-mono), monospace; font-size: 12px; font-weight: 600;
+  color: rgba(124,138,255,0.75);
+  background: rgba(88,101,242,0.08); border: 1px solid rgba(88,101,242,0.12);
+  border-radius: 5px; padding: 2px 8px;
+}
+
+/* ══ Jewel-Glow Category Badges ══ */
+.category-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 3px 10px; min-width: 48px;
+  border-radius: 5px;
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 11px; letter-spacing: 1px;
+  text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
+}
+.category-badge[data-cat="econ"] {
+  color: #5CB3FF;
+  background: rgba(74,158,255,0.06); border: 1px solid rgba(74,158,255,0.14);
+  box-shadow: inset 0 0 8px rgba(74,158,255,0.08);
+  text-shadow: 0 0 6px rgba(74,158,255,0.4);
+}
+.category-badge[data-cat="pol"] {
+  color: #BB7BF7;
+  background: rgba(168,85,247,0.06); border: 1px solid rgba(168,85,247,0.14);
+  box-shadow: inset 0 0 8px rgba(168,85,247,0.08);
+  text-shadow: 0 0 6px rgba(168,85,247,0.4);
+}
+.category-badge[data-cat="ent"] {
+  color: #FFC266;
+  background: rgba(255,183,77,0.06); border: 1px solid rgba(255,183,77,0.14);
+  box-shadow: inset 0 0 8px rgba(255,183,77,0.08);
+  text-shadow: 0 0 6px rgba(255,183,77,0.4);
+}
+.category-badge[data-cat="other"] {
+  color: rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: inset 0 0 6px rgba(255,255,255,0.03);
+}
+
+/* ══ Market List Rows (v3) ══ */
+.market-list-row {
+  border-radius: 10px;
+  background: rgba(255,255,255,0.015);
+  border: 1px solid rgba(255,255,255,0.025);
+  padding: 14px 18px;
+  margin: 0 20px 8px;
+  display: flex; align-items: center; gap: 12px;
+}
+.market-list-row:last-child { margin-bottom: 0; }
+
+.mrow-body { flex: 1; min-width: 0; }
+.mrow-title {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 14px; color: var(--text-primary);
+  line-height: 1.3;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.mrow-meta {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 12px; color: var(--text-muted);
+  margin-top: 3px;
+}
+.mrow-meta .dot {
+  display: inline-block; width: 3px; height: 3px; border-radius: 50%;
+  background: rgba(255,255,255,0.2); vertical-align: middle; margin: 0 6px;
+}
+.mrow-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+/* ══ Neon-Tube Probability Bar ══ */
+.prob-bar {
+  position: relative;
+  height: 8px; border-radius: 4px;
+  background: rgba(237,66,69,0.15);
+  border: 1px solid rgba(255,255,255,0.03);
+  overflow: visible;
+}
+.prob-bar.large { height: 16px; border-radius: 8px; }
+.prob-fill {
+  height: 100%; border-radius: inherit;
+  background: linear-gradient(90deg, #3DBE6F, #57F287);
+  box-shadow: 0 0 8px rgba(87,242,135,0.25);
+  position: relative;
+}
+.prob-bar.large .prob-fill {
+  background: linear-gradient(180deg, #5EE89A, #3DBE6F);
+  box-shadow: 0 0 14px rgba(87,242,135,0.3), inset 0 1px 2px rgba(255,255,255,0.15);
+}
+.prob-bar.large .prob-fill::after {
+  content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 2px;
+  background: rgba(255,255,255,0.8);
+  box-shadow: 0 0 6px rgba(255,255,255,0.4);
+}
+.prob-tick {
+  position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+  background: rgba(255,255,255,0.06); z-index: 1;
+}
+
+.prob-labels {
+  display: flex; justify-content: space-between; margin-bottom: 6px;
+  font-family: var(--font-mono), monospace; font-weight: 700; font-size: 14px;
+}
+.prob-labels .yes-label { color: var(--win); }
+.prob-labels .no-label { color: var(--loss); }
+
+.odds-display {
+  font-family: var(--font-mono), monospace; font-weight: 700; font-size: 15px;
+  white-space: nowrap;
+}
+.odds-display .yes-price { color: #5EE89A; text-shadow: 0 0 6px rgba(94,232,154,0.3); }
+.odds-display .slash { color: rgba(255,255,255,0.30); margin: 0 2px; }
+.odds-display .no-price { color: #F06B6B; }
+
+/* ══ Recessed Wells ══ */
+.buy-wells {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+  padding: 0 20px; margin-bottom: 16px;
+}
+.buy-well {
+  background: var(--panel-bg);
+  border-radius: 10px; padding: 16px;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.4), inset 0 0 1px rgba(255,255,255,0.05);
+  text-align: center;
+}
+.buy-well.yes {
+  border: 1px solid rgba(87,242,135,0.1);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.4), inset 0 0 20px rgba(87,242,135,0.03);
+}
+.buy-well.no {
+  border: 1px solid rgba(237,66,69,0.1);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.4), inset 0 0 20px rgba(237,66,69,0.03);
+}
+.buy-well .side-label {
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 12px; letter-spacing: 2px;
+  text-transform: uppercase; margin-bottom: 8px;
+}
+.buy-well.yes .side-label { color: var(--win); }
+.buy-well.no .side-label { color: var(--loss); }
+.buy-well .price-big {
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 38px; color: var(--text-primary); line-height: 1;
+}
+.buy-well .price-unit {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 12px; color: var(--text-muted); margin: 6px 0;
+}
+.buy-well .payout-text {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 13px; color: var(--text-sub);
+}
+.buy-well .payout-text em {
+  font-style: normal; font-weight: 700; color: var(--gold);
+}
+
+.recessed-strip {
+  display: grid; gap: 6px; padding: 10px 20px;
+}
+.recessed-strip.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.recessed-strip.cols-4 { grid-template-columns: repeat(4, 1fr); }
+.strip-cell {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px; padding: 10px 8px; text-align: center;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+}
+.strip-cell .cell-label {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 10px; letter-spacing: 1px;
+  color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;
+}
+.strip-cell .cell-value {
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 15px; color: var(--text-primary);
+}
+.strip-cell .cell-value.big { font-size: 22px; }
+.strip-cell .cell-value.green { color: var(--win); }
+.strip-cell .cell-value.red { color: var(--loss); }
+.strip-cell .cell-value.gold { color: var(--gold); }
+.strip-cell .cell-sub {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 10px; color: var(--text-muted); margin-top: 2px;
+}
+
+.status-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-display), sans-serif; font-weight: 600; font-size: 12px;
+}
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--win); box-shadow: 0 0 6px rgba(87,242,135,0.4);
+}
+.status-dot.closed { background: var(--loss); box-shadow: 0 0 6px rgba(237,66,69,0.4); }
+
+/* ══ Portfolio Rows (v3 — left stripe) ══ */
+.portfolio-row {
+  display: flex; align-items: center; gap: 12px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.015);
+  border: 1px solid rgba(255,255,255,0.025);
+  padding: 12px 16px; margin: 0 20px 8px;
+  position: relative; overflow: hidden;
+}
+.portfolio-row:last-child { margin-bottom: 0; }
+.portfolio-row.settled { opacity: 0.6; }
+.portfolio-row.settled.lost { opacity: 0.45; }
+
+.port-stripe {
+  width: 4px; align-self: stretch; border-radius: 2px; flex-shrink: 0;
+}
+.port-stripe.yes {
+  background: linear-gradient(180deg, #5EE89A, #3DBE6F);
+  box-shadow: 0 0 6px rgba(87,242,135,0.3);
+}
+.port-stripe.no {
+  background: linear-gradient(180deg, #F06B6B, #ED4245);
+  box-shadow: 0 0 6px rgba(237,66,69,0.3);
+}
+
+.port-body { flex: 1; min-width: 0; }
+.port-title {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 14px; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.port-meta {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 12px; color: var(--text-muted); margin-top: 2px;
+}
+.port-meta .dot {
+  display: inline-block; width: 3px; height: 3px; border-radius: 50%;
+  background: rgba(255,255,255,0.2); vertical-align: middle; margin: 0 5px;
+}
+
+.port-col { text-align: right; flex-shrink: 0; min-width: 60px; }
+.port-col .col-label {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.port-col .col-value {
+  font-family: var(--font-mono), monospace;
+  font-weight: 600; font-size: 15px; color: var(--text-sub);
+}
+.port-col .col-value.payout { color: var(--win); }
+.port-col .col-value.payout-gold { color: var(--gold); }
+.port-col .col-value.payout-loss { color: var(--loss); }
+
+.port-action {
+  font-family: var(--font-display), sans-serif; font-weight: 600; font-size: 12px;
+  color: rgba(124,138,255,0.7);
+  background: rgba(88,101,242,0.06); border: 1px solid rgba(88,101,242,0.12);
+  border-radius: 5px; padding: 3px 10px; flex-shrink: 0;
+}
+.status-badge {
+  font-family: var(--font-mono), monospace; font-weight: 700; font-size: 11px;
+  padding: 3px 10px; border-radius: 5px; flex-shrink: 0;
+}
+.status-badge.won {
+  color: var(--gold); background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.12);
+}
+.status-badge.lost {
+  color: #F06B6B; background: rgba(237,66,69,0.08); border: 1px solid rgba(237,66,69,0.1);
+}
+
+.section-label {
+  padding: 8px 20px 4px;
+  font-family: var(--font-display), sans-serif;
+  font-weight: 600; font-size: 12px; color: var(--text-muted); letter-spacing: 0.5px;
+}
+.section-label .dot-icon {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  vertical-align: middle; margin-right: 6px;
+}
+.section-label .dot-icon.open { background: var(--win); }
+.section-label .dot-icon.settled { background: var(--text-dim); border: 1px solid var(--text-muted); }
+
+/* ══ Position Detail (v3) ══ */
+.pos-side-pill {
+  display: inline-flex; align-items: center;
+  padding: 4px 14px; border-radius: 5px;
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+}
+.pos-side-pill.yes {
+  color: var(--win);
+  background: rgba(87,242,135,0.08); border: 1px solid rgba(87,242,135,0.15);
+  box-shadow: inset 0 0 8px rgba(87,242,135,0.06);
+}
+.pos-side-pill.no {
+  color: var(--loss);
+  background: rgba(237,66,69,0.08); border: 1px solid rgba(237,66,69,0.15);
+  box-shadow: inset 0 0 8px rgba(237,66,69,0.06);
+}
+
+.sell-well {
+  background: var(--panel-bg);
+  border: 1px solid rgba(255,183,77,0.08); border-radius: 10px;
+  padding: 16px 18px; margin: 0 20px 12px;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.4), inset 0 0 20px rgba(255,183,77,0.02);
+}
+.sell-well .sell-header {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 600; font-size: 12px; letter-spacing: 1.5px;
+  color: rgba(255,255,255,0.5); text-transform: uppercase; margin-bottom: 12px;
+}
+.sell-well .sell-row {
+  display: flex; justify-content: space-between; align-items: center; padding: 5px 0;
+}
+.sell-well .sell-row .sell-label {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 13px; color: var(--text-sub);
+}
+.sell-well .sell-row .sell-value {
+  font-family: var(--font-mono), monospace;
+  font-weight: 600; font-size: 15px; color: var(--text-primary);
+}
+.sell-well .sell-row .sell-value.gold { color: var(--gold); }
+.sell-well .sell-row .sell-value.bright { color: #fff; }
+.sell-divider {
+  height: 1px; margin: 8px 0;
+  background: linear-gradient(90deg, transparent, rgba(255,183,77,0.15), transparent);
+}
+.sell-well .sell-pnl {
+  display: flex; justify-content: space-between; align-items: center; padding: 8px 0 0;
+}
+.sell-well .sell-pnl .pnl-label {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 600; font-size: 14px; color: rgba(255,255,255,0.6);
+}
+.sell-well .sell-pnl .pnl-value {
+  font-family: var(--font-mono), monospace;
+  font-weight: 700; font-size: 22px; color: var(--win);
+  text-shadow: 0 0 10px rgba(87,242,135,0.3);
+}
+.sell-well .sell-pnl .pnl-value.loss {
+  color: var(--loss); text-shadow: 0 0 10px rgba(237,66,69,0.3);
+}
+
+.after-sale-strip {
+  margin: 0 20px 12px; padding: 8px 14px;
+  background: var(--panel-bg); border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  font-family: var(--font-display), sans-serif;
+  font-weight: 500; font-size: 12px; color: var(--text-muted);
+}
+
+/* ══ Shared elements ══ */
 .market-title-text {
   font-family: var(--font-display), sans-serif;
-  font-weight: 600;
-  font-size: var(--font-sm);
-  color: var(--text-primary);
-  flex: 1;
-  line-height: 1.3;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.odds-pill {
-  font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 12px;
-  display: flex;
-  gap: 0;
-  border-radius: 6px;
-  overflow: hidden;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.odds-yes {
-  background: rgba(74,222,128,0.15);
-  color: var(--win);
-  padding: 3px 7px;
-  border-right: 1px solid rgba(255,255,255,0.06);
-}
-
-.odds-no {
-  background: rgba(248,113,113,0.12);
-  color: var(--loss);
-  padding: 3px 7px;
-}
-
-/* ── Market detail ── */
-.market-detail-body {
-  padding: var(--space-md) 20px var(--space-sm);
+  font-weight: 500; font-size: 14px; color: var(--text-primary);
+  flex: 1; line-height: 1.3;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 
 .market-question {
   font-family: var(--font-display), sans-serif;
-  font-weight: 700;
-  font-size: 16px;
-  color: var(--text-primary);
-  line-height: 1.4;
-  margin-bottom: 14px;
+  font-weight: 700; font-size: 16px; color: var(--text-primary);
+  line-height: 1.4; margin-bottom: 14px;
 }
 
-.prob-bar {
-  display: flex;
-  height: 28px;
-  border-radius: 6px;
-  overflow: hidden;
-  margin-bottom: 14px;
-  background: rgba(255,255,255,0.05);
+.pred-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 20px 14px;
 }
-
-.prob-fill-yes {
-  background: var(--win);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 12px;
-  color: #111;
-  min-width: 40px;
-}
-
-.prob-fill-no {
-  background: var(--loss);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 12px;
-  color: #111;
-  min-width: 40px;
-}
-
-.price-boxes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-md);
-}
-
-.price-box {
-  background: rgba(255,255,255,0.03);
-  border-radius: var(--border-radius);
-  padding: var(--space-md) 14px;
-  text-align: center;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  border-left: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(0,0,0,0.3);
-  border-right: 1px solid rgba(0,0,0,0.2);
-}
-
-.price-box.yes {
-  border-top: 2px solid rgba(74,222,128,0.4);
-}
-
-.price-box.no {
-  border-top: 2px solid rgba(248,113,113,0.4);
-}
-
-.price-side {
+.pred-footer .hint {
   font-family: var(--font-display), sans-serif;
-  font-weight: 700;
-  font-size: var(--font-xs);
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
-  margin-bottom: var(--space-xs);
+  font-weight: 500; font-size: 12px; color: var(--text-muted);
 }
-
-.price-side.yes { color: var(--win); }
-.price-side.no  { color: var(--loss); }
-
-.price-value {
+.pred-footer .count {
   font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 26px;
-  color: var(--text-primary);
-  line-height: 1;
-  margin-bottom: 2px;
+  font-weight: 600; font-size: 12px; color: var(--text-sub);
 }
-
-.price-profit {
-  font-family: var(--font-mono), monospace;
-  font-weight: 700;
-  font-size: 12px;
+.pred-footer .bal {
+  font-family: var(--font-mono), monospace; font-weight: 700; font-size: 14px;
 }
-
-.price-profit.yes { color: var(--win-light); }
-.price-profit.no  { color: var(--loss-light); }
+.pred-footer .bal .lbl { color: var(--gold-dim); }
+.pred-footer .bal .amt { color: var(--text-primary); }
 
 .meta-line {
-  display: flex;
-  justify-content: space-between;
+  display: flex; justify-content: space-between;
   padding: var(--space-xs) 20px var(--space-md);
   font-family: var(--font-display), sans-serif;
-  font-weight: 600;
-  font-size: var(--font-xs);
-  color: var(--text-muted);
+  font-weight: 600; font-size: var(--font-xs); color: var(--text-muted);
   letter-spacing: 0.3px;
 }
 
-.position-badge {
-  display: inline-block;
-  padding: 3px 10px;
-  border-radius: 5px;
-  font-family: var(--font-mono), monospace;
-  font-weight: 700;
-  font-size: var(--font-xs);
-  color: #fff;
-  margin-top: var(--space-sm);
-}
-
-.position-badge.yes {
-  background: rgba(74,222,128,0.15);
-  border: 1px solid rgba(74,222,128,0.35);
-  color: var(--win);
-}
-
-.position-badge.no {
-  background: rgba(248,113,113,0.15);
-  border: 1px solid rgba(248,113,113,0.35);
-  color: var(--loss);
-}
-
-/* ── Bet confirmation ── */
-.bet-detail-body {
-  padding: 10px 20px;
-}
-
+/* ══ Bet confirmation (kept from v2) ══ */
+.bet-detail-body { padding: 10px 20px; }
 .bet-market-title {
   font-family: var(--font-display), sans-serif;
-  font-weight: 600;
-  font-size: var(--font-sm);
-  color: var(--text-sub);
-  line-height: 1.3;
-  margin-bottom: 10px;
+  font-weight: 600; font-size: var(--font-sm); color: var(--text-sub);
+  line-height: 1.3; margin-bottom: 10px;
 }
-
 .bet-info-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 6px;
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;
   margin-bottom: var(--space-xs);
 }
-
 .bet-info-cell {
-  background: rgba(255,255,255,0.03);
-  border-radius: var(--border-radius);
-  padding: var(--space-sm) 10px;
-  text-align: center;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  border-left: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(0,0,0,0.3);
-  border-right: 1px solid rgba(0,0,0,0.2);
+  background: var(--panel-bg); border-radius: var(--border-radius);
+  padding: var(--space-sm) 10px; text-align: center;
+  border: 1px solid var(--panel-border);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
 }
-
 .bet-info-label {
   font-family: var(--font-display), sans-serif;
-  font-weight: 700;
-  font-size: 10px;
-  color: var(--gold-dim);
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  margin-bottom: 3px;
+  font-weight: 700; font-size: 10px; color: var(--gold-dim);
+  letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 3px;
 }
-
 .bet-info-value {
   font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 16px;
-  color: var(--text-primary);
+  font-weight: 800; font-size: 16px; color: var(--text-primary);
 }
-
 .bet-info-value.yes { color: var(--win); }
 .bet-info-value.no  { color: var(--loss); }
 
-/* ── Portfolio ── */
-.portfolio-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-sm) 20px;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-}
-.portfolio-row:last-child { border-bottom: none; }
-
-.portfolio-title {
-  font-family: var(--font-display), sans-serif;
-  font-weight: 600;
-  font-size: 12px;
-  color: var(--text-primary);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.portfolio-side {
+/* ══ Position badge (market detail — existing position indicator) ══ */
+.position-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 5px;
   font-family: var(--font-mono), monospace;
-  font-weight: 700;
-  font-size: var(--font-xs);
-  padding: 2px 6px;
-  border-radius: var(--border-radius-sm);
-  flex-shrink: 0;
+  font-weight: 700; font-size: var(--font-xs); letter-spacing: 0.5px;
+  margin-top: var(--space-sm);
 }
-
-.portfolio-side.yes {
-  background: rgba(74,222,128,0.12);
+.position-badge.yes {
   color: var(--win);
+  background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.15);
+  box-shadow: inset 0 0 8px rgba(74,222,128,0.06);
 }
-
-.portfolio-side.no {
-  background: rgba(248,113,113,0.12);
+.position-badge.no {
   color: var(--loss);
+  background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.15);
+  box-shadow: inset 0 0 8px rgba(248,113,113,0.06);
 }
 
-.portfolio-qty {
-  font-family: var(--font-mono), monospace;
-  font-weight: 600;
-  font-size: 12px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-  width: 40px;
-  text-align: right;
-}
-
-.portfolio-cost {
-  font-family: var(--font-mono), monospace;
-  font-weight: 700;
-  font-size: var(--font-sm);
-  color: var(--text-primary);
-  flex-shrink: 0;
-  width: 70px;
-  text-align: right;
-}
-
-.portfolio-summary {
-  display: flex;
-  justify-content: space-between;
-  padding: 10px 20px;
-}
-
-.portfolio-stat {
-  text-align: center;
-}
-
-.portfolio-stat-label {
-  font-family: var(--font-display), sans-serif;
-  font-weight: 700;
-  font-size: 10px;
-  color: var(--gold-dim);
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  margin-bottom: 2px;
-}
-
-.portfolio-stat-value {
-  font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: var(--font-lg);
-  color: var(--text-primary);
-}
-
-/* ── Resolution ── */
-.resolution-body {
-  padding: 10px 20px;
-}
-
+/* ══ Resolution (kept from v2) ══ */
+.resolution-body { padding: 10px 20px; }
 .resolution-result {
   font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 28px;
-  text-align: center;
-  margin-bottom: var(--space-md);
+  font-weight: 800; font-size: 28px; text-align: center; margin-bottom: var(--space-md);
 }
-
 .resolution-result.yes { color: var(--win); }
 .resolution-result.no  { color: var(--loss); }
-
 .winners-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  display: flex; align-items: center; gap: var(--space-sm);
+  padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
 }
 .winners-row:last-child { border-bottom: none; }
-
 .winner-rank {
-  font-family: var(--font-mono), monospace;
-  font-weight: 700;
-  font-size: 12px;
-  color: var(--gold);
-  width: var(--space-xl);
-  text-align: center;
+  font-family: var(--font-mono), monospace; font-weight: 700; font-size: 12px;
+  color: var(--gold); width: var(--space-xl); text-align: center;
 }
-
 .winner-name {
-  font-family: var(--font-display), sans-serif;
-  font-weight: 600;
-  font-size: var(--font-sm);
-  color: var(--text-primary);
-  flex: 1;
+  font-family: var(--font-display), sans-serif; font-weight: 600;
+  font-size: var(--font-sm); color: var(--text-primary); flex: 1;
+}
+.winner-payout {
+  font-family: var(--font-mono), monospace; font-weight: 800; font-size: 14px; color: var(--win);
 }
 
-.winner-payout {
-  font-family: var(--font-mono), monospace;
-  font-weight: 800;
-  font-size: 14px;
-  color: var(--win);
+/* ══ Legacy compat — odds-pill used by curated/daily-drop ══ */
+.odds-pill {
+  font-family: var(--font-mono), monospace; font-weight: 800; font-size: 12px;
+  display: flex; gap: 0; border-radius: 6px; overflow: hidden;
+  white-space: nowrap; flex-shrink: 0;
+}
+.odds-yes { background: rgba(74,222,128,0.15); color: var(--win); padding: 3px 7px; border-right: 1px solid rgba(255,255,255,0.06); }
+.odds-no { background: rgba(248,113,113,0.12); color: var(--loss); padding: 3px 7px; }
+.market-index {
+  font-family: var(--font-mono), monospace; font-weight: 700;
+  font-size: var(--font-sm); color: var(--text-dim);
+  width: 20px; text-align: center; flex-shrink: 0;
+}
+
+/* ══ Legacy prob-fill (used by curated/daily-drop spotlight) ══ */
+.prob-fill-yes {
+  background: linear-gradient(90deg, #3DBE6F, #57F287);
+  box-shadow: 0 0 8px rgba(87,242,135,0.25);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono), monospace; font-weight: 800; font-size: 12px;
+  color: #111; min-width: 40px;
+}
+.prob-fill-no {
+  background: var(--loss);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono), monospace; font-weight: 800; font-size: 12px;
+  color: #111; min-width: 40px;
 }
 """
 
@@ -477,12 +643,31 @@ def _implied_profit(price: float) -> str:
 def _wrap_prediction_card(status_class: str, content: str, theme_id: str | None = None) -> str:
     """Wrap prediction market content with base engine CSS + prediction-specific CSS."""
     base_html = wrap_card(content, status_class, theme_id=theme_id)
-    # Inject prediction-specific CSS before </head>
     return base_html.replace("</style>", f"{_prediction_css()}</style>", 1)
 
 
+def _price_cents(price: float) -> str:
+    """Format a price as cents display (e.g., 0.38 → '38')."""
+    return f"{int(round(price * 100))}"
+
+
+def _recessed_strip(cells: list[tuple[str, str, str]], cols: int = 4) -> str:
+    """Build a recessed summary/meta strip.
+
+    Each cell is (label, value_html, css_class_for_value).
+    """
+    cells_html = ""
+    for label, value, cls in cells:
+        cells_html += f"""
+        <div class="strip-cell">
+          <div class="cell-label">{esc(label)}</div>
+          <div class="cell-value {cls}">{value}</div>
+        </div>"""
+    return f'<div class="recessed-strip cols-{cols}">{cells_html}</div>'
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  MARKET LIST CARD (State 1 — browse view)
+#  MARKET LIST CARD (State 1 — browse view) — V3
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_market_list_html(
@@ -490,60 +675,95 @@ def _build_market_list_html(
     page: int,
     total_pages: int,
     filter_label: str = "All Categories",
+    total_markets: int = 0,
 ) -> str:
-    """Build HTML for the market list card (compact rows, scannable)."""
-    header = build_header_html(
-        icon=icon_pill("predictions", "📊"),
-        title="PREDICTION MARKETS",
-        players=[],
-        outcome="active",
-        badge_text=f"Page {page}/{total_pages}",
-        subtitle="FLOW Markets",
-    )
+    """Build HTML for the v3 market list card."""
+    total = total_markets or len(markets)
+
+    header = f"""
+    <div class="pred-header">
+      <div class="pred-header-left">
+        <div class="globe-icon"></div>
+        <div>
+          <div class="pred-title">PREDICTION MARKETS</div>
+          <div class="pred-subtitle">ATLAS Flow &middot; Real-world events</div>
+        </div>
+      </div>
+      <div class="pred-header-right">
+        <div class="stat-value">{total} open</div>
+        <div class="stat-label">markets</div>
+        <div class="page-pill">Page {page} / {total_pages}</div>
+      </div>
+    </div>"""
 
     rows_html = ""
     for i, m in enumerate(markets):
-        idx = (page - 1) * len(markets) + i + 1  # continuous numbering
         title = m.get("title", "Untitled")
         category = m.get("category", "Other")
         yes_price = m.get("yes_price", 0.5)
         no_price = m.get("no_price", 1 - yes_price)
-        cat_color = _category_color(category)
-        # Strip emoji from category for badge text
+        yes_pct = max(2, min(98, int(round(yes_price * 100))))
+        slug = m.get("slug", "")
+        volume = m.get("volume", 0)
+        end_str = _fmt_end_date(m.get("end_date", ""))
+
         parts = category.split(" ", 1)
         cat_name = parts[1] if len(parts) > 1 else parts[0]
+        badge = _jewel_badge(cat_name, category)
+
+        meta_parts = []
+        if slug:
+            meta_parts.append(esc(slug[:20].upper()))
+        if end_str:
+            meta_parts.append(esc(end_str))
+        if volume:
+            meta_parts.append(f"{fmt_volume(volume)} vol")
+        meta_html = '<span class="dot"></span>'.join(meta_parts) if meta_parts else ""
+
+        yes_cents = _price_cents(yes_price)
+        no_cents = _price_cents(no_price)
 
         rows_html += f"""
         <div class="market-list-row">
-          <div class="market-index">{idx}</div>
-          <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
-          <div class="market-title-text">{esc(title)}</div>
-          <div class="odds-pill">
-            <span class="odds-yes">{yes_price:.0%}</span>
-            <span class="odds-no">{no_price:.0%}</span>
+          {badge}
+          <div class="mrow-body">
+            <div class="mrow-title">{esc(title)}</div>
+            <div class="mrow-meta">{meta_html}</div>
+          </div>
+          <div class="mrow-right">
+            <div class="prob-bar" style="width:90px;">
+              <div class="prob-tick"></div>
+              <div class="prob-fill" style="width:{yes_pct}%;"></div>
+            </div>
+            <div class="odds-display">
+              <span class="yes-price">{yes_cents}&cent;</span><span class="slash">/</span><span class="no-price">{no_cents}&cent;</span>
+            </div>
           </div>
         </div>"""
 
     if not markets:
         rows_html = """
-        <div style="padding: var(--space-xl) 20px; text-align: center; color: var(--text-muted);
+        <div style="padding: 24px 20px; text-align: center; color: var(--text-muted);
                     font-family: var(--font-display), sans-serif; font-size: 14px;">
           No markets found. Try a different category.
         </div>"""
 
-    filter_html = f"""
-    <div style="padding: 6px 20px 2px; font-family: var(--font-display), sans-serif;
-                font-weight: 600; font-size: 10px; color: var(--text-dim);
-                letter-spacing: 1px; text-transform: uppercase;">
-      {esc(filter_label)}
+    shown = len(markets)
+    start = (page - 1) * shown + 1 if shown else 0
+    end = start + shown - 1 if shown else 0
+
+    footer = f"""
+    <div class="pred-footer">
+      <span class="hint">Select a market below to view details</span>
+      <span class="count">{start}–{end} of {total}</span>
     </div>"""
 
     return f"""
     {header}
     <div class="gold-divider"></div>
-    {filter_html}
     {rows_html}
     <div class="gold-divider"></div>
+    {footer}
     """
 
 
@@ -553,15 +773,16 @@ async def render_market_list_card(
     total_pages: int,
     filter_label: str = "All Categories",
     theme_id: str | None = None,
+    total_markets: int = 0,
 ) -> bytes:
     """Render market list browse card to PNG bytes."""
-    content = _build_market_list_html(markets, page, total_pages, filter_label)
+    content = _build_market_list_html(markets, page, total_pages, filter_label, total_markets)
     html = _wrap_prediction_card("active", content, theme_id=theme_id)
     return await render_card(html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MARKET DETAIL CARD (State 2 — single market)
+#  MARKET DETAIL CARD (State 2 — single market) — V3
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_market_detail_html(
@@ -575,79 +796,96 @@ def _build_market_detail_html(
     user_position: str | None = None,
     user_contracts: int = 0,
     user_cost: int = 0,
+    user_balance: int = 0,
 ) -> str:
-    """Build HTML for a detailed single-market card."""
-    # Strip emoji for clean display
+    """Build HTML for the v3 market detail card."""
     parts = category.split(" ", 1)
     cat_name = parts[1] if len(parts) > 1 else parts[0]
-    cat_color = _category_color(category)
+    badge = _jewel_badge(cat_name, category)
 
-    header = build_header_html(
-        icon=icon_pill("predictions", "📊"),
-        title=cat_name.upper(),
-        players=[],
-        outcome="active",
-        badge_text="LIVE",
-        subtitle="FLOW Markets",
-    )
+    yes_pct = max(2, min(98, int(round(yes_price * 100))))
+    yes_cents = _price_cents(yes_price)
+    no_cents = _price_cents(no_price)
 
-    # Probability bar
-    yes_pct = max(0.02, min(0.98, yes_price))
-    no_pct = 1 - yes_pct
+    # Header: category tag left, volume right
+    header = f"""
+    <div class="pred-header">
+      <div class="pred-header-left">
+        {badge}
+      </div>
+      <div class="pred-header-right">
+        <div class="stat-value">{fmt_volume(volume)}</div>
+        <div class="stat-label">contracts traded</div>
+      </div>
+    </div>
+    <div style="padding: 0 20px 12px;">
+      <div class="market-question">{esc(title)}</div>
+    </div>"""
 
-    # Price boxes with implied profit
-    yes_profit = _implied_profit(yes_price)
-    no_profit = _implied_profit(no_price)
+    # Probability bar (large variant)
+    prob_bar = f"""
+    <div style="padding: 0 20px 16px;">
+      <div class="prob-labels">
+        <span class="yes-label">YES &mdash; {yes_price:.0%}</span>
+        <span class="no-label">NO &mdash; {no_price:.0%}</span>
+      </div>
+      <div class="prob-bar large">
+        <div class="prob-tick"></div>
+        <div class="prob-fill" style="width:{yes_pct}%;"></div>
+      </div>
+    </div>"""
 
-    # Position badge
+    # Buy wells
+    buy_wells = f"""
+    <div class="buy-wells">
+      <div class="buy-well yes">
+        <div class="side-label">BUY YES</div>
+        <div class="price-big">{yes_cents}</div>
+        <div class="price-unit">$ per contract</div>
+        <div class="payout-text">Pays <em>$100</em> if YES</div>
+      </div>
+      <div class="buy-well no">
+        <div class="side-label">BUY NO</div>
+        <div class="price-big">{no_cents}</div>
+        <div class="price-unit">$ per contract</div>
+        <div class="payout-text">Pays <em>$100</em> if NO</div>
+      </div>
+    </div>"""
+
+    # Position badge (if user has existing position)
     position_html = ""
     if user_position:
         side_class = "yes" if "YES" in user_position.upper() else "no"
         pos_text = f"YOUR BET: {user_position}"
         if user_contracts:
-            pos_text += f" × {user_contracts}"
-        position_html = f'<div class="position-badge {side_class}">{esc(pos_text)}</div>'
+            pos_text += f" &times; {user_contracts}"
+        position_html = f'<div style="padding: 0 20px 10px;"><div class="position-badge {side_class}">{pos_text}</div></div>'
 
-    # Meta line
-    meta_parts = []
-    if volume:
-        meta_parts.append(f"Vol: {fmt_volume(volume)}")
-    if liquidity:
-        meta_parts.append(f"Liq: {fmt_volume(liquidity)}")
-    end_str = _fmt_end_date(end_date)
-    if end_str:
-        meta_parts.append(f"Ends: {end_str}")
+    # Meta strip
+    end_str = _fmt_end_date(end_date) or "TBD"
+    meta_strip = _recessed_strip([
+        ("Category", esc(cat_name), ""),
+        ("Expires", esc(end_str), ""),
+        ("Status", '<span class="status-pill"><span class="status-dot"></span> Open</span>', ""),
+    ], cols=3)
 
-    meta_left = " · ".join(meta_parts[:2]) if meta_parts else ""
-    meta_right = meta_parts[2] if len(meta_parts) > 2 else (meta_parts[1] if len(meta_parts) > 1 and not meta_left.count("·") else "")
-    # Simplify: just show all in one line
-    meta_text = "  |  ".join(meta_parts) if meta_parts else ""
+    # Footer with balance
+    footer = f"""
+    <div class="pred-footer">
+      <span class="hint">Click button below to open wager modal</span>
+      <span class="bal"><span class="lbl">BAL </span><span class="amt">${user_balance:,}</span></span>
+    </div>"""
 
     return f"""
     {header}
     <div class="gold-divider"></div>
-    <div class="market-detail-body">
-      <div class="market-question">{esc(title)}</div>
-      <div class="prob-bar">
-        <div class="prob-fill-yes" style="width: {yes_pct:.0%};">YES {yes_price:.0%}</div>
-        <div class="prob-fill-no" style="width: {no_pct:.0%};">NO {no_price:.0%}</div>
-      </div>
-      <div class="price-boxes">
-        <div class="price-box yes">
-          <div class="price-side yes">YES</div>
-          <div class="price-value">{yes_price:.0%}</div>
-          <div class="price-profit yes">{esc(yes_profit)}</div>
-        </div>
-        <div class="price-box no">
-          <div class="price-side no">NO</div>
-          <div class="price-value">{no_price:.0%}</div>
-          <div class="price-profit no">{esc(no_profit)}</div>
-        </div>
-      </div>
-      {position_html}
-    </div>
-    <div class="meta-line"><span>{esc(meta_text)}</span></div>
+    {prob_bar}
+    {buy_wells}
+    {position_html}
     <div class="gold-divider"></div>
+    {meta_strip}
+    <div class="gold-divider"></div>
+    {footer}
     """
 
 
@@ -663,11 +901,13 @@ async def render_market_detail_card(
     user_contracts: int = 0,
     user_cost: int = 0,
     theme_id: str | None = None,
+    user_balance: int = 0,
 ) -> bytes:
     """Render single-market detail card to PNG bytes."""
     content = _build_market_detail_html(
         title, category, yes_price, no_price, volume,
         liquidity, end_date, user_position, user_contracts, user_cost,
+        user_balance,
     )
     html = _wrap_prediction_card("active", content, theme_id=theme_id)
     return await render_card(html)
@@ -694,7 +934,7 @@ async def render_bet_confirmation_card(
     side_class = "yes" if side.upper() == "YES" else "no"
 
     header = build_header_html(
-        icon=icon_pill("predictions", "📊"),
+        icon=icon_pill("predictions", "\U0001f4ca"),
         title="PREDICTION MARKET",
         players=[player_name],
         outcome=outcome,
@@ -717,7 +957,7 @@ async def render_bet_confirmation_card(
         </div>
         <div class="bet-info-cell">
           <div class="bet-info-label">Qty</div>
-          <div class="bet-info-value">×{quantity}</div>
+          <div class="bet-info-value">&times;{quantity}</div>
         </div>
       </div>
     </div>
@@ -741,7 +981,7 @@ async def render_bet_confirmation_card(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PORTFOLIO CARD
+#  PORTFOLIO CARD — V3 (open/settled split, left-stripe rows)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def render_portfolio_card(
@@ -751,77 +991,274 @@ async def render_portfolio_card(
     total_potential: int,
     balance: int,
     theme_id: str | None = None,
+    realized_pnl: int = 0,
 ) -> bytes:
     """Render portfolio card to PNG bytes.
 
-    Each position dict: {title, side, qty, cost, payout, buy_price}
+    Each position dict: {title, side, qty, cost, payout, buy_price, status}
+    status is 'open', 'won', or 'lost' (defaults to 'open' if missing).
     """
-    header = build_header_html(
-        icon=icon_pill("predictions", "📋"),
-        title="PORTFOLIO",
-        players=[player_name],
-        outcome="active",
-        badge_text=f"{len(positions)} OPEN",
-        subtitle="FLOW Markets",
-    )
+    # Split positions
+    open_pos = [p for p in positions if p.get("status", "open") == "open"]
+    settled_pos = [p for p in positions if p.get("status", "open") != "open"]
+    open_count = len(open_pos)
 
-    rows_html = ""
-    for pos in positions:
-        side = pos.get("side", "YES").upper()
-        side_class = "yes" if side == "YES" else "no"
-        title = pos.get("title", "")[:45]
-        qty = pos.get("qty", 0)
-        cost = pos.get("cost", 0)
-
-        rows_html += f"""
-        <div class="portfolio-row">
-          <div class="portfolio-side {side_class}">{side}</div>
-          <div class="portfolio-title">{esc(title)}</div>
-          <div class="portfolio-qty">×{qty}</div>
-          <div class="portfolio-cost">${cost:,}</div>
-        </div>"""
-
-    if not positions:
-        rows_html = """
-        <div style="padding: 20px; text-align: center; color: var(--text-muted);
-                    font-family: var(--font-display), sans-serif; font-size: var(--font-sm);">
-          No open positions
-        </div>"""
-
-    pl = total_potential - total_invested
-    pl_color = "var(--win)" if pl > 0 else "var(--loss)" if pl < 0 else "var(--push)"
-    pl_str = f"+${pl:,}" if pl > 0 else f"-${abs(pl):,}" if pl < 0 else "$0"
-
-    summary = f"""
-    <div class="portfolio-summary">
-      <div class="portfolio-stat">
-        <div class="portfolio-stat-label">Invested</div>
-        <div class="portfolio-stat-value">${total_invested:,}</div>
-      </div>
-      <div class="portfolio-stat">
-        <div class="portfolio-stat-label">Max Payout</div>
-        <div class="portfolio-stat-value">${total_potential:,}</div>
-      </div>
-      <div class="portfolio-stat">
-        <div class="portfolio-stat-label">Max P&amp;L</div>
-        <div class="portfolio-stat-value" style="color: {pl_color};">{pl_str}</div>
+    header = f"""
+    <div class="pred-header">
+      <div class="pred-header-left">
+        <div class="pf-icon">\U0001f4cb</div>
+        <div>
+          <div class="pred-title">YOUR PORTFOLIO</div>
+          <div class="pred-subtitle">{esc(player_name)} &middot; {len(positions)} positions</div>
+        </div>
       </div>
     </div>"""
 
-    footer = build_footer_html(balance)
+    # Summary strip
+    max_payout_cls = "green" if total_potential > total_invested else ""
+    pnl_cls = "green" if realized_pnl > 0 else ("red" if realized_pnl < 0 else "")
+    pnl_str = f"+${realized_pnl:,}" if realized_pnl > 0 else f"-${abs(realized_pnl):,}" if realized_pnl < 0 else "$0"
+
+    summary = _recessed_strip([
+        ("Open", f"{open_count}", "big"),
+        ("Invested", f"${total_invested:,}", "big"),
+        ("Max Pay", f"${total_potential:,}", f"big {max_payout_cls}"),
+        ("Real P&amp;L", pnl_str, f"big {pnl_cls}"),
+    ], cols=4)
+
+    # Open section
+    open_html = ""
+    if open_pos:
+        open_html += '<div class="section-label"><span class="dot-icon open"></span>Open positions</div>'
+        for pos in open_pos:
+            open_html += _build_portfolio_row(pos, settled=False)
+
+    # Settled section
+    settled_html = ""
+    if settled_pos:
+        settled_html += '<div class="section-label"><span class="dot-icon settled"></span>Settled</div>'
+        for pos in settled_pos:
+            settled_html += _build_portfolio_row(pos, settled=True)
+
+    if not positions:
+        open_html = """
+        <div style="padding: 20px; text-align: center; color: var(--text-muted);
+                    font-family: var(--font-display), sans-serif; font-size: var(--font-sm);">
+          No positions yet — browse markets to get started
+        </div>"""
+
+    footer = f"""
+    <div class="pred-footer">
+      <span class="count">{len(positions)} most recent positions</span>
+      <span class="bal"><span class="lbl">BAL </span><span class="amt">${balance:,}</span></span>
+    </div>"""
 
     content = f"""
     {header}
     <div class="gold-divider"></div>
-    {rows_html}
-    <div class="gold-divider"></div>
     {summary}
+    <div class="gold-divider"></div>
+    {open_html}
+    {settled_html}
     <div class="gold-divider"></div>
     {footer}
     """
 
     html = _wrap_prediction_card("active", content, theme_id=theme_id)
     return await render_card(html)
+
+
+def _build_portfolio_row(pos: dict, settled: bool = False) -> str:
+    """Build a single portfolio row with left stripe."""
+    side = pos.get("side", "YES").upper()
+    side_class = "yes" if side == "YES" else "no"
+    title = pos.get("title", "")[:50]
+    qty = pos.get("qty", 0)
+    cost = pos.get("cost", 0)
+    payout = pos.get("payout", 0)
+    buy_price = pos.get("buy_price", 0)
+    status = pos.get("status", "open")
+
+    settled_cls = ""
+    if settled:
+        settled_cls = " settled" + (" lost" if status == "lost" else "")
+
+    # Meta line: ticker · side · qty · buy price
+    slug = pos.get("slug", "")
+    meta_parts = []
+    if slug:
+        meta_parts.append(esc(slug[:15].upper()))
+    meta_parts.append(side)
+    meta_parts.append(f"{qty} contracts")
+    if buy_price:
+        meta_parts.append(f"@{buy_price:.0%}")
+    meta_html = '<span class="dot"></span>'.join(meta_parts)
+
+    # Cost + payout columns
+    payout_cls = "payout" if status == "open" else ("payout-gold" if status == "won" else "payout-loss")
+    payout_val = f"${payout:,}" if payout else "$0"
+
+    # Action/status badge
+    action_html = ""
+    if status == "open":
+        action_html = '<span class="port-action">Details</span>'
+    elif status == "won":
+        action_html = '<span class="status-badge won">WON</span>'
+    elif status == "lost":
+        action_html = '<span class="status-badge lost">LOST</span>'
+
+    return f"""
+    <div class="portfolio-row{settled_cls}">
+      <div class="port-stripe {side_class}"></div>
+      <div class="port-body">
+        <div class="port-title">{esc(title)}</div>
+        <div class="port-meta">{meta_html}</div>
+      </div>
+      <div class="port-col">
+        <div class="col-label">Cost</div>
+        <div class="col-value">${cost:,}</div>
+      </div>
+      <div class="port-col">
+        <div class="col-label">Payout</div>
+        <div class="col-value {payout_cls}">{payout_val}</div>
+      </div>
+      {action_html}
+    </div>"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  POSITION DETAIL / SELL CARD — V3 (NEW)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def render_position_detail_card(
+    position: dict,
+    sell_qty: int = 0,
+    user_balance: int = 0,
+    player_name: str = "",
+    theme_id: str | None = None,
+) -> bytes:
+    """Render position detail card to PNG bytes.
+
+    position dict: {title, side, qty, buy_price, cost, current_price, market_id, slug}
+    sell_qty: 0 = just viewing, >0 = show sell preview for that quantity.
+    """
+    content = _build_position_detail_html(position, sell_qty, user_balance, player_name)
+    # Green status bar for position cards (unrealized value signal)
+    html = _wrap_prediction_card("win", content, theme_id=theme_id)
+    return await render_card(html)
+
+
+def _build_position_detail_html(
+    position: dict,
+    sell_qty: int,
+    user_balance: int,
+    player_name: str,
+) -> str:
+    """Build HTML for the position detail / sell preview card."""
+    side = position.get("side", "YES").upper()
+    side_class = "yes" if side == "YES" else "no"
+    title = position.get("title", "Unknown Market")
+    slug = position.get("slug", "")
+    qty = position.get("qty", 0)
+    buy_price = position.get("buy_price", 0)
+    cost = position.get("cost", 0)
+    current_price = position.get("current_price", buy_price)
+
+    avg_cost_cents = _price_cents(buy_price)
+    current_cents = _price_cents(current_price)
+    delta = current_price - buy_price
+    delta_cents = int(round(delta * 100))
+    delta_sign = "+" if delta >= 0 else ""
+    delta_arrow = "\u2191" if delta >= 0 else "\u2193"
+    delta_cls = "green" if delta >= 0 else "red"
+
+    # Header
+    header = f"""
+    <div class="pred-header">
+      <div class="pred-header-left">
+        <div>
+          <span class="pos-side-pill {side_class}">YOUR {side} POSITION</span>
+          <div class="market-question" style="margin-top:10px; margin-bottom:0;">{esc(title)}</div>
+          <div class="pred-subtitle" style="margin-top:4px;">{esc(slug.upper())}</div>
+        </div>
+      </div>
+      <div class="pred-header-right">
+        <span class="status-pill"><span class="status-dot"></span> Market open</span>
+      </div>
+    </div>"""
+
+    # Position grid
+    pos_grid = _recessed_strip([
+        ("Contracts", f"{qty}", "big"),
+        ("Avg Cost", f"{avg_cost_cents}&cent;", "big"),
+        ("Total Cost", f"${cost:,}", "big"),
+        ("Current", f'{current_cents}&cent;<div class="cell-sub" style="color:var(--{delta_cls})">{delta_sign}{delta_cents}&cent; {delta_arrow}</div>', "big"),
+    ], cols=4)
+
+    # Sell preview section
+    sell_html = ""
+    if sell_qty > 0:
+        sell_price_bucks = int(round(current_price * 100))
+        proceeds = sell_price_bucks * sell_qty
+        cost_basis = int(round(buy_price * 100)) * sell_qty
+        pnl = proceeds - cost_basis
+        pnl_sign = "+" if pnl >= 0 else "-"
+        pnl_cls = "" if pnl >= 0 else " loss"
+
+        remaining = qty - sell_qty
+        remaining_payout = remaining * 100  # $100 per contract if wins
+
+        sell_html = f"""
+    <div class="gold-divider"></div>
+    <div class="sell-well">
+      <div class="sell-header">SELL CONTRACTS</div>
+      <div class="sell-row">
+        <span class="sell-label">Quantity to sell</span>
+        <span class="sell-value bright">{sell_qty}</span>
+      </div>
+      <div class="sell-divider"></div>
+      <div class="sell-row">
+        <span class="sell-label">Your avg buy price</span>
+        <span class="sell-value">{avg_cost_cents}&cent;/contract</span>
+      </div>
+      <div class="sell-row">
+        <span class="sell-label">Current sell price</span>
+        <span class="sell-value bright">{current_cents}&cent;/contract</span>
+      </div>
+      <div class="sell-row">
+        <span class="sell-label">You'll receive</span>
+        <span class="sell-value gold">${proceeds:,}</span>
+      </div>
+      <div class="sell-row">
+        <span class="sell-label">Original cost ({sell_qty} contracts)</span>
+        <span class="sell-value">${cost_basis:,}</span>
+      </div>
+      <div class="sell-divider"></div>
+      <div class="sell-pnl">
+        <span class="pnl-label">Profit on this sale</span>
+        <span class="pnl-value{pnl_cls}">{pnl_sign}${abs(pnl):,}</span>
+      </div>
+    </div>
+    <div class="after-sale-strip">
+      After this sale: {remaining} remaining &middot; @{avg_cost_cents}&cent;
+      &nbsp;|&nbsp; If {side} wins: pays ${remaining_payout:,}
+    </div>"""
+
+    # Footer
+    footer = f"""
+    <div class="pred-footer">
+      <span class="hint">Sell price updates with live data</span>
+      <span class="bal"><span class="lbl">BAL </span><span class="amt">${user_balance:,}</span></span>
+    </div>"""
+
+    return f"""
+    {header}
+    <div class="gold-divider"></div>
+    {pos_grid}
+    {sell_html}
+    <div class="gold-divider"></div>
+    {footer}
+    """
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -846,7 +1283,7 @@ async def render_resolution_card(
     result_class = "yes" if is_yes else "no"
 
     header = build_header_html(
-        icon=icon_pill("predictions", "🏆"),
+        icon=icon_pill("predictions", "\U0001f3c6"),
         title="MARKET RESOLVED",
         players=[],
         outcome=outcome,
@@ -892,11 +1329,11 @@ async def render_resolution_card(
 
 def _build_curated_list_html(
     markets: list[dict],
-    filter_label: str = "Curated · All Categories",
+    filter_label: str = "Curated \u00b7 All Categories",
 ) -> str:
     """Build HTML for a curated 10-market list with community sentiment bars."""
     header = build_header_html(
-        icon=icon_pill("predictions", "📊"),
+        icon=icon_pill("predictions", "\U0001f4ca"),
         title="PREDICTION MARKETS",
         players=[],
         outcome="active",
@@ -972,7 +1409,7 @@ def _build_curated_list_html(
 def _curated_css() -> str:
     """Extra CSS for curated list and daily drop cards."""
     return """
-/* ── Sentiment bar ── */
+/* \u2500\u2500 Sentiment bar \u2500\u2500 */
 .sentiment-bar {
   height: var(--space-xs);
   border-radius: 2px;
@@ -1000,7 +1437,7 @@ def _curated_css() -> str:
   white-space: nowrap;
 }
 
-/* ── Daily Drop spotlight ── */
+/* \u2500\u2500 Daily Drop spotlight \u2500\u2500 */
 .spotlight-section {
   padding: 14px 20px;
 }
@@ -1073,7 +1510,7 @@ def _curated_css() -> str:
   color: var(--win);
 }
 
-/* ── Price alert ── */
+/* \u2500\u2500 Price alert \u2500\u2500 */
 .alert-body {
   padding: 14px 20px;
 }
@@ -1111,7 +1548,7 @@ def _curated_css() -> str:
 
 async def render_curated_list_card(
     markets: list[dict],
-    filter_label: str = "Curated · All Categories",
+    filter_label: str = "Curated \u00b7 All Categories",
     theme_id: str | None = None,
 ) -> bytes:
     """Render curated 10-market list card to PNG bytes."""
@@ -1140,7 +1577,7 @@ async def render_daily_drop_card(
     leaderboard: [{name, profit, streak}, ...]
     """
     header = build_header_html(
-        icon=icon_pill("predictions", "🔥"),
+        icon=icon_pill("predictions", "\U0001f525"),
         title="DAILY DROP",
         players=[],
         outcome="jackpot",
@@ -1218,10 +1655,10 @@ async def render_daily_drop_card(
             streak = entry.get("streak", 0)
             stat_text = f"+${profit:,}"
             if streak >= 3:
-                stat_text += f" · {streak}W streak"
+                stat_text += f" \u00b7 {streak}W streak"
             lb_rows += f"""
             <div class="leaderboard-row">
-              <div class="winner-rank" style="color: var(--gold);">🏆</div>
+              <div class="winner-rank" style="color: var(--gold);">\U0001f3c6</div>
               <div class="leaderboard-name">{esc(name)}</div>
               <div class="leaderboard-stat">{stat_text}</div>
             </div>"""
@@ -1269,7 +1706,7 @@ async def render_price_alert_card(
     """Render price movement alert card to PNG bytes."""
     direction = "up" if new_price > old_price else "down"
     delta = abs(new_price - old_price)
-    arrow = "↑" if direction == "up" else "↓"
+    arrow = "\u2191" if direction == "up" else "\u2193"
     outcome = "win" if direction == "up" else "loss"
 
     title = market.get("title", "")
@@ -1279,7 +1716,7 @@ async def render_price_alert_card(
     cat_name = parts[1] if len(parts) > 1 else parts[0]
 
     header = build_header_html(
-        icon=icon_pill("predictions", "📈" if direction == "up" else "📉"),
+        icon=icon_pill("predictions", "\U0001f4c8" if direction == "up" else "\U0001f4c9"),
         title="PRICE ALERT",
         players=[],
         outcome=outcome,
@@ -1302,7 +1739,7 @@ async def render_price_alert_card(
       <div class="alert-direction {direction}">{arrow} {delta:.0%}</div>
       <div class="alert-prices">
         <span class="alert-old">{old_price:.0%}</span>
-        <span class="alert-arrow">→</span>
+        <span class="alert-arrow">\u2192</span>
         <span class="alert-new">{new_price:.0%}</span>
       </div>
       <div class="alert-holders">{esc(holders_text)}</div>
@@ -1343,7 +1780,7 @@ async def render_sell_confirmation_card(
     pnl_display = f"{pnl_sign}${abs(profit_loss):,}"
 
     header = build_header_html(
-        icon=icon_pill("predictions", "💰"),
+        icon=icon_pill("predictions", "\U0001f4b0"),
         title="CONTRACTS SOLD",
         players=[player_name],
         outcome=outcome,
@@ -1365,7 +1802,7 @@ async def render_sell_confirmation_card(
         </div>
         <div class="bet-info-cell">
           <div class="bet-info-label">Qty Sold</div>
-          <div class="bet-info-value">×{sell_quantity}</div>
+          <div class="bet-info-value">&times;{sell_quantity}</div>
         </div>
       </div>
     </div>
