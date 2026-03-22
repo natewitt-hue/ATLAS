@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.9.0"  # Edit-in-place UX — hub views edit messages instead of posting new ones
+ATLAS_VERSION = "6.10.0"  # 6 new card themes: Midnight Circuit, Venom Strike, Arctic Fox, Shadow Broker, Glacier Mint, Blackout Protocol
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
