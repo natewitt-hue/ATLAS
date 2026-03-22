@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.5.0"  # Blackjack UI redesign — CSS-rendered cards, cinematic result screen, shoe indicator
+ATLAS_VERSION = "6.6.0"  # Flow Store Phase 1 — store engine, effects API, purchase/activate/lootbox logic
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -241,6 +241,7 @@ async def setup_hook():
         "codex_cog",          # ATLAS Codex — historical AI (/ask, /h2h)
         "polymarket_cog",     # ATLAS Flow — Polymarket prediction markets
         "economy_cog",        # ATLAS Economy — money management & stipends
+        "flow_store",         # ATLAS Flow — store engine (Phase 1, no UI)
         "flow_live_cog",      # ATLAS Flow — live engagement system
         "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
         "boss_cog",           # ATLAS Boss — visual commissioner control room

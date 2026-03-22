@@ -1,0 +1,12 @@
+{
+    "typeCheckingMode": "basic",
+    "exclude": [
+        "Quarantine_Archive",
+        "__pycache__",
+        "*.bak",
+        "echo/*.txt"
+    ],
+    "reportAttributeAccessIssue": "warning",
+    "reportIncompatibleMethodOverride": false,
+    "reportMissingImports": "warning"
+}

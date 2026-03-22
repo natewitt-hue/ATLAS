@@ -21,3 +21,40 @@ assets/logos/
 assets/headshots/
 # Keep team_branding.json and player_headshots.json (runtime config, small)
 .worktrees/
+
+# Generated snapshots & test outputs
+ATLAS_Full_Code.txt
+ATLAS_Command_Map.txt
+stress_test_results.txt
+
+# Development session artifacts
+.superpowers/
+
+# Render test outputs
+test_*.png
+test_*.html
+test_renders/
+test_bj_v6_redesign.py
+
+# SQLite journal files
+*.db-shm
+*.db-wal
+
+# External binaries
+ngrok.exe
+
+# Empty staging/output dirs
+output/
+cortex/output/
+icons/_staging/
+
+# Dead quarantine files (already superseded)
+QUARANTINE/echo_voice_extractor.py
+QUARANTINE/hub_view.py
+QUARANTINE/ui_state.py
+
+# Dead icon assets (only referenced in quarantined code)
+icons/grid_achievements.png
+icons/grid_game.png
+icons/grid_slots.png
+icons/unnamed.jpg

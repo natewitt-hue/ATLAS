@@ -437,26 +437,66 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
     sort_dir = 'ASC' if sort_worst else 'DESC'
 
     if is_owner_query and not ('loss' in text_lower):
-        # Owner wins leaderboard — "worst owner" sorts ASC (fewest wins)
-        sql = f"""
-            SELECT winner_user AS owner, COUNT(*) AS total_wins
-            FROM games
-            WHERE status IN ('2','3') AND stageIndex = '1'
-              AND winner_user IS NOT NULL AND winner_user != ''
-        """
-        params_list = []
-        if season:
-            sql += " AND seasonIndex = ?"
-            params_list.append(str(season))
-        sql += f" GROUP BY winner_user ORDER BY total_wins {sort_dir} LIMIT ?"
-        params_list.append(limit)
+        if sort_worst:
+            # "Worst owner" → win PERCENTAGE, minimum 3 seasons + 30 games
+            # Prevents drive-by members (2 games, left) from ranking
+            season_filter = ""
+            params_list = []
+            if season:
+                season_filter = "AND g.seasonIndex = ?"
+                params_list.append(str(season))
+
+            sql = f"""
+                SELECT
+                    ot_agg.userName AS owner,
+                    SUM(CASE WHEN g.winner_user = ot_agg.userName THEN 1 ELSE 0 END) AS wins,
+                    COUNT(*) AS total_games,
+                    ROUND(CAST(SUM(CASE WHEN g.winner_user = ot_agg.userName THEN 1 ELSE 0 END) AS REAL)
+                           / COUNT(*) * 100, 1) AS win_pct,
+                    ot_agg.seasons
+                FROM (
+                    SELECT userName,
+                            COUNT(DISTINCT seasonIndex) AS seasons,
+                           SUM(games_played) AS career_games
+                    FROM owner_tenure
+                    GROUP BY userName
+                    HAVING COUNT(DISTINCT seasonIndex) >= 3 AND SUM(games_played) >= 30
+                ) ot_agg
+                JOIN games g ON g.status IN ('2','3') AND g.stageIndex = '1'
+                     AND (g.homeUser = ot_agg.userName OR g.awayUser = ot_agg.userName)
+                     {season_filter}
+                GROUP BY ot_agg.userName
+                ORDER BY win_pct ASC
+                LIMIT ?
+            """
+            params_list.append(limit)
+        else:
+            # "Best owner" → raw wins, but with minimum games threshold
+            sql = """
+                SELECT winner_user AS owner, COUNT(*) AS total_wins
+                FROM games
+                WHERE status IN ('2','3') AND stageIndex = '1'
+                  AND winner_user IS NOT NULL AND winner_user != ''
+            """
+            params_list = []
+            if season:
+                sql += " AND seasonIndex = ?"
+                params_list.append(str(season))
+            sql += """
+                GROUP BY winner_user
+                HAVING COUNT(*) >= 30
+                ORDER BY total_wins DESC
+                LIMIT ?
+            """
+            params_list.append(limit)
+
         return IntentResult(
             intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
             meta={"type": "leaderboard", "stat": "wins", "sort": sort_dir.lower()}
         )
 
     if 'loss' in text_lower:
-        # Owner losses leaderboard
+        # Owner losses leaderboard — require minimum 30 games to exclude drive-by members
         sql = """
             SELECT loser_user AS owner, COUNT(*) AS total_losses
             FROM games
@@ -467,7 +507,12 @@ def _build_leaderboard(match, caller_db, question, resolved_names):
         if season:
             sql += " AND seasonIndex = ?"
             params_list.append(str(season))
-        sql += f" GROUP BY loser_user ORDER BY total_losses {sort_dir} LIMIT ?"
+        sql += f"""
+            GROUP BY loser_user
+            HAVING COUNT(*) >= 30
+            ORDER BY total_losses {sort_dir}
+            LIMIT ?
+        """
         params_list.append(limit)
         return IntentResult(
             intent="leaderboard", sql=sql, params=tuple(params_list), tier=1,
