@@ -124,4 +124,4 @@ Theme registry: `atlas_themes.py` · Theme picker: `ThemeSelectView` in `economy
 
 ## Current Version
 
-**v6.10.1** — 6 new HERO-quality card themes (Midnight Circuit, Venom Strike, Arctic Fox, Shadow Broker, Glacier Mint, Blackout Protocol); fixed `ThemeSelectView` row overflow crash when theme count exceeds 5 by auto-distributing buttons across rows via `idx // 5`.
+**v6.11.0** — Flow Hub overhaul: betting record now includes parlays, added last-10-results dot strip with streak badge, replaced Wagered with Net P&L; My Bets card fully redesigned with themed panels, status badges, relative timestamps, and "Recently Settled" section; Flow Hub auto-refreshes every 30 seconds; silent theme switching (no confirmation message).

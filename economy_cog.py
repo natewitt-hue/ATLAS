@@ -686,6 +686,7 @@ class EconomyCog(commands.Cog):
             view=view, ephemeral=True, followup=True,
         )
         view.message = msg
+        await view.start_auto_refresh()
 
     # ── _impl methods (called by hub buttons and boss_cog) ─────────
 
@@ -850,7 +851,36 @@ class FlowHubView(discord.ui.View):
         self.user_id = user_id
         self.state = state
         self.message: discord.Message | None = None  # set after initial send
+        self._refresh_task: asyncio.Task | None = None
         self._rebuild_buttons()
+
+    # ── Auto-refresh loop ─────────────────────────────────────────────
+    async def start_auto_refresh(self):
+        """Start the 30-second auto-refresh loop."""
+        self._refresh_task = asyncio.create_task(self._auto_refresh_loop())
+
+    async def _auto_refresh_loop(self):
+        await asyncio.sleep(30)
+        while not self.is_finished():
+            try:
+                if self.message:
+                    png = await self.render_current()
+                    file = discord.File(io.BytesIO(png), filename="flow.png")
+                    await self.message.edit(attachments=[file], view=self)
+            except discord.NotFound:
+                break
+            except Exception:
+                log.debug("Flow hub auto-refresh failed", exc_info=True)
+            await asyncio.sleep(30)
+
+    async def on_timeout(self):
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
+
+    def stop(self):
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        super().stop()
 
     def _rebuild_buttons(self):
         """Clear and rebuild all buttons based on current state."""
@@ -1077,27 +1107,18 @@ class ThemeSelectView(discord.ui.View):
             await asyncio.get_running_loop().run_in_executor(
                 None, save_theme, interaction.user.id, theme_id
             )
-            # Re-render the dashboard card with new theme
+            # Re-render the dashboard card with new theme (silent update)
             await interaction.response.defer()
             try:
                 from flow_cards import build_flow_card
                 png = await build_flow_card(self.hub_view.user_id)
                 file = discord.File(io.BytesIO(png), filename="flow.png")
-                # Edit the original hub message if we have a reference
                 if self.hub_view.message:
                     await self.hub_view.message.edit(
                         attachments=[file], view=self.hub_view,
                     )
-                await interaction.followup.send(
-                    f"Theme set to **{display_name}**! Card updated.",
-                    ephemeral=True,
-                )
             except Exception:
                 log.exception("Failed to re-render hub after theme change")
-                await interaction.followup.send(
-                    f"Theme saved to **{display_name}**! It'll appear on your next `/flow`.",
-                    ephemeral=True,
-                )
         return callback
 
 

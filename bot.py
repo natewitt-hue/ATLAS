@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.10.1"  # fix: ThemeSelectView row overflow when theme count > 5
+ATLAS_VERSION = "6.11.0"  # feat: Flow Hub richer stats, My Bets redesign, 30s auto-refresh
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

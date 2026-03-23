@@ -65,9 +65,10 @@ def _get_weekly_delta(user_id: int) -> int:
 
 
 def _get_lifetime_record(user_id: int) -> tuple[int, int, int]:
-    """Get (wins, losses, pushes) across all settled straight bets."""
+    """Get (wins, losses, pushes) across all settled straight bets AND parlays."""
     with sqlite3.connect(DB_PATH) as con:
-        row = con.execute(
+        # Straight bets
+        s = con.execute(
             """SELECT
                  SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END),
                  SUM(CASE WHEN status='Lost' THEN 1 ELSE 0 END),
@@ -76,7 +77,38 @@ def _get_lifetime_record(user_id: int) -> tuple[int, int, int]:
                WHERE discord_id = ? AND parlay_id IS NULL""",
             (user_id,)
         ).fetchone()
-    return (row[0] or 0, row[1] or 0, row[2] or 0)
+        # Parlays
+        p = con.execute(
+            """SELECT
+                 SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END),
+                 SUM(CASE WHEN status='Lost' THEN 1 ELSE 0 END),
+                 SUM(CASE WHEN status='Push' THEN 1 ELSE 0 END)
+               FROM parlays_table
+               WHERE discord_id = ?""",
+            (user_id,)
+        ).fetchone()
+    return (
+        (s[0] or 0) + (p[0] or 0),
+        (s[1] or 0) + (p[1] or 0),
+        (s[2] or 0) + (p[2] or 0),
+    )
+
+
+def _get_last_n_results(user_id: int, n: int = 10) -> list[str]:
+    """Get last N bet results (newest first) as list of 'Won'/'Lost'/'Push'."""
+    with sqlite3.connect(DB_PATH) as con:
+        rows = con.execute(
+            """SELECT status, created_at FROM (
+                 SELECT status, created_at FROM bets_table
+                   WHERE discord_id = ? AND status IN ('Won','Lost','Push')
+                     AND parlay_id IS NULL
+                 UNION ALL
+                 SELECT status, created_at FROM parlays_table
+                   WHERE discord_id = ? AND status IN ('Won','Lost','Push')
+               ) ORDER BY created_at DESC LIMIT ?""",
+            (user_id, user_id, n),
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 def _get_total_wagered(user_id: int) -> int:
@@ -197,6 +229,26 @@ _FLOW_CSS = """\
   font-family: var(--font-display); font-weight: 600; font-size: 10px;
   color: var(--text-dim); letter-spacing: 1.5px; text-transform: uppercase;
 }
+
+.results-strip {
+  display: flex; justify-content: center; gap: 6px;
+  padding: 6px 28px 2px;
+}
+.results-strip .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+}
+.results-strip .dot.win { background: var(--win); box-shadow: 0 0 4px rgba(74,222,128,0.4); }
+.results-strip .dot.loss { background: var(--loss); box-shadow: 0 0 4px rgba(248,113,113,0.4); }
+.results-strip .dot.push { background: var(--push, #FBBF24); box-shadow: 0 0 4px rgba(251,191,36,0.3); }
+.results-strip .dot.empty { background: rgba(255,255,255,0.06); }
+
+.streak-badge {
+  display: inline-block; font-family: var(--font-mono); font-weight: 700;
+  font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 4px;
+  vertical-align: middle;
+}
+.streak-badge.hot { background: rgba(74,222,128,0.15); color: var(--win); }
+.streak-badge.cold { background: rgba(248,113,113,0.15); color: var(--loss); }
 """
 
 # Status bar mapping: internal status → shared CSS class
@@ -212,10 +264,12 @@ def _gather_flow_data(user_id: int) -> dict:
     from flow_wallet import get_theme
     balance = _get_balance(user_id)
     wins, losses, pushes = _get_lifetime_record(user_id)
+    last_results = _get_last_n_results(user_id, 10)
     return {
         "balance": balance,
         "delta": _get_weekly_delta(user_id),
         "wins": wins, "losses": losses, "pushes": pushes,
+        "last_results": last_results,
         "total_wagered": _get_total_wagered(user_id),
         "positions": _get_active_positions(user_id),
         "rank_total": _get_leaderboard_rank(user_id),
@@ -237,7 +291,7 @@ async def build_flow_card(user_id: int) -> bytes:
     balance = d["balance"]
     delta = d["delta"]
     wins, losses, pushes = d["wins"], d["losses"], d["pushes"]
-    total_wagered = d["total_wagered"]
+    last_results = d["last_results"]
     positions = d["positions"]
     rank, total_users = d["rank_total"]
     status = d["status"]
@@ -247,6 +301,31 @@ async def build_flow_card(user_id: int) -> bytes:
     win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
     season_start = d["season_start"]
     roi = ((balance - season_start) / season_start * 100) if season_start > 0 else 0
+    net_pnl = balance - season_start
+
+    # ── Streak from last results ──────────────────────────────────────────
+    streak_text = ""
+    if last_results:
+        first = last_results[0]
+        count = 0
+        for r in last_results:
+            if r == first:
+                count += 1
+            else:
+                break
+        if count >= 2:
+            prefix = "W" if first == "Won" else ("L" if first == "Lost" else "P")
+            streak_cls = "hot" if first == "Won" else "cold"
+            streak_text = f'<span class="streak-badge {streak_cls}">{prefix}{count}</span>'
+
+    # ── Results dot strip HTML ────────────────────────────────────────────
+    dots_html = ""
+    for r in reversed(last_results):  # oldest→newest left→right
+        cls = "win" if r == "Won" else ("loss" if r == "Lost" else "push")
+        dots_html += f'<span class="dot {cls}"></span>'
+    # Pad to 10 with empty dots
+    for _ in range(10 - len(last_results)):
+        dots_html = f'<span class="dot empty"></span>' + dots_html
 
     # ── Delta string ──────────────────────────────────────────────────────
     delta_str = f"+${delta:,}" if delta >= 0 else f"-${abs(delta):,}"
@@ -269,7 +348,8 @@ async def build_flow_card(user_id: int) -> bytes:
     # ── Open bets count ───────────────────────────────────────────────────
     open_bets = positions["bets"] + positions["contracts"]
 
-    # ── ROI color ─────────────────────────────────────────────────────────
+    # ── P&L / ROI colors ─────────────────────────────────────────────────
+    pnl_class = "green" if net_pnl >= 0 else "red"
     roi_class = "green" if roi >= 0 else "red"
 
     # ── Status bar CSS class ──────────────────────────────────────────────
@@ -285,9 +365,14 @@ async def build_flow_card(user_id: int) -> bytes:
     box_shadow = theme.get("stat_box_shadow", "none")
     win_shadow = theme.get("stat_box_shadow_win", box_shadow)
 
-    # ROI box gets win glow when positive, loss border when negative
+    # P&L / ROI boxes get win glow when positive, loss border when negative
+    pnl_border = win_border if net_pnl >= 0 else "2px solid var(--loss)"
+    pnl_shadow = win_shadow if net_pnl >= 0 else box_shadow
     roi_border = win_border if roi >= 0 else "2px solid var(--loss)"
     roi_shadow = win_shadow if roi >= 0 else box_shadow
+
+    # ── Net P&L display string ────────────────────────────────────────────
+    pnl_str = f"+${net_pnl:,}" if net_pnl >= 0 else f"-${abs(net_pnl):,}"
 
     # ── Build HTML ────────────────────────────────────────────────────────
     body = f"""<style>{_FLOW_CSS}</style>
@@ -312,13 +397,16 @@ async def build_flow_card(user_id: int) -> bytes:
   <div class="hero-delta {delta_class}">{esc(delta_str)} this week</div>
 </div>
 
+<!-- Results dot strip -->
+<div class="results-strip">{dots_html}</div>
+
 <div class="gold-divider" style="background:{divider_bg};"></div>
 
 <!-- Stat Grid Row 1 -->
 <div class="stat-grid">
   <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
     <div class="stat-box-label">RECORD</div>
-    <div class="stat-box-value">{wins}-{losses}-{pushes}</div>
+    <div class="stat-box-value">{wins}-{losses}-{pushes}{streak_text}</div>
   </div>
   <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
     <div class="stat-box-label">WIN RATE</div>
@@ -332,9 +420,9 @@ async def build_flow_card(user_id: int) -> bytes:
 
 <!-- Stat Grid Row 2 -->
 <div class="stat-grid">
-  <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
-    <div class="stat-box-label">WAGERED</div>
-    <div class="stat-box-value">${total_wagered:,}</div>
+  <div class="stat-box" style="border-left:{pnl_border};box-shadow:{pnl_shadow};">
+    <div class="stat-box-label">NET P&amp;L</div>
+    <div class="stat-box-value {pnl_class}">{pnl_str}</div>
   </div>
   <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
     <div class="stat-box-label">OPEN BETS</div>
@@ -439,196 +527,493 @@ from odds_utils import american_to_str as _american_to_str, payout_calc as _payo
 #  MY BETS CARD
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _relative_time(ts_str: str | None) -> str:
+    """Convert a SQLite timestamp string to a relative time like '2h ago'."""
+    if not ts_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        diff = datetime.now(timezone.utc) - dt
+        secs = int(diff.total_seconds())
+        if secs < 60:
+            return "just now"
+        if secs < 3600:
+            return f"{secs // 60}m ago"
+        if secs < 86400:
+            return f"{secs // 3600}h ago"
+        days = secs // 86400
+        return f"{days}d ago"
+    except (ValueError, TypeError):
+        return ""
+
+
 def _gather_my_bets_data(user_id: int) -> dict:
-    """Sync: collect DB data for My Bets card."""
+    """Sync: collect DB data for My Bets card (open + recently settled)."""
     balance = _get_balance(user_id)
+    wins, losses, pushes = _get_lifetime_record(user_id)
     with sqlite3.connect(DB_PATH) as con:
-        straight = con.execute(
-            "SELECT matchup, bet_type, pick, wager_amount, odds, line, status, week "
+        # Open straight bets
+        open_straight = con.execute(
+            "SELECT matchup, bet_type, pick, wager_amount, odds, line, status, week, created_at "
             "FROM bets_table WHERE discord_id=? AND status='Pending' AND parlay_id IS NULL "
             "ORDER BY bet_id DESC",
             (user_id,),
         ).fetchall()
-        parlays = con.execute(
-            "SELECT parlay_id, week, combined_odds, wager_amount, status "
+        # Recently settled straight bets (last 48h, max 8)
+        settled_straight = con.execute(
+            "SELECT matchup, bet_type, pick, wager_amount, odds, line, status, week, created_at "
+            "FROM bets_table WHERE discord_id=? AND status IN ('Won','Lost','Push') "
+            "AND parlay_id IS NULL AND created_at >= datetime('now', '-2 days') "
+            "ORDER BY created_at DESC LIMIT 8",
+            (user_id,),
+        ).fetchall()
+        # Open parlays
+        open_parlays = con.execute(
+            "SELECT parlay_id, week, combined_odds, wager_amount, status, created_at "
             "FROM parlays_table WHERE discord_id=? AND status='Pending' "
             "ORDER BY rowid DESC",
             (user_id,),
         ).fetchall()
-        # Batch-fetch legs from normalized parlay_legs table
+        # Recently settled parlays
+        settled_parlays = con.execute(
+            "SELECT parlay_id, week, combined_odds, wager_amount, status, created_at "
+            "FROM parlays_table WHERE discord_id=? AND status IN ('Won','Lost','Push') "
+            "AND created_at >= datetime('now', '-2 days') "
+            "ORDER BY created_at DESC LIMIT 4",
+            (user_id,),
+        ).fetchall()
+        # Batch-fetch legs for ALL parlays (open + settled)
+        all_parlays = list(open_parlays) + list(settled_parlays)
         legs_map: dict[str, list[dict]] = {}
-        if parlays:
-            pids = [p[0] for p in parlays]
+        if all_parlays:
+            pids = [p[0] for p in all_parlays]
             placeholders = ",".join("?" * len(pids))
             leg_rows = con.execute(
-                f"SELECT parlay_id, pick, status FROM parlay_legs "
+                f"SELECT parlay_id, pick, bet_type, line, status FROM parlay_legs "
                 f"WHERE parlay_id IN ({placeholders}) ORDER BY parlay_id, leg_index",
                 pids,
             ).fetchall()
-            for parlay_id, pick, status in leg_rows:
-                legs_map.setdefault(parlay_id, []).append({"pick": pick, "status": status})
+            for parlay_id, pick, btype, line, status in leg_rows:
+                legs_map.setdefault(parlay_id, []).append({
+                    "pick": pick, "bet_type": btype, "line": line, "status": status,
+                })
         # Real sportsbook bets (NFL/NBA/MLB/NHL etc.)
-        real_bets: list = []
+        open_real: list = []
+        settled_real: list = []
         try:
-            real_bets = con.execute(
-                "SELECT sport_key, bet_type, pick, wager_amount, odds, line, status "
+            open_real = con.execute(
+                "SELECT sport_key, bet_type, pick, wager_amount, odds, line, status, created_at "
                 "FROM real_bets WHERE discord_id=? AND status='Pending' "
                 "ORDER BY bet_id DESC",
                 (user_id,),
             ).fetchall()
+            settled_real = con.execute(
+                "SELECT sport_key, bet_type, pick, wager_amount, odds, line, status, created_at "
+                "FROM real_bets WHERE discord_id=? AND status IN ('Won','Lost','Push') "
+                "AND created_at >= datetime('now', '-2 days') "
+                "ORDER BY created_at DESC LIMIT 6",
+                (user_id,),
+            ).fetchall()
         except sqlite3.OperationalError:
             pass  # real_bets table may not exist yet
-    return {"balance": balance, "straight": straight, "parlays": parlays, "legs_map": legs_map, "real_bets": real_bets}
+    return {
+        "balance": balance, "record": (wins, losses, pushes),
+        "open_straight": open_straight, "settled_straight": settled_straight,
+        "open_parlays": open_parlays, "settled_parlays": settled_parlays,
+        "legs_map": legs_map,
+        "open_real": open_real, "settled_real": settled_real,
+    }
+
+
+_SPORT_LABELS = {
+    "americanfootball_nfl": "NFL", "basketball_nba": "NBA",
+    "baseball_mlb": "MLB", "icehockey_nhl": "NHL",
+    "basketball_ncaab": "NCAAB", "mma_ufc": "UFC",
+    "soccer_epl": "EPL", "soccer_mls": "MLS",
+    "basketball_wnba": "WNBA",
+}
+
+# ── My Bets CSS ──────────────────────────────────────────────────────────
+_MY_BETS_CSS = """\
+.bet-card {
+  background: linear-gradient(180deg, var(--panel-bg) 0%, var(--bg) 100%);
+  border: 1px solid var(--panel-border);
+  border-top: 1px solid var(--panel-border-top);
+  border-radius: var(--border-radius-sm);
+  padding: 10px 14px;
+  margin: 0 20px var(--space-sm);
+}
+.bet-card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.status-badge {
+  display: inline-block; font-family: var(--font-display); font-weight: 800;
+  font-size: 9px; padding: 2px 8px; border-radius: 3px;
+  letter-spacing: 1px; text-transform: uppercase;
+}
+.status-badge.open { background: rgba(212,175,55,0.15); color: var(--gold); }
+.status-badge.won { background: rgba(74,222,128,0.15); color: var(--win); }
+.status-badge.lost { background: rgba(248,113,113,0.15); color: var(--loss); }
+.status-badge.push { background: rgba(251,191,36,0.15); color: var(--push, #FBBF24); }
+.bet-time {
+  font-family: var(--font-mono); font-size: var(--font-xs);
+  color: var(--text-dim);
+}
+.bet-card-pick {
+  font-family: var(--font-display); font-weight: 700;
+  font-size: var(--font-base); color: var(--text-primary);
+  margin-bottom: 2px;
+}
+.bet-card-meta {
+  font-family: var(--font-display); font-weight: 600;
+  font-size: var(--font-sm); color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.bet-card-amounts {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: var(--font-sm);
+}
+.bet-card-amounts .wager { color: var(--text-sub); }
+.bet-card-amounts .payout { font-weight: 700; }
+.bet-card-amounts .payout.win { color: var(--win); }
+.bet-card-amounts .payout.loss { color: var(--loss); }
+.bet-card-amounts .payout.push-val { color: var(--push, #FBBF24); }
+.bet-card-amounts .payout.pending { color: var(--gold); }
+
+.parlay-title {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 4px;
+}
+.parlay-title .leg-count {
+  font-family: var(--font-display); font-weight: 700;
+  font-size: var(--font-base); color: var(--text-primary);
+}
+.parlay-title .parlay-odds {
+  font-family: var(--font-mono); font-weight: 700;
+  font-size: var(--font-sm); color: var(--gold);
+}
+
+.leg-tree { padding-left: 4px; margin-bottom: 4px; }
+.leg-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 0;
+  font-family: var(--font-display); font-size: var(--font-sm);
+}
+.leg-icon { font-size: 11px; flex-shrink: 0; width: 14px; text-align: center; }
+.leg-icon.won { color: var(--win); }
+.leg-icon.lost { color: var(--loss); }
+.leg-icon.pending { color: var(--text-muted); }
+.leg-text { color: var(--text-sub); }
+.leg-connector {
+  color: var(--text-dim); font-family: var(--font-mono);
+  font-size: 11px; flex-shrink: 0; width: 14px; text-align: center;
+}
+
+.section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; margin-bottom: var(--space-sm);
+}
+.section-header-label {
+  font-family: var(--font-display); font-weight: 700; font-size: 10px;
+  color: var(--gold-dim); letter-spacing: 1.5px; text-transform: uppercase;
+}
+.section-header-count {
+  font-family: var(--font-mono); font-weight: 700; font-size: var(--font-xs);
+  color: var(--text-muted);
+}
+
+.stat-grid-3col {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px; padding: 0 20px;
+}
+"""
+
+
+def _build_straight_bet_card(
+    pick, btype, matchup, wager, odds, line, status, created_at,
+    theme, *, sport_tag: str = "",
+) -> str:
+    """Build HTML for a single straight bet panel."""
+    # Status
+    st_lower = status.lower() if status != "Pending" else "open"
+    st_label = "OPEN" if status == "Pending" else status.upper()
+
+    # Line string
+    line_str = ""
+    if btype in ("Spread", "Over/Under") and line is not None:
+        line_str = f" ({line:+g})" if btype == "Spread" else f" ({line})"
+
+    # Meta line
+    meta_parts = []
+    if sport_tag:
+        meta_parts.append(sport_tag)
+    meta_parts.append(f"{btype}{line_str}")
+    meta_parts.append(_american_to_str(int(odds)))
+    meta_text = " \u00b7 ".join(meta_parts)
+
+    # Amounts
+    potential = _payout_calc(wager, odds)
+    if status == "Won":
+        profit = potential - wager
+        payout_text = f"+${profit:,}"
+        payout_cls = "win"
+    elif status == "Lost":
+        payout_text = f"-${wager:,}"
+        payout_cls = "loss"
+    elif status == "Push":
+        payout_text = "PUSH"
+        payout_cls = "push-val"
+    else:
+        payout_text = f"${potential:,}"
+        payout_cls = "pending"
+
+    # Theme-aware border
+    if status == "Won":
+        border = theme.get("stat_left_border_win", "2px solid var(--win)")
+    elif status == "Lost":
+        border = "2px solid var(--loss)"
+    elif status == "Push":
+        border = "2px solid var(--push, #FBBF24)"
+    else:
+        border = theme.get("stat_left_border_default", "2px solid var(--gold-deep)")
+    shadow = theme.get("stat_box_shadow", "none")
+
+    time_str = _relative_time(created_at)
+
+    # Matchup as subtitle if different from pick
+    matchup_line = ""
+    if matchup and str(matchup) != str(pick):
+        matchup_line = f'<div class="bet-card-meta" style="color:var(--text-dim);font-size:var(--font-xs);">{esc(str(matchup))}</div>'
+
+    return f'''<div class="bet-card" style="border-left:{border};box-shadow:{shadow};">
+  <div class="bet-card-header">
+    <span class="status-badge {st_lower}">{st_label}</span>
+    <span class="bet-time">{esc(time_str)}</span>
+  </div>
+  <div class="bet-card-pick">{esc(str(pick))}</div>
+  {matchup_line}
+  <div class="bet-card-meta">{esc(meta_text)}</div>
+  <div class="bet-card-amounts">
+    <span class="wager">Wager: ${wager:,}</span>
+    <span class="payout {payout_cls}">{payout_text}</span>
+  </div>
+</div>\n'''
+
+
+def _build_parlay_card(pid, week, c_odds, wager, status, created_at, legs, theme) -> str:
+    """Build HTML for a parlay panel with expanded legs."""
+    st_lower = status.lower() if status != "Pending" else "open"
+    st_label = "OPEN" if status == "Pending" else status.upper()
+    n_legs = len(legs)
+
+    potential = _payout_calc(wager, c_odds)
+    if status == "Won":
+        profit = potential - wager
+        payout_text = f"+${profit:,}"
+        payout_cls = "win"
+    elif status == "Lost":
+        payout_text = f"-${wager:,}"
+        payout_cls = "loss"
+    elif status == "Push":
+        payout_text = "PUSH"
+        payout_cls = "push-val"
+    else:
+        payout_text = f"${potential:,}"
+        payout_cls = "pending"
+
+    if status == "Won":
+        border = theme.get("stat_left_border_win", "2px solid var(--win)")
+    elif status == "Lost":
+        border = "2px solid var(--loss)"
+    elif status == "Push":
+        border = "2px solid var(--push, #FBBF24)"
+    else:
+        border = theme.get("stat_left_border_accent", "2px solid var(--gold)")
+    shadow = theme.get("stat_box_shadow", "none")
+
+    time_str = _relative_time(created_at)
+
+    # Build leg tree
+    legs_html = ""
+    for i, leg in enumerate(legs):
+        leg_pick = leg["pick"]
+        leg_status = leg["status"]
+        leg_btype = leg.get("bet_type", "")
+        leg_line = leg.get("line")
+        if leg_status == "Won":
+            icon, icon_cls = "\u2714", "won"
+        elif leg_status == "Lost":
+            icon, icon_cls = "\u2718", "lost"
+        else:
+            icon, icon_cls = "\u25cb", "pending"
+        # Connector symbol
+        connector = "\u2514" if i == len(legs) - 1 else "\u251c"
+        # Leg meta
+        leg_meta = ""
+        if leg_btype:
+            line_str = ""
+            if leg_btype == "Spread" and leg_line is not None:
+                line_str = f" {leg_line:+g}"
+            elif leg_btype in ("Over/Under", "Totals") and leg_line is not None:
+                line_str = f" {leg_line}"
+            leg_meta = f" ({leg_btype}{line_str})"
+        legs_html += f'''<div class="leg-item">
+  <span class="leg-connector">{connector}</span>
+  <span class="leg-icon {icon_cls}">{icon}</span>
+  <span class="leg-text">{esc(str(leg_pick))}{esc(leg_meta)}</span>
+</div>\n'''
+
+    return f'''<div class="bet-card" style="border-left:{border};box-shadow:{shadow};">
+  <div class="bet-card-header">
+    <span class="status-badge {st_lower}">{st_label}</span>
+    <span class="bet-time">{esc(time_str)}</span>
+  </div>
+  <div class="parlay-title">
+    <span class="leg-count">{n_legs}-Leg Parlay</span>
+    <span class="parlay-odds">{_american_to_str(int(c_odds))}</span>
+  </div>
+  <div class="leg-tree">{legs_html}</div>
+  <div class="bet-card-amounts">
+    <span class="wager">Wager: ${wager:,}</span>
+    <span class="payout {payout_cls}">{payout_text}</span>
+  </div>
+</div>\n'''
 
 
 async def build_my_bets_card(user_id: int, *, theme_id: str | None = None) -> bytes:
-    """Build the My Bets card showing active sportsbook positions."""
+    """Build the My Bets card with themed panels, timestamps, and settled section."""
+    from atlas_themes import get_theme
     d = await asyncio.get_running_loop().run_in_executor(None, _gather_my_bets_data, user_id)
     balance = d["balance"]
-    straight = d["straight"]
-    parlays = d["parlays"]
+    wins, losses, pushes = d["record"]
     legs_map = d["legs_map"]
-    real_bets = d["real_bets"]
+    theme = get_theme(theme_id)
 
-    pending_count = len(straight) + len(parlays) + len(real_bets)
-    total_risk = sum(b[3] for b in straight) + sum(p[3] for p in parlays) + sum(r[3] for r in real_bets)
+    open_straight = d["open_straight"]
+    open_parlays = d["open_parlays"]
+    open_real = d["open_real"]
+    settled_straight = d["settled_straight"]
+    settled_parlays = d["settled_parlays"]
+    settled_real = d["settled_real"]
+
+    open_count = len(open_straight) + len(open_parlays) + len(open_real)
+    settled_count = len(settled_straight) + len(settled_parlays) + len(settled_real)
+
+    total_risk = (
+        sum(b[3] for b in open_straight)
+        + sum(p[3] for p in open_parlays)
+        + sum(r[3] for r in open_real)
+    )
     max_payout = (
-        sum(_payout_calc(b[3], b[4]) for b in straight)
-        + sum(_payout_calc(p[3], p[2]) for p in parlays)
-        + sum(_payout_calc(r[3], r[4]) for r in real_bets)
+        sum(_payout_calc(b[3], b[4]) for b in open_straight)
+        + sum(_payout_calc(p[3], p[2]) for p in open_parlays)
+        + sum(_payout_calc(r[3], r[4]) for r in open_real)
     )
 
     # Status bar
-    if not straight and not parlays:
+    if not open_straight and not open_parlays and not open_real:
         status_class = "jackpot"
     elif max_payout > total_risk:
         status_class = "win"
     else:
         status_class = "loss"
 
-    # Build bet rows HTML
-    bets_html = ""
-    if straight:
-        bets_html += '<div class="section-label">STRAIGHT BETS</div>\n'
-        for b in straight[:8]:
-            matchup, btype, pick, wager, odds, line, status, week = b
-            potential = _payout_calc(wager, odds)
-            line_str = ""
-            if btype in ("Spread", "Over/Under") and line is not None:
-                line_str = f" ({line:+g})" if btype == "Spread" else f" ({line})"
-            bets_html += f'''<div class="bet-row">
-  <span class="bet-team">{esc(str(pick))}</span>
-  <span class="bet-type">{esc(btype)}{esc(line_str)} {_american_to_str(int(odds))}</span>
-  <div class="bet-details">
-    <span class="bet-wager">Wager: ${wager:,}</span>
-    <span class="bet-potential">Win: ${potential:,}</span>
-  </div>
+    # ── Open positions section ────────────────────────────────────────────
+    open_html = ""
+    if open_count > 0:
+        open_html += f'''<div class="section-header">
+  <span class="section-header-label">OPEN POSITIONS</span>
+  <span class="section-header-count">{open_count}</span>
 </div>\n'''
-
-    if parlays:
-        bets_html += '<div class="section-label" style="margin-top:var(--space-sm);">PARLAYS</div>\n'
-        for p in parlays[:4]:
-            pid, week, c_odds, wager, status = p
+        for b in open_straight[:8]:
+            matchup, btype, pick, wager, odds, line, status, week, created_at = b
+            open_html += _build_straight_bet_card(
+                pick, btype, matchup, wager, odds, line, status, created_at, theme,
+            )
+        for p in open_parlays[:4]:
+            pid, week, c_odds, wager, status, created_at = p
             legs = legs_map.get(pid, [])
-            potential = _payout_calc(wager, c_odds)
-            legs_html = ""
-            for leg in legs:
-                leg_pick = leg["pick"]
-                leg_status = leg["status"]
-                if leg_status == "Won":
-                    cls = "won"
-                    icon = "✔"
-                elif leg_status == "Lost":
-                    cls = "lost"
-                    icon = "✗"
-                else:
-                    cls = "pending"
-                    icon = "○"
-                legs_html += f'<span class="parlay-leg {cls}">{icon} {esc(str(leg_pick))}</span>'
-
-            bets_html += f'''<div class="bet-row">
-  <div><span class="parlay-header">{len(legs)}-Leg Parlay</span> · <span class="parlay-odds">{_american_to_str(int(c_odds))}</span></div>
-  <div class="bet-details">
-    <span class="bet-wager">Wager: ${wager:,}</span>
-    <span class="bet-potential">Win: ${potential:,}</span>
-  </div>
-  <div class="parlay-legs">{legs_html}</div>
-</div>\n'''
-
-    # Real sportsbook bets
-    _SPORT_LABELS = {
-        "americanfootball_nfl": "NFL", "basketball_nba": "NBA",
-        "baseball_mlb": "MLB", "icehockey_nhl": "NHL",
-        "basketball_ncaab": "NCAAB", "mma_ufc": "UFC",
-        "soccer_epl": "EPL", "soccer_mls": "MLS",
-        "basketball_wnba": "WNBA",
-    }
-    if real_bets:
-        bets_html += '<div class="section-label" style="margin-top:var(--space-sm);">REAL SPORTS</div>\n'
-        for rb in real_bets[:8]:
-            sport_key, btype, pick, wager, odds, line, _status = rb
-            potential = _payout_calc(wager, odds)
+            open_html += _build_parlay_card(pid, week, c_odds, wager, status, created_at, legs, theme)
+        for rb in open_real[:6]:
+            sport_key, btype, pick, wager, odds, line, status, created_at = rb
             sport_tag = _SPORT_LABELS.get(sport_key, sport_key.split("_")[-1].upper())
-            line_str = ""
-            if btype in ("Spread",) and line is not None:
-                line_str = f" ({line:+g})"
-            elif btype in ("Over/Under", "Totals") and line is not None:
-                line_str = f" ({line})"
-            bets_html += f'''<div class="bet-row">
-  <span class="bet-team">{esc(str(pick))}</span>
-  <span class="bet-type">{esc(sport_tag)} · {esc(btype)}{esc(line_str)} {_american_to_str(int(odds))}</span>
-  <div class="bet-details">
-    <span class="bet-wager">Wager: ${wager:,}</span>
-    <span class="bet-potential">Win: ${potential:,}</span>
-  </div>
+            open_html += _build_straight_bet_card(
+                pick, btype, "", wager, odds, line, status, created_at, theme,
+                sport_tag=sport_tag,
+            )
+
+    # ── Recently settled section ──────────────────────────────────────────
+    settled_html = ""
+    if settled_count > 0:
+        settled_html += '<div class="gold-divider"></div>\n'
+        settled_html += f'''<div class="section-header">
+  <span class="section-header-label">RECENTLY SETTLED</span>
+  <span class="section-header-count">{settled_count}</span>
 </div>\n'''
+        for b in settled_straight:
+            matchup, btype, pick, wager, odds, line, status, week, created_at = b
+            settled_html += _build_straight_bet_card(
+                pick, btype, matchup, wager, odds, line, status, created_at, theme,
+            )
+        for p in settled_parlays:
+            pid, week, c_odds, wager, status, created_at = p
+            legs = legs_map.get(pid, [])
+            settled_html += _build_parlay_card(pid, week, c_odds, wager, status, created_at, legs, theme)
+        for rb in settled_real:
+            sport_key, btype, pick, wager, odds, line, status, created_at = rb
+            sport_tag = _SPORT_LABELS.get(sport_key, sport_key.split("_")[-1].upper())
+            settled_html += _build_straight_bet_card(
+                pick, btype, "", wager, odds, line, status, created_at, theme,
+                sport_tag=sport_tag,
+            )
 
-    if not straight and not parlays and not real_bets:
-        bets_html = '<div class="empty-state">No active bets. Hit /sportsbook to place some!</div>'
+    # ── Empty state ───────────────────────────────────────────────────────
+    if open_count == 0 and settled_count == 0:
+        open_html = '<div class="empty-state">No active bets. Hit /sportsbook to place some!</div>'
 
-    body = f"""<style>{_FLOW_CSS}{_TAB_CSS}</style>
+    # ── Theme-aware footer boxes ──────────────────────────────────────────
+    default_border = theme.get("stat_left_border_default", "2px solid var(--gold-deep)")
+    box_shadow = theme.get("stat_box_shadow", "none")
+    win_border = theme.get("stat_left_border_win", "2px solid var(--win)")
+
+    body = f"""<style>{_FLOW_CSS}{_TAB_CSS}{_MY_BETS_CSS}</style>
 
 <div class="header">
   <div class="header-left">
     <div class="game-icon-pill">{icon_pill("sportsbook", "\U0001f4cb")}</div>
     <div class="game-title-group">
       <div class="game-title">MY BETS</div>
-      <div class="game-subtitle">ACTIVE POSITIONS</div>
+      <div class="game-subtitle">POSITIONS &amp; RESULTS</div>
     </div>
   </div>
 </div>
 
 <div class="gold-divider"></div>
 
-<div class="stat-grid-2col">
-  <div class="stat-cell">
-    <div class="stat-label">BALANCE</div>
-    <div class="stat-value">${balance:,}</div>
-  </div>
-  <div class="stat-cell">
-    <div class="stat-label">PENDING</div>
-    <div class="stat-value">{pending_count} bet{'s' if pending_count != 1 else ''}</div>
-  </div>
-</div>
+{open_html}
+{settled_html}
 
 <div class="gold-divider"></div>
 
-{bets_html}
-
-<div class="gold-divider"></div>
-
-<div class="stat-grid-2col">
-  <div class="stat-cell">
-    <div class="stat-label">TOTAL AT RISK</div>
-    <div class="stat-value red">${total_risk:,}</div>
+<div class="stat-grid-3col">
+  <div class="stat-box" style="border-left:2px solid var(--loss);box-shadow:{box_shadow};">
+    <div class="stat-box-label">AT RISK</div>
+    <div class="stat-box-value red">${total_risk:,}</div>
   </div>
-  <div class="stat-cell">
-    <div class="stat-label">MAX PAYOUT</div>
-    <div class="stat-value green">${max_payout:,}</div>
+  <div class="stat-box" style="border-left:{win_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">MAX PAYOUT</div>
+    <div class="stat-box-value green">${max_payout:,}</div>
+  </div>
+  <div class="stat-box" style="border-left:{default_border};box-shadow:{box_shadow};">
+    <div class="stat-box-label">RECORD</div>
+    <div class="stat-box-value">{wins}-{losses}-{pushes}</div>
   </div>
 </div>
 
-<div class="footer-text">All Sportsbooks · Pending bets only</div>
+<div class="footer-text">All Sportsbooks · Open &amp; Recently Settled</div>
 """
 
     full_html = wrap_card(body, status_class=status_class, theme_id=theme_id)
@@ -849,11 +1234,19 @@ def _gather_leaderboard_data() -> dict:
         ).fetchall()
         win_rates = {}
         wr_rows = con.execute(
-            "SELECT discord_id, "
-            "  SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END) as wins, "
-            "  SUM(CASE WHEN status IN ('Won','Lost') THEN 1 ELSE 0 END) as total "
-            "FROM bets_table WHERE parlay_id IS NULL "
-            "GROUP BY discord_id"
+            """SELECT discord_id, SUM(w) as wins, SUM(t) as total FROM (
+                 SELECT discord_id,
+                   SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END) as w,
+                   SUM(CASE WHEN status IN ('Won','Lost') THEN 1 ELSE 0 END) as t
+                 FROM bets_table WHERE parlay_id IS NULL
+                 GROUP BY discord_id
+                 UNION ALL
+                 SELECT discord_id,
+                   SUM(CASE WHEN status='Won' THEN 1 ELSE 0 END) as w,
+                   SUM(CASE WHEN status IN ('Won','Lost') THEN 1 ELSE 0 END) as t
+                 FROM parlays_table
+                 GROUP BY discord_id
+               ) GROUP BY discord_id"""
         ).fetchall()
         for did, wins, total in wr_rows:
             win_rates[did] = (wins / total * 100) if total > 0 else 0.0
