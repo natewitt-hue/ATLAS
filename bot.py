@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.14.0"  # feat(oracle): v3 Phase 2 — permanent memory with hybrid retrieval (FTS5 + vector embeddings), wired to all ATLAS conversations
+ATLAS_VERSION = "6.15.0"  # feat(oracle): v3 Phase 3 — Code-Gen Agent replaces NL→SQL, generates Python against QueryBuilder API
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

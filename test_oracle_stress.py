@@ -575,7 +575,7 @@ TEST_CASES = [
 ]
 
 
-async def run_test(question: str, caller_db: str, desc: str) -> dict:
+async def run_test(question: str, caller_db: str, desc: str, force_agent: bool = False) -> dict:
     """Run a single test through the full pipeline."""
     # Step 1: Resolve names in question
     annotated_q, alias_map = resolve_names_in_question(question)
@@ -583,8 +583,44 @@ async def run_test(question: str, caller_db: str, desc: str) -> dict:
     # Step 2: Self-reference collision check
     collision = check_self_reference_collision(caller_db, alias_map)
 
-    # Step 3: Intent detection (Tier 1 regex only, no Gemini client)
-    result = await detect_intent(question, caller_db, alias_map, gemini_client=None)
+    # Step 3a: Force agent path (bypass Tier 1 regex)
+    if force_agent:
+        from oracle_agent import run_agent
+        from codex_utils import _build_schema
+        schema = _build_schema()
+        agent_result = await run_agent(
+            question=annotated_q,
+            caller_db=caller_db,
+            alias_map=alias_map,
+            schema=schema,
+        )
+        if isinstance(agent_result.data, list):
+            rows = agent_result.data
+        elif isinstance(agent_result.data, str):
+            rows = [{"answer": agent_result.data}]
+        elif isinstance(agent_result.data, dict):
+            rows = [agent_result.data]
+        else:
+            rows = []
+        return {
+            "desc": desc,
+            "question": question,
+            "caller": caller_db,
+            "annotated": annotated_q,
+            "alias_map": alias_map,
+            "collision": collision,
+            "intent": "agent",
+            "tier": 2,
+            "sql": agent_result.sql,
+            "params": (),
+            "meta": {},
+            "rows": rows,
+            "error": agent_result.error,
+            "attempts": agent_result.attempts,
+        }
+
+    # Step 3b: Intent detection (Tier 1 regex)
+    result = await detect_intent(question, caller_db, alias_map)
 
     # Step 4: Execute SQL if we got a match
     rows = []
@@ -610,8 +646,15 @@ async def run_test(question: str, caller_db: str, desc: str) -> dict:
 
 
 async def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Oracle Stress Test Harness")
+    parser.add_argument("--agent", action="store_true",
+                        help="Force ALL questions through Code-Gen Agent (bypass Tier 1 regex)")
+    args = parser.parse_args()
+
+    mode = "AGENT FORCED" if args.agent else "STANDARD (Tier 1 regex)"
     print("=" * 80)
-    print(f"ORACLE STRESS TEST - {len(TEST_CASES)} Questions")
+    print(f"ORACLE STRESS TEST - {len(TEST_CASES)} Questions [{mode}]")
     print("=" * 80)
 
     results = []
@@ -626,13 +669,13 @@ async def main():
         question, caller, desc, expected_intent = test_entry[:4]
         validators = test_entry[4] if len(test_entry) > 4 else []
 
-        r = await run_test(question, caller, desc)
+        r = await run_test(question, caller, desc, force_agent=args.agent)
         results.append(r)
 
         # Validate intent/tier
         has_rows = len(r["rows"]) > 0
         no_error = r["error"] is None
-        intent_match = r["intent"] == expected_intent
+        intent_match = r["intent"] == expected_intent if not args.agent else True
         tier_ok = r["tier"] <= 2
 
         # Run data validators (run even with 0 rows for validators like _val_has_rows)
@@ -671,6 +714,8 @@ async def main():
         tier_status = "✓" if tier_ok else "✗"
         print(f"  Intent:    {r['intent']} (expected: {expected_intent}) [{intent_status}]")
         print(f"  Tier:      {r['tier']} [{tier_status}]")
+        if "attempts" in r:
+            print(f"  Attempts:  {r['attempts']}")
         print(f"  Meta:      {r['meta']}")
         if r["collision"]:
             print(f"  COLLISION: {r['collision']}")

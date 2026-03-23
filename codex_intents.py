@@ -1795,11 +1795,10 @@ async def detect_intent(
     resolved_names: dict[str, str] | None = None,
 ) -> IntentResult:
     """
-    Three-tier intent detection.
+    Two-tier intent detection (v3).
 
-    Tier 1: Regex pre-flight (instant)
-    Tier 2: AI structured classification (if regex misses)
-    Tier 3: Returns IntentResult(tier=3) → caller uses existing gemini_sql() pipeline
+    Tier 1: Regex pre-flight (instant, deterministic)
+    Tier 2+: Returns IntentResult(tier=3) → caller invokes Code-Gen Agent
     """
     resolved = resolved_names or {}
     question = _normalize_question(question)
@@ -1809,10 +1808,5 @@ async def detect_intent(
     if result:
         return result
 
-    # Tier 2: AI classification
-    result = await _classify_gemini(question, caller_db, resolved)
-    if result.tier < 3:
-        return result
-
-    # Tier 3: Fallthrough
+    # Tier 2+: Agent handles this (old Tier 2 Gemini classification deprecated)
     return IntentResult(intent="unknown", tier=3)

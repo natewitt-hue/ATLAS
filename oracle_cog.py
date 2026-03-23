@@ -304,6 +304,13 @@ try:
 except ImportError:
     pass
 
+# Code-Gen Agent (v3 Phase 3 — replaces Tier 2 classification + Tier 3 NL→SQL)
+_run_agent = None
+try:
+    from oracle_agent import run_agent as _run_agent
+except ImportError:
+    pass
+
 # Optional affinity module
 try:
     import affinity as _affinity_mod
@@ -2970,37 +2977,68 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
             except Exception:
                 pass
 
-        # ── Three-tier intent detection ─────────────────────
+        # ── Two-tier intent detection (v3) ───────────────────
         attempt = 1
         intent_result = None
-        tier_label = "Tier 3 (NL→SQL)"
+        tier_label = "Tier 2 (Agent)"
         if _detect_intent:
             intent_result = await _detect_intent(q, caller_db, alias_map)
 
+        # Tier 1 hit: execute SQL directly
         if intent_result and intent_result.tier < 3 and intent_result.sql:
             rows, error = run_sql(intent_result.sql, intent_result.params)
             sql = intent_result.sql
-            tier_label = f"Tier {intent_result.tier} ({'regex' if intent_result.tier == 1 else 'classified'})"
+            tier_label = f"Tier {intent_result.tier} (regex)"
             if error:
-                intent_result = None
+                intent_result = None  # fall through to agent
 
+        # Tier 2+: Code-Gen Agent (replaces old Gemini classification + NL→SQL)
         if not intent_result or intent_result.tier >= 3 or not intent_result.sql:
-            sql = await gemini_sql(annotated, alias_map, conv_context=conv_block)
-            if not sql:
-                await interaction.followup.send(
-                    "📊 Couldn't generate a query for that. Try rephrasing — "
-                    "be specific about player names, seasons, or owners.",
-                    ephemeral=True,
+            if _run_agent:
+                schema = _build_schema_fn() if _build_schema_fn else ""
+                agent_result = await _run_agent(
+                    question=annotated,
+                    caller_db=caller_db,
+                    alias_map=alias_map,
+                    conv_context=conv_block,
+                    schema=schema,
                 )
-                raise _EarlyReturn()
+                if agent_result.error:
+                    await interaction.followup.send(
+                        "⚠️ Couldn't pull that data. Try asking differently!",
+                        ephemeral=True,
+                    )
+                    raise _EarlyReturn()
+                # Normalize agent result to rows for gemini_answer
+                if isinstance(agent_result.data, list):
+                    rows = agent_result.data
+                elif isinstance(agent_result.data, str):
+                    rows = [{"answer": agent_result.data}]
+                elif isinstance(agent_result.data, dict):
+                    rows = [agent_result.data]
+                else:
+                    rows = []
+                sql = agent_result.sql
+                attempt = agent_result.attempts
+                tier_label = f"Tier 2 (Agent x{agent_result.attempts})"
+            else:
+                # Legacy fallback if oracle_agent not available
+                sql = await gemini_sql(annotated, alias_map, conv_context=conv_block)
+                if not sql:
+                    await interaction.followup.send(
+                        "📊 Couldn't generate a query for that. Try rephrasing — "
+                        "be specific about player names, seasons, or owners.",
+                        ephemeral=True,
+                    )
+                    raise _EarlyReturn()
 
-            schema = _build_schema_fn() if _build_schema_fn else ""
-            rows, sql, error, attempt, _warnings = await retry_sql(sql, schema)
-            if error:
-                await interaction.followup.send(
-                    "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
-                )
-                raise _EarlyReturn()
+                schema = _build_schema_fn() if _build_schema_fn else ""
+                rows, sql, error, attempt, _warnings = await retry_sql(sql, schema)
+                if error:
+                    await interaction.followup.send(
+                        "⚠️ Couldn't pull that data. Try asking differently!", ephemeral=True
+                    )
+                    raise _EarlyReturn()
 
         answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
         answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
@@ -4195,7 +4233,7 @@ async def _generate_followup(
     context = "\n".join(filter(None, [chain_block, affinity_block]))
     system_instruction = get_persona()
 
-    if domain == "TSL" and _HISTORY_OK and gemini_sql and gemini_answer and retry_sql:
+    if domain == "TSL" and _HISTORY_OK and gemini_answer:
         return await _followup_tsl(question, author, context)
     elif domain == "SCOUT" and _HISTORY_OK and run_sql:
         return await _followup_scout(question, author, context)
@@ -4225,7 +4263,40 @@ async def _followup_tsl(
         except Exception:
             pass
 
-    # SQL generation
+    # Code-Gen Agent path (v3)
+    if _run_agent:
+        schema = _build_schema_fn() if _build_schema_fn else ""
+        agent_result = await _run_agent(
+            question=annotated,
+            caller_db=None,
+            alias_map=alias_map,
+            conv_context=context,
+            schema=schema,
+        )
+        if agent_result.error:
+            return "Couldn't pull that data on follow-up. Try a different angle.", {
+                "title": "🔬 ATLAS Intelligence — TSL League",
+                "color": C_DARK,
+                "footer": "Follow-up · ATLAS™ Oracle",
+            }
+        if isinstance(agent_result.data, list):
+            rows = agent_result.data
+        elif isinstance(agent_result.data, str):
+            rows = [{"answer": agent_result.data}]
+        else:
+            rows = [agent_result.data] if isinstance(agent_result.data, dict) else []
+        sql = agent_result.sql
+        answer = await gemini_answer(question, sql, rows, conv_context=context)
+        footer_parts = [f"🔍 {len(rows)} records", "Follow-up", "Agent"]
+        if agent_result.attempts > 1:
+            footer_parts.append("⚠️ Self-corrected")
+        return answer, {
+            "title": "🔬 ATLAS Intelligence — TSL League",
+            "color": C_DARK,
+            "footer": " | ".join(footer_parts) + " · ATLAS™ Oracle",
+        }
+
+    # Legacy fallback (NL→SQL)
     sql = await gemini_sql(annotated, alias_map, conv_context=context)
     if not sql:
         return "ATLAS couldn't generate a query for that follow-up. Try rephrasing.", {
