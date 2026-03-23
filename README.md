@@ -104,6 +104,24 @@ All visual cards use a unified HTML-to-PNG pipeline:
 
 Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` → PNG bytes (700px, 2x DPI, 4-page pool)
 
+## Theme System
+
+ATLAS supports per-user card themes selectable from the Flow Hub. Themes override style tokens (colors, overlays, gradients) without touching card layout logic.
+
+| Theme | ID | Palette |
+|-------|----|---------|
+| Obsidian Gold | `obsidian_gold` | Black + warm gold — default |
+| Miami Vice | `miami_vice` | Cyan + hot pink neon |
+| Digital Rain | `digital_rain` | Matrix green on black |
+| Midnight Circuit | `midnight_circuit` | Deep navy + electric blue |
+| Venom Strike | `venom_strike` | Toxic green + dark chrome |
+| Arctic Fox | `arctic_fox` | Ice white + polar blue |
+| Shadow Broker | `shadow_broker` | Crimson + obsidian |
+| Glacier Mint | `glacier_mint` | Mint green + frosted glass |
+| Blackout Protocol | `blackout_protocol` | Pure black + white accents |
+
+Theme registry: `atlas_themes.py` · Theme picker: `ThemeSelectView` in `economy_cog.py` · Design tool: `atlas_theme_studio.jsx`
+
 ## Current Version
 
-**v6.9.0** — Edit-in-place UX: hub view interactions now edit the existing message instead of posting new ones, eliminating ephemeral message clutter across Oracle (AnalyticsNav, TeamCardView, DraftClassView, PlayerDrillView, DraftSeasonView, WeekRecapView, ClutchMarginView), Genesis (Pending Trades, Lottery with Back button), and Codex (ephemeral error/validation messages).
+**v6.10.1** — 6 new HERO-quality card themes (Midnight Circuit, Venom Strike, Arctic Fox, Shadow Broker, Glacier Mint, Blackout Protocol); fixed `ThemeSelectView` row overflow crash when theme count exceeds 5 by auto-distributing buttons across rows via `idx // 5`.
