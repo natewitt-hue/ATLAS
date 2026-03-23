@@ -448,19 +448,53 @@ class SBBetsPanelView(discord.ui.View):
         super().__init__(timeout=300)
         self.bot = bot
 
-    @discord.ui.button(label="Grade Week", emoji="\u2705", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Open Bets", emoji="\U0001f4cb", style=discord.ButtonStyle.primary, row=0)
+    async def open_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        cog = interaction.client.get_cog("RealSportsbookCog") or interaction.client.get_cog("SportsbookCog")
+        sb_cog = interaction.client.get_cog("SportsbookCog")
+        if not sb_cog:
+            return await _send_cog_error(interaction, "Sportsbook")
+        await sb_cog._open_bets_impl(interaction)
+
+    @discord.ui.button(label="Settled Bets", emoji="\U0001f4c4", style=discord.ButtonStyle.primary, row=0)
+    async def settled_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        sb_cog = interaction.client.get_cog("SportsbookCog")
+        if not sb_cog:
+            return await _send_cog_error(interaction, "Sportsbook")
+        await sb_cog._settled_bets_impl(interaction)
+
+    @discord.ui.button(label="Grade Week", emoji="\u2705", style=discord.ButtonStyle.primary, row=1)
     async def grade(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.send_modal(BossSBGradeModal())
 
-    @discord.ui.button(label="Refund Bet", emoji="\U0001f4b8", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Force Settle", emoji="\u2696\ufe0f", style=discord.ButtonStyle.danger, row=1)
+    async def force_settle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        await interaction.response.send_modal(BossSBForceSettleModal())
+
+    @discord.ui.button(label="AG Status", emoji="\U0001f4ca", style=discord.ButtonStyle.secondary, row=1)
+    async def ag_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        sb_cog = interaction.client.get_cog("SportsbookCog")
+        if not sb_cog:
+            return await _send_cog_error(interaction, "Sportsbook")
+        await sb_cog._autograde_status_impl(interaction)
+
+    @discord.ui.button(label="Refund Bet", emoji="\U0001f4b8", style=discord.ButtonStyle.secondary, row=2)
     async def refund(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.send_modal(BossSBRefundModal())
 
-    @discord.ui.button(label="Balance Adjust", emoji="\U0001f4b0", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Balance Adjust", emoji="\U0001f4b0", style=discord.ButtonStyle.secondary, row=2)
     async def balance(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
@@ -468,13 +502,13 @@ class SBBetsPanelView(discord.ui.View):
             "Select a member to adjust balance:", view=SBBalanceMemberSelectView(), ephemeral=True,
         )
 
-    @discord.ui.button(label="Add Prop", emoji="\U0001f4dd", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Add Prop", emoji="\U0001f4dd", style=discord.ButtonStyle.primary, row=3)
     async def add_prop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
         await interaction.response.send_modal(BossSBAddPropModal())
 
-    @discord.ui.button(label="Settle Prop", emoji="\u2696\ufe0f", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Settle Prop", emoji="\u2696\ufe0f", style=discord.ButtonStyle.secondary, row=3)
     async def settle_prop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
@@ -482,7 +516,7 @@ class SBBetsPanelView(discord.ui.View):
             "Select the prop result:", view=SettlePropSelectView(), ephemeral=True,
         )
 
-    @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
@@ -671,6 +705,24 @@ class BossSBRefundModal(discord.ui.Modal, title="Refund a Bet"):
         except ValueError:
             return await interaction.response.send_message("❌ Bet ID must be a number.", ephemeral=True)
         await cog._sb_refund_impl(interaction, bid)
+
+
+class BossSBForceSettleModal(discord.ui.Modal, title="Force-Settle a Bet"):
+    bet_id = discord.ui.TextInput(label="Bet ID", placeholder="e.g., 42", required=True)
+    result = discord.ui.TextInput(label="Result", placeholder="Won / Lost / Push / Cancelled", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("Admin only.", ephemeral=True)
+        cog = interaction.client.get_cog("SportsbookCog")
+        if not cog:
+            return await _send_cog_error(interaction, "Sportsbook")
+        try:
+            bid = int(self.bet_id.value)
+        except ValueError:
+            return await interaction.response.send_message("❌ Bet ID must be a number.", ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await cog._force_settle_impl(interaction, bid, self.result.value)
 
 
 class SBBalanceMemberSelectView(discord.ui.View):

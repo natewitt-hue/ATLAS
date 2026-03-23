@@ -156,3 +156,43 @@ async def post_transaction(
         await _send_with_retry(channel, line)
     except Exception as e:
         log.warning(f"[LEDGER] Failed to post transaction after {_MAX_RETRIES} attempts: {e}")
+
+
+# ── Bet outcome → emoji mapping ──────────────────────────────────────────
+_BET_RESULT_EMOJI = {"Won": "✅", "Lost": "❌", "Push": "➖", "Cancelled": "🚫"}
+
+
+async def post_bet_settlement(
+    bot: commands.Bot,
+    guild_id: int,
+    discord_id: int,
+    bet_id: int,
+    matchup: str,
+    bet_type: str,
+    pick: str,
+    wager: int,
+    result: str,
+    payout: int,
+    new_balance: int,
+    source: str = "TSL",
+) -> None:
+    """Post a sportsbook bet settlement audit line to #ledger."""
+    try:
+        channel = _resolve_channel(bot, guild_id)
+        if not channel:
+            return
+
+        display_name = _get_display_name(channel, discord_id)
+        ts = _timestamp()
+        emoji = _BET_RESULT_EMOJI.get(result, "❓")
+        source_label = f"Sportsbook {result}" if source == "TSL" else f"ESPN {result}"
+
+        line = (
+            f"`{ts}` | **{display_name}** | {emoji} {source_label} | "
+            f"{matchup} | {bet_type}: {pick} | "
+            f"Wager: ${wager:,} | Payout: ${payout:,} | Balance: ${new_balance:,} | `#B{bet_id}`"
+        )
+
+        await _send_with_retry(channel, line)
+    except Exception as e:
+        log.warning(f"[LEDGER] Failed to post bet settlement after {_MAX_RETRIES} attempts: {e}")

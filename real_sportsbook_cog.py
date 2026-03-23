@@ -402,11 +402,14 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # BACKGROUND TASKS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    @tasks.loop(minutes=15)
+    @tasks.loop(minutes=10)
     async def sync_scores_task(self):
-        """Fetch scores every 15 minutes, auto-grade completed bets."""
+        """Fetch scores every 10 minutes, auto-grade completed bets."""
         await asyncio.sleep(random.uniform(5, 15))
-        await self._sync_scores()
+        try:
+            await self._sync_scores()
+        except Exception:
+            log.exception("[REAL-SB] Score sync exception — will retry next cycle")
 
     @sync_scores_task.before_loop
     async def _before_scores(self):
@@ -655,6 +658,22 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                     )
                     await db.commit()
                     graded += 1
+
+                    # Post to #ledger
+                    try:
+                        from ledger_poster import post_bet_settlement
+                        _payout = _payout_calc(wager, odds) if result == "Won" else (wager if result == "Push" else 0)
+                        _bal = await flow_wallet.get_balance(uid)
+                        _matchup = f"{away_team} @ {home_team}"
+                        guild = self.bot.guilds[0] if self.bot.guilds else None
+                        if guild:
+                            await post_bet_settlement(
+                                self.bot, guild.id, uid, bet_id, _matchup,
+                                bet_type, pick, wager, result, _payout, _bal, source="ESPN",
+                            )
+                    except Exception:
+                        log.warning(f"[REAL-SB] Failed to post bet {bet_id} to #ledger")
+
                 except Exception:
                     await db.rollback()
                     raise

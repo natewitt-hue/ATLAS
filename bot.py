@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.17.2"  # fix(oracle): AST try/except hardening, season fallback chain, timestamp ordering
+ATLAS_VERSION = "6.18.0"  # feat(sportsbook): auto-settle overhaul — 10-min cycles, alert fix, health monitor, bet browser, ledger posting, force-settle
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

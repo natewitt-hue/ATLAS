@@ -798,11 +798,16 @@ def get_last_n_games(team: str, n: int = 5) -> list[dict]:
     return results
 
 
-def get_weekly_results(week: int | None = None) -> list[dict]:
+def get_weekly_results(week: int | None = None, *, stage: str | int | None = "CURRENT") -> list[dict]:
     """
     Return completed games (status 2 or 3) for the given week.
     Uses df_all_games (full season load) as primary source.
     Falls back to live API call if df_all_games is empty.
+
+    Args:
+        week: Week number (1-indexed). Defaults to CURRENT_WEEK.
+        stage: Stage filter. "CURRENT" (default) filters by CURRENT_STAGE.
+               None skips stage filtering (finds games across all stages).
 
     MM export schema:
       weekIndex = week - 1 (0-based)
@@ -831,7 +836,7 @@ def get_weekly_results(week: int | None = None) -> list[dict]:
         if "seasonIndex" in df.columns:
             df = df[df["seasonIndex"] == _state.CURRENT_SEASON]
 
-        if "stageIndex" in df.columns:
+        if "stageIndex" in df.columns and stage == "CURRENT":
             df = df[df["stageIndex"] == _state.CURRENT_STAGE]
 
         # Completed games (status 2 or 3). Both have final scores.

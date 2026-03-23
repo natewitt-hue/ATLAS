@@ -108,6 +108,18 @@ SPREAD_SCALING    = 4.0       # divisor: Elo-based power diff → spread points
 SPORTSBOOK_VERSION = "v5.0"
 log.info(f"[SPORTSBOOK] Loading {SPORTSBOOK_VERSION}")
 
+# ── Autograde health tracking ────────────────────────────────────────────────
+_autograde_health: dict = {
+    "last_run_at": None,
+    "last_run_duration_s": 0.0,
+    "last_run_settled": 0,
+    "last_run_skipped": 0,
+    "total_runs": 0,
+    "total_settled": 0,
+    "consecutive_failures": 0,
+    "task_alive": False,
+}
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  ADMIN HELPER
@@ -1080,7 +1092,7 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _build_score_lookup(week: int) -> dict:
-    results = dm.get_weekly_results(week)
+    results = dm.get_weekly_results(week, stage=None)
     lookup  = {}
     fuzzy   = []
     for g in results:
@@ -1098,12 +1110,24 @@ def _build_score_lookup(week: int) -> dict:
 
 def _fuzzy_match(matchup_key: str, lookup: dict) -> dict | None:
     key = matchup_key.lower().strip()
+    # Tier 1: exact key match
     if key in lookup:
         return lookup[key]
+    # Tier 2: token-set overlap
     query = set(key.replace(" @ ", " ").split())
     for home_toks, away_toks, game in lookup.get("__fuzzy__", []):
         if (query & home_toks) and (query & away_toks):
             return game
+    # Tier 3: substring containment
+    parts = key.split(" @ ")
+    if len(parts) == 2:
+        away_q, home_q = parts[0].strip(), parts[1].strip()
+        for home_toks, away_toks, game in lookup.get("__fuzzy__", []):
+            home_str = " ".join(home_toks)
+            away_str = " ".join(away_toks)
+            if ((away_q in away_str or away_str in away_q) and
+                    (home_q in home_str or home_str in home_q)):
+                return game
     return None
 
 
@@ -1150,14 +1174,17 @@ def _grade_single_bet(bet_type: str, pick: str, line: float,
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def _run_autograde(bot) -> None:
+    from datetime import datetime as _dt, timezone as _tz
+    _ag_start = _dt.now(_tz.utc)
+    _autograde_health["task_alive"] = True
+
     def _grade_sync():
         results = []
         pending_events = []
         with _db_con() as con:
             ungraded = con.execute(
                 "SELECT DISTINCT week FROM bets_table "
-                "WHERE status NOT IN ('Won','Lost','Push','Cancelled') AND week <= ?",
-                (dm.CURRENT_WEEK,)
+                "WHERE status NOT IN ('Won','Lost','Push','Cancelled','Error')"
             ).fetchall()
         if not ungraded:
             return results, pending_events
@@ -1172,6 +1199,7 @@ async def _run_autograde(bot) -> None:
             settled = wins = losses = pushes = 0
             total_paid = 0
             error_bets = []
+            settled_details = []
 
             try:
                 with _db_con() as con:
@@ -1224,6 +1252,13 @@ async def _run_autograde(bot) -> None:
                         _ra = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (0 if res == "Push" else -amt)
                         wager_registry.settle_wager_sync("TSL_BET", str(bid), res.lower(), _ra, con=con)
                         settled += 1
+                        _settle_payout = _payout_calc(amt, int(odds)) if res == "Won" else (amt if res == "Push" else 0)
+                        settled_details.append({
+                            "bet_id": bid, "discord_id": uid, "matchup": matchup,
+                            "bet_type": btype, "pick": pick, "wager": amt,
+                            "result": res, "payout": _settle_payout,
+                            "new_balance": _get_balance(uid),
+                        })
                         _ev_profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (-amt if res == "Lost" else 0)
                         pending_events.append({
                             "discord_id": uid,
@@ -1289,6 +1324,7 @@ async def _run_autograde(bot) -> None:
                         "total_paid": total_paid,
                         "skipped_matchups": skipped_matchups,
                         "error_bets": error_bets,
+                        "settled_details": settled_details,
                     })
             except Exception:
                 try:
@@ -1304,6 +1340,17 @@ async def _run_autograde(bot) -> None:
     loop = asyncio.get_running_loop()
     results, pending_events = await loop.run_in_executor(None, _grade_sync)
 
+    # ── Update health metrics ────────────────────────────────────────
+    _autograde_health["last_run_at"] = _ag_start
+    _autograde_health["last_run_duration_s"] = (_dt.now(_tz.utc) - _ag_start).total_seconds()
+    _autograde_health["total_runs"] += 1
+    _run_settled = sum(r["settled"] for r in results)
+    _run_skipped = sum(len(r.get("skipped_matchups", [])) for r in results)
+    _autograde_health["last_run_settled"] = _run_settled
+    _autograde_health["last_run_skipped"] = _run_skipped
+    _autograde_health["total_settled"] += _run_settled
+    _autograde_health["consecutive_failures"] = 0
+
     try:
         from flow_events import SportsbookEvent, flow_bus
         for ev_data in pending_events:
@@ -1312,11 +1359,19 @@ async def _run_autograde(bot) -> None:
     except Exception:
         log.exception("Failed to emit sportsbook FLOW events")
 
+    all_skipped = []
+    all_errors = []
+    all_settled = []
+
     for r in results:
         log.info(
             f"[AUTO-GRADE] Week {r['week']} — Settled {r['settled']} | "
             f"W{r['wins']} L{r['losses']} P{r['pushes']} | Paid ${r['total_paid']:,}"
         )
+        all_skipped.extend(r.get("skipped_matchups", []))
+        all_errors.extend(r.get("error_bets", []))
+        all_settled.extend(r.get("settled_details", []))
+
         try:
             from setup_cog import get_channel_id as _get_ch_id
             ch_id = _get_ch_id("sportsbook")
@@ -1338,42 +1393,52 @@ async def _run_autograde(bot) -> None:
             except Exception:
                 pass
 
-        # ── Admin alerts for autograde issues ──────────────────────────
-        all_skipped = []
-        all_errors = []
-        for r in results:
-            all_skipped.extend(r.get("skipped_matchups", []))
-            all_errors.extend(r.get("error_bets", []))
+    # ── Post settled bets to #ledger ─────────────────────────────────
+    if all_settled:
+        try:
+            from ledger_poster import post_bet_settlement
+            guild = bot.guilds[0] if bot.guilds else None
+            if guild:
+                for sd in all_settled:
+                    await post_bet_settlement(
+                        bot, guild.id, sd["discord_id"], sd["bet_id"],
+                        sd["matchup"], sd["bet_type"], sd["pick"],
+                        sd["wager"], sd["result"], sd["payout"],
+                        sd["new_balance"], source="TSL",
+                    )
+        except Exception:
+            log.exception("[AUTO-GRADE] Failed to post to #ledger")
 
-        if all_skipped or all_errors:
-            try:
-                from setup_cog import get_channel_id as _get_ch_id
-                admin_ch_id = _get_ch_id("admin-chat")
-                admin_ch = bot.get_channel(admin_ch_id) if admin_ch_id else None
-                if admin_ch:
-                    if all_skipped:
-                        lines = [f"bet `{bid}`: {matchup} (${amt:,})" for bid, matchup, _, amt in all_skipped[:15]]
-                        alert = discord.Embed(
-                            title="Autograde: Unmatched Bets",
-                            description="\n".join(lines),
-                            color=0xE74C3C,
-                        )
-                        alert.set_footer(text=f"{len(all_skipped)} bet(s) could not be fuzzy-matched to game results")
-                        await admin_ch.send(embed=alert)
-                    if all_errors:
-                        lines = [
-                            f"{kind} `{bid}`: ${amt:,} @ {odds} — payout ${payout:,.0f}"
-                            for kind, bid, _, amt, odds, payout, _ in all_errors[:15]
-                        ]
-                        alert = discord.Embed(
-                            title="Autograde: Error Bets (Insane Payout)",
-                            description="\n".join(lines),
-                            color=0xE74C3C,
-                        )
-                        alert.set_footer(text=f"{len(all_errors)} bet(s) marked Error — use /boss flow audit to resolve")
-                        await admin_ch.send(embed=alert)
-            except Exception:
-                log.exception("[AUTO-GRADE] Failed to post autograde alerts")
+    # ── Admin alerts for autograde issues ────────────────────────────
+    if all_skipped or all_errors:
+        try:
+            from setup_cog import get_channel_id as _get_ch_id
+            admin_ch_id = _get_ch_id("admin-chat")
+            admin_ch = bot.get_channel(admin_ch_id) if admin_ch_id else None
+            if admin_ch:
+                if all_skipped:
+                    lines = [f"bet `{bid}`: {matchup} (${amt:,})" for bid, matchup, _, amt in all_skipped[:15]]
+                    alert = discord.Embed(
+                        title="Autograde: Unmatched Bets",
+                        description="\n".join(lines),
+                        color=0xE74C3C,
+                    )
+                    alert.set_footer(text=f"{len(all_skipped)} bet(s) could not be fuzzy-matched to game results")
+                    await admin_ch.send(embed=alert)
+                if all_errors:
+                    lines = [
+                        f"{kind} `{bid}`: ${amt:,} @ {odds} — payout ${payout:,.0f}"
+                        for kind, bid, _, amt, odds, payout, _ in all_errors[:15]
+                    ]
+                    alert = discord.Embed(
+                        title="Autograde: Error Bets (Insane Payout)",
+                        description="\n".join(lines),
+                        color=0xE74C3C,
+                    )
+                    alert.set_footer(text=f"{len(all_errors)} bet(s) marked Error — use /boss flow audit to resolve")
+                    await admin_ch.send(embed=alert)
+        except Exception:
+            log.exception("[AUTO-GRADE] Failed to post autograde alerts")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3098,11 +3163,17 @@ class SportsbookCog(commands.Cog):
 
     async def _on_data_refresh(self):
         _invalidate_elo_cache()
-        await _run_autograde(self.bot)
+        try:
+            await _run_autograde(self.bot)
+        except Exception:
+            log.exception("[AUTO-GRADE] Unhandled exception in data refresh callback")
 
-    @tasks.loop(minutes=60)
+    @tasks.loop(minutes=10)
     async def auto_grade(self):
-        await _run_autograde(self.bot)
+        try:
+            await _run_autograde(self.bot)
+        except Exception:
+            log.exception("[AUTO-GRADE] Unhandled exception — will retry next cycle")
 
     @auto_grade.before_loop
     async def before_auto_grade(self):
@@ -3597,6 +3668,223 @@ class SportsbookCog(commands.Cog):
 
         embed.set_footer(text="🟢 = Open  🔴 = Locked  ⚡ = Admin Override")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Autograde status (boss panel) ────────────────────────────────────
+    async def _autograde_status_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        h = _autograde_health
+        with _db_con() as con:
+            pending_tsl = con.execute(
+                "SELECT COUNT(*) FROM bets_table WHERE status NOT IN ('Won','Lost','Push','Cancelled','Error')"
+            ).fetchone()[0]
+        try:
+            import aiosqlite
+            async with aiosqlite.connect(DB_PATH) as db:
+                row = await db.execute("SELECT COUNT(*) FROM real_bets WHERE status='Pending'")
+                pending_espn = (await row.fetchone())[0]
+        except Exception:
+            pending_espn = 0
+
+        last = h["last_run_at"]
+        last_str = f"<t:{int(last.timestamp())}:R>" if last else "Never"
+        embed = discord.Embed(title="Autograde Health", color=TSL_GOLD)
+        embed.add_field(name="Last Run", value=last_str, inline=True)
+        embed.add_field(name="Duration", value=f"{h['last_run_duration_s']:.1f}s", inline=True)
+        embed.add_field(name="Total Runs", value=str(h["total_runs"]), inline=True)
+        embed.add_field(name="Last Settled", value=str(h["last_run_settled"]), inline=True)
+        embed.add_field(name="Last Skipped", value=str(h["last_run_skipped"]), inline=True)
+        embed.add_field(name="Total Settled", value=str(h["total_settled"]), inline=True)
+        embed.add_field(name="Pending (TSL)", value=str(pending_tsl), inline=True)
+        embed.add_field(name="Pending (ESPN)", value=str(pending_espn), inline=True)
+        embed.add_field(name="Failures", value=str(h["consecutive_failures"]), inline=True)
+        embed.add_field(name="Cycle", value="10 min (TSL + ESPN)", inline=True)
+        embed.set_footer(text="TSL Sportsbook • Autograde Monitor")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── Open bets browser (boss panel) ────────────────────────────────
+    async def _open_bets_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        # Query TSL pending bets
+        with _db_con() as con:
+            tsl_bets = con.execute(
+                "SELECT bet_id, discord_id, week, matchup, bet_type, pick, wager_amount, odds, created_at "
+                "FROM bets_table WHERE status NOT IN ('Won','Lost','Push','Cancelled','Error') "
+                "ORDER BY created_at DESC"
+            ).fetchall()
+
+        # Query ESPN pending bets
+        espn_bets = []
+        try:
+            import sqlite3
+            with sqlite3.connect(DB_PATH) as econ:
+                espn_bets = econ.execute(
+                    "SELECT b.bet_id, b.discord_id, 0, "
+                    "COALESCE(e.away_team || ' @ ' || e.home_team, b.event_id), "
+                    "b.bet_type, b.pick, b.wager_amount, b.odds, b.created_at "
+                    "FROM real_bets b LEFT JOIN real_events e ON b.event_id = e.event_id "
+                    "WHERE b.status='Pending' ORDER BY b.created_at DESC"
+                ).fetchall()
+        except Exception:
+            pass
+
+        all_bets = [(b, "TSL") for b in tsl_bets] + [(b, "ESPN") for b in espn_bets]
+        if not all_bets:
+            return await interaction.followup.send("No open bets.", ephemeral=True)
+
+        PER_PAGE = 10
+        total_pages = max(1, (len(all_bets) + PER_PAGE - 1) // PER_PAGE)
+
+        def _build_page(page: int) -> discord.Embed:
+            start = page * PER_PAGE
+            chunk = all_bets[start:start + PER_PAGE]
+            embed = discord.Embed(
+                title=f"Open Bets ({len(all_bets)} total)",
+                color=TSL_GOLD,
+            )
+            lines = []
+            for bet, src in chunk:
+                bid, uid, wk, matchup, btype, pick, wager, odds, created = bet
+                wk_str = f"W{wk}" if wk else ""
+                lines.append(
+                    f"`#{bid}` **{src}** {wk_str} | {matchup}\n"
+                    f"  {btype}: {pick} | ${wager:,} @ {odds}"
+                )
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"Page {page + 1}/{total_pages}")
+            return embed
+
+        from pagination_view import PaginationView
+        embeds = [_build_page(i) for i in range(total_pages)]
+        view = PaginationView(embeds, author_id=interaction.user.id)
+        await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+
+    # ── Settled bets browser (boss panel) ─────────────────────────────
+    async def _settled_bets_impl(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        # Query TSL settled bets
+        with _db_con() as con:
+            tsl_bets = con.execute(
+                "SELECT bet_id, discord_id, week, matchup, bet_type, pick, wager_amount, odds, status, created_at "
+                "FROM bets_table WHERE status IN ('Won','Lost','Push','Cancelled','Error') "
+                "ORDER BY created_at DESC LIMIT 200"
+            ).fetchall()
+
+        # Query ESPN settled bets
+        espn_bets = []
+        try:
+            import sqlite3
+            with sqlite3.connect(DB_PATH) as econ:
+                espn_bets = econ.execute(
+                    "SELECT b.bet_id, b.discord_id, 0, "
+                    "COALESCE(e.away_team || ' @ ' || e.home_team, b.event_id), "
+                    "b.bet_type, b.pick, b.wager_amount, b.odds, b.status, b.created_at "
+                    "FROM real_bets b LEFT JOIN real_events e ON b.event_id = e.event_id "
+                    "WHERE b.status IN ('Won','Lost','Push','Cancelled') "
+                    "ORDER BY b.created_at DESC LIMIT 200"
+                ).fetchall()
+        except Exception:
+            pass
+
+        _STATUS_EMOJI = {"Won": "✅", "Lost": "❌", "Push": "➖", "Cancelled": "🚫", "Error": "⚠️"}
+        all_bets = [(b, "TSL") for b in tsl_bets] + [(b, "ESPN") for b in espn_bets]
+        # Sort by created_at descending (index 9)
+        all_bets.sort(key=lambda x: x[0][9] or "", reverse=True)
+
+        if not all_bets:
+            return await interaction.followup.send("No settled bets.", ephemeral=True)
+
+        PER_PAGE = 10
+        total_pages = max(1, (len(all_bets) + PER_PAGE - 1) // PER_PAGE)
+
+        def _build_page(page: int) -> discord.Embed:
+            start = page * PER_PAGE
+            chunk = all_bets[start:start + PER_PAGE]
+            embed = discord.Embed(
+                title=f"Settled Bets (recent {len(all_bets)})",
+                color=TSL_GOLD,
+            )
+            lines = []
+            for bet, src in chunk:
+                bid, uid, wk, matchup, btype, pick, wager, odds, status, created = bet
+                emoji = _STATUS_EMOJI.get(status, "❓")
+                payout_str = ""
+                if status == "Won":
+                    payout_str = f" → ${_payout_calc(wager, int(odds)):,}"
+                elif status == "Push":
+                    payout_str = f" → ${wager:,}"
+                lines.append(
+                    f"{emoji} `#{bid}` **{src}** | {matchup}\n"
+                    f"  {btype}: {pick} | ${wager:,}{payout_str}"
+                )
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"Page {page + 1}/{total_pages}")
+            return embed
+
+        from pagination_view import PaginationView
+        embeds = [_build_page(i) for i in range(total_pages)]
+        view = PaginationView(embeds, author_id=interaction.user.id)
+        await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+
+    # ── Force-settle (boss panel) ─────────────────────────────────────
+    async def _force_settle_impl(self, interaction: discord.Interaction, bet_id: int, result: str):
+        result = result.strip().title()
+        if result not in ("Won", "Lost", "Push", "Cancelled"):
+            return await interaction.followup.send(
+                f"❌ Invalid result `{result}`. Must be Won/Lost/Push/Cancelled.", ephemeral=True
+            )
+
+        with _db_con() as con:
+            row = con.execute(
+                "SELECT discord_id, matchup, bet_type, pick, wager_amount, odds, status "
+                "FROM bets_table WHERE bet_id=?", (bet_id,)
+            ).fetchone()
+            if not row:
+                return await interaction.followup.send(f"❌ Bet #{bet_id} not found.", ephemeral=True)
+
+            uid, matchup, btype, pick, wager, odds, cur_status = row
+            if cur_status in ("Won", "Lost", "Push", "Cancelled"):
+                return await interaction.followup.send(
+                    f"❌ Bet #{bet_id} already settled as **{cur_status}**.", ephemeral=True
+                )
+
+            payout = 0
+            if result == "Won":
+                payout = _payout_calc(wager, int(odds))
+                _update_balance(uid, payout, con,
+                                subsystem="TSL_BET", subsystem_id=str(bet_id),
+                                reference_key=f"TSL_BET_{bet_id}_won_force")
+            elif result == "Push":
+                payout = wager
+                _update_balance(uid, wager, con,
+                                subsystem="TSL_BET", subsystem_id=str(bet_id),
+                                reference_key=f"TSL_BET_{bet_id}_push_force")
+
+            con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (result, bet_id))
+            import wager_registry
+            _ra = (payout - wager) if result == "Won" else (0 if result == "Push" else -wager)
+            wager_registry.settle_wager_sync("TSL_BET", str(bet_id), result.lower(), _ra, con=con)
+            new_bal = _get_balance(uid)
+
+        # Post to #ledger
+        try:
+            from ledger_poster import post_bet_settlement
+            guild = interaction.guild
+            if guild:
+                await post_bet_settlement(
+                    self.bot, guild.id, uid, bet_id, matchup, btype, pick,
+                    wager, result, payout, new_bal, source="TSL",
+                )
+        except Exception:
+            log.exception("[FORCE-SETTLE] Failed to post to #ledger")
+
+        await interaction.followup.send(
+            f"✅ Bet `#{bet_id}` force-settled as **{result}**.\n"
+            f"Matchup: {matchup} | {btype}: {pick}\n"
+            f"Wager: ${wager:,} → Payout: ${payout:,} | New balance: ${new_bal:,}",
+            ephemeral=True,
+        )
 
     async def _sb_lines_impl(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)
