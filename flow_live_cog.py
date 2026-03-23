@@ -29,8 +29,9 @@ except ImportError:
     flow_bus = None  # Soft fallback — cog degrades gracefully if flow_events missing
 
 try:
-    from flow_wallet import get_theme_for_render
+    from flow_wallet import get_theme_for_render, DB_PATH
 except ImportError:
+    DB_PATH = "flow_economy.db"  # fallback if flow_wallet unavailable
     def get_theme_for_render(_uid):  # noqa: E301
         return None
 
@@ -168,7 +169,7 @@ class SessionTracker:
     def _ensure_sessions_table(self):
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS flow_live_sessions (
@@ -200,7 +201,7 @@ class SessionTracker:
         conn = None
         try:
             d = session.to_dict()
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.execute("""
                 INSERT OR REPLACE INTO flow_live_sessions
                 (discord_id, guild_id, started_at, last_activity,
@@ -230,7 +231,7 @@ class SessionTracker:
     def _delete_persisted(self, discord_id: int, guild_id: int):
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.execute(
                 "DELETE FROM flow_live_sessions WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, guild_id),
@@ -244,7 +245,7 @@ class SessionTracker:
         import json, sqlite3
         self._ensure_sessions_table()
         try:
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             cursor = conn.execute("SELECT * FROM flow_live_sessions")
             col_names = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
@@ -449,7 +450,7 @@ class FlowLiveCog(commands.Cog):
         """Create flow_live_state table in flow_economy.db if needed."""
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS flow_live_state (
                     guild_id    INTEGER PRIMARY KEY,
@@ -465,7 +466,7 @@ class FlowLiveCog(commands.Cog):
         try:
             import sqlite3
             self._ensure_state_table()
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             rows = conn.execute("SELECT guild_id, pulse_msg_id FROM flow_live_state").fetchall()
             conn.close()
             for guild_id, msg_id in rows:
@@ -476,7 +477,7 @@ class FlowLiveCog(commands.Cog):
     def _save_pulse_message_id(self, guild_id: int, message_id: int):
         try:
             import sqlite3
-            conn = sqlite3.connect("flow_economy.db", timeout=10)
+            conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.execute(
                 "INSERT OR REPLACE INTO flow_live_state (guild_id, pulse_msg_id) VALUES (?, ?)",
                 (guild_id, message_id)
@@ -519,14 +520,14 @@ class FlowLiveCog(commands.Cog):
 
     async def _on_game_result(self, event):
         """Handle game result: track session, detect highlights."""
-        session = self.sessions.record(event)
+        session = await asyncio.to_thread(self.sessions.record, event)
         highlight = self.detector.check(event, session)
         if highlight and highlight.highlight_type == HighlightType.INSTANT:
             await self._post_instant_highlight(highlight, event.guild_id)
 
     async def _on_sportsbook_result(self, event):
         """Handle sportsbook result: track session + detect highlights."""
-        self.sessions.record_sportsbook(event)
+        await asyncio.to_thread(self.sessions.record_sportsbook, event)
         highlight = self.detector.check_sportsbook(event)
         if highlight and highlight.highlight_type == HighlightType.INSTANT:
             await self._post_instant_highlight(highlight, event.guild_id)
@@ -578,7 +579,7 @@ class FlowLiveCog(commands.Cog):
             import sqlite3 as _sq
             data = {"amount": 0, "last_player": None, "last_amount": 0, "last_ago": "never"}
             try:
-                conn = _sq.connect("flow_economy.db", timeout=10)
+                conn = _sq.connect(DB_PATH, timeout=10)
                 row = conn.execute("SELECT COALESCE(SUM(pool), 0) FROM casino_jackpot").fetchone()
                 if row:
                     data["amount"] = row[0]

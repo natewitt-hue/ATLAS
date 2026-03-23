@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.12.0"  # fix: bug hunt sweep — race condition, token compliance, dead code, render pipeline
+ATLAS_VERSION = "6.12.1"  # fix: nightly audit — closed-con crash, hardcoded DB path, async blocking, silent defer fail, parlay own_con
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

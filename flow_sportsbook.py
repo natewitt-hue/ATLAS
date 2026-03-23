@@ -965,118 +965,114 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
     Returns a list of pending event dicts (for the event bus).
     Called by both TSL grading and real sport grading after updating leg statuses.
     """
-    own_con = con is None
-    if own_con:
-        con = _db_con().__enter__()
+    if con is None:
+        with _db_con() as own_con:
+            return _check_parlay_completion(parlay_id, con=own_con)
 
-    try:
-        parlay = con.execute(
-            "SELECT discord_id, combined_odds, wager_amount, status "
-            "FROM parlays_table WHERE parlay_id = ?",
-            (parlay_id,),
-        ).fetchone()
-        if not parlay or parlay[3] != "Pending":
-            return []
+    parlay = con.execute(
+        "SELECT discord_id, combined_odds, wager_amount, status "
+        "FROM parlays_table WHERE parlay_id = ?",
+        (parlay_id,),
+    ).fetchone()
+    if not parlay or parlay[3] != "Pending":
+        return []
 
-        uid, combined_odds, wager_amount, _ = parlay
+    uid, combined_odds, wager_amount, _ = parlay
 
-        legs = con.execute(
-            "SELECT status, odds FROM parlay_legs WHERE parlay_id = ? ORDER BY leg_index",
-            (parlay_id,),
-        ).fetchall()
+    legs = con.execute(
+        "SELECT status, odds FROM parlay_legs WHERE parlay_id = ? ORDER BY leg_index",
+        (parlay_id,),
+    ).fetchall()
 
-        statuses = [row[0] for row in legs]
-        if not statuses:
-            return []
+    statuses = [row[0] for row in legs]
+    if not statuses:
+        return []
 
-        has_pending = "Pending" in statuses
-        any_lost = "Lost" in statuses
-        all_won = all(s == "Won" for s in statuses)
-        any_pushed = "Push" in statuses
-        any_won = "Won" in statuses
-        events = []
+    has_pending = "Pending" in statuses
+    any_lost = "Lost" in statuses
+    all_won = all(s == "Won" for s in statuses)
+    any_pushed = "Push" in statuses
+    any_won = "Won" in statuses
+    events = []
 
-        # A single loss kills the parlay immediately, even with pending legs
-        if any_lost:
-            con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (parlay_id,))
-            import wager_registry
-            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "lost", -wager_amount, con=con)
-            events.append({
-                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
-                "bet_type": "parlay", "amount": -wager_amount,
-                "balance_after": _get_balance(uid),
-                "description": f"Lost parlay (parlay_id={parlay_id})",
-                "bet_id": parlay_id,
-            })
-            return events
-
-        # If any legs still pending, can't settle yet
-        if has_pending:
-            return []
-
-        # All legs resolved — settle
-        if all_won:
-            payout = _payout_calc(wager_amount, combined_odds)
-            if payout < 0 or payout > MAX_PAYOUT:
-                log.error(f"[PARLAY] Insane payout ${payout:,.2f} for {parlay_id} — CAPPING")
-                con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
-                return []
-            new_bal = _update_balance(uid, payout, con,
-                            subsystem="PARLAY", subsystem_id=str(parlay_id),
-                            reference_key=f"PARLAY_SETTLE_{parlay_id}")
-            con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (parlay_id,))
-            import wager_registry
-            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "won", payout - wager_amount, con=con)
-            events.append({
-                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
-                "bet_type": "parlay", "amount": payout - wager_amount,
-                "balance_after": new_bal,
-                "description": f"Won parlay (parlay_id={parlay_id})",
-                "bet_id": parlay_id,
-            })
-        elif any_pushed and any_won:
-            # Reduced parlay: drop pushed legs, pay on winning legs only
-            winning_odds = [int(row[1]) for row, s in zip(legs, statuses) if s == "Won"]
-            reduced_odds = _combine_parlay_odds(winning_odds)
-            payout = _payout_calc(wager_amount, reduced_odds)
-            if payout < 0 or payout > MAX_PAYOUT:
-                log.error(f"[PARLAY] Insane reduced payout ${payout:,.2f} for {parlay_id} — CAPPING")
-                con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
-                return []
-            new_bal = _update_balance(uid, payout, con,
-                            subsystem="PARLAY", subsystem_id=str(parlay_id),
-                            reference_key=f"PARLAY_SETTLE_{parlay_id}")
-            con.execute("UPDATE parlays_table SET status='Won', combined_odds=? WHERE parlay_id=?",
-                        (reduced_odds, parlay_id))
-            import wager_registry
-            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "won", payout - wager_amount, con=con)
-            events.append({
-                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
-                "bet_type": "parlay", "amount": payout - wager_amount,
-                "balance_after": new_bal,
-                "description": f"Won reduced parlay (parlay_id={parlay_id})",
-                "bet_id": parlay_id,
-            })
-        elif any_pushed:
-            # All legs pushed (no wins) — full refund
-            new_bal = _update_balance(uid, wager_amount, con,
-                            subsystem="PARLAY", subsystem_id=str(parlay_id),
-                            reference_key=f"PARLAY_PUSH_{parlay_id}")
-            con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (parlay_id,))
-            import wager_registry
-            wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "push", 0, con=con)
-            events.append({
-                "discord_id": uid, "guild_id": None, "source": "TSL_BET",
-                "bet_type": "parlay", "amount": 0,
-                "balance_after": new_bal,
-                "description": f"Push parlay (parlay_id={parlay_id})",
-                "bet_id": parlay_id,
-            })
-
+    # A single loss kills the parlay immediately, even with pending legs
+    if any_lost:
+        con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (parlay_id,))
+        import wager_registry
+        wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "lost", -wager_amount, con=con)
+        events.append({
+            "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+            "bet_type": "parlay", "amount": -wager_amount,
+            "balance_after": _get_balance(uid),
+            "description": f"Lost parlay (parlay_id={parlay_id})",
+            "bet_id": parlay_id,
+        })
         return events
-    finally:
-        if own_con:
-            con.close()
+
+    # If any legs still pending, can't settle yet
+    if has_pending:
+        return []
+
+    # All legs resolved — settle
+    if all_won:
+        payout = _payout_calc(wager_amount, combined_odds)
+        if payout < 0 or payout > MAX_PAYOUT:
+            log.error(f"[PARLAY] Insane payout ${payout:,.2f} for {parlay_id} — CAPPING")
+            con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
+            return []
+        new_bal = _update_balance(uid, payout, con,
+                        subsystem="PARLAY", subsystem_id=str(parlay_id),
+                        reference_key=f"PARLAY_SETTLE_{parlay_id}")
+        con.execute("UPDATE parlays_table SET status='Won' WHERE parlay_id=?", (parlay_id,))
+        import wager_registry
+        wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "won", payout - wager_amount, con=con)
+        events.append({
+            "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+            "bet_type": "parlay", "amount": payout - wager_amount,
+            "balance_after": new_bal,
+            "description": f"Won parlay (parlay_id={parlay_id})",
+            "bet_id": parlay_id,
+        })
+    elif any_pushed and any_won:
+        # Reduced parlay: drop pushed legs, pay on winning legs only
+        winning_odds = [int(row[1]) for row, s in zip(legs, statuses) if s == "Won"]
+        reduced_odds = _combine_parlay_odds(winning_odds)
+        payout = _payout_calc(wager_amount, reduced_odds)
+        if payout < 0 or payout > MAX_PAYOUT:
+            log.error(f"[PARLAY] Insane reduced payout ${payout:,.2f} for {parlay_id} — CAPPING")
+            con.execute("UPDATE parlays_table SET status='Error' WHERE parlay_id=?", (parlay_id,))
+            return []
+        new_bal = _update_balance(uid, payout, con,
+                        subsystem="PARLAY", subsystem_id=str(parlay_id),
+                        reference_key=f"PARLAY_SETTLE_{parlay_id}")
+        con.execute("UPDATE parlays_table SET status='Won', combined_odds=? WHERE parlay_id=?",
+                    (reduced_odds, parlay_id))
+        import wager_registry
+        wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "won", payout - wager_amount, con=con)
+        events.append({
+            "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+            "bet_type": "parlay", "amount": payout - wager_amount,
+            "balance_after": new_bal,
+            "description": f"Won reduced parlay (parlay_id={parlay_id})",
+            "bet_id": parlay_id,
+        })
+    elif any_pushed:
+        # All legs pushed (no wins) — full refund
+        new_bal = _update_balance(uid, wager_amount, con,
+                        subsystem="PARLAY", subsystem_id=str(parlay_id),
+                        reference_key=f"PARLAY_PUSH_{parlay_id}")
+        con.execute("UPDATE parlays_table SET status='Push' WHERE parlay_id=?", (parlay_id,))
+        import wager_registry
+        wager_registry.settle_wager_sync("PARLAY", str(parlay_id), "push", 0, con=con)
+        events.append({
+            "discord_id": uid, "guild_id": None, "source": "TSL_BET",
+            "bet_type": "parlay", "amount": 0,
+            "balance_after": new_bal,
+            "description": f"Push parlay (parlay_id={parlay_id})",
+            "bet_id": parlay_id,
+        })
+
+    return events
 
 
 # ═════════════════════════════════════════════════════════════════════════════

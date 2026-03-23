@@ -968,7 +968,11 @@ class FlowHubView(discord.ui.View):
         except discord.NotFound:
             return
         except Exception:
-            return
+            log.exception("FlowHubView._swap_to failed")
+            try:
+                await interaction.followup.send("Something went wrong — try again.", ephemeral=True)
+            except Exception:
+                pass
 
     # ── Row 2: Contextual action callbacks ────────────────────────────
 

@@ -163,10 +163,10 @@ def _get_leaderboard_rank(user_id: int) -> tuple[int, int]:
             ") WHERE discord_id = ?",
             (user_id,),
         ).fetchone()
-    if row:
-        return row[0], row[1]
-    total = con.execute("SELECT COUNT(*) FROM users_table").fetchone()[0]
-    return total, total
+        if row:
+            return row[0], row[1]
+        total = con.execute("SELECT COUNT(*) FROM users_table").fetchone()[0]
+        return total, total
 
 
 def _determine_status(user_id: int) -> str:
