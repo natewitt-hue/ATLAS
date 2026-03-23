@@ -53,6 +53,10 @@ except ImportError:
 import atlas_ai
 from atlas_ai import Tier
 
+# ── Permanent memory (Oracle v3) ──────────────────────────────────────────────
+from oracle_memory import OracleMemory
+_oracle_mem = OracleMemory()
+
 # ── Chain memory for Oracle reply-chain conversations ─────────────────────────
 try:
     from conversation_memory import add_chain_turn, build_chain_block, cleanup_stale_chains
@@ -2859,7 +2863,7 @@ class _OracleIntelModal(discord.ui.Modal):
             # Track for reply-chain detection
             _oracle_message_ids.add(sent_msg.id)
             _chain_roots[sent_msg.id] = sent_msg.id  # Root of a new chain
-            # Store initial turn in chain memory
+            # Store initial turn in chain memory + permanent memory
             if add_chain_turn:
                 await add_chain_turn(
                     chain_id=sent_msg.id,
@@ -2868,6 +2872,10 @@ class _OracleIntelModal(discord.ui.Modal):
                     question=q_text,
                     answer=answer[:500],
                 )
+            await _oracle_mem.embed_and_store(
+                interaction.user.id, q_text, answer[:500],
+                message_id=sent_msg.id,
+            )
         except _EarlyReturn:
             pass  # _generate() already sent its own response
         except Exception as e:
@@ -2951,8 +2959,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
 
         # ── Conversation memory ─────────────────────────────
         conv_block = ""
-        if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
+        conv_block = await _oracle_mem.build_context_block(interaction.user.id, q)
 
         # ── Affinity tone (answer only) ─────────────────────
         affinity_block = ""
@@ -2998,8 +3005,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
         answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
         answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
 
-        if _add_conversation_turn:
-            await _add_conversation_turn(interaction.user.id, q, answer, sql=sql or "", source="oracle")
+        await _oracle_mem.embed_and_store(interaction.user.id, q, answer, sql=sql or "")
 
         footer_parts = [f"🔍 {len(rows)} records analyzed", tier_label]
         if alias_map:
@@ -3045,8 +3051,7 @@ class _AskWebModal(_OracleIntelModal):
 
         # ── Conversation memory ────────────────────────────
         conv_block = ""
-        if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
+        conv_block = await _oracle_mem.build_context_block(interaction.user.id, q)
 
         system_instruction = get_persona("analytical")
         contents = f"{conv_block}\n\n{q}" if conv_block else q
@@ -3065,10 +3070,7 @@ class _AskWebModal(_OracleIntelModal):
 
         answer = result.text or fallback_msg
 
-        if _add_conversation_turn:
-            await _add_conversation_turn(
-                interaction.user.id, q, answer, sql="", source="oracle"
-            )
+        await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
 
         footer = f"{footer_mode} · Web search enabled · ATLAS™ Oracle"
         if result.fallback_used:
@@ -3118,8 +3120,7 @@ class PlayerScoutModal(_OracleIntelModal, title="🎯 Ask ATLAS — Player Scout
 
         # ── Conversation memory fetch ─────────────────────────
         conv_block = ""
-        if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
+        conv_block = await _oracle_mem.build_context_block(interaction.user.id, q)
 
         # ── Scout-specific SQL prompt ─────────────────────────
         scout_schema = f"""DATABASE: tsl_history.db — Madden Player Scouting Data
@@ -3216,10 +3217,7 @@ RESPONSE GUIDELINES:
         answer = answer_result.text or "No scouting data found."
 
         # ── Store conversation turn ───────────────────────────
-        if _add_conversation_turn:
-            await _add_conversation_turn(
-                interaction.user.id, q, answer, sql=sql or "", source="oracle"
-            )
+        await _oracle_mem.embed_and_store(interaction.user.id, q, answer, sql=sql or "")
 
         footer_parts = [f"🔍 {len(rows)} players analyzed"]
         if team_name:
@@ -3263,8 +3261,7 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
 
         # ── Conversation memory ─────────────────────────────
         conv_block = ""
-        if _build_conversation_block:
-            conv_block = await _build_conversation_block(interaction.user.id, source="oracle")
+        conv_block = await _oracle_mem.build_context_block(interaction.user.id, q)
 
         # ── Build TSL context from live data ────────────────
         context_parts = []
@@ -3415,10 +3412,7 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
         answer = result.text or "ATLAS couldn't formulate a strategy for that one."
 
         # ── Store conversation turn ─────────────────────────
-        if _add_conversation_turn:
-            await _add_conversation_turn(
-                interaction.user.id, q, answer, sql="", source="oracle"
-            )
+        await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
 
         # ── Footer ──────────────────────────────────────────
         footer_parts = ["Strategy Room"]
@@ -4107,10 +4101,15 @@ class StatsHubCog(commands.Cog):
                 # ── Auto-classify domain ──────────────────────────
                 domain = await _classify_followup_domain(q)
 
-                # ── Build chain context ───────────────────────────
+                # ── Build chain context + permanent memory ────────
                 chain_block = ""
                 if build_chain_block:
                     chain_block = await build_chain_block(chain_id)
+                mem_block = await _oracle_mem.build_context_block(message.author.id, q)
+                if mem_block and chain_block:
+                    chain_block = chain_block + "\n\n" + mem_block
+                elif mem_block:
+                    chain_block = mem_block
 
                 # ── Affinity tone ─────────────────────────────────
                 affinity_block = ""
@@ -4139,7 +4138,7 @@ class StatsHubCog(commands.Cog):
                 _oracle_message_ids.add(sent.id)
                 _chain_roots[sent.id] = chain_id  # Points to original root
 
-                # ── Store in chain memory ─────────────────────────
+                # ── Store in chain memory + permanent memory ────────
                 if add_chain_turn:
                     await add_chain_turn(
                         chain_id=chain_id,
@@ -4148,6 +4147,10 @@ class StatsHubCog(commands.Cog):
                         question=q,
                         answer=answer[:500],
                     )
+                await _oracle_mem.embed_and_store(
+                    message.author.id, q, answer[:500],
+                    message_id=sent.id,
+                )
 
         except Exception as e:
             try:

@@ -1,13 +1,13 @@
 # conftest.py — root-level pytest configuration
 """
-Creates an in-memory (temp-file) tsl_history.db with all required tables for tests.
-The worktree DB may be empty; this fixture ensures Layer 1 tests get err=None.
+Shared fixtures for Oracle v3 tests.
+
+The QueryBuilder tests only validate SQL generation (no DB needed).
+This conftest provides a temp DB for any tests that do execute queries.
 """
 import sqlite3
-import tempfile
-from pathlib import Path
 import pytest
-import oracle_query_builder as oqb
+
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS games (
@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS teams (
     cityName TEXT,
     abbrName TEXT,
     divisionName TEXT,
-    conferenceName TEXT
+    conferenceName TEXT,
+    userName TEXT
 );
 CREATE TABLE IF NOT EXISTS standings (
     id INTEGER PRIMARY KEY,
@@ -109,6 +110,7 @@ CREATE TABLE IF NOT EXISTS team_stats (
     stageIndex TEXT,
     weekIndex TEXT,
     teamName TEXT,
+    gameId TEXT,
     offTotalYds TEXT,
     offPassYds TEXT,
     offRushYds TEXT,
@@ -137,18 +139,21 @@ CREATE TABLE IF NOT EXISTS players (
     playerBestOvr TEXT,
     age TEXT,
     dev TEXT,
+    devTrait TEXT,
     isFA TEXT,
     isOnIR TEXT,
     jerseyNum TEXT,
     college TEXT,
     yearsPro TEXT,
-    capHit TEXT
+    capHit TEXT,
+    rosterId TEXT
 );
 CREATE TABLE IF NOT EXISTS player_abilities (
     id INTEGER PRIMARY KEY,
     teamName TEXT,
     firstName TEXT,
     lastName TEXT,
+    rosterId TEXT,
     title TEXT,
     description TEXT
 );
@@ -169,7 +174,9 @@ CREATE TABLE IF NOT EXISTS player_draft_map (
     pos TEXT,
     playerBestOvr TEXT,
     dev TEXT,
-    was_traded TEXT
+    was_traded TEXT,
+    current_team TEXT,
+    rookieYear TEXT
 );
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY,
@@ -184,17 +191,13 @@ CREATE TABLE IF NOT EXISTS trades (
 """
 
 
-@pytest.fixture(autouse=True, scope="session")
-def patch_db_path(tmp_path_factory):
-    """Replace oracle_query_builder.DB_PATH with a temp DB that has all tables."""
+@pytest.fixture(scope="session")
+def test_db(tmp_path_factory):
+    """Create a temp DB with all TSL tables for integration tests."""
     tmp_dir = tmp_path_factory.mktemp("db")
     db_file = tmp_dir / "tsl_history_test.db"
     conn = sqlite3.connect(str(db_file))
     conn.executescript(_DDL)
     conn.commit()
     conn.close()
-    # Patch the module-level DB_PATH
-    original = oqb.DB_PATH
-    oqb.DB_PATH = db_file
-    yield db_file
-    oqb.DB_PATH = original
+    return db_file

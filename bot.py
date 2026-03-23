@@ -133,7 +133,9 @@ import reasoning
 import build_tsl_db as db_builder
 import build_member_db as member_db
 import roster
-from conversation_memory import add_conversation_turn, build_conversation_block
+from conversation_memory import add_conversation_turn, build_conversation_block  # legacy
+from oracle_memory import OracleMemory
+_atlas_mem = OracleMemory()
 
 # Optional modules
 try: import intelligence as intel
@@ -169,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.12.1"  # fix: nightly audit — closed-con crash, hardcoded DB path, async blocking, silent defer fail, parlay own_con
+ATLAS_VERSION = "6.14.0"  # feat(oracle): v3 Phase 2 — permanent memory with hybrid retrieval (FTS5 + vector embeddings), wired to all ATLAS conversations
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -587,8 +589,8 @@ async def on_message(message: discord.Message):
                     context = f"{affinity_instruction}\n\n{context}"
 
                 # ── Conversation memory (follow-up context) ─────────
-                conv_block = await build_conversation_block(
-                    message.author.id, source="casual",
+                conv_block = await _atlas_mem.build_context_block(
+                    message.author.id, user_input,
                 )
                 if conv_block:
                     context = f"{conv_block}\n\n{context}"
@@ -596,9 +598,9 @@ async def on_message(message: discord.Message):
                 wit = await call_atlas(user_input, context, persona_type=persona_type)
                 await message.reply(wit)
 
-                # ── Record this exchange for future context ─────────
-                await add_conversation_turn(
-                    message.author.id, user_input, wit, source="casual",
+                # ── Record this exchange in permanent memory ──────
+                await _atlas_mem.embed_and_store(
+                    message.author.id, user_input, wit,
                 )
 
                 # ── Post-interaction affinity update ───────────────

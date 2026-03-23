@@ -689,6 +689,33 @@ async def generate_stream(
     raise RuntimeError("No AI provider configured")
 
 
+# ── Embedding API ────────────────────────────────────────────────────────────
+
+async def embed_text(text: str) -> list[float] | None:
+    """Generate a text embedding via Gemini text-embedding-004.
+
+    Free tier: 1,500 requests/day. Returns a 768-dim float vector,
+    or None if Gemini is unavailable or the call fails.
+    Used by oracle_memory for permanent conversation memory search.
+    """
+    loop = asyncio.get_running_loop()
+    gemini = _get_gemini()
+    if not gemini:
+        return None
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: gemini.models.embed_content(
+                model="text-embedding-004",
+                content=text,
+            ),
+        )
+        return result.embeddings[0].values
+    except Exception as e:
+        log.warning(f"[atlas_ai] Embedding failed: {e}")
+        return None
+
+
 # ── Public sync API ──────────────────────────────────────────────────────────
 
 def generate_sync(
