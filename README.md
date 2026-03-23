@@ -124,6 +124,10 @@ Theme registry: `atlas_themes.py` · Theme picker: `ThemeSelectView` in `economy
 
 ## Current Version
 
+**v6.15.0** — Oracle v3 Phase 3: Code-Gen Agent replaces NL→SQL pipeline. New `oracle_agent.py` generates Python against the QueryBuilder API via Claude Sonnet, executes in a sandboxed environment with all 18 domain functions in scope. Tier 1 regex preserved (95% of queries), agent fires on miss with up to 2 retries. Sandbox extends `_SAFE_BUILTINS` from reasoning.py — blocks import/open/eval/type.
+
+**v6.14.0** — Oracle v3 Phases 1+2: QueryBuilder API with 44 StatDefs, 18 domain functions, composable Query builder. Permanent conversation memory with hybrid retrieval (sliding window + FTS5 + vector cosine similarity via Gemini text-embedding-004).
+
 **v6.12.0** — Bug hunt sweep: fixed casino wager TOCTOU race condition (balance read now inside user lock), wired blackjack + prediction renderers to style token system, removed ~230 lines of dead Oracle tool code, refactored trade card to use proper wrap_card() pipeline, replaced sync `requests` with `httpx` in sentinel, added channel config warnings at startup.
 
 **v6.11.0** — Flow Hub overhaul: betting record now includes parlays, added last-10-results dot strip with streak badge, replaced Wagered with Net P&L; My Bets card fully redesigned with themed panels, status badges, relative timestamps, and "Recently Settled" section; Flow Hub auto-refreshes every 30 seconds; silent theme switching (no confirmation message).
