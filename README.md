@@ -124,6 +124,8 @@ Theme registry: `atlas_themes.py` · Theme picker: `ThemeSelectView` in `economy
 
 ## Current Version
 
+**v6.17.2** — Oracle v3 peer review fixes: AST sandbox now blocks Try/ExceptHandler/Raise nodes (closes traceback frame escape vector). Season/week fallback chain uses data_manager instead of hardcoded values. `embed_and_store` timestamps captured before embedding call to preserve chronological ordering under concurrency.
+
 **v6.17.0** — Oracle v3 Phase 5 (Cleanup): Removed ~435 lines of dead Tier 2 Gemini classification code from `codex_intents.py` (replaced by Code-Gen Agent in Phase 3). Added admin-only `/forget` command to wipe a user's Oracle conversation memory. Added `backfill_embeddings.py` one-time migration script to generate embeddings for pre-Phase 2 conversation rows (respects Gemini 1,500/day free-tier quota).
 
 **v6.16.0** — Oracle v3 Phase 4: Answer generation migrated from Claude Haiku to Claude Sonnet for richer persona-aware responses. Full observability wired — every Oracle query now logs tier, model, token counts, latency, SQL executed, and row count to `oracle_query_log` table. `AIResult` dataclass extended with `input_tokens`, `output_tokens`, `latency_ms` fields captured from both Claude and Gemini API responses.

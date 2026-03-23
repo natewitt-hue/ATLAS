@@ -303,7 +303,13 @@ def _get_current_season() -> int:
         import oracle_query_builder as qb
         return qb.current_season()
     except Exception:
-        return 6
+        log.warning("Failed to resolve current season — falling back to data_manager")
+        try:
+            import data_manager as dm
+            return int(dm.CURRENT_SEASON)
+        except Exception:
+            log.error("Cannot determine current season from any source")
+            return 1  # Safer than a stale hardcode — obviously wrong prompts investigation
 
 
 def _get_current_week() -> int:
@@ -311,7 +317,13 @@ def _get_current_week() -> int:
         import oracle_query_builder as qb
         return qb.current_week()
     except Exception:
-        return 1
+        log.warning("Failed to resolve current week — falling back to data_manager")
+        try:
+            import data_manager as dm
+            return int(dm.CURRENT_WEEK)
+        except Exception:
+            log.error("Cannot determine current week from any source")
+            return 1
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -364,6 +364,15 @@ def validate_sandbox_ast(code: str) -> None:
                     f"Blocked: dunder string literal '{node.value}' "
                     f"(line {node.lineno})"
                 )
+        # Block try/except/raise — generated code has no legitimate need
+        # for exception handling, and caught exceptions expose __traceback__
+        # frame traversal (exc.__traceback__.tb_frame.f_back.f_globals)
+        if isinstance(node, (_ast.Try, _ast.ExceptHandler, _ast.Raise)):
+            node_name = type(node).__name__
+            raise _UnsafeCodeError(
+                f"Blocked: {node_name} statement not allowed in sandbox "
+                f"(line {node.lineno})"
+            )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

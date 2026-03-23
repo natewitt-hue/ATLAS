@@ -198,12 +198,13 @@ class OracleMemory:
         entities: dict | None = None,
         message_id: int | None = None,
         embedding: list[float] | None = None,
+        created_at: float | None = None,
     ) -> int | None:
         """Store a conversation turn. Returns the row ID or None on error."""
         await self._ensure()
         entities_json = json.dumps(entities) if entities else None
         embedding_blob = json.dumps(embedding).encode() if embedding else None
-        now = time.time()
+        now = created_at or time.time()
 
         try:
             async with aiosqlite.connect(self._db_path, timeout=10) as db:
@@ -233,7 +234,14 @@ class OracleMemory:
         Calls atlas_ai.embed_text() to generate a vector from the question,
         then stores the turn with the embedding. If embedding fails, the turn
         is still stored (just without a vector for similarity search).
+
+        The timestamp is captured *before* the embedding call so that
+        concurrent turns are stored in true chronological order even if
+        embedding latencies vary.
         """
+        # Capture timestamp before the (potentially slow) embedding call
+        # so concurrent turns are ordered by question time, not store time.
+        created_at = time.time()
         try:
             import atlas_ai
             embedding = await atlas_ai.embed_text(question)
@@ -241,7 +249,7 @@ class OracleMemory:
             embedding = None
         return await self.store_turn(
             discord_id, question, answer,
-            embedding=embedding, **kwargs,
+            embedding=embedding, created_at=created_at, **kwargs,
         )
 
     async def log_query(
