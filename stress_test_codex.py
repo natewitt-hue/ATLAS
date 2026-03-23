@@ -66,7 +66,8 @@ async def run_question(i: int, question: str, alias_map: dict):
         }
 
     # Step 3: SQL results → NL answer
-    answer = await gemini_answer(question, sql, rows)
+    answer_result = await gemini_answer(question, sql, rows)
+    answer = answer_result.text.strip()
     total_time = time.time() - start
 
     return {

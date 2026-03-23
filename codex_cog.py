@@ -42,7 +42,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 import atlas_ai
-from atlas_ai import Tier
+from atlas_ai import AIResult, Tier
 from difflib import get_close_matches
 
 import data_manager as dm
@@ -266,8 +266,8 @@ Now generate a query for this question:
 async def gemini_answer(
     question: str, sql: str, rows: list[dict],
     conv_context: str = "",
-) -> str:
-    """Format SQL results into natural language via AI. Non-blocking via run_in_executor."""
+) -> AIResult:
+    """Format SQL results into natural language via AI. Returns full AIResult."""
     results_str = json.dumps(rows, indent=2)
     if len(results_str) > MAX_CHARS:
         results_str = results_str[:MAX_CHARS] + "\n... (truncated)"
@@ -301,8 +301,8 @@ RESPONSE GUIDELINES:
 - Use sports language and dramatic flair — make numbers tell a story.
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.HAIKU)
-    return result.text.strip()
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET)
+    return result
 
 
 # ── Cog ──────────────────────────────────────────────────────────────────────

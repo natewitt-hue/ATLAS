@@ -149,7 +149,8 @@ async def run_question(i: int, question: str) -> dict:
 
     # Step 3: SQL results → NL answer
     try:
-        answer = await gemini_answer(question, sql, rows)
+        answer_result = await gemini_answer(question, sql, rows)
+        answer = answer_result.text.strip()
     except Exception as e:
         return {
             "q": question, "status": "ANSWER_ERROR", "error": str(e),

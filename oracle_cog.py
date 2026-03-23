@@ -31,6 +31,7 @@ import functools
 import logging
 import re
 import sqlite3
+import time
 import traceback
 from collections import Counter
 from typing import Optional
@@ -43,7 +44,7 @@ import analysis as an
 import data_manager as dm
 import intelligence as ig
 
-from permissions import ADMIN_USER_IDS
+from permissions import ADMIN_USER_IDS, is_commissioner
 
 try:
     from echo_loader import get_persona
@@ -2940,6 +2941,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
     )
 
     async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
+        pipeline_start = time.time()
         q = self.question.value.strip()
 
         annotated, alias_map = resolve_names_in_question(q)
@@ -3041,9 +3043,22 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
                     raise _EarlyReturn()
 
         answer_context = "\n".join(filter(None, [conv_block, affinity_block]))
-        answer = await gemini_answer(q, sql, rows, conv_context=answer_context)
+        answer_result = await gemini_answer(q, sql, rows, conv_context=answer_context)
+        answer = answer_result.text.strip()
 
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer, sql=sql or "")
+        asyncio.ensure_future(_oracle_mem.log_query(
+            discord_id=interaction.user.id,
+            question=q,
+            tier=intent_result.tier if intent_result else 2,
+            latency_ms=int((time.time() - pipeline_start) * 1000),
+            intent=intent_result.name if intent_result else None,
+            model=answer_result.model,
+            input_tokens=answer_result.input_tokens,
+            output_tokens=answer_result.output_tokens,
+            sql_executed=sql,
+            rows_returned=len(rows),
+        ))
 
         footer_parts = [f"🔍 {len(rows)} records analyzed", tier_label]
         if alias_map:
@@ -4196,6 +4211,33 @@ class StatsHubCog(commands.Cog):
             except Exception:
                 pass
 
+    # ── /forget (admin-only) ─────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="forget",
+        description="🧹 [Admin] Wipe a user's Oracle conversation memory.",
+    )
+    @app_commands.describe(user="The member whose Oracle memory to erase")
+    async def forget_user_cmd(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        if not await is_commissioner(interaction):
+            await interaction.response.send_message(
+                "⛔ Commissioner-only command.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        count = await _oracle_mem.forget_user(user.id)
+        if count:
+            await interaction.followup.send(
+                f"🧹 Erased **{count}** memory entries for {user.mention}.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"No Oracle memory found for {user.mention}.", ephemeral=True
+            )
+
 
 # ── Oracle Follow-up Domain Classifier ────────────────────────────────────────
 
@@ -4250,6 +4292,7 @@ async def _followup_tsl(
     context: str,
 ) -> tuple[str, dict]:
     """TSL League follow-up — NL→SQL→answer pipeline."""
+    pipeline_start = time.time()
     # Name resolution
     annotated = question
     alias_map = {}
@@ -4286,7 +4329,19 @@ async def _followup_tsl(
         else:
             rows = [agent_result.data] if isinstance(agent_result.data, dict) else []
         sql = agent_result.sql
-        answer = await gemini_answer(question, sql, rows, conv_context=context)
+        answer_result = await gemini_answer(question, sql, rows, conv_context=context)
+        answer = answer_result.text.strip()
+        asyncio.ensure_future(_oracle_mem.log_query(
+            discord_id=author.id,
+            question=question,
+            tier=2,
+            latency_ms=int((time.time() - pipeline_start) * 1000),
+            model=answer_result.model,
+            input_tokens=answer_result.input_tokens,
+            output_tokens=answer_result.output_tokens,
+            sql_executed=sql,
+            rows_returned=len(rows),
+        ))
         footer_parts = [f"🔍 {len(rows)} records", "Follow-up", "Agent"]
         if agent_result.attempts > 1:
             footer_parts.append("⚠️ Self-corrected")
@@ -4314,7 +4369,19 @@ async def _followup_tsl(
             "footer": "Follow-up · ATLAS™ Oracle",
         }
 
-    answer = await gemini_answer(question, sql, rows, conv_context=context)
+    answer_result = await gemini_answer(question, sql, rows, conv_context=context)
+    answer = answer_result.text.strip()
+    asyncio.ensure_future(_oracle_mem.log_query(
+        discord_id=author.id,
+        question=question,
+        tier=3,
+        latency_ms=int((time.time() - pipeline_start) * 1000),
+        model=answer_result.model,
+        input_tokens=answer_result.input_tokens,
+        output_tokens=answer_result.output_tokens,
+        sql_executed=sql,
+        rows_returned=len(rows),
+    ))
     footer_parts = [f"🔍 {len(rows)} records", "Follow-up"]
     if attempt > 1:
         footer_parts.append("⚠️ Self-corrected")

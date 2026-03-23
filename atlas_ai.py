@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncIterator
@@ -50,6 +51,9 @@ class AIResult:
     _raw_content: list = field(default_factory=list, repr=False)
     grounding_chunks: list[dict] = field(default_factory=list)  # [{uri, title, domain}]
     search_queries: list[str] = field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    latency_ms: int | None = None
 
 
 # ── Model mapping ────────────────────────────────────────────────────────────
@@ -155,10 +159,15 @@ def _call_claude(client, prompt, system, tier, max_tokens, temperature, json_mod
     if temperature is not None:
         kwargs["temperature"] = temperature
 
+    t0 = time.perf_counter()
     response = client.messages.create(**kwargs)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
     text_parts = [b.text for b in response.content if hasattr(b, "text")]
     text = " ".join(text_parts).strip()
+
+    in_tok = getattr(response.usage, "input_tokens", None)
+    out_tok = getattr(response.usage, "output_tokens", None)
 
     if json_mode:
         text = _strip_json_fences(text)
@@ -178,14 +187,23 @@ def _call_claude(client, prompt, system, tier, max_tokens, temperature, json_mod
             retry_kwargs = {k: v for k, v in kwargs.items() if k != "messages"}
             retry_kwargs["messages"] = retry_msgs
             retry_response = client.messages.create(**retry_kwargs)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
             retry_parts = [b.text for b in retry_response.content if hasattr(b, "text")]
             text = _strip_json_fences(" ".join(retry_parts).strip())
+            # Sum tokens from both calls
+            r_in = getattr(retry_response.usage, "input_tokens", 0)
+            r_out = getattr(retry_response.usage, "output_tokens", 0)
+            in_tok = (in_tok or 0) + r_in
+            out_tok = (out_tok or 0) + r_out
 
     return AIResult(
         text=text,
         provider="claude",
         model=model,
         _raw_content=list(response.content),
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        latency_ms=elapsed_ms,
     )
 
 
@@ -229,16 +247,31 @@ def _call_gemini(client, prompt, system, tier, max_tokens, temperature, json_mod
 
     config = types.GenerateContentConfig(**config_kwargs)
 
+    t0 = time.perf_counter()
     response = client.models.generate_content(
         model=model,
         config=config,
         contents=contents,
     )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
     text = (response.text or "").strip()
+
+    in_tok = out_tok = None
+    try:
+        um = response.usage_metadata
+        in_tok = um.prompt_token_count
+        out_tok = um.candidates_token_count
+    except Exception:
+        pass
+
     return AIResult(
         text=text,
         provider="gemini",
         model=model,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        latency_ms=elapsed_ms,
     )
 
 

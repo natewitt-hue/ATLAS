@@ -124,6 +124,10 @@ Theme registry: `atlas_themes.py` · Theme picker: `ThemeSelectView` in `economy
 
 ## Current Version
 
+**v6.17.0** — Oracle v3 Phase 5 (Cleanup): Removed ~435 lines of dead Tier 2 Gemini classification code from `codex_intents.py` (replaced by Code-Gen Agent in Phase 3). Added admin-only `/forget` command to wipe a user's Oracle conversation memory. Added `backfill_embeddings.py` one-time migration script to generate embeddings for pre-Phase 2 conversation rows (respects Gemini 1,500/day free-tier quota).
+
+**v6.16.0** — Oracle v3 Phase 4: Answer generation migrated from Claude Haiku to Claude Sonnet for richer persona-aware responses. Full observability wired — every Oracle query now logs tier, model, token counts, latency, SQL executed, and row count to `oracle_query_log` table. `AIResult` dataclass extended with `input_tokens`, `output_tokens`, `latency_ms` fields captured from both Claude and Gemini API responses.
+
 **v6.15.0** — Oracle v3 Phase 3: Code-Gen Agent replaces NL→SQL pipeline. New `oracle_agent.py` generates Python against the QueryBuilder API via Claude Sonnet, executes in a sandboxed environment with all 18 domain functions in scope. Tier 1 regex preserved (95% of queries), agent fires on miss with up to 2 retries. Sandbox extends `_SAFE_BUILTINS` from reasoning.py — blocks import/open/eval/type.
 
 **v6.14.0** — Oracle v3 Phases 1+2: QueryBuilder API with 44 StatDefs, 18 domain functions, composable Query builder. Permanent conversation memory with hybrid retrieval (sliding window + FTS5 + vector cosine similarity via Gemini text-embedding-004).
