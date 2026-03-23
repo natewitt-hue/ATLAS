@@ -1016,15 +1016,16 @@ async def deduct_wager(discord_id: int, wager: int,
     correlation_id: optional UUID fragment to link this debit to its
     future casino_sessions row (prevents race conditions on backlink).
     """
-    balance = await flow_wallet.get_balance(discord_id)
-    max_bet = CASINO_MAX_BET
-    for threshold, limit, _ in BET_TIERS:
-        if balance >= threshold:
-            max_bet = limit
-            break
-    if wager > max_bet:
-        raise ValueError(f"Wager ${wager:,} exceeds your tier limit of ${max_bet:,}")
     async with flow_wallet.get_user_lock(discord_id):
+        # Read balance INSIDE lock to prevent TOCTOU race on tier limits
+        balance = await flow_wallet.get_balance(discord_id)
+        max_bet = CASINO_MAX_BET
+        for threshold, limit, _ in BET_TIERS:
+            if balance >= threshold:
+                max_bet = limit
+                break
+        if wager > max_bet:
+            raise ValueError(f"Wager ${wager:,} exceeds your tier limit of ${max_bet:,}")
         async with aiosqlite.connect(flow_wallet.DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:

@@ -280,6 +280,10 @@ def _rebuild_rings_cache(abbr_map: dict[int, str], season: int, stage: int) -> d
     """
     Build rings cache from tsl_history.db championship records.
     Falls back to empty cache if DB is unavailable.
+
+    NOTE: Rebuilt once per load_all(). Rings are historical (championships
+    already played) and only change when tsl_history.db is re-synced, so
+    mid-session invalidation is unnecessary.
     """
     cache: dict[int, int] = {tid: 0 for tid in abbr_map}
 
@@ -330,6 +334,10 @@ def _rebuild_scarcity_cache(players: list) -> dict[str, dict]:
     """
     Compute position scarcity from the full player roster.
     Called once during load_all() — eliminates iterating 1700+ players per trade asset.
+
+    NOTE: Scarcity only shifts when /wittsync refreshes the roster DataFrame.
+    Mid-session trades move existing players; they don't change league-wide
+    positional counts enough to invalidate this cache.
     """
     EXPECTED: dict[str, int] = {
         "QB": 32, "HB": 64, "WR": 96, "TE": 64, "LT": 32, "LG": 32, "C": 32,

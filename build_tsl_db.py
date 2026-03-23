@@ -125,7 +125,12 @@ def _fetch_csv_from_api(endpoint: str, timeout: int = 90) -> list[dict]:
 
 def _load_rows_into_table(conn: sqlite3.Connection, table_name: str,
                           rows: list[dict], transform=None) -> int:
-    """Drop + recreate a table from a list of row dicts. Returns row count."""
+    """Drop + recreate a table from a list of row dicts. Returns row count.
+
+    SAFETY: table_name comes from _TABLE_SCHEMAS keys (hardcoded constants).
+    F-string SQL is used for DDL (CREATE/DROP) where parameterized queries
+    aren't supported. Never pass user-supplied values as table_name.
+    """
     if not rows:
         # Create an empty table with proper schema so downstream queries
         # don't crash with missing columns or "no such table".

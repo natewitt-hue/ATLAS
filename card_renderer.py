@@ -187,11 +187,11 @@ def _build_html(data: dict, *, theme_id: str | None = None) -> str:
     # ── Band config ──────────────────────────────────────────────────────────
     band = data.get("band", "GREEN")
     band_cfg = {
-        "GREEN":  ("green",  "var(--win)",    "🟢", "FAIR",      "Within legal range",  "Auto-Eligible"),
-        "YELLOW": ("yellow", "var(--yellow)", "🟡", "CAUTION",   "Flagged for review",  "Commissioner<br>Required"),
-        "RED":    ("red",    "var(--loss)",   "🔴", "LOPSIDED",  "Outside legal range", "Auto-Declined"),
+        "GREEN":  ("win",   "green",  "var(--win)",    "🟢", "FAIR",      "Within legal range",  "Auto-Eligible"),
+        "YELLOW": ("push",  "yellow", "var(--yellow)", "🟡", "CAUTION",   "Flagged for review",  "Commissioner<br>Required"),
+        "RED":    ("loss",  "red",    "var(--loss)",   "🔴", "LOPSIDED",  "Outside legal range", "Auto-Declined"),
     }
-    sbar_cls, band_color, band_emoji, band_word, band_sub, decision_text = band_cfg.get(band, band_cfg["GREEN"])
+    status_cls, sbar_cls, band_color, band_emoji, band_word, band_sub, decision_text = band_cfg.get(band, band_cfg["GREEN"])
 
     team_a = _esc(data.get("team_a_name", "Team A"))
     team_b = _esc(data.get("team_b_name", "Team B"))
@@ -266,12 +266,6 @@ def _build_html(data: dict, *, theme_id: str | None = None) -> str:
   /* Trade card overrides */
   .card {{ border-radius: 20px; width: {Tokens.CARD_WIDTH}px; }}
   .inner {{ position: relative; z-index: 2; background: var(--bg); }}
-
-  /* Status bar */
-  .sbar {{ height: 5px; }}
-  .sbar.green  {{ background: linear-gradient(90deg, var(--win), var(--win-dark), var(--win)); }}
-  .sbar.yellow {{ background: linear-gradient(90deg, var(--yellow), #FACC15, var(--yellow)); }}
-  .sbar.red    {{ background: linear-gradient(90deg, var(--loss), var(--loss-dark), var(--loss)); }}
 
   .sep      {{ height: 1px; background: rgba(255,255,255,0.04); margin: 0 36px; }}
   .sep-gold {{ height: 1px; background: linear-gradient(90deg, transparent, rgba(212,175,55,0.2) 15%, rgba(212,175,55,0.2) 85%, transparent); }}
@@ -612,9 +606,10 @@ def _build_html(data: dict, *, theme_id: str | None = None) -> str:
     font-size: var(--font-xs); color: #262626; font-weight: 600;
     letter-spacing: 0.05em;
   }}
-</style>
+</style>"""
 
-  <div class="sbar {sbar_cls}"></div>
+    # ── Trade card body HTML (separate from CSS) ──────────────────────────────
+    trade_body = f"""
   <div class="inner">
 
     <!-- HEADER -->
@@ -736,7 +731,7 @@ def _build_html(data: dict, *, theme_id: str | None = None) -> str:
     </div>
   </div>"""
 
-    return wrap_card(trade_css, "", theme_id=theme_id)
+    return wrap_card(trade_css + trade_body, status_cls, theme_id=theme_id)
 
 
 # ── Main render function ─────────────────────────────────────────────────────

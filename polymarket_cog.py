@@ -69,6 +69,8 @@ POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 # Channels
 PREDICTION_CHANNEL_ID = int(os.getenv("PREDICTION_MARKET_CHANNEL_ID", "0"))
+if not PREDICTION_CHANNEL_ID:
+    print("[polymarket] WARNING: PREDICTION_MARKET_CHANNEL_ID not set — prediction posts disabled")
 
 # How many TSL Bucks = 1 full contract payout
 # A YES at $0.65 costs 65 TSL Bucks; pays out 100 TSL Bucks if correct.

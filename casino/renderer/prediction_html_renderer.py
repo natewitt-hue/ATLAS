@@ -143,19 +143,19 @@ def _prediction_css() -> str:
   text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
 }
 .category-badge[data-cat="econ"] {
-  color: #5CB3FF;
+  color: var(--jewel-blue);
   background: rgba(74,158,255,0.06); border: 1px solid rgba(74,158,255,0.14);
   box-shadow: inset 0 0 8px rgba(74,158,255,0.08);
   text-shadow: 0 0 6px rgba(74,158,255,0.4);
 }
 .category-badge[data-cat="pol"] {
-  color: #BB7BF7;
+  color: var(--jewel-purple);
   background: rgba(168,85,247,0.06); border: 1px solid rgba(168,85,247,0.14);
   box-shadow: inset 0 0 8px rgba(168,85,247,0.08);
   text-shadow: 0 0 6px rgba(168,85,247,0.4);
 }
 .category-badge[data-cat="ent"] {
-  color: #FFC266;
+  color: var(--jewel-amber);
   background: rgba(255,183,77,0.06); border: 1px solid rgba(255,183,77,0.14);
   box-shadow: inset 0 0 8px rgba(255,183,77,0.08);
   text-shadow: 0 0 6px rgba(255,183,77,0.4);

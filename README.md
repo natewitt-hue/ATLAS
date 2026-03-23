@@ -124,4 +124,6 @@ Theme registry: `atlas_themes.py` · Theme picker: `ThemeSelectView` in `economy
 
 ## Current Version
 
+**v6.12.0** — Bug hunt sweep: fixed casino wager TOCTOU race condition (balance read now inside user lock), wired blackjack + prediction renderers to style token system, removed ~230 lines of dead Oracle tool code, refactored trade card to use proper wrap_card() pipeline, replaced sync `requests` with `httpx` in sentinel, added channel config warnings at startup.
+
 **v6.11.0** — Flow Hub overhaul: betting record now includes parlays, added last-10-results dot strip with streak badge, replaced Wagered with Net P&L; My Bets card fully redesigned with themed panels, status badges, relative timestamps, and "Recently Settled" section; Flow Hub auto-refreshes every 30 seconds; silent theme switching (no confirmation message).

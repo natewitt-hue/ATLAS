@@ -150,16 +150,13 @@ def _bj_shoe_html(shoe_remaining: int | None, shoe_total: int = 312) -> str:
 _BLACKJACK_CSS = """<style>
 /* ═══ BLACKJACK v6 — Photorealistic Card Design ═══ */
 
-/* Blackjack-specific custom properties */
+/* BJ colors: --bj-bg-table, --bj-bg-footer, --bj-text-white, --bj-text-ghost,
+   --bj-gold-hot, --bj-gold are injected at :root by atlas_style_tokens.
+   Only non-token effect vars are scoped here. */
 .card {
-  --bj-bg-table: #090a0d;
-  --bj-bg-footer: #08090b;
-  --bj-text-white: #fafafa;
-  --bj-text-ghost: #7c7d86;
   --bj-border-hair: rgba(255,255,255,0.04);
   --bj-border-glass: rgba(255,255,255,0.06);
-  --bj-gold-hot: #ffe066;
-  --bj-bj-gold: #ffd700;
+  --bj-bj-gold: var(--bj-gold);
 }
 
 /* ═══ HEADER ═══ */

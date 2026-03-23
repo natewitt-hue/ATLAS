@@ -303,6 +303,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         }
 
         added = 0
+        # SAFETY: col/dtype are from the hardcoded new_cols dict above (DDL migration).
         for col, dtype in new_cols.items():
             if col not in columns:
                 default = " DEFAULT 'Consensus'" if col == "odds_provider" else ""

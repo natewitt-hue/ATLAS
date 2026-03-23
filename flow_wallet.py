@@ -478,7 +478,8 @@ async def setup_wallet_db() -> None:
                 value TEXT NOT NULL DEFAULT ''
             )
         """)
-        # -- Audit columns: subsystem + subsystem_id (idempotent migration) --
+        # -- Audit columns: subsystem + subsystem_id (idempotent DDL migration) --
+        # SAFETY: col values are hardcoded string literals below.
         for col in ("subsystem TEXT DEFAULT NULL", "subsystem_id TEXT DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE transactions ADD COLUMN {col}")

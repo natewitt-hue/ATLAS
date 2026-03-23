@@ -45,6 +45,19 @@ class Tokens:
     DISCORD_BLUE = "#5865F2"    # Discord blurple
     SILVER = "#C0C0C0"          # metallic silver — coin tails
 
+    # ── Blackjack table ──
+    BJ_BG_TABLE = "#090a0d"       # near-black table surface
+    BJ_BG_FOOTER = "#08090b"      # footer strip
+    BJ_TEXT_WHITE = "#fafafa"     # bright card-value text
+    BJ_TEXT_GHOST = "#7c7d86"     # muted labels, shoe indicator
+    BJ_GOLD_HOT = "#ffe066"      # warm gold accent
+    BJ_GOLD = "#ffd700"          # classic blackjack gold
+
+    # ── Prediction market jewel-glow ──
+    JEWEL_BLUE = "#5CB3FF"       # economics category
+    JEWEL_PURPLE = "#BB7BF7"     # politics category
+    JEWEL_AMBER = "#FFC266"      # entertainment category
+
     # ── Typography ──
     FONT_DISPLAY = "Outfit"
     FONT_MONO = "JetBrains Mono"
@@ -112,6 +125,15 @@ class Tokens:
         "text-light": TEXT_LIGHT,
         "discord-blue": DISCORD_BLUE,
         "silver": SILVER,
+        "bj-bg-table": BJ_BG_TABLE,
+        "bj-bg-footer": BJ_BG_FOOTER,
+        "bj-text-white": BJ_TEXT_WHITE,
+        "bj-text-ghost": BJ_TEXT_GHOST,
+        "bj-gold-hot": BJ_GOLD_HOT,
+        "bj-gold": BJ_GOLD,
+        "jewel-blue": JEWEL_BLUE,
+        "jewel-purple": JEWEL_PURPLE,
+        "jewel-amber": JEWEL_AMBER,
         "font-display": FONT_DISPLAY,
         "font-mono": FONT_MONO,
         "font-xs": FONT_XS,

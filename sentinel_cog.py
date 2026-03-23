@@ -49,7 +49,6 @@ from urllib.parse import urlparse
 import discord
 from atlas_colors import AtlasColors
 import httpx
-import requests  # TODO: Unify on async httpx — requests is only used in _fetch_image_bytes()
 from discord import app_commands
 from discord.ext import commands
 import atlas_ai
@@ -2490,10 +2489,14 @@ def _build_qb_lookup() -> str:
 
 
 def _fetch_image_bytes(url: str) -> bytes:
-    """Download an image from a Discord CDN URL."""
+    """Download an image from a Discord CDN URL.
+
+    Called via run_in_executor — httpx sync client avoids pulling in
+    the 'requests' dependency for a single call site.
+    """
     if not _validate_image_url(url):
         raise ValueError(f"Blocked image URL (must be Discord CDN): {url}")
-    resp = requests.get(url, timeout=15)
+    resp = httpx.get(url, timeout=15)
     resp.raise_for_status()
     return resp.content
 

@@ -169,7 +169,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.11.0"  # feat: Flow Hub richer stats, My Bets redesign, 30s auto-refresh
+ATLAS_VERSION = "6.12.0"  # fix: bug hunt sweep — race condition, token compliance, dead code, render pipeline
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -177,6 +177,8 @@ GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 from permissions import ADMIN_USER_IDS
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "0"))
+if not ADMIN_CHANNEL_ID:
+    print("[ATLAS] WARNING: ADMIN_CHANNEL_ID not set — admin notifications will be silently skipped")
 
 intents       = discord.Intents.all()
 
