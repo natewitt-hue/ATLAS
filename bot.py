@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.17.0"  # feat(oracle): v3 Phase 5 — Cleanup dead Tier 2 code, /forget command, embedding backfill
+ATLAS_VERSION = "6.17.1"  # fix(oracle): sandbox AST validation, executor timeout, extract_sql regex, observability gaps
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

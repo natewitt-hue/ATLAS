@@ -323,6 +323,50 @@ _SAFE_BUILTINS = {
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  AST VALIDATION — blocks dunder attribute traversal before sandbox runs
+# ═════════════════════════════════════════════════════════════════════════════
+
+import ast as _ast
+
+
+class _UnsafeCodeError(Exception):
+    """Raised when generated code uses blocked patterns (dunder access, etc.)."""
+
+
+def validate_sandbox_ast(code: str) -> None:
+    """Parse *code* and reject any dunder attribute access.
+
+    The custom ``getattr`` in ``_SAFE_BUILTINS`` only intercepts the
+    ``getattr()`` builtin.  Direct dot-notation (``obj.__class__``) uses
+    Python's C-level ``__getattribute__`` protocol and bypasses the
+    builtins dict entirely.  This function catches those patterns at
+    parse time so they never run.
+
+    Raises ``_UnsafeCodeError`` on violation.
+    """
+    try:
+        tree = _ast.parse(code)
+    except SyntaxError as exc:
+        raise _UnsafeCodeError(f"Syntax error in generated code: {exc}") from exc
+
+    for node in _ast.walk(tree):
+        # Block obj.__dunder__ attribute access
+        if isinstance(node, _ast.Attribute) and node.attr.startswith("_"):
+            raise _UnsafeCodeError(
+                f"Blocked: access to private/dunder attribute '.{node.attr}' "
+                f"(line {node.lineno})"
+            )
+        # Block string literals that look like dunder names passed to
+        # hasattr() or similar — belt-and-suspenders
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+            if node.value.startswith("__") and node.value.endswith("__"):
+                raise _UnsafeCodeError(
+                    f"Blocked: dunder string literal '{node.value}' "
+                    f"(line {node.lineno})"
+                )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  SANDBOXED EXECUTION
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -370,10 +414,15 @@ def build_exec_env() -> dict:
 
 def safe_exec(code: str) -> tuple[any, str]:
     """
-    Execute generated code in a sandboxed env.
+    Run generated code in a sandboxed env.
     Returns (result, error_message).
     result is whatever the code assigned to the `result` variable.
     """
+    # AST validation — reject dunder traversal before running
+    try:
+        validate_sandbox_ast(code)
+    except _UnsafeCodeError as exc:
+        return None, str(exc)
     env = build_exec_env()
     try:
         exec(code, env)

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import atlas_ai
 from atlas_ai import Tier
-from reasoning import _SAFE_BUILTINS
+from reasoning import _SAFE_BUILTINS, validate_sandbox_ast, _UnsafeCodeError
 
 log = logging.getLogger("oracle_agent")
 
@@ -410,6 +410,11 @@ def _extract_code(text: str) -> str:
 
 def _safe_run(code: str, env: dict) -> tuple:
     """Run generated code in sandboxed env. Returns (result, error_str | None)."""
+    # AST validation — reject dunder traversal before running
+    try:
+        validate_sandbox_ast(code)
+    except _UnsafeCodeError as exc:
+        return None, str(exc)
     try:
         compiled = compile(code, "<oracle_agent>", "exec")
         # pylint: disable=exec-used
@@ -500,7 +505,13 @@ async def run_agent(
         sql_capture: list[str] = []
         env = build_agent_env(caller_db, alias_map, sql_capture)
 
-        data, error = await loop.run_in_executor(None, _safe_run, code, env)
+        try:
+            data, error = await asyncio.wait_for(
+                loop.run_in_executor(None, _safe_run, code, env),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            data, error = None, "Sandbox timed out after 15 seconds"
 
         if error is None and data is not None:
             captured_sql = sql_capture[-1] if sql_capture else ""

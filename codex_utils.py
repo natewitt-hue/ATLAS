@@ -64,10 +64,13 @@ async def run_sql_async(sql: str, params: tuple = ()) -> tuple[list[dict], str |
 
 def extract_sql(text: str) -> str | None:
     """Pull SQL out of AI response."""
+    # Pattern 1: fenced — DOTALL needed for multi-line SQL inside ```
     match = re.search(r"```(?:sql)?\s*(SELECT.+?)```", text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    match = re.search(r"(SELECT\s.+?);?\s*$", text, re.DOTALL | re.IGNORECASE)
+    # Pattern 2: unfenced — NO DOTALL so we don't swallow explanation text
+    # after the SQL. MULTILINE makes $ match end-of-line, not end-of-string.
+    match = re.search(r"(SELECT\s.+?);?\s*$", text, re.MULTILINE | re.IGNORECASE)
     if match:
         return match.group(1).strip()
     return None

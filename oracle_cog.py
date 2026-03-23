@@ -3101,6 +3101,7 @@ class _AskWebModal(_OracleIntelModal):
 
     async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
+        pipeline_start = time.time()
 
         # ── Conversation memory ────────────────────────────
         conv_block = ""
@@ -3124,6 +3125,18 @@ class _AskWebModal(_OracleIntelModal):
         answer = result.text or fallback_msg
 
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
+
+        # ── Observability logging ──────────────────────────
+        asyncio.ensure_future(_oracle_mem.log_query(
+            discord_id=interaction.user.id,
+            question=q,
+            tier=4,  # Tier 4 = web search
+            latency_ms=int((time.time() - pipeline_start) * 1000),
+            intent=f"web_{self.mode}",
+            model=result.model if hasattr(result, "model") else None,
+            input_tokens=result.input_tokens if hasattr(result, "input_tokens") else None,
+            output_tokens=result.output_tokens if hasattr(result, "output_tokens") else None,
+        ))
 
         footer = f"{footer_mode} · Web search enabled · ATLAS™ Oracle"
         if result.fallback_used:
@@ -3160,6 +3173,7 @@ class PlayerScoutModal(_OracleIntelModal, title="🎯 Ask ATLAS — Player Scout
 
     async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
+        pipeline_start = time.time()
 
         # ── Caller team resolution ────────────────────────────
         caller_db = None
@@ -3272,6 +3286,20 @@ RESPONSE GUIDELINES:
         # ── Store conversation turn ───────────────────────────
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer, sql=sql or "")
 
+        # ── Observability logging ──────────────────────────
+        asyncio.ensure_future(_oracle_mem.log_query(
+            discord_id=interaction.user.id,
+            question=q,
+            tier=5,  # Tier 5 = player scout
+            latency_ms=int((time.time() - pipeline_start) * 1000),
+            intent="player_scout",
+            model=answer_result.model,
+            input_tokens=answer_result.input_tokens,
+            output_tokens=answer_result.output_tokens,
+            sql_executed=sql,
+            rows_returned=len(rows),
+        ))
+
         footer_parts = [f"🔍 {len(rows)} players analyzed"]
         if team_name:
             footer_parts.append(f"🏈 {team_name}")
@@ -3301,6 +3329,7 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
 
     async def _generate(self, interaction: discord.Interaction) -> tuple[str, dict]:
         q = self.question.value.strip()
+        pipeline_start = time.time()
 
         # ── Resolve caller identity ─────────────────────────
         caller_db = None
@@ -3466,6 +3495,18 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
 
         # ── Store conversation turn ─────────────────────────
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
+
+        # ── Observability logging ──────────────────────────
+        asyncio.ensure_future(_oracle_mem.log_query(
+            discord_id=interaction.user.id,
+            question=q,
+            tier=6,  # Tier 6 = strategy room
+            latency_ms=int((time.time() - pipeline_start) * 1000),
+            intent="strategy_room",
+            model=result.model if hasattr(result, "model") else None,
+            input_tokens=result.input_tokens if hasattr(result, "input_tokens") else None,
+            output_tokens=result.output_tokens if hasattr(result, "output_tokens") else None,
+        ))
 
         # ── Footer ──────────────────────────────────────────
         footer_parts = ["Strategy Room"]
