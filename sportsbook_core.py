@@ -33,8 +33,49 @@ def grade_bet(bet_row: dict, event_row: dict) -> str:
     - Prediction: parse result_payload JSON, compare pick to payload['resolved_side'];
                   'VOID' result → Push
     """
-    # TODO: implement — this function will be filled in by the user
-    raise NotImplementedError("grade_bet() not yet implemented")
+    if event_row["status"] == "cancelled":
+        return "Cancelled"
+
+    bet_type = bet_row["bet_type"]
+    pick     = bet_row["pick"]
+    line     = bet_row.get("line")
+    home     = event_row["home_participant"]
+    away     = event_row["away_participant"]
+    h_score  = float(event_row["home_score"] or 0)
+    a_score  = float(event_row["away_score"] or 0)
+
+    if bet_type == "Moneyline":
+        if h_score == a_score:
+            return "Push"
+        winner = home if h_score > a_score else away
+        return "Won" if pick == winner else "Lost"
+
+    if bet_type == "Spread":
+        pick_score = h_score if pick == home else a_score
+        opp_score  = a_score if pick == home else h_score
+        covered = pick_score + line - opp_score
+        if covered > 0:
+            return "Won"
+        if covered == 0:
+            return "Push"
+        return "Lost"
+
+    if bet_type in ("Over", "Under"):
+        total = h_score + a_score
+        if total == line:
+            return "Push"
+        if bet_type == "Over":
+            return "Won" if total > line else "Lost"
+        return "Won" if total < line else "Lost"
+
+    if bet_type == "Prediction":
+        payload = json.loads(event_row.get("result_payload") or "{}")
+        resolved = payload.get("resolved_side", "")
+        if resolved == "VOID":
+            return "Push"
+        return "Won" if pick == resolved else "Lost"
+
+    return "Error"
 OLD_SB_DB = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
 FLOW_DB   = os.path.join(_DIR, "flow.db")
 
