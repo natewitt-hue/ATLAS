@@ -392,6 +392,49 @@ async def _post_settlement_card(event, bets) -> None:
     pass
 
 
+# ─── Parlay helpers ───────────────────────────────────────────────────────────
+
+async def write_parlay(
+    parlay_id: str,
+    discord_id: int,
+    combined_odds: int,
+    wager: int,
+) -> None:
+    """
+    Insert a new Pending parlay header row into flow.db.
+    Safe to call before write_parlay_leg; legs reference this row via FK.
+    """
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            """INSERT OR IGNORE INTO parlays
+               (parlay_id, discord_id, combined_odds, wager_amount, status)
+               VALUES (?, ?, ?, ?, 'Pending')""",
+            (parlay_id, discord_id, combined_odds, wager),
+        )
+        await db.commit()
+
+
+async def write_parlay_leg(
+    parlay_id: str,
+    leg_index: int,
+    bet_id: int,
+) -> None:
+    """
+    Insert a parlay_legs join row into flow.db linking a bet to a parlay.
+    bet_id must already exist in the bets table (written via write_bet).
+    """
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            """INSERT OR IGNORE INTO parlay_legs
+               (parlay_id, bet_id, leg_index)
+               VALUES (?, ?, ?)""",
+            (parlay_id, bet_id, leg_index),
+        )
+        await db.commit()
+
+
 # ─── Public API for ingestor cogs ─────────────────────────────────────────────
 
 async def write_event(

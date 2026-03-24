@@ -896,6 +896,37 @@ def _build_game_lines(games_raw: list) -> list[dict]:
     return ui_games
 
 
+async def _write_tsl_events(games: list[dict]) -> None:
+    """
+    Write current-week TSL games into sportsbook_core events table.
+    Called after _build_game_lines() so event rows exist before any bet is placed.
+    """
+    import sportsbook_core
+    import data_manager as dm
+    from datetime import datetime, timezone
+
+    for g in games:
+        schedule_id = g.get("scheduleId") or g.get("game_id", "")
+        if schedule_id and str(schedule_id) not in ("0", ""):
+            event_id = f"tsl:{schedule_id}"
+        else:
+            home_id = g.get("homeTeamId", g.get("home", ""))
+            away_id = g.get("awayTeamId", g.get("away", ""))
+            event_id = f"tsl:s{dm.CURRENT_SEASON}:w{g.get('bet_week', dm.CURRENT_WEEK)}:{home_id}v{away_id}"
+
+        commence_ts = g.get("gameTime") or \
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        await sportsbook_core.write_event(
+            event_id=event_id,
+            source="TSL",
+            home=g.get("home", ""),
+            away=g.get("away", ""),
+            commence_ts=commence_ts,
+        )
+        g["event_id"] = event_id  # store back for bet placement
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  PARLAY CART (DB-backed, survives restarts)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1170,302 +1201,10 @@ def _grade_single_bet(bet_type: str, pick: str, line: float,
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  AUTO-GRADE
+#  AUTO-GRADE (removed — settlement now handled by sportsbook_core.settle_event
+#  triggered via EVENT_FINALIZED bus. Manual grading via _grade_bets_impl
+#  still uses _build_score_lookup / _fuzzy_match / _grade_single_bet below.)
 # ═════════════════════════════════════════════════════════════════════════════
-
-async def _run_autograde(bot) -> None:
-    from datetime import datetime as _dt, timezone as _tz
-    _ag_start = _dt.now(_tz.utc)
-    _autograde_health["task_alive"] = True
-
-    def _grade_sync():
-        results = []
-        pending_events = []
-        with _db_con() as con:
-            ungraded = con.execute(
-                "SELECT DISTINCT week FROM bets_table "
-                "WHERE status NOT IN ('Won','Lost','Push','Cancelled','Error')"
-            ).fetchall()
-        if not ungraded:
-            return results, pending_events
-
-        failed_weeks = []
-        for (week,) in ungraded:
-            scores     = _build_score_lookup(week)
-            real_games = len([k for k in scores if k != "__fuzzy__"])
-            if real_games == 0:
-                continue
-
-            settled = wins = losses = pushes = 0
-            total_paid = 0
-            error_bets = []
-            settled_details = []
-            skipped_matchups = []
-            import wager_registry
-
-            # ── Read phase: no exclusive lock needed in WAL mode ──────────
-            with _db_con() as con:
-                pending = con.execute(
-                    "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
-                    "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
-                    (week,)
-                ).fetchall()
-
-            # ── Per-bet write: lock held only for ~4 SQL statements each ──
-            for b in pending:
-                bid, uid, matchup, btype, amt, odds, pick, line = b
-                gd = _fuzzy_match(matchup.lower().strip(), scores)
-                if not gd:
-                    skipped_matchups.append((bid, matchup, uid, amt))
-                    log.warning(f"[AUTO-GRADE] Fuzzy match FAILED for bet {bid}: '{matchup}' — stays Pending")
-                    continue
-                try:
-                    line_val = float(line)
-                except (ValueError, TypeError):
-                    line_val = 0.0
-                res = _grade_single_bet(btype, pick, line_val,
-                                        gd["home"], gd["away"],
-                                        gd["home_score"], gd["away_score"])
-                if res == "Pending":
-                    continue
-                try:
-                    with _db_con() as con:
-                        con.execute("BEGIN IMMEDIATE")
-                        # Guard: re-check status to prevent double-settlement
-                        cur = con.execute(
-                            "SELECT status FROM bets_table WHERE bet_id=?", (bid,)
-                        ).fetchone()
-                        if not cur or cur[0] != "Pending":
-                            continue
-                        if res == "Won":
-                            payout = _payout_calc(amt, int(odds))
-                            if payout < 0 or payout > MAX_PAYOUT:
-                                log.error(f"[AUTO-GRADE] Insane payout ${payout:,.2f} for bet {bid} — marking Error")
-                                con.execute("UPDATE bets_table SET status='Error' WHERE bet_id=?", (bid,))
-                                error_bets.append(("bet", bid, uid, amt, int(odds), payout, matchup))
-                                settled += 1
-                                continue
-                            _update_balance(uid, payout, con,
-                                            subsystem="TSL_BET", subsystem_id=str(bid),
-                                            reference_key=f"TSL_BET_{bid}_won")
-                            total_paid += payout - amt
-                            wins += 1
-                        elif res == "Push":
-                            _update_balance(uid, amt, con,
-                                            subsystem="TSL_BET", subsystem_id=str(bid),
-                                            reference_key=f"TSL_BET_{bid}_push")
-                            pushes += 1
-                        elif res == "Lost":
-                            losses += 1
-                        con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
-                        _ra = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (0 if res == "Push" else -amt)
-                        wager_registry.settle_wager_sync("TSL_BET", str(bid), res.lower(), _ra, con=con)
-                        settled += 1
-                    # Balance reads happen after commit so they see updated values
-                    _settle_payout = _payout_calc(amt, int(odds)) if res == "Won" else (amt if res == "Push" else 0)
-                    settled_details.append({
-                        "bet_id": bid, "discord_id": uid, "matchup": matchup,
-                        "bet_type": btype, "pick": pick, "wager": amt,
-                        "result": res, "payout": _settle_payout,
-                        "new_balance": _get_balance(uid),
-                    })
-                    _ev_profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (-amt if res == "Lost" else 0)
-                    pending_events.append({
-                        "discord_id": uid,
-                        "guild_id": None,
-                        "source": "TSL_BET",
-                        "bet_type": btype,
-                        "amount": _ev_profit,
-                        "balance_after": _get_balance(uid),
-                        "description": f"{res}: {pick} ({btype}) on {matchup}",
-                        "bet_id": bid,
-                    })
-                except Exception:
-                    log.exception(f"[AUTO-GRADE] Error settling bet {bid}")
-                    failed_weeks.append(week)
-
-            # ── Parlays: read all legs up front, then settle per-parlay ───
-            with _db_con() as con:
-                parlays = con.execute(
-                    "SELECT parlay_id, discord_id, combined_odds, wager_amount "
-                    "FROM parlays_table WHERE week=? AND status='Pending'",
-                    (week,)
-                ).fetchall()
-                parlay_legs_map = {}
-                for pid, _, _, _ in parlays:
-                    parlay_legs_map[pid] = con.execute(
-                        "SELECT game_id, matchup, pick, bet_type, line, odds, source "
-                        "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
-                        (pid,)
-                    ).fetchall()
-
-            for pid, uid, c_odds, amt in parlays:
-                legs = parlay_legs_map.get(pid, [])
-                if not legs:
-                    try:
-                        with _db_con() as con:
-                            con.execute("BEGIN IMMEDIATE")
-                            con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
-                    except Exception:
-                        log.exception(f"[AUTO-GRADE] Error settling empty parlay {pid}")
-                    continue
-
-                # Grade all legs (pure computation, no DB access)
-                leg_results = []
-                for row in legs:
-                    leg_matchup = row[1]
-                    source = row[6] if len(row) > 6 else "TSL"
-                    if source != "TSL":
-                        leg_results.append("Pending")
-                        continue
-                    gd = _fuzzy_match(leg_matchup.lower().strip(), scores)
-                    if not gd:
-                        leg_results.append("Pending")
-                        continue
-                    leg_results.append(_grade_single_bet(
-                        row[3], row[2], float(row[4]),
-                        gd["home"], gd["away"], gd["home_score"], gd["away_score"]
-                    ))
-
-                # Per-parlay write transaction
-                try:
-                    with _db_con() as con:
-                        con.execute("BEGIN IMMEDIATE")
-                        prow = con.execute(
-                            "SELECT status FROM parlays_table WHERE parlay_id=?", (pid,)
-                        ).fetchone()
-                        if not prow or prow[0] != "Pending":
-                            continue
-                        for leg_idx, (leg_res, row) in enumerate(zip(leg_results, legs)):
-                            source = row[6] if len(row) > 6 else "TSL"
-                            if source == "TSL" and leg_res != "Pending":
-                                con.execute(
-                                    "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
-                                    (leg_res, pid, leg_idx),
-                                )
-                        settle_events = _check_parlay_completion(pid, con=con)
-                        pending_events.extend(settle_events)
-                        if settle_events:
-                            settled += 1
-                except Exception:
-                    log.exception(f"[AUTO-GRADE] Error settling parlay {pid}")
-                    failed_weeks.append(week)
-
-            if settled > 0 or wins + losses + pushes > 0:
-                results.append({
-                    "week": week, "settled": settled,
-                    "wins": wins, "losses": losses, "pushes": pushes,
-                    "total_paid": total_paid,
-                    "skipped_matchups": skipped_matchups,
-                    "error_bets": error_bets,
-                    "settled_details": settled_details,
-                })
-        if failed_weeks:
-            log.warning(f"[AUTO-GRADE] Failed weeks: {failed_weeks}")
-        return results, pending_events
-
-    loop = asyncio.get_running_loop()
-    results, pending_events = await loop.run_in_executor(None, _grade_sync)
-
-    # ── Update health metrics ────────────────────────────────────────
-    _autograde_health["last_run_at"] = _ag_start
-    _autograde_health["last_run_duration_s"] = (_dt.now(_tz.utc) - _ag_start).total_seconds()
-    _autograde_health["total_runs"] += 1
-    _run_settled = sum(r["settled"] for r in results)
-    _run_skipped = sum(len(r.get("skipped_matchups", [])) for r in results)
-    _autograde_health["last_run_settled"] = _run_settled
-    _autograde_health["last_run_skipped"] = _run_skipped
-    _autograde_health["total_settled"] += _run_settled
-    _autograde_health["consecutive_failures"] = 0
-
-    try:
-        from flow_events import SportsbookEvent, flow_bus
-        for ev_data in pending_events:
-            sb_event = SportsbookEvent(**ev_data)
-            await flow_bus.emit("sportsbook_result", sb_event)
-    except Exception:
-        log.exception("Failed to emit sportsbook FLOW events")
-
-    all_skipped = []
-    all_errors = []
-    all_settled = []
-
-    for r in results:
-        log.info(
-            f"[AUTO-GRADE] Week {r['week']} — Settled {r['settled']} | "
-            f"W{r['wins']} L{r['losses']} P{r['pushes']} | Paid ${r['total_paid']:,}"
-        )
-        all_skipped.extend(r.get("skipped_matchups", []))
-        all_errors.extend(r.get("error_bets", []))
-        all_settled.extend(r.get("settled_details", []))
-
-        try:
-            from setup_cog import get_channel_id as _get_ch_id
-            ch_id = _get_ch_id("sportsbook")
-            channel = bot.get_channel(ch_id) if ch_id else None
-        except ImportError:
-            channel = discord.utils.get(bot.get_all_channels(), name="sportsbook")
-        if channel:
-            try:
-                embed = discord.Embed(
-                    title=f"✅ Week {r['week']} Bets Auto-Graded", color=TSL_GOLD
-                )
-                embed.add_field(name="Settled",      value=str(r["settled"]),       inline=True)
-                embed.add_field(name="✅ Won",       value=str(r["wins"]),          inline=True)
-                embed.add_field(name="❌ Lost",      value=str(r["losses"]),        inline=True)
-                embed.add_field(name="🔁 Push",     value=str(r["pushes"]),        inline=True)
-                embed.add_field(name="💸 Paid Out", value=f"${r['total_paid']:,}", inline=True)
-                embed.set_footer(text="TSL Sportsbook • Auto-graded")
-                await channel.send(embed=embed)
-            except Exception:
-                pass
-
-    # ── Post settled bets to #ledger ─────────────────────────────────
-    if all_settled:
-        try:
-            from ledger_poster import post_bet_settlement
-            guild = bot.guilds[0] if bot.guilds else None
-            if guild:
-                for sd in all_settled:
-                    await post_bet_settlement(
-                        bot, guild.id, sd["discord_id"], sd["bet_id"],
-                        sd["matchup"], sd["bet_type"], sd["pick"],
-                        sd["wager"], sd["result"], sd["payout"],
-                        sd["new_balance"], source="TSL",
-                    )
-        except Exception:
-            log.exception("[AUTO-GRADE] Failed to post to #ledger")
-
-    # ── Admin alerts for autograde issues ────────────────────────────
-    if all_skipped or all_errors:
-        try:
-            from setup_cog import get_channel_id as _get_ch_id
-            admin_ch_id = _get_ch_id("admin-chat")
-            admin_ch = bot.get_channel(admin_ch_id) if admin_ch_id else None
-            if admin_ch:
-                if all_skipped:
-                    lines = [f"bet `{bid}`: {matchup} (${amt:,})" for bid, matchup, _, amt in all_skipped[:15]]
-                    alert = discord.Embed(
-                        title="Autograde: Unmatched Bets",
-                        description="\n".join(lines),
-                        color=0xE74C3C,
-                    )
-                    alert.set_footer(text=f"{len(all_skipped)} bet(s) could not be fuzzy-matched to game results")
-                    await admin_ch.send(embed=alert)
-                if all_errors:
-                    lines = [
-                        f"{kind} `{bid}`: ${amt:,} @ {odds} — payout ${payout:,.0f}"
-                        for kind, bid, _, amt, odds, payout, _ in all_errors[:15]
-                    ]
-                    alert = discord.Embed(
-                        title="Autograde: Error Bets (Insane Payout)",
-                        description="\n".join(lines),
-                        color=0xE74C3C,
-                    )
-                    alert.set_footer(text=f"{len(all_errors)} bet(s) marked Error — use /boss flow audit to resolve")
-                    await admin_ch.send(embed=alert)
-        except Exception:
-            log.exception("[AUTO-GRADE] Failed to post autograde alerts")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1544,28 +1283,33 @@ async def _place_straight_bet(
             with _db_con() as con:
                 con.execute("BEGIN IMMEDIATE")
                 safe_line = line if isinstance(line, (int, float)) else 0.0
-                con.execute(
-                    "INSERT INTO bets_table "
-                    "(discord_id, week, matchup, bet_type, wager_amount, odds, pick, line) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (int(interaction.user.id), int(bet_week), matchup_key,
-                     bet_type, int(amount), int(odds), team, float(safe_line))
-                )
-                bet_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
                 new_bal = flow_wallet.update_balance_sync(
                     interaction.user.id, -amount, source="TSL_BET", con=con,
-                    subsystem="TSL_BET", subsystem_id=str(bet_id),
-                )
-                import wager_registry
-                wager_registry.register_wager_sync(
-                    "TSL_BET", str(bet_id), int(interaction.user.id), int(amount),
-                    label=f"{team} {bet_type} {_american_to_str(odds)}",
-                    odds=int(odds), con=con,
+                    subsystem="TSL_BET", subsystem_id="pending",
                 )
                 con.commit()
         except flow_wallet.InsufficientFundsError:
             balance = _get_balance(interaction.user.id)
             return await _send_error(f"❌ Insufficient balance. You have **${balance:,}**.")
+
+        # Write bet to sportsbook_core (flow.db) after funds confirmed
+        import sportsbook_core as _sb_core
+        bet_id = await _sb_core.write_bet(
+            discord_id=int(interaction.user.id),
+            event_id=f"tsl:{game_id}",
+            bet_type=bet_type,
+            pick=team,
+            line=safe_line if isinstance(safe_line, (int, float)) else None,
+            odds=int(odds),
+            wager=int(amount),
+        )
+        import wager_registry
+        with _db_con() as con:
+            wager_registry.register_wager_sync(
+                "TSL_BET", str(bet_id), int(interaction.user.id), int(amount),
+                label=f"{team} {bet_type} {_american_to_str(odds)}",
+                odds=int(odds), con=con,
+            )
 
     profit = _payout_calc(amount, odds) - amount
 
@@ -1778,6 +1522,39 @@ class ParlayWagerModal(discord.ui.Modal):
                     f"Your parlay cart has been preserved — add funds and try again.",
                     ephemeral=True,
                 )
+
+        # Mirror parlay + legs into sportsbook_core (flow.db)
+        try:
+            import sportsbook_core as _sb_core
+            await _sb_core.write_parlay(
+                parlay_id=parlay_id,
+                discord_id=int(interaction.user.id),
+                combined_odds=int(self.combined_odds),
+                wager=int(amt),
+            )
+            for i, leg in enumerate(self.legs):
+                source = leg.get("source", "TSL")
+                raw_game_id = leg.get("event_id", leg.get("game_id", ""))
+                event_id = f"tsl:{raw_game_id}" if source == "TSL" else str(raw_game_id)
+                leg_line = leg.get("line")
+                leg_line_val = float(leg_line) if leg_line not in (None, "", 0) else None
+                leg_bet_id = await _sb_core.write_bet(
+                    discord_id=int(interaction.user.id),
+                    event_id=event_id,
+                    bet_type=leg["bet_type"],
+                    pick=leg["pick"],
+                    line=leg_line_val,
+                    odds=int(leg["odds"]),
+                    wager=int(amt),
+                    parlay_id=parlay_id,
+                )
+                await _sb_core.write_parlay_leg(
+                    parlay_id=parlay_id,
+                    leg_index=i,
+                    bet_id=leg_bet_id,
+                )
+        except Exception:
+            log.exception("[PARLAY] Failed to mirror parlay to sportsbook_core")
 
         potential = _payout_calc(amt, self.combined_odds) - amt
         _clear_cart(interaction.user.id)
@@ -2031,7 +1808,9 @@ async def _load_tsl_week_games() -> list[dict]:
         raise ValueError(f"No games found for Week {bet_week}. Schedule may not be posted yet.")
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _build_game_lines, raw_games)
+    games = await loop.run_in_executor(None, _build_game_lines, raw_games)
+    await _write_tsl_events(games)
+    return games
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3161,11 +2940,9 @@ class SportsbookCog(commands.Cog):
         setup_snapshots_table()
         dm._autograde_callback = self._on_data_refresh
         _expire_stale_cart_legs()
-        self.auto_grade.start()
         self.daily_snapshot.start()
 
     def cog_unload(self):
-        self.auto_grade.cancel()
         self.daily_snapshot.cancel()
         dm._autograde_callback = None
 
@@ -3190,24 +2967,6 @@ class SportsbookCog(commands.Cog):
 
     async def _on_data_refresh(self):
         _invalidate_elo_cache()
-        try:
-            await _run_autograde(self.bot)
-        except Exception:
-            log.exception("[AUTO-GRADE] Unhandled exception in data refresh callback")
-
-    @tasks.loop(minutes=10)
-    async def auto_grade(self):
-        try:
-            await _run_autograde(self.bot)
-        except Exception:
-            log.exception("[AUTO-GRADE] Unhandled exception — will retry next cycle")
-
-    @auto_grade.before_loop
-    async def before_auto_grade(self):
-        await self.bot.wait_until_ready()
-        await discord.utils.sleep_until(
-            discord.utils.utcnow().replace(minute=0, second=0, microsecond=0)
-        )
 
     # ── Autocomplete helper ───────────────────────────────────────────────────
     async def _matchup_autocomplete(self, interaction: discord.Interaction, current: str):
