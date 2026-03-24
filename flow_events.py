@@ -71,5 +71,9 @@ class FlowEventBus:
             except Exception:
                 log.exception("Error in flow event handler for %s", event_type)
 
+# Wagering settlement event — emitted by ingestor cogs when a game/market finalises
+# payload shape: {"event_id": str, "source": "TSL" | "REAL" | "POLY"}
+EVENT_FINALIZED = "event_finalized"
+
 # Singleton — imported by game cogs and flow_live_cog
 flow_bus = FlowEventBus()

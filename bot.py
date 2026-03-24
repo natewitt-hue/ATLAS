@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.18.8"  # fix(real-sb): pass con= to flow_wallet.credit inside BEGIN IMMEDIATE
+ATLAS_VERSION = "6.19.0"  # feat: unified event-bet architecture v7
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -233,6 +233,14 @@ async def setup_hook():
     #   2. setup_cog SECOND: provisions channels and populates server_config
     #      table that all other cogs depend on for routing.
     #   3. Everything else: order does not matter; all print their own load messages.
+    # sportsbook_core — must be ready before any sportsbook cog loads
+    try:
+        import sportsbook_core
+        await sportsbook_core.setup_db()
+        print("ATLAS: sportsbook_core flow.db schema ready.")
+    except Exception as e:
+        print(f"ATLAS: sportsbook_core setup failed: {e}")
+
     _EXTENSIONS = [
         "echo_cog",           # ATLAS Echo — voice personas (MUST be first)
         "setup_cog",          # ATLAS Setup — server config (MUST be second)
@@ -308,6 +316,16 @@ async def setup_hook():
         print("ATLAS: HTML render engine initialized.")
     except Exception as e:
         print(f"ATLAS: Render engine init failed: {e}")
+
+    # sportsbook_core v7 migration + bus subscription (idempotent)
+    try:
+        import sportsbook_core
+        await sportsbook_core.run_migration_v7()
+        sportsbook_core._register_bus_subscription()
+        sportsbook_core.settlement_poll.start()
+        print("ATLAS: sportsbook_core migration v7 + settlement bus ready.")
+    except Exception as e:
+        print(f"ATLAS: sportsbook_core migration failed: {e}")
 
     # FIX #9: Only sync command tree on initial boot (setup_hook runs once).
     # This avoids burning Discord's 200 syncs/day rate limit during debugging.
