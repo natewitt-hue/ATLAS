@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.18.7"  # fix(sportsbook): per-bet autograde transactions, polymarket aiosqlite timeout
+ATLAS_VERSION = "6.18.8"  # fix(real-sb): pass con= to flow_wallet.credit inside BEGIN IMMEDIATE
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

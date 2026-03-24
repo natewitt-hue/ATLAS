@@ -663,6 +663,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                                 uid, payout, "REAL_BET",
                                 description=f"Won: {pick} ({bet_type})",
                                 reference_key=ref_key,
+                                con=db,
                             )
                         except Exception as e:
                             log.error(f"Failed to pay bet {bet_id}: {e}")
@@ -674,6 +675,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                                 uid, wager, "REAL_BET",
                                 description=f"Push: {pick} ({bet_type})",
                                 reference_key=ref_key,
+                                con=db,
                             )
                         except Exception as e:
                             log.error(f"Failed to refund push bet {bet_id}: {e}")
