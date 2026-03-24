@@ -681,14 +681,10 @@ class BossSBGradeModal(discord.ui.Modal, title="Grade Bets for Week"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
-        if not cog:
-            return await _send_cog_error(interaction, "Sportsbook")
-        try:
-            week_num = int(self.week.value)
-        except ValueError:
-            return await interaction.response.send_message("❌ Week must be a number.", ephemeral=True)
-        await cog._grade_bets_impl(interaction, week_num)
+        await interaction.response.send_message(
+            "Manual grading is no longer supported — settlement is automatic via the event bus.",
+            ephemeral=True,
+        )
 
 
 class BossSBRefundModal(discord.ui.Modal, title="Refund a Bet"):
