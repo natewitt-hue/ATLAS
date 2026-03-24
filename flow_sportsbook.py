@@ -191,6 +191,7 @@ def setup_db():
                 bet_type   TEXT    NOT NULL,
                 line       REAL    NOT NULL DEFAULT 0,
                 odds       INTEGER NOT NULL,
+                source     TEXT    NOT NULL DEFAULT 'TSL',
                 status     TEXT    NOT NULL DEFAULT 'Pending',
                 UNIQUE(parlay_id, leg_index)
             )
