@@ -55,7 +55,7 @@ from discord.ext import commands, tasks
 import data_manager as dm
 import flow_wallet
 from real_sportsbook_cog import (
-    EventListView, SPORT_EMOJI, SUPPORTED_SPORTS as REAL_SPORTS,
+    SPORT_EMOJI, SUPPORTED_SPORTS as REAL_SPORTS,
     _parse_commence, _place_real_bet, _short_name as _real_short_name,
     CustomRealWagerModal,
 )
