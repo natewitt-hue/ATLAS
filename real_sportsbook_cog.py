@@ -152,47 +152,6 @@ def _evaluate_bet(bet_type: str, pick: str, odds: int, line: float,
     return "Lost"
 
 
-# ── Cross-sport parlay leg grading ───────────────────────────────────────────
-
-async def _grade_parlay_legs_for_event(event_id: str, home_team: str,
-                                        away_team: str, home_score: int,
-                                        away_score: int):
-    """Grade parlay legs tied to a real-sport event and settle if ready."""
-    from flow_sportsbook import _check_parlay_completion, _db_con
-
-    con = _db_con()
-    try:
-        legs = con.execute(
-            "SELECT parlay_id, leg_index, pick, bet_type, line, odds "
-            "FROM parlay_legs WHERE game_id = ? AND source != 'TSL' AND status = 'Pending'",
-            (event_id,),
-        ).fetchall()
-        if not legs:
-            return
-
-        affected_parlays = set()
-        for pid, leg_idx, pick, bet_type, line_val, odds in legs:
-            result = _evaluate_bet(
-                bet_type, pick, int(odds), float(line_val or 0),
-                0,  # wager not needed for evaluation
-                home_team, away_team, home_score, away_score,
-            )
-            con.execute(
-                "UPDATE parlay_legs SET status = ? WHERE parlay_id = ? AND leg_index = ?",
-                (result, pid, leg_idx),
-            )
-            affected_parlays.add(pid)
-
-        con.commit()
-
-        for pid in affected_parlays:
-            _check_parlay_completion(pid, con=con)
-
-        con.commit()
-    finally:
-        con.close()
-
-
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
@@ -550,15 +509,10 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def _sync_scores(self):
-        """Fetch scores from ESPN for all sports, update events, auto-grade bets.
+        """Fetch scores from ESPN for all sports, update events, emit EVENT_FINALIZED."""
+        import sportsbook_core
+        from flow_events import flow_bus, EVENT_FINALIZED
 
-        Two-pass approach:
-          Pass 1 (score-driven): Fetch fresh scores from ESPN (7-day lookback),
-                  update real_events, grade any pending bets for newly completed events.
-          Pass 2 (bet-driven): Find pending bets whose events are already marked
-                  completed in the DB but somehow weren't graded (e.g. prior DB lock,
-                  crash, or ESPN returned the score but grading failed).
-        """
         log.info("[REAL-SB] Syncing scores...")
         try:
             all_scores = await self.client.get_all_scores(days_from=7)
@@ -566,14 +520,13 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
             log.error(f"[REAL-SB] ESPN score fetch failed: {e}")
             return
 
-        # ── Pass 1: Score-driven — update events + grade from fresh ESPN data ──
-        graded_total = 0
+        finalized_total = 0
         async with aiosqlite.connect(DB_PATH) as db:
             for sport_key, games in all_scores.items():
                 for game in games:
-                    event_id = game.get("event_id", "")
+                    espn_event_id = game.get("event_id", "")
                     status = game.get("status", "")
-                    if not event_id:
+                    if not espn_event_id:
                         continue
 
                     home_score = game.get("home_score")
@@ -583,6 +536,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
                     home_team = game.get("home_team", {}).get("display_name", "")
                     away_team = game.get("away_team", {}).get("display_name", "")
+                    commence_ts = game.get("event_date", "")
                     completed = status == "final"
 
                     now = datetime.now(timezone.utc).isoformat()
@@ -592,128 +546,29 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                             completed = ?, locked = 1,
                             last_score_sync = ?
                         WHERE event_id = ?
-                    """, (home_score, away_score, 1 if completed else 0, now, event_id))
+                    """, (home_score, away_score, 1 if completed else 0, now, espn_event_id))
                     await db.commit()
 
                     if completed:
-                        count = await self._grade_event(event_id, home_team, away_team,
-                                                         home_score, away_score)
-                        graded_total += count
-
-        # ── Pass 2: Bet-driven — catch orphaned pending bets with completed events ──
-        orphan_graded = 0
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                rows = await db.execute_fetchall("""
-                    SELECT DISTINCT b.event_id, e.home_team, e.away_team, e.home_score, e.away_score
-                    FROM real_bets b
-                    JOIN real_events e ON b.event_id = e.event_id
-                    WHERE b.status = 'Pending' AND e.completed = 1
-                """)
-                for event_id, home_team, away_team, home_score, away_score in rows:
-                    if home_score is not None and away_score is not None:
-                        count = await self._grade_event(
-                            event_id, home_team, away_team, home_score, away_score
-                        )
-                        orphan_graded += count
-        except Exception:
-            log.exception("[REAL-SB] Pass 2 (orphan bet grading) failed")
-
-        log.info(f"[REAL-SB] Score sync complete. Graded {graded_total} (fresh) + {orphan_graded} (orphan) bets.")
-
-    async def _grade_event(self, event_id: str, home_team: str, away_team: str,
-                           home_score: int, away_score: int) -> int:
-        """Grade all pending bets for a completed event. Returns count graded."""
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT bet_id, discord_id, bet_type, pick, odds, line, wager_amount "
-                "FROM real_bets WHERE event_id = ? AND status = 'Pending'",
-                (event_id,),
-            ) as cur:
-                bets = await cur.fetchall()
-
-        if not bets:
-            return 0
-
-        graded = 0
-        for bet_id, uid, bet_type, pick, odds, line, wager in bets:
-            result = _evaluate_bet(
-                bet_type, pick, odds, line, wager,
-                home_team, away_team, home_score, away_score,
-            )
-            # result: "Won", "Lost", "Push"
-            ref_key = f"REAL_BET_{bet_id}_{result.lower()}"
-
-            # Atomic: credit + status update in single transaction
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("BEGIN IMMEDIATE")
-                try:
-                    # Check if already graded (idempotency)
-                    row = await db.execute_fetchall(
-                        "SELECT status FROM real_bets WHERE bet_id = ?", (bet_id,)
-                    )
-                    if not row or row[0][0] != "Pending":
-                        await db.rollback()
-                        continue
-
-                    if result == "Won":
-                        payout = _payout_calc(wager, odds)
+                        event_id = f"real:{sport_key}:{espn_event_id}"
                         try:
-                            await flow_wallet.credit(
-                                uid, payout, "REAL_BET",
-                                description=f"Won: {pick} ({bet_type})",
-                                reference_key=ref_key,
-                                con=db,
+                            await sportsbook_core.write_event(
+                                event_id, "REAL", home_team, away_team, commence_ts
                             )
-                        except Exception as e:
-                            log.error(f"Failed to pay bet {bet_id}: {e}")
-                            await db.rollback()
-                            continue
-                    elif result == "Push":
-                        try:
-                            await flow_wallet.credit(
-                                uid, wager, "REAL_BET",
-                                description=f"Push: {pick} ({bet_type})",
-                                reference_key=ref_key,
-                                con=db,
+                            await sportsbook_core.finalize_event(
+                                event_id, home_score, away_score
                             )
-                        except Exception as e:
-                            log.error(f"Failed to refund push bet {bet_id}: {e}")
-                            await db.rollback()
-                            continue
-
-                    await db.execute(
-                        "UPDATE real_bets SET status = ? WHERE bet_id = ?",
-                        (result, bet_id),
-                    )
-                    await db.commit()
-                    graded += 1
-
-                    # Post to #ledger
-                    try:
-                        from ledger_poster import post_bet_settlement
-                        _payout = _payout_calc(wager, odds) if result == "Won" else (wager if result == "Push" else 0)
-                        _bal = await flow_wallet.get_balance(uid)
-                        _matchup = f"{away_team} @ {home_team}"
-                        guild = self.bot.guilds[0] if self.bot.guilds else None
-                        if guild:
-                            await post_bet_settlement(
-                                self.bot, guild.id, uid, bet_id, _matchup,
-                                bet_type, pick, wager, result, _payout, _bal, source="ESPN",
+                            await flow_bus.emit(
+                                EVENT_FINALIZED,
+                                {"event_id": event_id, "source": "REAL"},
                             )
-                    except Exception:
-                        log.warning(f"[REAL-SB] Failed to post bet {bet_id} to #ledger")
+                            finalized_total += 1
+                        except Exception:
+                            log.exception(
+                                f"[REAL-SB] Failed to finalize event {event_id}"
+                            )
 
-                except Exception:
-                    await db.rollback()
-                    raise
-
-        # Grade any cross-sport parlay legs tied to this event
-        await _grade_parlay_legs_for_event(
-            event_id, home_team, away_team, home_score, away_score,
-        )
-
-        return graded
+        log.info(f"[REAL-SB] Score sync complete. Finalized {finalized_total} events.")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # IMPL METHODS (for boss_cog delegation)
@@ -1271,19 +1126,29 @@ async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, s
         description=f"Bet: {pick} ({bet_type})",
     )
 
-    # Insert bet
-    now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO real_bets "
-            "(discord_id, event_id, sport_key, bet_type, pick, odds, line, wager_amount, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (uid, event["event_id"], event.get("sport_key", ""),
-             bet_type, pick, odds, line, amt, now),
-        )
-        bet_id_rows = await db.execute_fetchall("SELECT last_insert_rowid()")
-        bet_id = bet_id_rows[0][0]
-        await db.commit()
+    # Write bet to sportsbook_core (flow.db) and legacy real_bets for admin reads
+    import sportsbook_core
+    sport_key = event.get("sport_key", "")
+    espn_event_id = event["event_id"]
+    core_event_id = f"real:{sport_key}:{espn_event_id}"
+    commence_ts = event.get("commence_time", "")
+
+    await sportsbook_core.write_event(
+        event_id=core_event_id,
+        source="REAL",
+        home=event.get("home_team", ""),
+        away=event.get("away_team", ""),
+        commence_ts=commence_ts,
+    )
+    bet_id = await sportsbook_core.write_bet(
+        discord_id=uid,
+        event_id=core_event_id,
+        bet_type=bet_type,
+        pick=pick,
+        line=line,
+        odds=odds,
+        wager=amt,
+    )
 
     # Register in wager registry (was missing from the old RealBetModal)
     import wager_registry
