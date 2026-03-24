@@ -550,14 +550,23 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def _sync_scores(self):
-        """Fetch scores from ESPN for all sports, update events, auto-grade bets."""
-        log.info("Syncing real sportsbook scores...")
+        """Fetch scores from ESPN for all sports, update events, auto-grade bets.
+
+        Two-pass approach:
+          Pass 1 (score-driven): Fetch fresh scores from ESPN (7-day lookback),
+                  update real_events, grade any pending bets for newly completed events.
+          Pass 2 (bet-driven): Find pending bets whose events are already marked
+                  completed in the DB but somehow weren't graded (e.g. prior DB lock,
+                  crash, or ESPN returned the score but grading failed).
+        """
+        log.info("[REAL-SB] Syncing scores...")
         try:
-            all_scores = await self.client.get_all_scores(days_from=3)
+            all_scores = await self.client.get_all_scores(days_from=7)
         except Exception as e:
-            log.error(f"ESPN score fetch failed: {e}")
+            log.error(f"[REAL-SB] ESPN score fetch failed: {e}")
             return
 
+        # ── Pass 1: Score-driven — update events + grade from fresh ESPN data ──
         graded_total = 0
         async with aiosqlite.connect(DB_PATH) as db:
             for sport_key, games in all_scores.items():
@@ -591,7 +600,26 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                                                          home_score, away_score)
                         graded_total += count
 
-        log.info(f"Score sync complete. Graded {graded_total} bets.")
+        # ── Pass 2: Bet-driven — catch orphaned pending bets with completed events ──
+        orphan_graded = 0
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                rows = await db.execute_fetchall("""
+                    SELECT DISTINCT b.event_id, e.home_team, e.away_team, e.home_score, e.away_score
+                    FROM real_bets b
+                    JOIN real_events e ON b.event_id = e.event_id
+                    WHERE b.status = 'Pending' AND e.completed = 1
+                """)
+                for event_id, home_team, away_team, home_score, away_score in rows:
+                    if home_score is not None and away_score is not None:
+                        count = await self._grade_event(
+                            event_id, home_team, away_team, home_score, away_score
+                        )
+                        orphan_graded += count
+        except Exception:
+            log.exception("[REAL-SB] Pass 2 (orphan bet grading) failed")
+
+        log.info(f"[REAL-SB] Score sync complete. Graded {graded_total} (fresh) + {orphan_graded} (orphan) bets.")
 
     async def _grade_event(self, event_id: str, home_team: str, away_team: str,
                            home_score: int, away_score: int) -> int:

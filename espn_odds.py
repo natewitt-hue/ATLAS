@@ -82,7 +82,7 @@ class ESPNOddsClient:
 
     # Lookahead / lookback for syncing
     ODDS_DAYS_AHEAD = 7
-    SCORES_DAYS_BACK = 3
+    SCORES_DAYS_BACK = 7
 
     def __init__(self, branding=None):
         """Initialize ESPN odds client.

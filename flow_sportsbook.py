@@ -1092,7 +1092,7 @@ def _check_parlay_completion(parlay_id: str, con=None) -> list[dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _build_score_lookup(week: int) -> dict:
-    results = dm.get_weekly_results(week, stage=None)
+    results = dm.get_weekly_results(week, stage=None, force_live=True)
     lookup  = {}
     fuzzy   = []
     for g in results:

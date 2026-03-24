@@ -798,7 +798,8 @@ def get_last_n_games(team: str, n: int = 5) -> list[dict]:
     return results
 
 
-def get_weekly_results(week: int | None = None, *, stage: str | int | None = "CURRENT") -> list[dict]:
+def get_weekly_results(week: int | None = None, *, stage: str | int | None = "CURRENT",
+                       force_live: bool = False) -> list[dict]:
     """
     Return completed games (status 2 or 3) for the given week.
     Uses df_all_games (full season load) as primary source.
@@ -808,6 +809,8 @@ def get_weekly_results(week: int | None = None, *, stage: str | int | None = "CU
         week: Week number (1-indexed). Defaults to CURRENT_WEEK.
         stage: Stage filter. "CURRENT" (default) filters by CURRENT_STAGE.
                None skips stage filtering (finds games across all stages).
+        force_live: If True, skip DataFrames and always hit the live API.
+                    Use for autograde to guarantee fresh scores.
 
     MM export schema:
       weekIndex = week - 1 (0-based)
@@ -821,7 +824,7 @@ def get_weekly_results(week: int | None = None, *, stage: str | int | None = "CU
 
     src = _state.df_all_games if not _state.df_all_games.empty else _state.df_games
 
-    if not src.empty:
+    if not src.empty and not force_live:
         df = src.copy()
 
         for col in ["weekIndex", "week", "seasonIndex", "stageIndex", "status"]:
