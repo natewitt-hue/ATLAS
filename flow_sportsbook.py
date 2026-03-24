@@ -1900,7 +1900,7 @@ class SportsbookWorkspace(discord.ui.View):
                 description=f"No **{sport_name}** games available right now.\nOdds sync on a schedule \u2014 check back later!",
                 color=TSL_GOLD,
             )
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
             back.callback = self._back_to_sports
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
@@ -1961,7 +1961,7 @@ class SportsbookWorkspace(discord.ui.View):
 
         if not row:
             embed = discord.Embed(description="No odds available for this game yet.", color=TSL_GOLD)
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
             back.callback = lambda i: self._nav_real_games(i)
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
@@ -1972,7 +1972,7 @@ class SportsbookWorkspace(discord.ui.View):
                        ("moneyline_home", "spread_home", "over_under"))
         if not has_odds:
             embed = discord.Embed(description="No odds available for this game yet.", color=TSL_GOLD)
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
             back.callback = lambda i: self._nav_real_games(i)
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
