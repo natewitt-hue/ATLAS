@@ -10,6 +10,31 @@ from odds_utils import payout_calc as _payout_calc
 log = logging.getLogger("sportsbook_core")
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ─── Grading ────────────────────────────────────────────────────────────────────
+
+def grade_bet(bet_row: dict, event_row: dict) -> str:
+    """
+    Pure grading function — no DB access, no side effects.
+    Returns: 'Won' | 'Lost' | 'Push' | 'Cancelled'
+
+    bet_row keys:  bet_type, pick, line, odds, wager_amount
+    event_row keys: home_participant, away_participant,
+                    home_score, away_score, result_payload (JSON str), status
+
+    Grading rules:
+    - Cancelled event → 'Cancelled'
+    - Moneyline: pick the winner by score; tie → 'Push'
+    - Spread: covered = pick_score + line - opponent_score; >0 Won, ==0 Push, <0 Lost
+              (line is from picked team's perspective; negative means favored)
+    - Over: total > line → Won; total == line → Push; total < line → Lost
+    - Under: total < line → Won; total == line → Push; total > line → Lost
+    - Prediction: parse result_payload JSON, compare pick to payload['resolved_side'];
+                  'VOID' result → Push
+    """
+    # TODO: implement — this function will be filled in by the user
+    raise NotImplementedError("grade_bet() not yet implemented")
 OLD_SB_DB = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
 FLOW_DB   = os.path.join(_DIR, "flow.db")
 

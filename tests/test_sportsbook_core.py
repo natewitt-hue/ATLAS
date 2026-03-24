@@ -3,6 +3,7 @@ import asyncio
 import os
 import sys
 import aiosqlite
+import json
 
 # Point FLOW_DB_PATH to a dummy path so OLD_SB_DB doesn't affect wallet
 os.environ["FLOW_DB_PATH"] = os.path.join(os.path.dirname(__file__), "test_old.db")
@@ -91,3 +92,74 @@ async def test_migration_idempotent(tmp_path):
         assert len(credits) == count_after_first
     finally:
         sportsbook_core.flow_wallet.credit = original_credit
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def make_event(home_score, away_score, source="TSL",
+               home="Eagles", away="Cowboys", result_payload=None, status="final"):
+    return {
+        "home_participant": home, "away_participant": away,
+        "home_score": home_score, "away_score": away_score,
+        "result_payload": json.dumps(result_payload or {}),
+        "status": status,
+    }
+
+def make_bet(bet_type, pick, odds=-110, line=None, wager=100):
+    return {"bet_type": bet_type, "pick": pick, "odds": odds,
+            "line": line, "wager_amount": wager}
+
+# ─── Moneyline ────────────────────────────────────────────────────────────────
+
+def test_grade_moneyline_win():
+    assert sportsbook_core.grade_bet(make_bet("Moneyline", "Eagles"), make_event(24, 17)) == "Won"
+
+def test_grade_moneyline_loss():
+    assert sportsbook_core.grade_bet(make_bet("Moneyline", "Cowboys"), make_event(24, 17)) == "Lost"
+
+def test_grade_moneyline_push():
+    assert sportsbook_core.grade_bet(make_bet("Moneyline", "Eagles"), make_event(21, 21)) == "Push"
+
+# ─── Spread ───────────────────────────────────────────────────────────────────
+
+def test_grade_spread_win():
+    # Eagles -3.5 favorite — Eagles win by 7, covers -3.5
+    assert sportsbook_core.grade_bet(make_bet("Spread", "Eagles", line=-3.5), make_event(24, 17)) == "Won"
+
+def test_grade_spread_loss():
+    # Eagles -7 favorite — Eagles win by only 3, does NOT cover
+    assert sportsbook_core.grade_bet(make_bet("Spread", "Eagles", line=-7.0), make_event(20, 17)) == "Lost"
+
+def test_grade_spread_push():
+    # Eagles -7 — Eagles win by exactly 7
+    assert sportsbook_core.grade_bet(make_bet("Spread", "Eagles", line=-7.0), make_event(24, 17)) == "Push"
+
+# ─── Over/Under ───────────────────────────────────────────────────────────────
+
+def test_grade_over_win():
+    assert sportsbook_core.grade_bet(make_bet("Over", "Over", line=40.5), make_event(24, 20)) == "Won"
+
+def test_grade_over_loss():
+    assert sportsbook_core.grade_bet(make_bet("Over", "Over", line=44.5), make_event(24, 20)) == "Lost"
+
+def test_grade_under_win():
+    assert sportsbook_core.grade_bet(make_bet("Under", "Under", line=44.5), make_event(24, 20)) == "Won"
+
+def test_grade_ou_push():
+    assert sportsbook_core.grade_bet(make_bet("Over", "Over", line=44.0), make_event(24, 20)) == "Push"
+
+# ─── Prediction ───────────────────────────────────────────────────────────────
+
+def test_grade_prediction_win():
+    event = make_event(0, 0, source="POLY", result_payload={"resolved_side": "YES"})
+    assert sportsbook_core.grade_bet(make_bet("Prediction", "YES"), event) == "Won"
+
+def test_grade_prediction_loss():
+    event = make_event(0, 0, source="POLY", result_payload={"resolved_side": "YES"})
+    assert sportsbook_core.grade_bet(make_bet("Prediction", "NO"), event) == "Lost"
+
+# ─── Cancelled event ─────────────────────────────────────────────────────────
+
+def test_grade_cancelled_event():
+    event = make_event(0, 0, status="cancelled")
+    assert sportsbook_core.grade_bet(make_bet("Moneyline", "Eagles"), event) == "Cancelled"
