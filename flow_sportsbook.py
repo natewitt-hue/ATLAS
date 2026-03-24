@@ -2522,9 +2522,25 @@ class SportsbookWorkspace(discord.ui.View):
 class SportsbookHubView(discord.ui.View):
     """Unified sportsbook hub — TSL simulation + real sports."""
 
-    def __init__(self, cog: "SportsbookCog"):
+    def __init__(self, cog: "SportsbookCog", user_id: int | None = None):
         super().__init__(timeout=None)
         self.cog = cog
+        # Update Cart badge with live count for this user
+        if user_id is not None:
+            try:
+                import sqlite3 as _sq3
+                with _sq3.connect(DB_PATH) as _c:
+                    n = _c.execute(
+                        "SELECT COUNT(*) FROM parlay_cart WHERE discord_id = ?", (user_id,)
+                    ).fetchone()[0]
+                if n > 0:
+                    for item in self.children:
+                        if getattr(item, "custom_id", None) == "atlas:sportsbook:parlay":
+                            item.label = f"Cart [{n}]"
+                            item.style = discord.ButtonStyle.success
+                            break
+            except Exception:
+                pass  # non-critical; fallback to default "Cart" label
 
     # ── Row 0: Sport buttons ───────────────────────────────────────────────
 
@@ -2932,7 +2948,7 @@ class SportsbookCog(commands.Cog):
             theme_id = get_theme_for_render(interaction.user.id)
             img = await build_sportsbook_card(interaction.user.id, theme_id=theme_id)
             await send_card(interaction, img, filename="sportsbook.png",
-                            followup=True, view=SportsbookHubView(self))
+                            followup=True, view=SportsbookHubView(self, interaction.user.id))
         except Exception as e:
             # Fallback to text embed if card rendering fails
             balance = _get_balance(interaction.user.id)
@@ -2943,7 +2959,7 @@ class SportsbookCog(commands.Cog):
                 f"*Card render error: `{e}`*"
             )
             embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
-            await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
+            await interaction.followup.send(embed=embed, view=SportsbookHubView(self, interaction.user.id))
 
     # ── User-facing _impl methods (called by board buttons) ────────────────
 
