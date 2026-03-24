@@ -87,16 +87,13 @@ async def _get_max_bet() -> int:
 
 
 def _parse_commence(ct: str) -> Optional[datetime]:
-    """Parse ISO8601 commence_time string."""
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            dt = datetime.strptime(ct, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            continue
-    return None
+    """Parse ISO8601 commence_time string (with or without seconds)."""
+    if not ct:
+        return None
+    try:
+        return datetime.fromisoformat(ct.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
 
 
 # ── Bet evaluation (module-level for reuse) ──────────────────────────────────
