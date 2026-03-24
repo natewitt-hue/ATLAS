@@ -92,6 +92,10 @@ def _wrap_card(
 ) -> str:
     """Build a full HTML document around the card shell.
 
+    NOTE: This is a local variant intentionally distinct from
+    atlas_html_engine.wrap_card — highlight cards use a different
+    status-bar layout and icon structure than standard casino cards.
+
     Args:
         status_bar_css: inline CSS for the 5px top bar (background property).
         icon_emoji: HTML entity string for the icon pill, e.g. '&#127921;'.

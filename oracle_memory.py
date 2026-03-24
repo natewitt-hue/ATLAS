@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 
 import aiosqlite
@@ -335,6 +336,14 @@ class OracleMemory:
             log.error("Failed to get turn by message_id: %s", e)
             return None
 
+    @staticmethod
+    def _sanitize_fts(query: str) -> str:
+        """Strip FTS5 special characters so user input can't break MATCH syntax."""
+        # Remove FTS5 operators: " * ? : ^ ( ) { } + - ~
+        sanitized = re.sub(r'[\"*?:^(){}+\-~]', ' ', query)
+        # Collapse whitespace and strip
+        return re.sub(r'\s+', ' ', sanitized).strip()
+
     async def search_fts(
         self,
         query: str,
@@ -347,6 +356,9 @@ class OracleMemory:
         Optionally scoped to a specific user.
         """
         await self._ensure()
+        query = self._sanitize_fts(query)
+        if not query:
+            return []
         try:
             async with aiosqlite.connect(self._db_path, timeout=10) as db:
                 db.row_factory = aiosqlite.Row

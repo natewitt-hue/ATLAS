@@ -239,6 +239,7 @@ def _build_session_recap_html(
     best_cells_html = ""
     if session.biggest_win or session.biggest_loss:
         bw_str = f"+${session.biggest_win:,}" if session.biggest_win else "—"
+        # biggest_loss is stored as a negative integer; abs() converts to display magnitude
         bl_str = f"-${abs(session.biggest_loss):,}" if session.biggest_loss else "—"
         best_cells_html = f"""
       <div class="data-cell">

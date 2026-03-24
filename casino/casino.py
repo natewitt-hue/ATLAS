@@ -68,6 +68,20 @@ async def post_to_ledger(
         )
     except Exception:
         log.exception("Failed to post to ledger")
+        try:
+            import os
+            from setup_cog import get_channel_id
+            ch_id = get_channel_id("admin_chat") or int(os.getenv("ADMIN_CHANNEL_ID", "0"))
+            if ch_id:
+                ch = bot.get_channel(ch_id)
+                if ch:
+                    await ch.send(
+                        f"\u26a0\ufe0f **Ledger write failure** \u2014 <@{discord_id}> "
+                        f"`{game_type}` {outcome} ${payout:,} \u2014 "
+                        f"wager resolved but not recorded. Check logs."
+                    )
+        except Exception:
+            pass  # Never let notification failure cascade
 
     # Emit FLOW event for live engagement system
     try:
@@ -80,18 +94,6 @@ async def post_to_ledger(
         await flow_bus.emit("game_result", event)
     except Exception:
         log.exception("Failed to emit FLOW event")
-
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _is_admin(interaction: discord.Interaction) -> bool:
-    if not interaction.guild:
-        return False
-    return (
-        interaction.user.guild_permissions.administrator
-        or any(r.name == ADMIN_ROLE_NAME for r in interaction.user.roles)
-    )
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  HUB VIEW
@@ -275,19 +277,7 @@ class CasinoHubView(discord.ui.View):
         await interaction.response.defer(thinking=True, ephemeral=True)
         uid = interaction.user.id
 
-        async with aiosqlite.connect(db.DB_PATH) as conn:
-            async with conn.execute("""
-                SELECT game_type,
-                       COUNT(*) as hands,
-                       SUM(wager) as wagered,
-                       SUM(payout) as returned,
-                       SUM(CASE WHEN outcome='win'  THEN 1 ELSE 0 END) as wins,
-                       SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses
-                FROM casino_sessions
-                WHERE discord_id=?
-                GROUP BY game_type
-            """, (uid,)) as cur:
-                rows = await cur.fetchall()
+        rows = await db.get_player_stats(uid)
 
         balance = await db.get_balance(uid)
 

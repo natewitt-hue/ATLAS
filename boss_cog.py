@@ -2060,7 +2060,8 @@ def _boss_build_reassignment_summary_embed(summary: dict) -> discord.Embed:
 
 def _boss_build_reassignment_team_embeds(changed_results) -> list[discord.Embed]:
     """Build per-team embeds showing each player's ability changes."""
-    EMBED_CHAR_LIMIT = 5_800
+    FOOTER = "ATLAS™ Boss · Ability Reassignment Engine"
+    MAX_EMBED = 5_900  # discord hard cap is 6000; leave 100 chars headroom
 
     by_team: dict[str, list] = {}
     for r in changed_results:
@@ -2100,7 +2101,6 @@ def _boss_build_reassignment_team_embeds(changed_results) -> list[discord.Embed]
             ))
 
         part = 1
-        cur_chars = 0
         cur_embed = None
 
         def _make_embed(part_num: int) -> discord.Embed:
@@ -2116,20 +2116,18 @@ def _boss_build_reassignment_team_embeds(changed_results) -> list[discord.Embed]
 
             if cur_embed is None:
                 cur_embed = _make_embed(part)
-                cur_chars = len(cur_embed.title or "")
 
-            if cur_chars + field_chars > EMBED_CHAR_LIMIT and cur_embed.fields:
-                cur_embed.set_footer(text="ATLAS™ Boss · Ability Reassignment Engine")
+            # Use discord.py's own len() — matches what Discord validates exactly
+            if len(cur_embed) + field_chars + len(FOOTER) > MAX_EMBED and cur_embed.fields:
+                cur_embed.set_footer(text=FOOTER)
                 embeds.append(cur_embed)
                 part += 1
                 cur_embed = _make_embed(part)
-                cur_chars = len(cur_embed.title or "")
 
             cur_embed.add_field(name=fname, value=fval, inline=False)
-            cur_chars += field_chars
 
         if cur_embed is not None:
-            cur_embed.set_footer(text="ATLAS™ Boss · Ability Reassignment Engine")
+            cur_embed.set_footer(text=FOOTER)
             embeds.append(cur_embed)
 
     return embeds

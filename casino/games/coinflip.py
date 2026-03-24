@@ -149,7 +149,6 @@ async def play_coinflip(
     )
     file = discord.File(io.BytesIO(png), filename="coinflip.png")
 
-    max_bet = await get_max_bet(uid)
     replay_view = PlayAgainView(
         user_id=uid,
         wager=wager,

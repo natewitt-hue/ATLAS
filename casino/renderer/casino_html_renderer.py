@@ -1938,9 +1938,14 @@ def _build_scratch_html(
         outcome = "jackpot"
         badge_text = "TRIPLE MATCH!"
     elif all_revealed:
-        status_class = "win"
-        outcome = "win"
-        badge_text = f"+${total:,}"
+        if total > 0:
+            status_class = "win"
+            outcome = "win"
+            badge_text = f"+${total:,}"
+        else:
+            status_class = "loss"
+            outcome = "loss"
+            badge_text = "NO MATCH"
     else:
         status_class = "push"
         outcome = "active"

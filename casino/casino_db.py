@@ -426,6 +426,24 @@ async def get_balance(discord_id: int) -> int:
     return await flow_wallet.get_balance(discord_id)
 
 
+async def get_player_stats(discord_id: int) -> list[tuple]:
+    """Return per-game stats rows for a player: (game_type, hands, wagered, returned, wins, losses)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT game_type,
+                      COUNT(*) AS hands,
+                      SUM(wager) AS wagered,
+                      SUM(payout) AS returned,
+                      SUM(CASE WHEN outcome='win'  THEN 1 ELSE 0 END) AS wins,
+                      SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) AS losses
+               FROM casino_sessions
+               WHERE discord_id=?
+               GROUP BY game_type""",
+            (discord_id,),
+        ) as cur:
+            return await cur.fetchall()
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  JACKPOT SYSTEM
 # ═════════════════════════════════════════════════════════════════════════════
@@ -492,7 +510,7 @@ async def _contribute_and_check_jackpot(
     return None
 
 
-async def _award_jackpot(tier: str, discord_id: int, game_type: str, con, session_id: int) -> dict:
+async def _award_jackpot(tier: str, discord_id: int, game_type: str, con, session_id: int) -> dict | None:
     """Award jackpot pool to the winner. Returns info dict."""
     now = datetime.now(timezone.utc).isoformat()
     async with con.execute(
@@ -767,11 +785,7 @@ async def check_achievements(
         if "comeback_king" not in existing and outcome == "win":
             # Check if previous streak was 8+ losses (streak just reset to win 1)
             if streak_info["type"] == "win" and streak_info["len"] == 1:
-                async with db.execute(
-                    "SELECT streak_len FROM casino_streaks WHERE discord_id=?", (discord_id,)
-                ) as cur:
-                    pass  # We can't check previous streak after reset
-                # Alternative: check last 9 sessions (8 losses + this win)
+                # Check last 9 sessions (8 losses + this win)
                 async with db.execute(
                     "SELECT outcome FROM casino_sessions WHERE discord_id=? ORDER BY session_id DESC LIMIT 9",
                     (discord_id,),
@@ -1419,7 +1433,11 @@ async def create_challenge(
 async def get_challenge(challenge_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT * FROM coinflip_challenges WHERE challenge_id=?", (challenge_id,)
+            """SELECT challenge_id, challenger_id, opponent_id, wager,
+                      channel_id, status, winner_id, created_at, resolved_at,
+                      challenger_corr_id, opponent_corr_id
+               FROM coinflip_challenges WHERE challenge_id=?""",
+            (challenge_id,),
         ) as cur:
             row = await cur.fetchone()
     if not row:

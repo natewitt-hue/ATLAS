@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.18.2"  # fix(sportsbook): ESPN 7-day lookback, bet-driven orphan grading, TSL live API scores on autograde
+ATLAS_VERSION = "6.18.7"  # fix(sportsbook): per-bet autograde transactions, polymarket aiosqlite timeout
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
