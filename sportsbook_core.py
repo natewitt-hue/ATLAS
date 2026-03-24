@@ -10,7 +10,66 @@ from odds_utils import payout_calc as _payout_calc
 log = logging.getLogger("sportsbook_core")
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
+OLD_SB_DB = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
+FLOW_DB = os.path.join(_DIR, "flow.db")
 
+_SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK(source IN ('TSL','REAL','POLY')),
+    status TEXT NOT NULL DEFAULT 'scheduled'
+           CHECK(status IN ('scheduled','live','final','cancelled')),
+    home_participant TEXT, away_participant TEXT,
+    home_score REAL, away_score REAL,
+    result_payload TEXT,
+    commence_ts TEXT, finalized_ts TEXT,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS bets (
+    bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_id INTEGER NOT NULL,
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    bet_type TEXT NOT NULL CHECK(bet_type IN ('Moneyline','Spread','Over','Under','Prediction')),
+    pick TEXT NOT NULL, line REAL, odds INTEGER NOT NULL, wager_amount INTEGER NOT NULL,
+    status TEXT DEFAULT 'Pending'
+           CHECK(status IN ('Pending','Won','Lost','Push','Cancelled','Error')),
+    parlay_id TEXT REFERENCES parlays(parlay_id),
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS parlays (
+    parlay_id TEXT PRIMARY KEY, discord_id INTEGER NOT NULL,
+    combined_odds INTEGER NOT NULL, wager_amount INTEGER NOT NULL,
+    status TEXT DEFAULT 'Pending' CHECK(status IN ('Pending','Won','Lost','Push','Cancelled')),
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS parlay_legs (
+    leg_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parlay_id TEXT NOT NULL REFERENCES parlays(parlay_id),
+    bet_id INTEGER NOT NULL REFERENCES bets(bet_id),
+    leg_index INTEGER NOT NULL, UNIQUE(parlay_id, leg_index)
+);
+
+CREATE TABLE IF NOT EXISTS event_locks (event_id TEXT PRIMARY KEY REFERENCES events(event_id), locked INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS event_line_overrides (
+    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
+    home_spread REAL, away_spread REAL, home_ml INTEGER, away_ml INTEGER,
+    ou_line REAL, set_by TEXT, set_at TEXT
+);
+CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
+INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '7');
+
+CREATE INDEX IF NOT EXISTS idx_events_source_status ON events(source, status);
+CREATE INDEX IF NOT EXISTS idx_bets_event_status    ON bets(event_id, status);
+CREATE INDEX IF NOT EXISTS idx_bets_user            ON bets(discord_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bets_parlay          ON bets(parlay_id) WHERE parlay_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_parlays_user_status  ON parlays(discord_id, status);
+CREATE INDEX IF NOT EXISTS idx_parlay_legs_parlay   ON parlay_legs(parlay_id);
+"""
 
 # ─── Grading ────────────────────────────────────────────────────────────────────
 
@@ -236,67 +295,6 @@ async def settle_event(event_id: str) -> None:
         log.info(f"[CORE] settle_event({event_id}) — graded {len(pending)} bets")
 
 
-OLD_SB_DB = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
-FLOW_DB   = os.path.join(_DIR, "flow.db")
-
-_SCHEMA_SQL = """
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS events (
-    event_id TEXT PRIMARY KEY,
-    source TEXT NOT NULL CHECK(source IN ('TSL','REAL','POLY')),
-    status TEXT NOT NULL DEFAULT 'scheduled'
-           CHECK(status IN ('scheduled','live','final','cancelled')),
-    home_participant TEXT, away_participant TEXT,
-    home_score REAL, away_score REAL,
-    result_payload TEXT,
-    commence_ts TEXT, finalized_ts TEXT,
-    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-);
-
-CREATE TABLE IF NOT EXISTS bets (
-    bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    discord_id INTEGER NOT NULL,
-    event_id TEXT NOT NULL REFERENCES events(event_id),
-    bet_type TEXT NOT NULL CHECK(bet_type IN ('Moneyline','Spread','Over','Under','Prediction')),
-    pick TEXT NOT NULL, line REAL, odds INTEGER NOT NULL, wager_amount INTEGER NOT NULL,
-    status TEXT DEFAULT 'Pending'
-           CHECK(status IN ('Pending','Won','Lost','Push','Cancelled','Error')),
-    parlay_id TEXT REFERENCES parlays(parlay_id),
-    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-);
-
-CREATE TABLE IF NOT EXISTS parlays (
-    parlay_id TEXT PRIMARY KEY, discord_id INTEGER NOT NULL,
-    combined_odds INTEGER NOT NULL, wager_amount INTEGER NOT NULL,
-    status TEXT DEFAULT 'Pending' CHECK(status IN ('Pending','Won','Lost','Push','Cancelled')),
-    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-);
-
-CREATE TABLE IF NOT EXISTS parlay_legs (
-    leg_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    parlay_id TEXT NOT NULL REFERENCES parlays(parlay_id),
-    bet_id INTEGER NOT NULL REFERENCES bets(bet_id),
-    leg_index INTEGER NOT NULL, UNIQUE(parlay_id, leg_index)
-);
-
-CREATE TABLE IF NOT EXISTS event_locks (event_id TEXT PRIMARY KEY REFERENCES events(event_id), locked INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS event_line_overrides (
-    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
-    home_spread REAL, away_spread REAL, home_ml INTEGER, away_ml INTEGER,
-    ou_line REAL, set_by TEXT, set_at TEXT
-);
-CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '7');
-
-CREATE INDEX IF NOT EXISTS idx_events_source_status ON events(source, status);
-CREATE INDEX IF NOT EXISTS idx_bets_event_status    ON bets(event_id, status);
-CREATE INDEX IF NOT EXISTS idx_bets_user            ON bets(discord_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_bets_parlay          ON bets(parlay_id) WHERE parlay_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_parlays_user_status  ON parlays(discord_id, status);
-CREATE INDEX IF NOT EXISTS idx_parlay_legs_parlay   ON parlay_legs(parlay_id);
-"""
-
 async def setup_db() -> None:
     """Create flow.db schema. Called at bot startup before migration."""
     async with aiosqlite.connect(FLOW_DB) as db:
@@ -392,3 +390,119 @@ async def run_migration_v7() -> None:
 async def _post_settlement_card(event, bets) -> None:
     """Stub — post settlement ledger card. Implement when ledger integration is confirmed."""
     pass
+
+
+# ─── Public API for ingestor cogs ─────────────────────────────────────────────
+
+async def write_event(
+    event_id: str,
+    source: str,
+    home: str,
+    away: str,
+    commence_ts: str,
+    payload: dict | None = None,
+) -> None:
+    """
+    Upsert an event row into flow.db.
+    Safe to call on every sync cycle — INSERT OR IGNORE is idempotent.
+    """
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            """INSERT OR IGNORE INTO events
+               (event_id, source, home_participant, away_participant, commence_ts, result_payload)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (event_id, source, home, away, commence_ts, json.dumps(payload or {})),
+        )
+        await db.commit()
+
+
+async def write_bet(
+    discord_id: int,
+    event_id: str,
+    bet_type: str,
+    pick: str,
+    line: float | None,
+    odds: int,
+    wager: int,
+    parlay_id: str | None = None,
+) -> int:
+    """
+    Insert a new Pending bet into flow.db.
+    Returns the new bet_id.
+    Enforces FK constraint — event_id must already exist in events table.
+    """
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        cur = await db.execute(
+            """INSERT INTO bets
+               (discord_id, event_id, bet_type, pick, line, odds, wager_amount, parlay_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (discord_id, event_id, bet_type, pick, line, odds, wager, parlay_id),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def finalize_event(
+    event_id: str,
+    home_score: float,
+    away_score: float,
+    result_payload: dict | None = None,
+) -> None:
+    """
+    Mark an event as final, storing final scores and optional result payload.
+    Called by ingestor cogs when a game/market is complete.
+    Does NOT settle — ingestor must emit EVENT_FINALIZED after calling this.
+    """
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            """UPDATE events
+               SET status='final', home_score=?, away_score=?,
+                   result_payload=?,
+                   finalized_ts=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+               WHERE event_id=?""",
+            (home_score, away_score, json.dumps(result_payload or {}), event_id),
+        )
+        await db.commit()
+
+
+def _register_bus_subscription() -> None:
+    """
+    Subscribe settle_event to the flow_events bus EVENT_FINALIZED event.
+    Called once at bot startup from bot.py setup_hook, after all cogs load.
+    Uses a string key ('event_finalized') which the FlowEventBus handles generically.
+    """
+    try:
+        from flow_events import flow_bus, EVENT_FINALIZED
+        flow_bus.subscribe(
+            EVENT_FINALIZED,
+            lambda payload: asyncio.create_task(settle_event(payload["event_id"])),
+        )
+        log.info("[CORE] Subscribed to EVENT_FINALIZED bus")
+    except ImportError as exc:
+        log.warning(f"[CORE] Could not subscribe to flow_bus: {exc}")
+
+
+@tasks.loop(minutes=10)
+async def settlement_poll() -> None:
+    """
+    Fallback poller — catches any final events that still have Pending bets,
+    in case the EVENT_FINALIZED bus event was missed.
+    Runs every 10 minutes. settle_event() is idempotent so re-running is safe.
+    """
+    try:
+        async with aiosqlite.connect(FLOW_DB) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT DISTINCT e.event_id FROM events e
+                   JOIN bets b ON b.event_id = e.event_id
+                   WHERE e.status = 'final' AND b.status = 'Pending'"""
+            )
+            rows = await cur.fetchall()
+        for row in rows:
+            await settle_event(row["event_id"])
+    except Exception:
+        log.exception("[CORE] settlement_poll error")
