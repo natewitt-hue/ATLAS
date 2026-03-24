@@ -1090,15 +1090,31 @@ async def _place_straight_bet(
 
         # Write bet to sportsbook_core (flow.db) after funds confirmed
         import sportsbook_core as _sb_core
-        bet_id = await _sb_core.write_bet(
-            discord_id=int(interaction.user.id),
-            event_id=f"tsl:{game_id}",
-            bet_type=bet_type,
-            pick=team,
-            line=safe_line if isinstance(safe_line, (int, float)) else None,
-            odds=int(odds),
-            wager=int(amount),
-        )
+        try:
+            bet_id = await _sb_core.write_bet(
+                discord_id=int(interaction.user.id),
+                event_id=f"tsl:{game_id}",
+                bet_type=bet_type,
+                pick=team,
+                line=safe_line if isinstance(safe_line, (int, float)) else None,
+                odds=int(odds),
+                wager=int(amount),
+            )
+        except Exception as e:
+            log.exception(f"[SB] write_bet failed for uid={interaction.user.id} event_id={game_id}: {e}")
+            # Refund the debit since we can't record the bet
+            try:
+                with _db_con() as con:
+                    _update_balance(interaction.user.id, amount, con,
+                                    subsystem="TSL_BET", subsystem_id="pending",
+                                    reference_key="TSL_BET_WRITE_FAILED_REFUND")
+                    con.commit()
+            except Exception:
+                log.exception("[SB] CRITICAL: refund also failed after write_bet failure")
+            return await _send_error(
+                "⚠️ Bet placement failed — your funds have been returned. Please try again."
+            )
+
         import wager_registry
         with _db_con() as con:
             wager_registry.register_wager_sync(
