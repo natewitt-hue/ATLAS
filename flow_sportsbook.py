@@ -2278,9 +2278,44 @@ class SportsbookWorkspace(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
             try:
                 if game.get("_is_real"):
+                    # Re-fetch current odds — may have shifted since match detail loaded
+                    fresh_odds = bet["odds"]  # fallback if DB unavailable
+                    try:
+                        async with aiosqlite.connect(DB_PATH) as _db:
+                            _db.row_factory = aiosqlite.Row
+                            async with _db.execute(
+                                "SELECT * FROM real_events "
+                                "WHERE event_id = ? AND locked = 0 AND completed = 0",
+                                (game["event_id"],),
+                            ) as _cur:
+                                _fresh = await _cur.fetchone()
+                        if _fresh is None:
+                            await interaction.followup.send(
+                                "❌ This game is no longer available for betting.",
+                                ephemeral=True,
+                            )
+                            return
+                        _fresh = dict(_fresh)
+                        _home = game.get("home_team", game.get("home", ""))
+                        _bt   = bet["bet_type"]
+                        _pick = bet["pick"]
+                        _col  = {
+                            ("Moneyline", True):  "moneyline_home",
+                            ("Moneyline", False): "moneyline_away",
+                            ("Spread",    True):  "spread_home_odds",
+                            ("Spread",    False): "spread_away_odds",
+                            ("Over",      True):  "over_odds",
+                            ("Over",      False): "over_odds",
+                            ("Under",     True):  "under_odds",
+                            ("Under",     False): "under_odds",
+                        }.get((_bt, _pick == _home))
+                        if _col and _fresh.get(_col) is not None:
+                            fresh_odds = int(_fresh[_col])
+                    except Exception:
+                        pass  # fall back to cached odds on DB error
                     await _place_real_bet(
                         interaction, game, bet["bet_type"], bet["pick"],
-                        bet["odds"], bet.get("line"), amount,
+                        fresh_odds, bet.get("line"), amount,
                         game.get("_source_label", "REAL"),
                     )
                 else:
