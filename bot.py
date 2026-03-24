@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.20.1"  # fix: sportsbook tipoff times showing TBD (ESPN date format no seconds)
+ATLAS_VERSION = "6.21.0"  # feat: sportsbook UX overhaul — parlay mode, hub upgrades, bug fixes
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
