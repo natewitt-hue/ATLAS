@@ -162,7 +162,7 @@ def _highlight_rows_html(highlights: List[HighlightRow]) -> str:
     return "\n".join(rows)
 
 
-def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
+def _build_pulse_html(data: PulseData, theme_id: str | None = None, refresh_interval: int = 60) -> str:
     # Jackpot hero
     jackpot_str = f"${data.jackpot_amount:,}"
     if data.jackpot_last_player:
@@ -392,7 +392,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
     <div style="display:flex;align-items:center;justify-content:space-between;
         padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">
       <div style="font-size:10px;color:var(--text-warm-dim);font-family:var(--font-mono),monospace;">
-        FLOW PULSE v1.1 &middot; Updates every 60s
+        FLOW PULSE v1.1 &middot; Updates every {refresh_interval}s
       </div>
       <div style="display:flex;gap:var(--space-md);">
         <span style="font-size:10px;color:var(--win);font-family:var(--font-mono),monospace;">
@@ -409,7 +409,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None) -> str:
 
 # ── Renderer ─────────────────────────────────────────────────────────────────
 
-async def render_pulse_card(data: PulseData, theme_id: str | None = None) -> bytes:
+async def render_pulse_card(data: PulseData, theme_id: str | None = None, refresh_interval: int = 60) -> bytes:
     """Render the pulse dashboard card to PNG bytes via Playwright."""
-    html = _build_pulse_html(data, theme_id=theme_id)
+    html = _build_pulse_html(data, theme_id=theme_id, refresh_interval=refresh_interval)
     return await render_card(html)

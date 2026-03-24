@@ -1,263 +1,221 @@
-# ATLAS Nightly Review — 2026-03-23
-
-**Auditor:** automated (`audit-monday-flow` scheduled task)
-**Focus:** Flow & Economy subsystem — 10 files, 5-pass audit
-**Bot version at audit time:** v6.12.0
-
----
-
-## Commit Delta (last 24 h)
-
-| Hash | Message | Files Touched |
-|------|---------|---------------|
-| `8900938` | fix: bug hunt sweep — race condition, token compliance, dead code removal — v6.12.0 | `economy_cog.py`, `flow_cards.py`, `flow_sportsbook.py`, `flow_wallet.py` |
-| `23dce71` | feat(flow): overhaul Flow Hub stats, redesign My Bets, add auto-refresh — v6.11.0 | `economy_cog.py`, `flow_cards.py` |
-
-**Net delta:** significant churn in `flow_cards.py` (My Bets redesign, Net P&L stat, results dot strip, streak badge) and `economy_cog.py` (auto-refresh loop added to `flow_cmd`). Both files are in audit scope — high priority for logic trace.
+# ATLAS Nightly Code Review
+**Date:** 2026-03-24
+**Scope:** Casino & Rendering Subsystem
+**Auditor:** Claude Code (automated overnight audit)
+**Files audited:** 15 files · 11,705 lines
 
 ---
 
-## Audit Findings
+## CRITICAL
 
-### 🔴 CRITICAL
+### C-1 · `_award_jackpot` return type mismatch — `casino/casino_db.py` L495–548
 
-#### C-01 — `flow_cards.py:168` — Closed connection accessed after `with` block
+**Severity:** HIGH
 
-**Severity:** CRITICAL — crash for any user not yet in `users_table`
-**File:** `flow_cards.py`, function `_get_leaderboard_rank()`
+`_award_jackpot` is annotated as returning `dict` but returns `None` at the early-exit path when `amount < 1`. The caller `process_wager` stores the result and may pass it downstream to streak/highlight logic that accesses dict keys without a None guard. This will surface as an unhandled `TypeError` mid-transaction, silently failing a payout with no user-visible error message.
 
-```python
-def _get_leaderboard_rank(user_id: int) -> tuple[int, int]:
-    with sqlite3.connect(DB_PATH) as con:
-        row = con.execute("SELECT rank, total FROM ...").fetchone()
-    if row:
-        return row[0], row[1]
-    # BUG: con is CLOSED here — the `with` block has exited
-    total = con.execute("SELECT COUNT(*) FROM users_table").fetchone()[0]
-    return total, total
-```
-
-The `with sqlite3.connect(...)` context manager calls `con.close()` on exit. Any user whose `user_id` is not yet ranked (new accounts, fresh season) hits the `if row` falsy branch and executes a query on a closed connection. Result: `sqlite3.ProgrammingError: Cannot operate on a closed database` — the entire hub card render fails for that user.
-
-**Fix:** Open a second connection for the fallback query, or move both queries inside the `with` block:
-
-```python
-def _get_leaderboard_rank(user_id: int) -> tuple[int, int]:
-    with sqlite3.connect(DB_PATH) as con:
-        row = con.execute("SELECT rank, total FROM ...").fetchone()
-        if row:
-            return row[0], row[1]
-        total = con.execute("SELECT COUNT(*) FROM users_table").fetchone()[0]
-        return total, total
-```
-
-**Introduced by:** v6.11.0 My Bets redesign commit (`23dce71`) which added the rank display to the dashboard card.
+**Fix:** Change the annotation to `dict | None` and add a None check at all call sites, or return an empty sentinel dict `{}` and guard on `jackpot_info.get("amount", 0)`.
 
 ---
 
-#### C-02 — `flow_live_cog.py` (multiple lines) — Hardcoded DB filename ignores `FLOW_DB_PATH`
+### C-2 · `get_challenge` column key zip is fragile against schema drift — `casino/casino_db.py` L1419–1430
 
-**Severity:** CRITICAL — silent data corruption / shadow database in non-default environments
-**File:** `flow_live_cog.py`, functions: `_ensure_sessions_table`, `_persist`, `_delete_persisted`, `load_persisted`, `_ensure_state_table`, `_load_pulse_message_ids`, `_save_pulse_message_id`, `_get_jackpot_data`
+**Severity:** HIGH
 
-Every `sqlite3.connect()` call in this file uses a raw string literal:
+`get_challenge` uses `SELECT *` followed by a hardcoded list of column names to zip into a dict. The DDL confirms `challenger_corr_id` and `opponent_corr_id` were added via `ALTER TABLE` after initial creation. On any production database where the ALTER was applied in a different order, SQLite column ordering may differ from what the zip expects. A misaligned zip produces silently wrong data: money may be credited to the wrong user or correlation IDs swapped, corrupting the ledger without raising an exception.
 
-```python
-conn = sqlite3.connect("flow_economy.db", timeout=10)
-```
-
-Every other module in the Flow subsystem resolves the path via `flow_wallet.DB_PATH`, which respects the `FLOW_DB_PATH` environment variable and resolves to an absolute path. `flow_live_cog.py` writes to a _relative path_ `flow_economy.db`, meaning it resolves against the current working directory at runtime — which may differ from where the authoritative database lives.
-
-**Impact:** Session persistence, pulse message IDs, and jackpot data are silently written to a shadow file. The live dashboard shows stale/empty data, and on reboot the bot loses all persisted session state. Worse: if `FLOW_DB_PATH` is set to a non-default path, the live cog is entirely decoupled from the rest of the economy.
-
-**Fix:** Import and use `DB_PATH` from `flow_wallet`:
-
-```python
-from flow_wallet import DB_PATH  # at top of file
-
-# everywhere:
-conn = sqlite3.connect(DB_PATH, timeout=10)
-```
+**Fix:** Replace with an explicit named-column `SELECT` (e.g. `SELECT id, challenger_id, opponent_id, ...`). Never rely on `SELECT *` positional ordering when the schema has been modified via `ALTER TABLE`.
 
 ---
 
-### 🟡 WARNING
+## WARNINGS
 
-#### W-01 — `flow_live_cog.py` — Blocking `sqlite3` I/O in async event handlers (no executor)
+### W-1 · `post_to_ledger` silently swallows all exceptions — `casino/casino.py` L49–82
 
-**File:** `flow_live_cog.py`, `SessionTracker._persist()` (L198), called at L278, L312
-**Callers:** async `_on_game_result()` → `sessions.record()` → `_persist()` (sync, blocking)
+`post_to_ledger` wraps both the ledger DB write and the FLOW event emission in a bare `except Exception: log.exception(...)`. Ledger failures are invisible to the player and to Discord. Wagers can be resolved but never recorded in the transaction ledger — a bookkeeping gap that cannot be detected without manually diffing wager outcomes against ledger entries.
 
-`_persist()` opens a `sqlite3` connection and executes DML synchronously. It is called on every game result and sportsbook result event — potentially multiple times per second during peak play. Because there is no `asyncio.to_thread()` or `run_in_executor()` wrapper, this blocks the event loop for the duration of each disk write.
-
-Contrast with `_get_jackpot_data()` (L608) in the same file, which is correctly wrapped:
-```python
-jp = await asyncio.get_running_loop().run_in_executor(None, _get_jackpot_data)
-```
-
-The inconsistency suggests `_persist()` was written before the `run_in_executor` pattern was established for this cog.
-
-**Risk:** Under load (concurrent blackjack/slots sessions) the bot's heartbeat with Discord can stall, triggering reconnects. Low probability of user-visible failure in normal TSL traffic (~31 teams), but will become noticeable if casino usage grows.
-
-**Fix:** Wrap in `asyncio.to_thread()`:
-```python
-async def _on_game_result(self, event):
-    session = await asyncio.to_thread(self.sessions.record, event)
-    ...
-```
-Or convert `_persist()` to async using `aiosqlite` (consistent with the rest of the economy stack).
+**Recommendation:** Emit a warning to the configured admin channel on ledger write failure.
 
 ---
 
-#### W-02 — `economy_cog.py` + `flow_sportsbook.py` — Silent exception swallow after `defer()` leaves interaction dead
+### W-2 · `_is_admin` bypasses shared permission helper — `casino/casino.py` L87–93
 
-**File:** `economy_cog.py` `FlowHubView._swap_to()`, `flow_sportsbook.py` `FlowHubView._swap_to()`
+`CasinoCog._is_admin()` checks `ctx.author.guild_permissions.administrator` and a hardcoded `"Commissioner"` role name directly, bypassing `is_commissioner()` from `permissions.py`. The rest of the bot uses `permissions.py` which also checks `ADMIN_USER_IDS` from env. A commissioner configured only in `ADMIN_USER_IDS` will be denied access to casino commissioner commands.
+
+**Fix:** Replace with `from permissions import is_commissioner; return await is_commissioner(ctx)`.
+
+---
+
+### W-3 · `my_stats` handler uses raw `aiosqlite.connect` instead of DB layer — `casino/casino.py` L275–330
+
+The `my_stats` button handler opens `aiosqlite.connect(db.DB_PATH)` directly, bypassing `casino_db` entirely. This bypasses the locking layer (`flow_wallet.get_user_lock()`), runs outside any `BEGIN IMMEDIATE` context, and will not benefit from future schema migrations applied through the DB layer.
+
+**Recommendation:** Extract the stats query into a `casino_db` function.
+
+---
+
+### W-4 · `assert` in production code path — `casino/renderer/ledger_renderer.py` L283
 
 ```python
-async def _swap_to(self, interaction, tab_cls, **kw):
-    await interaction.response.defer()
-    try:
-        await self.render_current(interaction)
-    except Exception:
-        return  # ← interaction is now deferred with no followup
+assert info is not None
 ```
 
-Once `defer()` is called, Discord expects either `edit_original_response()` or `followup.send()` within ~15 minutes. The bare `except Exception: return` swallows the error and returns without sending anything. Discord shows the user "application did not respond" after the deferred spinner. This affects every button press in both the Flow Hub and Sportsbook Hub.
+Python `assert` is a no-op when run with the `-O` (optimize) flag. Even when active, it raises `AssertionError` rather than a graceful error. The rendering caller catches `Exception` (which includes `AssertionError`), so the card render will fail silently.
 
-**Fix:** At minimum, send an ephemeral error on failure:
-```python
-except Exception:
-    log.exception("_swap_to failed")
-    try:
-        await interaction.followup.send("Something went wrong — try again.", ephemeral=True)
-    except Exception:
-        pass
-```
+**Fix:** Replace with `if info is None: raise ValueError(f"Unknown ledger source: {source_key}")`.
 
 ---
 
-#### W-03 — `flow_sportsbook.py` — `_check_parlay_completion` `own_con` path: `__enter__` without `__exit__` silently rolls back all changes
+### W-5 · Playwright page pool zombie-check iterates stale `page` reference — `atlas_html_engine.py` L604–613
 
-**File:** `flow_sportsbook.py`, `_check_parlay_completion()` (~L962)
+The `PagePool.acquire()` health-check loop retries up to `self._size` times but reuses the same `page` variable without fetching a fresh candidate from the queue at each iteration. In the failure scenario where one page in the pool is closed, this loop spins `_size` times on the same closed page before falling through to spawn a replacement — a latency spike under concurrent load with multiple closed pages.
 
-```python
-own_con = con is None
-if own_con:
-    con = _db_con().__enter__()  # acquires connection; __exit__ never called
-try:
-    # ... multi-statement DML (grade legs, credit balance, log payout) ...
-finally:
-    if own_con:
-        con.close()  # closes connection WITHOUT __exit__ → rollback on close
-```
-
-`sqlite3` connections used as context managers commit on clean exit and rollback on exception. Calling `__enter__()` without the matching `__exit__()` means the connection manager state is never resolved. `con.close()` on a connection with uncommitted changes triggers an implicit rollback — silently discarding all the DML (parlay grading, balance credit, audit log).
-
-**Current blast radius:** Zero — all three call sites pass `con=<existing connection>`, so `own_con` is always `False`. The path is dead code. But any future refactor that calls `_check_parlay_completion()` without a connection argument will cause silent data loss with no exception raised.
-
-**Fix:** Use a proper context manager:
-```python
-if own_con:
-    with _db_con() as con:
-        _do_completion_work(con, ...)
-        return
-_do_completion_work(con, ...)
-```
-Or add an assertion: `assert con is not None, "must pass explicit connection"`.
+**Recommendation:** Re-fetch from the queue at each iteration, or restructure to drain-and-replace individually.
 
 ---
 
-### 🔵 OBSERVATIONS
+### W-6 · `asyncio.sleep` calls extend the interaction response window — multiple game files
 
-#### O-01 — `flow_store.py:200,594` — `uuid4()` in `ref_key` breaks idempotency on transaction retry
-
-```python
-ref_key = f"store_purchase_{discord_id}_{item_id}_{uuid.uuid4().hex[:8]}"
-ref_key = f"store_lootbox_{discord_id}_{inventory_id}_{uuid.uuid4().hex[:8]}"
-```
-
-The `transactions` table uses `reference_key` for idempotency (duplicate-spend protection). Every other subsystem (stipends, sportsbook) uses deterministic keys (`STIPEND_{id}_{member}_{period}`). Appending a random UUID suffix means each call generates a unique key — the idempotency check never fires. If the connection drops after `BEGIN IMMEDIATE` but before `COMMIT`, a retry would create a second transaction row.
-
-In practice the risk is low because the per-user `asyncio.Lock` prevents concurrent access, and the `is_activated=1` guard on the inventory row prevents double-open. But the idempotency table is providing false confidence here.
-
-**Suggestion:** Use a deterministic key: `f"store_purchase_{discord_id}_{item_id}_{timestamp_bucket}"` or `f"store_lootbox_{discord_id}_{inventory_id}"`.
+`blackjack.py:532` (1.5s), `slots.py` (3× 0.9s = 2.7s minimum per spin), `crash.py` (multiple). These yield control to the event loop and are not true blocking calls, but they extend the Discord interaction response window. In `slots.py`, the 2.7s animation sleep plus Playwright render time approaches the 3s Discord interaction timeout window on slow hardware.
 
 ---
 
-#### O-02 — `flow_live_cog.py:648-649` — Pulse dashboard hardcodes sportsbook/prediction metrics to zero
+### W-7 · `_get_browser()` singleton has no initialization lock — `atlas_html_engine.py`
 
-```python
-sb_week=0, sb_bets=0, sb_volume=0, sb_hot_player=None, sb_hot_desc="",
-pred_open=0, pred_hot_title="", pred_yes_pct=0, pred_no_pct=0, pred_volume=0,
-```
+The global `_browser` singleton uses a bare `if _browser is None: _browser = await ...` pattern with no `asyncio.Lock`. Under concurrent startup (two cogs triggering renders simultaneously before the pool is ready), two browser instances can be spawned and the second overwrites the first, leaving the first as a zombie process consuming system resources.
 
-The Pulse dashboard card has sportsbook and prediction sections, but the data builder is passed hard-coded zeros. The rendered card shows empty/zero stats for sportsbook week and prediction markets. This appears to be intentional scaffolding (the section exists in the renderer), but worth noting — users see a dashboard that implies live sportsbook data is being tracked when it isn't.
+**Recommendation:** Guard initialization with an `asyncio.Lock` stored at module level.
 
 ---
 
-#### O-03 — `flow_live_cog.py` — `_get_jackpot_data` uses `run_in_executor` correctly (positive reference)
+## OBSERVATIONS
 
-```python
-jp = await asyncio.get_running_loop().run_in_executor(None, _get_jackpot_data)
-```
+### O-1 · Dead code block in `check_achievements` — `casino/casino_db.py` L770–773
 
-This is the right pattern for sync SQLite in an async context. It's also the correct precedent to apply to `_persist()` (W-01 above).
+A cursor is opened with `async with conn.execute("SELECT ...")` and immediately discarded with `pass`. This is a no-op query that wastes a round-trip to SQLite on every wager resolution. The achievement system is a stub that was never implemented.
 
 ---
 
-## Cross-Module Risk Map
+### O-2 · Redundant `get_max_bet()` call in coinflip — `casino/games/coinflip.py` L79 and L152
 
-| Risk | Modules Involved | Trigger Condition |
-|------|-----------------|-------------------|
-| New user hits Flow Hub → render crash (C-01) | `flow_cards.py` ← `economy_cog.py` | User with no rank in `users_table` opens hub |
-| Live dashboard writes to wrong DB (C-02) | `flow_live_cog.py` ↔ `flow_wallet.py` | Any non-default `FLOW_DB_PATH` deployment or CWD mismatch |
-| Event loop stall during peak casino play (W-01) | `flow_live_cog.py` ← `flow_events.py` (bus) ← `casino/casino.py` | Multiple concurrent game results firing at once |
-| Hub button press → spinner with no response (W-02) | `economy_cog.py`, `flow_sportsbook.py` → Discord API | Any exception in `render_current()` after defer |
-| Silent parlay data loss if `own_con` path ever triggered (W-03) | `flow_sportsbook.py` | Calling `_check_parlay_completion()` without `con=` argument |
+`play_coinflip` fetches `max_bet` at L79 for display purposes, then `ChallengeView.accept()` fetches it again at L152 before processing the wager. An unnecessary second DB round-trip; the two calls can theoretically return different values if bet limits change mid-session.
 
 ---
 
-## Positive Patterns (worth preserving)
+### O-3 · `coin_gradient`/`coin_rim` CSS values injected as raw f-string — `casino/renderer/casino_html_renderer.py` L1700
 
-| Pattern | Where | Why It's Good |
-|---------|-------|---------------|
-| `get_user_lock(discord_id)` + `BEGIN IMMEDIATE` | `flow_wallet.py`, `flow_store.py` | Per-user lock prevents concurrent double-spend; IMMEDIATE acquires write lock upfront, eliminating TOCTOU in balance reads |
-| Deterministic `ref_key` idempotency | `flow_wallet.py`, `economy_cog.py` stipends | Prevents duplicate credits even if the caller retries |
-| `@functools.lru_cache` + cache invalidation in setter | `flow_wallet.get_theme_for_render()` | Theme lookups are hot path (every render); invalidation on `set_theme()` keeps it correct |
-| WAL mode on every connection | `flow_store.py`, `flow_wallet.py` | Concurrent readers don't block writers; critical for Discord's concurrent interaction model |
-| `FlowEventBus` exception isolation | `flow_events.py` | Exception in one subscriber doesn't kill other subscribers — live cog failure won't break casino payout |
-| `AuditResult` dataclass + exception-safe checks | `flow_audit.py` | Each audit check is independently isolated; a bad check surfaces as a HIGH finding rather than crashing the whole audit |
+Values are constructed from internal logic (not user input), so no practical XSS vector exists today. Noted for future-proofing: if the source ever changes to include user-supplied data, the lack of escaping becomes a real risk.
 
 ---
 
-## Test Gaps
+### O-4 · Crash round processes O(n) individual DB writes for multi-player rounds — `casino/games/crash.py`
 
-| Gap | Risk Level | Trigger |
-|-----|-----------|---------|
-| `_get_leaderboard_rank()` fallback path (new user not in `users_table`) | CRITICAL | First hub open for any new user |
-| `_check_parlay_completion()` with `con=None` (own_con path) | HIGH | Future refactor removes `con=` argument from callers |
-| `flow_live_cog` with `FLOW_DB_PATH` set to non-default path | HIGH | VPS deployment with custom DB location |
-| `_swap_to()` when `render_current()` raises | MEDIUM | Any card render failure during tab navigation |
-| Lootbox `guaranteed_rarity` fallback (10 retries exhausted, take max rarity) | LOW | Extremely low-weight rarity pool |
-| Store purchase / lootbox retry after mid-transaction disconnect | LOW | Network blip during `BEGIN IMMEDIATE` |
+For each losing player in a crash round, `process_wager()` is called individually inside the `_run_round()` loop. Each call acquires `flow_wallet.get_user_lock()` and opens a `BEGIN IMMEDIATE` transaction separately. With 10+ concurrent crash participants, this serializes O(n) exclusive DB writes at end-of-round, creating a burst of lock contention.
 
 ---
 
-## Metrics
+### O-5 · `highlight_renderer.py` defines a local `_wrap_card` that shadows the engine's `wrap_card` — L82
+
+Scoped correctly and does not cause a collision, but a future maintainer editing this file may be surprised that `_wrap_card` is not the same function as `wrap_card`. A comment or rename would improve clarity.
+
+---
+
+### O-6 · `biggest_loss` display relies on undocumented sign convention — `casino/renderer/session_recap_renderer.py` L241
+
+Correctness depends on whether `PlayerSession.biggest_loss` stores losses as a negative integer or a positive loss magnitude. If the convention changes, `abs()` silently displays the wrong sign.
+
+---
+
+### O-7 · Scratch card uses `status_class = "win"` for all-revealed non-match outcomes — `casino/renderer/casino_html_renderer.py` L1941–1944
+
+When all 3 tiles are revealed with no triple match, the card renders with a green `"win"` status bar, visually indistinguishable from a jackpot result. Minor UX distinction issue — no functional bug.
+
+---
+
+### O-8 · `pulse_renderer.py` footer "Updates every 60s" is hardcoded — L395
+
+If the calling cog changes the refresh interval, the displayed value will be stale. Should be passed as a parameter.
+
+---
+
+## CROSS-MODULE RISKS
+
+### XM-1 · `flow_wallet` shared DB — sportsbook settle cycle could block casino wagers
+
+`sportsbook.db` is shared between `casino_db.py` and `flow_sportsbook.py`. If `flow_sportsbook.py` ever opens a `BEGIN EXCLUSIVE` transaction during a settle cycle, it will block all casino wager deductions for the duration. Currently using `BEGIN IMMEDIATE` (correct). Risk is latent as sportsbook settle complexity grows.
+
+---
+
+### XM-2 · `reconcile_orphaned_wagers` 10-minute loop may flag in-flight blackjack hands as orphans
+
+If a player has a blackjack hand open for more than 10 minutes (Discord view timeout is 5 minutes but hands can be left open), the wager appears orphaned to the reconcile loop. The `on_timeout()` handler resolves the wager on timeout, but the race window exists between the timeout firing and the reconcile loop's `NOT EXISTS` query.
+
+---
+
+### XM-3 · Prediction renderer imports `CATEGORY_COLORS_HEX` from `polymarket_cog` with a try/except fallback
+
+If `polymarket_cog` is not loaded (disabled in cog load order), the renderer silently uses a fallback color dict. Prediction cards rendered during polymarket cog absence will have different category colors than when it is loaded — visual inconsistency with no error raised.
+
+---
+
+### XM-4 · Ledger write failure (W-1) is invisible to `reconcile_orphaned_wagers`
+
+If `post_to_ledger` fails silently, the wager is marked resolved in `wager_registry` but has no corresponding ledger entry. The reconcile pass will not catch this because the wager shows as resolved — the missing ledger post is permanently invisible to the reconcile system.
+
+---
+
+## POSITIVE PATTERNS
+
+1. **SENTINEL pattern used correctly in all concurrent flows.** `active_sessions["PENDING"]`, `active_rounds[ch_id] = "PENDING"`, and `ChallengeView.resolved = True` are all set before the first `await` in their respective paths. This correctly prevents TOCTOU double-entry without requiring a separate lock.
+
+2. **`BEGIN IMMEDIATE` used consistently for all balance-modifying operations.** `process_wager`, `deduct_wager`, and jackpot award all use `BEGIN IMMEDIATE` transactions with explicit rollback on exception. The locking hierarchy (user-lock then BEGIN IMMEDIATE) is consistent throughout `casino_db.py`.
+
+3. **RNG is always server-side and outcome-first.** In slots, the outcome is computed by `_spin_controlled()` before any animation renders. In crash, the crash point is computed via SHA-256 hash of a server secret before players join. In blackjack, the shoe is shuffled server-side. No client-visible state can be used to predict outcomes.
+
+4. **All user-facing text passes through `esc()` (html.escape) in every renderer.** Checked across all 7 renderer files. No unescaped f-string interpolation of user-supplied data was found.
+
+5. **Playwright page pool uses `try/finally` to guarantee page return.** `render_card()` in `atlas_html_engine.py` wraps every render in `try/finally: pool.release(page)`, ensuring pages are never permanently removed from the pool even on render failure.
+
+6. **`atlas_style_tokens.py` is a genuine single source of truth.** All 15 renderer files reference CSS variables generated from `Tokens._CSS_MAP`. No hardcoded color hex values found outside the tokens file and the `atlas_themes.py` override system.
+
+7. **Blackjack `on_timeout()` correctly handles split hands** by iterating all pending hands and resolving each wager individually, preventing money loss on Discord interaction timeout.
+
+8. **Parameterized queries used throughout `casino_db.py`.** Zero SQL string formatting with user data found. All variable data is passed as SQLite parameter tuples.
+
+---
+
+## TEST GAPS
+
+- No unit tests for `_award_jackpot` return type contract — the `dict | None` mismatch (C-1) would be caught immediately by a type assertion test.
+- No integration test for `get_challenge` column ordering after `ALTER TABLE` (C-2) — a test that creates a challenge DB with altered column order then calls `get_challenge` would expose the zip misalignment.
+- No test for `reconcile_orphaned_wagers` with a concurrent in-flight wager (XM-2).
+- No smoke tests confirming all 7 renderers produce non-empty PNG bytes — a CSS syntax error in any renderer would only surface when a user triggers that specific game.
+- No test for `post_to_ledger` failure path (W-1) — the silent swallow produces no observable signal.
+- No test for Playwright pool exhaustion (all 4 pages checked out simultaneously).
+
+---
+
+## METRICS
 
 | Metric | Value |
 |--------|-------|
-| Files audited | 10 |
-| Lines of code reviewed | ~5,900 (estimated across all 10 files) |
-| Critical findings | 2 |
-| Warning findings | 3 |
-| Observations | 3 |
-| SQL injection vectors found | 0 (1 apparent f-string in `flow_sportsbook._set_line_override` is whitelist-validated against `_ALLOWED_LINE_COLS`) |
-| Bare `except:` clauses | 0 |
-| `time.sleep()` in async context | 0 |
-| Blocking SQLite in async (without executor) | 1 (`flow_live_cog._persist`) |
-| Hardcoded DB paths | 8 call sites in `flow_live_cog.py` |
+| Files read | 15 |
+| Total lines audited | 11,705 |
+| CRITICAL findings | 2 |
+| WARNING findings | 7 |
+| OBSERVATIONS | 8 |
+| CROSS-MODULE RISKS | 4 |
+| SQL injection vectors found | 0 |
+| Unescaped HTML injection vectors found | 0 (1 low-risk internal CSS injection noted in O-3) |
+| `eval`/`exec` calls found | 0 |
+| `SELECT *` with positional zip | 1 (C-2) |
+| Bare `assert` in production paths | 1 (W-4) |
+| `asyncio.sleep` calls in interaction handlers | 6 total (BJ: 1, Slots: 3, Crash: multiple) |
+| `BEGIN IMMEDIATE` transaction sites | 7 |
+| SENTINEL anti-TOCTOU patterns | 3 (blackjack, crash, coinflip) |
+| Dead code blocks | 1 (O-1) |
+| Recent git commits touching casino/rendering scope | 0 (last 5 commits were sportsbook/oracle/atlas_ai) |
 
 ---
 
-*Generated by ATLAS audit-monday-flow scheduled task. All findings are code-level — no production incidents observed. Priority order for fixes: C-01 (any new user reproduces), C-02 (environment-dependent), W-02 (UX regression on any render error), W-01 (performance at scale), W-03 (pre-emptive before refactor).*
+*Priority order for fixes: C-1 (type mismatch — silent payout failure), C-2 (schema drift — silent data corruption), W-4 (assert in renderer), W-2 (permission bypass — admin inconsistency), W-7 (browser singleton lock — startup race).*

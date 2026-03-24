@@ -33,16 +33,18 @@ _ACH_ICONS_DIR = _DIR / "icons" / "achievements"
 _browser = None
 _pw_context_manager = None
 _pw_instance = None
+_browser_lock = asyncio.Lock()
 
 
 async def _get_browser():
     global _browser, _pw_context_manager, _pw_instance
-    if _browser is None or not _browser.is_connected():
-        from playwright.async_api import async_playwright
+    async with _browser_lock:
+        if _browser is None or not _browser.is_connected():
+            from playwright.async_api import async_playwright
 
-        _pw_context_manager = async_playwright()
-        _pw_instance = await _pw_context_manager.__aenter__()
-        _browser = await _pw_instance.chromium.launch(headless=True)
+            _pw_context_manager = async_playwright()
+            _pw_instance = await _pw_context_manager.__aenter__()
+            _browser = await _pw_instance.chromium.launch(headless=True)
     return _browser
 
 
@@ -610,7 +612,7 @@ class PagePool:
                 return page
             log.warning("Dead page detected in pool — replacing")
             page = await self._new_page()
-        return page
+        raise RuntimeError("Playwright pool exhausted: all pages dead after replacement attempts")
 
     async def release(self, page):
         """Return a page to the pool, recycling dead or exhausted pages."""

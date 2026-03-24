@@ -280,7 +280,8 @@ def _build_transaction_html(
 ) -> str:
     """Build HTML for a non-casino transaction slip (3-column + description)."""
     info = SOURCE_INFO.get(source, SOURCE_INFO.get("ADMIN"))
-    assert info is not None
+    if info is None:
+        raise ValueError(f"Unknown ledger source: {source!r}")
 
     status_class = "credit" if amount > 0 else "debit" if amount < 0 else "neutral"
     badge_class = "credit" if amount >= 0 else "debit"
