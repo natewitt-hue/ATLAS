@@ -740,7 +740,7 @@ async def embed_text(text: str) -> list[float] | None:
             None,
             lambda: gemini.models.embed_content(
                 model="text-embedding-004",
-                content=text,
+                contents=text,
             ),
         )
         return result.embeddings[0].values

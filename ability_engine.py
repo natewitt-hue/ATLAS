@@ -983,7 +983,7 @@ def reassign_roster(players: list[dict],
         violation_slots: list[tuple[int, str, list[str]]] = []  # (slot_idx, ability, reasons)
 
         for i, ab in enumerate(equipped):
-            if not ab:
+            if not ab or ab == "nan":
                 continue
             earned, reasons = is_ability_earned(p, ab)
             if earned:

@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.18.4"  # fix(casino): nightly audit — W-1/W-3/W-5/O-1–O-8 sweep
+ATLAS_VERSION = "6.18.5"  # fix(boss): embed overflow + nan ability spam
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
