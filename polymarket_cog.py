@@ -685,7 +685,7 @@ async def _execute_prediction_buy(
 
     async with flow_wallet.get_user_lock(user_id):
         now = datetime.now(timezone.utc).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             await db.execute("BEGIN IMMEDIATE")
 
             # Guard: market must still be active
@@ -761,7 +761,7 @@ async def _execute_prediction_sell(
 
     async with flow_wallet.get_user_lock(user_id):
         now = datetime.now(timezone.utc).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             await db.execute("BEGIN IMMEDIATE")
 
             # Load contract
@@ -1457,7 +1457,7 @@ class PredictionWorkspace(discord.ui.View):
 
         # Log engagement
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 await db.execute(
                     "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
                     "VALUES (?, 'view', ?, 'workspace', ?)",
@@ -1693,7 +1693,7 @@ class PredictionWorkspace(discord.ui.View):
 
     async def _load_positions(self):
         """Load open positions from DB."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute("""
                 SELECT pc.id, pc.market_id, pm.title, pc.side, pc.buy_price,
                        pc.quantity, pc.cost_bucks, pc.potential_payout,
@@ -2034,7 +2034,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         upserted = 0
         garbage_count = 0
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             for event in events:
                 event_id = str(event.get("id", ""))
                 event_category = extract_category_from_event(event)
@@ -2163,7 +2163,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         One-time Gemini classification for markets still labeled 'Other'.
         Batches titles into one prompt, parses JSON response, updates DB.
         """
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT market_id, title, slug FROM prediction_markets "
                 "WHERE status='active' AND category LIKE '%Other%' "
@@ -2202,7 +2202,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             log.error(f"AI classification failed: {e}")
             return
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             updated = 0
             blocked = 0
             for item in classifications:
@@ -2233,7 +2233,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         """Score all active markets for curation. Runs every sync cycle."""
         now = datetime.now(timezone.utc).isoformat()
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             # Fetch all active markets
             blocked_ph = ",".join("?" for _ in BLOCKED_CATEGORIES)
             async with db.execute(f"""
@@ -2338,7 +2338,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         view_mode: 'curated' (weighted random), 'trending' (top volume_24hr),
                    'popular' (most TSL bets), 'new' (newest)
         """
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             if view_mode == "trending":
                 query = """
                     SELECT pm.market_id, pm.slug, pm.title, pm.category,
@@ -2536,7 +2536,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     async def _store_price_snapshots(self):
         """Store price snapshots for movement detection. Runs every ~15 min."""
         now = datetime.now(timezone.utc).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT market_id, yes_price FROM prediction_markets WHERE status = 'active'"
             ) as cursor:
@@ -2574,7 +2574,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         # Get today's daily drop markets to skip
         today = now.strftime("%Y-%m-%d")
         drop_market_ids: set[str] = set()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT spotlight_market_id, supporting FROM daily_drops WHERE drop_date = ?",
                 (today,),
@@ -2655,7 +2655,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
                         async def _alert_bet_cb(interaction: discord.Interaction, mid=market_id):
                             # Log engagement
-                            async with aiosqlite.connect(DB_PATH) as db2:
+                            async with aiosqlite.connect(DB_PATH, timeout=30) as db2:
                                 await db2.execute(
                                     "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
                                     "VALUES (?, 'alert_click', ?, 'price_alert', ?)",
@@ -2682,7 +2682,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         except discord.NotFound:
             return
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT market_id, slug, title, category, yes_price, no_price, "
                 "volume, end_date, liquidity "
@@ -2703,7 +2703,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         }
 
         # Log engagement
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             await db.execute(
                 "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
                 "VALUES (?, 'view', ?, 'markets_cmd', ?)",
@@ -2737,7 +2737,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 continue  # Not clearly resolved yet
 
             # Check our DB: only act on markets still marked pending
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 async with db.execute(
                     "SELECT resolved_by FROM prediction_markets WHERE market_id = ?",
                     (market_id,)
@@ -2820,7 +2820,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         For each, fetch the market individually by ID and check if resolved.
         """
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT DISTINCT c.market_id "
@@ -2853,7 +2853,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
             # Settle it
             result_upper = result.upper()
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 async with db.execute(
                     "SELECT COUNT(*) FROM prediction_contracts "
                     "WHERE market_id = ? AND status = 'open'",
@@ -2872,7 +2872,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             counts = await self._resolve(market_id, result_upper)
 
             # Mark market as auto-resolved
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 await db.execute(
                     "UPDATE prediction_markets "
                     "SET resolved_by = 'auto', result = ?, status = 'closed' "
@@ -2897,7 +2897,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
     async def _stale_market_alert_pass(self):
         """Alert admin about markets with open contracts that haven't synced in >30 days."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT c.market_id, COUNT(*) as open_count,
@@ -2980,7 +2980,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             )
 
             # Show top winners
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 async with db.execute(
                     "SELECT user_id, quantity, potential_payout, cost_bucks "
                     "FROM prediction_contracts "
@@ -3051,7 +3051,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         # Check if already posted today
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT drop_id FROM daily_drops WHERE drop_date = ?", (today,)
             ) as cursor:
@@ -3071,7 +3071,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
     async def _generate_daily_drop(self, today: str):
         """Build shortlist, call Gemini, render card, post to channel."""
         # Step 1: Build shortlist — top 30 by curation score, max 3 per category
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute("""
                 SELECT pm.market_id, pm.slug, pm.title, pm.category,
                        pm.yes_price, pm.no_price, pm.volume, pm.end_date,
@@ -3135,7 +3135,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         # Step 3: Community momentum
         community_data = {}
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             all_market_ids = [spotlight["market_id"]] + [s["market_id"] for s in supporting]
             for mid in all_market_ids:
                 community_data[mid] = await self._get_community_sentiment(mid, db)
@@ -3188,7 +3188,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 return
             # Log engagement
             try:
-                async with aiosqlite.connect(DB_PATH) as db2:
+                async with aiosqlite.connect(DB_PATH, timeout=30) as db2:
                     await db2.execute(
                         "INSERT INTO market_engagement (market_id, event_type, user_id, source, created_at) "
                         "VALUES (?, 'view', ?, 'daily_drop', ?)",
@@ -3205,7 +3205,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         msg = await send_card_to_channel(channel, png, filename="daily_drop.png", view=view)
 
         # Step 7: Store the selection
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             supporting_json = json.dumps([
                 {"market_id": s["market_id"], "hook": s.get("hook", "")}
                 for s in supporting
@@ -3315,7 +3315,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         """Get top prediction traders by weekly profit + streaks."""
         week_start = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             # Weekly profit
             async with db.execute("""
                 SELECT user_id,
@@ -3432,7 +3432,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         await self._ensure_db()
         slug = slug.strip().lower()
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             # Try exact slug match first, then partial match
             async with db.execute(
                 "SELECT market_id, slug, title, category, yes_price, no_price, "
@@ -3484,7 +3484,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 no_price = live_prices["no_price"]
                 # Update DB cache
                 now = datetime.now(timezone.utc).isoformat()
-                async with aiosqlite.connect(DB_PATH) as db:
+                async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                     await db.execute(
                         "UPDATE prediction_markets SET yes_price=?, no_price=?, "
                         "last_synced=? WHERE market_id=?",
@@ -3565,7 +3565,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             return
 
         # Look up market_id from slug
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT market_id, title FROM prediction_markets WHERE slug = ?",
                 (slug,)
@@ -3606,7 +3606,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         counts = {"won": 0, "lost": 0, "voided": 0}
         total_payout = 0
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             await db.execute("BEGIN IMMEDIATE")
 
             # Guard: prevent double-resolution (TOCTOU between status check and here)
@@ -3747,7 +3747,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         test = await self.client.fetch_active_markets(limit=1)
         api_ok = test is not None
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT COUNT(*), MAX(last_synced) "
                 "FROM prediction_markets WHERE status='active'"
@@ -3797,7 +3797,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         """Void all open contracts on sports-category markets and refund users."""
         await self._ensure_db()
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             # Find sports markets with open contracts
             placeholders = ",".join("?" for _ in BLOCKED_CATEGORIES)
             async with db.execute(
@@ -3825,7 +3825,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             total_refunded += counts["voided"]  # each voided contract = 1 refund
 
             # Also remove the market from the DB so it won't reappear
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 await db.execute(
                     "DELETE FROM prediction_markets WHERE market_id = ?",
                     (market_id,),
@@ -3846,7 +3846,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         await self._ensure_db()
         slug = slug.strip().lower()
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             async with db.execute(
                 "SELECT market_id, title, featured FROM prediction_markets WHERE slug = ?",
                 (slug,)

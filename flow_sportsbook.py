@@ -1200,32 +1200,42 @@ async def _run_autograde(bot) -> None:
             total_paid = 0
             error_bets = []
             settled_details = []
+            skipped_matchups = []
+            import wager_registry
 
-            try:
-                with _db_con() as con:
-                    con.execute("BEGIN IMMEDIATE")
-                    pending = con.execute(
-                        "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
-                        "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
-                        (week,)
-                    ).fetchall()
+            # ── Read phase: no exclusive lock needed in WAL mode ──────────
+            with _db_con() as con:
+                pending = con.execute(
+                    "SELECT bet_id, discord_id, matchup, bet_type, wager_amount, odds, pick, line "
+                    "FROM bets_table WHERE week=? AND status NOT IN ('Won','Lost','Push','Cancelled')",
+                    (week,)
+                ).fetchall()
 
-                    skipped_matchups = []
-                    for b in pending:
-                        bid, uid, matchup, btype, amt, odds, pick, line = b
-                        gd = _fuzzy_match(matchup.lower().strip(), scores)
-                        if not gd:
-                            skipped_matchups.append((bid, matchup, uid, amt))
-                            log.warning(f"[AUTO-GRADE] Fuzzy match FAILED for bet {bid}: '{matchup}' — stays Pending")
-                            continue
-                        try:
-                            line_val = float(line)
-                        except (ValueError, TypeError):
-                            line_val = 0.0
-                        res = _grade_single_bet(btype, pick, line_val,
-                                                gd["home"], gd["away"],
-                                                gd["home_score"], gd["away_score"])
-                        if res == "Pending":
+            # ── Per-bet write: lock held only for ~4 SQL statements each ──
+            for b in pending:
+                bid, uid, matchup, btype, amt, odds, pick, line = b
+                gd = _fuzzy_match(matchup.lower().strip(), scores)
+                if not gd:
+                    skipped_matchups.append((bid, matchup, uid, amt))
+                    log.warning(f"[AUTO-GRADE] Fuzzy match FAILED for bet {bid}: '{matchup}' — stays Pending")
+                    continue
+                try:
+                    line_val = float(line)
+                except (ValueError, TypeError):
+                    line_val = 0.0
+                res = _grade_single_bet(btype, pick, line_val,
+                                        gd["home"], gd["away"],
+                                        gd["home_score"], gd["away_score"])
+                if res == "Pending":
+                    continue
+                try:
+                    with _db_con() as con:
+                        con.execute("BEGIN IMMEDIATE")
+                        # Guard: re-check status to prevent double-settlement
+                        cur = con.execute(
+                            "SELECT status FROM bets_table WHERE bet_id=?", (bid,)
+                        ).fetchone()
+                        if not cur or cur[0] != "Pending":
                             continue
                         if res == "Won":
                             payout = _payout_calc(amt, int(odds))
@@ -1248,91 +1258,108 @@ async def _run_autograde(bot) -> None:
                         elif res == "Lost":
                             losses += 1
                         con.execute("UPDATE bets_table SET status=? WHERE bet_id=?", (res, bid))
-                        import wager_registry
                         _ra = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (0 if res == "Push" else -amt)
                         wager_registry.settle_wager_sync("TSL_BET", str(bid), res.lower(), _ra, con=con)
                         settled += 1
-                        _settle_payout = _payout_calc(amt, int(odds)) if res == "Won" else (amt if res == "Push" else 0)
-                        settled_details.append({
-                            "bet_id": bid, "discord_id": uid, "matchup": matchup,
-                            "bet_type": btype, "pick": pick, "wager": amt,
-                            "result": res, "payout": _settle_payout,
-                            "new_balance": _get_balance(uid),
-                        })
-                        _ev_profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (-amt if res == "Lost" else 0)
-                        pending_events.append({
-                            "discord_id": uid,
-                            "guild_id": None,
-                            "source": "TSL_BET",
-                            "bet_type": btype,
-                            "amount": _ev_profit,
-                            "balance_after": _get_balance(uid),
-                            "description": f"{res}: {pick} ({btype}) on {matchup}",
-                            "bet_id": bid,
-                        })
+                    # Balance reads happen after commit so they see updated values
+                    _settle_payout = _payout_calc(amt, int(odds)) if res == "Won" else (amt if res == "Push" else 0)
+                    settled_details.append({
+                        "bet_id": bid, "discord_id": uid, "matchup": matchup,
+                        "bet_type": btype, "pick": pick, "wager": amt,
+                        "result": res, "payout": _settle_payout,
+                        "new_balance": _get_balance(uid),
+                    })
+                    _ev_profit = (_payout_calc(amt, int(odds)) - amt) if res == "Won" else (-amt if res == "Lost" else 0)
+                    pending_events.append({
+                        "discord_id": uid,
+                        "guild_id": None,
+                        "source": "TSL_BET",
+                        "bet_type": btype,
+                        "amount": _ev_profit,
+                        "balance_after": _get_balance(uid),
+                        "description": f"{res}: {pick} ({btype}) on {matchup}",
+                        "bet_id": bid,
+                    })
+                except Exception:
+                    log.exception(f"[AUTO-GRADE] Error settling bet {bid}")
+                    failed_weeks.append(week)
 
-                    # ── Parlays ───────────────────────────────────────────
-                    parlays = con.execute(
-                        "SELECT parlay_id, discord_id, combined_odds, wager_amount "
-                        "FROM parlays_table WHERE week=? AND status='Pending'",
-                        (week,)
+            # ── Parlays: read all legs up front, then settle per-parlay ───
+            with _db_con() as con:
+                parlays = con.execute(
+                    "SELECT parlay_id, discord_id, combined_odds, wager_amount "
+                    "FROM parlays_table WHERE week=? AND status='Pending'",
+                    (week,)
+                ).fetchall()
+                parlay_legs_map = {}
+                for pid, _, _, _ in parlays:
+                    parlay_legs_map[pid] = con.execute(
+                        "SELECT game_id, matchup, pick, bet_type, line, odds, source "
+                        "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
+                        (pid,)
                     ).fetchall()
 
-                    for pid, uid, c_odds, amt in parlays:
-                        legs = con.execute(
-                            "SELECT game_id, matchup, pick, bet_type, line, odds, source "
-                            "FROM parlay_legs WHERE parlay_id=? ORDER BY leg_index",
-                            (pid,)
-                        ).fetchall()
-                        if not legs:
+            for pid, uid, c_odds, amt in parlays:
+                legs = parlay_legs_map.get(pid, [])
+                if not legs:
+                    try:
+                        with _db_con() as con:
+                            con.execute("BEGIN IMMEDIATE")
                             con.execute("UPDATE parlays_table SET status='Lost' WHERE parlay_id=?", (pid,))
+                    except Exception:
+                        log.exception(f"[AUTO-GRADE] Error settling empty parlay {pid}")
+                    continue
+
+                # Grade all legs (pure computation, no DB access)
+                leg_results = []
+                for row in legs:
+                    leg_matchup = row[1]
+                    source = row[6] if len(row) > 6 else "TSL"
+                    if source != "TSL":
+                        leg_results.append("Pending")
+                        continue
+                    gd = _fuzzy_match(leg_matchup.lower().strip(), scores)
+                    if not gd:
+                        leg_results.append("Pending")
+                        continue
+                    leg_results.append(_grade_single_bet(
+                        row[3], row[2], float(row[4]),
+                        gd["home"], gd["away"], gd["home_score"], gd["away_score"]
+                    ))
+
+                # Per-parlay write transaction
+                try:
+                    with _db_con() as con:
+                        con.execute("BEGIN IMMEDIATE")
+                        prow = con.execute(
+                            "SELECT status FROM parlays_table WHERE parlay_id=?", (pid,)
+                        ).fetchone()
+                        if not prow or prow[0] != "Pending":
                             continue
-
-                        leg_results = []
-                        for leg_idx, row in enumerate(legs):
-                            leg = {"game_id": row[0], "matchup": row[1], "pick": row[2],
-                                   "bet_type": row[3], "line": row[4], "odds": row[5]}
+                        for leg_idx, (leg_res, row) in enumerate(zip(leg_results, legs)):
                             source = row[6] if len(row) > 6 else "TSL"
-                            if source != "TSL":
-                                leg_results.append("Pending")
-                                continue
-                            gd = _fuzzy_match(leg["matchup"].lower().strip(), scores)
-                            if not gd:
-                                leg_results.append("Pending")
-                                continue
-                            res = _grade_single_bet(
-                                leg["bet_type"], leg["pick"], float(leg["line"]),
-                                gd["home"], gd["away"], gd["home_score"], gd["away_score"]
-                            )
-                            leg_results.append(res)
-                            # Update per-leg status
-                            con.execute(
-                                "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
-                                (res, pid, leg_idx),
-                            )
-
-                        # Delegate settlement to shared function
+                            if source == "TSL" and leg_res != "Pending":
+                                con.execute(
+                                    "UPDATE parlay_legs SET status=? WHERE parlay_id=? AND leg_index=?",
+                                    (leg_res, pid, leg_idx),
+                                )
                         settle_events = _check_parlay_completion(pid, con=con)
                         pending_events.extend(settle_events)
                         if settle_events:
                             settled += 1
-
-                if settled > 0 or wins + losses + pushes > 0:
-                    results.append({
-                        "week": week, "settled": settled,
-                        "wins": wins, "losses": losses, "pushes": pushes,
-                        "total_paid": total_paid,
-                        "skipped_matchups": skipped_matchups,
-                        "error_bets": error_bets,
-                        "settled_details": settled_details,
-                    })
-            except Exception:
-                try:
-                    con.rollback()
                 except Exception:
-                    pass
-                log.exception(f"[AUTO-GRADE] ROLLBACK — week {week}")
-                failed_weeks.append(week)
+                    log.exception(f"[AUTO-GRADE] Error settling parlay {pid}")
+                    failed_weeks.append(week)
+
+            if settled > 0 or wins + losses + pushes > 0:
+                results.append({
+                    "week": week, "settled": settled,
+                    "wins": wins, "losses": losses, "pushes": pushes,
+                    "total_paid": total_paid,
+                    "skipped_matchups": skipped_matchups,
+                    "error_bets": error_bets,
+                    "settled_details": settled_details,
+                })
         if failed_weeks:
             log.warning(f"[AUTO-GRADE] Failed weeks: {failed_weeks}")
         return results, pending_events
