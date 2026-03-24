@@ -2085,6 +2085,59 @@ class SportsbookWorkspace(discord.ui.View):
 
         await self._update_workspace(interaction, embed, self)
 
+    # ── State 7: Parlay Review ──────────────────────────────────────────────
+
+    async def show_parlay_review(self, interaction: discord.Interaction):
+        """Show cart legs before opening wager modal — single submission path."""
+        self.clear_items()
+        cart = _get_cart(self.user_id)
+        if len(cart) < 2:
+            embed = discord.Embed(
+                description="\u274c A parlay requires at least **2 legs**.", color=TSL_GOLD
+            )
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back.callback = self._back_to_sports
+            self.add_item(back)
+            await self._update_workspace(interaction, embed, self)
+            return
+
+        combined = _combine_parlay_odds([l["odds"] for l in cart])
+        embed = discord.Embed(
+            title="\U0001f3b0  PARLAY REVIEW",
+            color=TSL_GOLD,
+            description=(
+                f"**{len(cart)} Legs** \u2014 Combined: **{combined:+d}**\n"
+                f"*Review your legs, then enter your wager.*"
+            ),
+        )
+        for i, leg in enumerate(cart, 1):
+            source_badge = f"[{leg.get('source', 'TSL')}] " if leg.get('source') != 'TSL' else ""
+            embed.add_field(
+                name=f"Leg {i}: {source_badge}{leg['pick']}",
+                value=f"{leg['bet_type']} ({leg['odds']:+d})\n{leg.get('display', '')}",
+                inline=False,
+            )
+
+        submit_btn = discord.ui.Button(
+            label=f"\U0001f4b0 Enter Wager ({_american_to_str(combined)})",
+            style=discord.ButtonStyle.success,
+            row=0,
+        )
+        clear_btn = discord.ui.Button(label="\U0001f5d1\ufe0f Clear", style=discord.ButtonStyle.danger, row=0)
+        back_btn = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
+
+        async def _open_modal(i: discord.Interaction):
+            await i.response.send_modal(ParlayWagerModal(self.user_id, cart, combined))
+
+        submit_btn.callback = _open_modal
+        clear_btn.callback = self._clear_cart_cb
+        back_btn.callback = self._back_to_sports
+        self.add_item(submit_btn)
+        self.add_item(clear_btn)
+        self.add_item(back_btn)
+
+        await self._update_workspace(interaction, embed, self)
+
     # ── Classmethod: Open workspace from hub ────────────────────────────────
 
     @classmethod
@@ -2370,18 +2423,8 @@ class SportsbookWorkspace(discord.ui.View):
         await self.show_sport_selector(interaction)
 
     async def _submit_parlay_cb(self, interaction: discord.Interaction):
-        """Open parlay wager modal."""
-        cart = _get_cart(self.user_id)
-        if len(cart) < 2:
-            embed = discord.Embed(
-                description="\u274c A parlay requires at least **2 legs**.", color=TSL_GOLD
-            )
-            await self._update_workspace(interaction, embed, self)
-            return
-        combined = _combine_parlay_odds([l["odds"] for l in cart])
-        await interaction.response.send_modal(
-            ParlayWagerModal(self.user_id, cart, combined)
-        )
+        """Route to parlay review screen before opening wager modal."""
+        await self.show_parlay_review(interaction)
 
     async def _clear_cart_cb(self, interaction: discord.Interaction):
         """Show confirmation before clearing the parlay cart."""
