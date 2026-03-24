@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.18.5"  # fix(boss): embed overflow + nan ability spam
+ATLAS_VERSION = "6.18.6"  # fix(sportsbook): autograde team name fallback chain — city names before nickname ID lookup
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

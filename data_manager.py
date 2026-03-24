@@ -885,8 +885,8 @@ def get_weekly_results(week: int | None = None, *, stage: str | int | None = "CU
         away_obj = g.get("awayTeam") or {}
         results.append({
             "week":       target,
-            "home":       _normalize_nick(g.get("homeTeamName") or home_obj.get("nickName") or home_obj.get("displayName") or team_name(g.get("homeTeamId", 0))),
-            "away":       _normalize_nick(g.get("awayTeamName") or away_obj.get("nickName") or away_obj.get("displayName") or team_name(g.get("awayTeamId", 0))),
+            "home":       _normalize_nick(g.get("homeTeamName") or home_obj.get("nickName") or team_name(g.get("homeTeamId", 0)) or home_obj.get("displayName") or ""),
+            "away":       _normalize_nick(g.get("awayTeamName") or away_obj.get("nickName") or team_name(g.get("awayTeamId", 0)) or away_obj.get("displayName") or ""),
             "home_score": hs,
             "away_score": aws,
             "homeUser":   str(g.get("homeUser", "")),
