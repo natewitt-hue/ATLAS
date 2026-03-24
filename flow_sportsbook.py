@@ -2417,7 +2417,7 @@ class SportsbookWorkspace(discord.ui.View):
         return callback
 
     async def _add_to_parlay_cb(self, interaction: discord.Interaction):
-        """Add current selection to parlay cart, then back to sport selector."""
+        """Add current selection to parlay cart, then return to game list."""
         bet = self._pending_bet
         game = bet["game"]
 
@@ -2447,7 +2447,11 @@ class SportsbookWorkspace(discord.ui.View):
             await self._update_workspace(interaction, embed, self)
             return
 
-        await self.show_sport_selector(interaction)
+        # Stay on game list for same sport — cart footer shows updated leg count
+        if self._current_event:
+            await self.show_real_games(interaction, self._current_sport_key)
+        else:
+            await self.show_tsl_games(interaction)
 
     async def _add_leg_direct(self, interaction: discord.Interaction,
                                game: dict, pick: str, line, odds: int, bet_type: str):
@@ -2547,7 +2551,13 @@ class SportsbookWorkspace(discord.ui.View):
     # ── Navigation callbacks ────────────────────────────────────────────────
 
     async def _back_to_sports(self, interaction: discord.Interaction):
-        await self.show_sport_selector(interaction)
+        """Dismiss the workspace — user returns to the hub card."""
+        await interaction.response.edit_message(
+            content="-# Sportsbook workspace closed. Run `/sportsbook` to reopen.",
+            embed=None,
+            view=None,
+            attachments=[],
+        )
 
     async def _back_to_tsl_games(self, interaction: discord.Interaction):
         await interaction.response.defer()
