@@ -559,7 +559,15 @@ async def _migrate_contracts_sold_status(db):
     """Add 'sold' to the status CHECK constraint and add sell columns.
 
     SQLite doesn't support ALTER CHECK, so we recreate the table if needed.
+    No-op if prediction_contracts has already been archived by run_migration_v7().
     """
+    # Skip entirely if the table no longer exists (archived by v7 migration)
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_contracts'"
+    ) as _cur:
+        if not await _cur.fetchone():
+            return
+
     # Quick probe: can we insert 'sold' status?
     try:
         await db.execute("SAVEPOINT sold_probe")
@@ -713,29 +721,18 @@ async def _execute_prediction_buy(
                     f"You need **{cost_bucks:,} TSL Bucks** but only have **{balance:,}**."
                 )
 
-            # Insert contract
-            await db.execute(
-                "INSERT INTO prediction_contracts "
-                "(user_id, market_id, slug, side, buy_price, quantity, "
-                "cost_bucks, potential_payout, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
-                (user_id, market_id, slug, side, price, quantity, cost_bucks, payout, now),
-            )
-            async with db.execute("SELECT last_insert_rowid()") as cur:
-                contract_id = (await cur.fetchone())[0]
-
             # Debit wallet
             await flow_wallet.debit(
                 user_id, cost_bucks, "PREDICTION",
                 description="prediction market bet",
-                subsystem="PREDICTION", subsystem_id=str(contract_id),
+                subsystem="PREDICTION", subsystem_id=f"poly:{market_id}:{side}",
                 con=db,
             )
 
             # Wager registry
             import wager_registry
             await wager_registry.register_wager(
-                "PREDICTION", str(contract_id), int(user_id), cost_bucks,
+                "PREDICTION", f"poly:{market_id}:{side}", int(user_id), cost_bucks,
                 label=f"{slug}: {side} @ ${price:.2f}",
                 con=db,
             )
@@ -770,7 +767,7 @@ async def _execute_prediction_buy(
             away="",
             commence_ts=commence_ts,
         )
-        await sportsbook_core.write_bet(
+        bet_id = await sportsbook_core.write_bet(
             discord_id=user_id,
             event_id=event_id,
             bet_type="Prediction",
@@ -780,12 +777,12 @@ async def _execute_prediction_buy(
             wager=cost_bucks,
         )
     except Exception as exc:
-        log.warning(f"[POLY] sportsbook_core registration failed for contract {contract_id}: {exc}")
-        # Non-fatal — legacy prediction_contracts row is still authoritative during transition
+        log.warning(f"[POLY] sportsbook_core registration failed for poly:{market_id}:{side}: {exc}")
+        bet_id = None
 
     new_bal = balance - cost_bucks
     return {
-        "contract_id": contract_id,
+        "contract_id": bet_id,
         "cost": cost_bucks,
         "payout": payout,
         "new_balance": new_bal,
@@ -863,19 +860,8 @@ async def _execute_prediction_sell(
                     (remaining_qty, remaining_cost, remaining_payout, contract_id),
                 )
 
-                # Insert sold portion
-                await db.execute(
-                    "INSERT INTO prediction_contracts "
-                    "(user_id, market_id, slug, side, buy_price, quantity, "
-                    "cost_bucks, potential_payout, status, created_at, "
-                    "sell_price, sell_bucks, sold_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sold', ?, ?, ?, ?)",
-                    (user_id, c_mid, c_slug, c_side, c_buy_price,
-                     sell_quantity, cost_basis, PAYOUT_SCALE * sell_quantity,
-                     now, current_price, proceeds, now),
-                )
-                async with db.execute("SELECT last_insert_rowid()") as cur:
-                    sold_id = (await cur.fetchone())[0]
+                # Partial sell — no legacy row inserted (prediction_contracts archived)
+                sold_id = contract_id
 
             # Credit wallet with proceeds
             await flow_wallet.credit(
