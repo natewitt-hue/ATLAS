@@ -185,12 +185,8 @@ async def _check_parlay_completion(parlay_id: str) -> None:
             final_status = "Push"
             payout = parlay["wager_amount"]
 
-    if payout > 0:
-        await flow_wallet.credit(
-            int(parlay["discord_id"]), payout, "TSL_BET",
-            description=f"Parlay {parlay_id} {final_status}",
-            reference_key=f"PARLAY_{parlay_id}_settled")
-
+    # Step 1: Atomically claim settlement — BEGIN IMMEDIATE prevents concurrent double-settle
+    settled_this_call = False
     async with aiosqlite.connect(FLOW_DB) as db:
         await db.execute("PRAGMA foreign_keys=ON")
         db.row_factory = aiosqlite.Row
@@ -204,6 +200,14 @@ async def _check_parlay_completion(parlay_id: str) -> None:
         await db.execute(
             "UPDATE parlays SET status=? WHERE parlay_id=?", (final_status, parlay_id))
         await db.commit()
+        settled_this_call = True
+
+    # Step 2: Credit wallet (idempotent via reference_key; only if we won the race above)
+    if settled_this_call and payout > 0:
+        await flow_wallet.credit(
+            int(parlay["discord_id"]), payout, "TSL_BET",
+            description=f"Parlay {parlay_id} {final_status}",
+            reference_key=f"PARLAY_{parlay_id}_settled")
 
     profit = payout - parlay["wager_amount"]
     await wager_registry.settle_wager("PARLAY", parlay_id, final_status.lower(), profit)
@@ -500,7 +504,7 @@ async def finalize_event(
     """
     async with aiosqlite.connect(FLOW_DB) as db:
         await db.execute("PRAGMA foreign_keys=ON")
-        await db.execute(
+        cur = await db.execute(
             """UPDATE events
                SET status='final', home_score=?, away_score=?,
                    result_payload=?,
@@ -508,6 +512,11 @@ async def finalize_event(
                WHERE event_id=?""",
             (home_score, away_score, json.dumps(result_payload or {}), event_id),
         )
+        if cur.rowcount == 0:
+            raise ValueError(
+                f"[CORE] finalize_event: no event row for {event_id!r} — "
+                "was write_event() called before finalize_event()?"
+            )
         await db.commit()
 
 

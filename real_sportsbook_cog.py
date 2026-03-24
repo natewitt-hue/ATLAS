@@ -1133,22 +1133,40 @@ async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, s
     core_event_id = f"real:{sport_key}:{espn_event_id}"
     commence_ts = event.get("commence_time", "")
 
-    await sportsbook_core.write_event(
-        event_id=core_event_id,
-        source="REAL",
-        home=event.get("home_team", ""),
-        away=event.get("away_team", ""),
-        commence_ts=commence_ts,
-    )
-    bet_id = await sportsbook_core.write_bet(
-        discord_id=uid,
-        event_id=core_event_id,
-        bet_type=bet_type,
-        pick=pick,
-        line=line,
-        odds=odds,
-        wager=amt,
-    )
+    try:
+        await sportsbook_core.write_event(
+            event_id=core_event_id,
+            source="REAL",
+            home=event.get("home_team", ""),
+            away=event.get("away_team", ""),
+            commence_ts=commence_ts,
+        )
+        bet_id = await sportsbook_core.write_bet(
+            discord_id=uid,
+            event_id=core_event_id,
+            bet_type=bet_type,
+            pick=pick,
+            line=line,
+            odds=odds,
+            wager=amt,
+        )
+    except Exception:
+        log.exception(f"[REAL-SB] write_event/write_bet failed for uid={uid} event={core_event_id} — refunding")
+        try:
+            await flow_wallet.credit(
+                uid, amt, "REAL_BET",
+                description="Refund: bet record write failed",
+                reference_key=f"REAL_BET_WRITE_FAILED_{uid}_{espn_event_id}",
+            )
+        except Exception:
+            log.exception(f"[REAL-SB] CRITICAL: refund also failed for uid={uid} — manual intervention required")
+        if not interaction.response.is_done():
+            return await interaction.response.send_message(
+                "⚠️ Bet placement failed — your funds have been returned. Please try again.", ephemeral=True
+            )
+        return await interaction.followup.send(
+            "⚠️ Bet placement failed — your funds have been returned. Please try again.", ephemeral=True
+        )
 
     # Register in wager registry (was missing from the old RealBetModal)
     import wager_registry

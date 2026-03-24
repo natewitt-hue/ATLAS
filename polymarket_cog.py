@@ -566,6 +566,7 @@ async def _migrate_contracts_sold_status(db):
         "SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_contracts'"
     ) as _cur:
         if not await _cur.fetchone():
+            log.warning("[POLY] _migrate_contracts_sold_status: prediction_contracts not found — skipping (expected post-v7 migration)")
             return
 
     # Quick probe: can we insert 'sold' status?
@@ -737,6 +738,16 @@ async def _execute_prediction_buy(
                 con=db,
             )
 
+            # Write to prediction_contracts (read model for portfolio, sell, display queries)
+            cur_pc = await db.execute(
+                "INSERT INTO prediction_contracts "
+                "(user_id, market_id, slug, side, buy_price, quantity, cost_bucks, "
+                "potential_payout, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+                (str(user_id), market_id, slug, side, price, quantity, cost_bucks, payout, now),
+            )
+            contract_id = cur_pc.lastrowid
+
             # Fetch end_date for sportsbook_core event registration
             async with db.execute(
                 "SELECT end_date FROM prediction_markets WHERE market_id = ?",
@@ -747,7 +758,7 @@ async def _execute_prediction_buy(
 
             await db.commit()
 
-    # Register event + bet in sportsbook_core (idempotent — safe to call on every buy)
+    # Mirror event + bet into sportsbook_core/flow.db (idempotent — safe to call on every buy)
     try:
         import sportsbook_core
         event_id = f"poly:{market_id}"
@@ -767,7 +778,7 @@ async def _execute_prediction_buy(
             away="",
             commence_ts=commence_ts,
         )
-        bet_id = await sportsbook_core.write_bet(
+        await sportsbook_core.write_bet(
             discord_id=user_id,
             event_id=event_id,
             bet_type="Prediction",
@@ -777,12 +788,11 @@ async def _execute_prediction_buy(
             wager=cost_bucks,
         )
     except Exception as exc:
-        log.warning(f"[POLY] sportsbook_core registration failed for poly:{market_id}:{side}: {exc}")
-        bet_id = None
+        log.warning(f"[POLY] sportsbook_core mirror failed for poly:{market_id}:{side}: {exc}")
 
     new_bal = balance - cost_bucks
     return {
-        "contract_id": bet_id,
+        "contract_id": contract_id,
         "cost": cost_bucks,
         "payout": payout,
         "new_balance": new_bal,

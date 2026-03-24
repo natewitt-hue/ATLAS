@@ -283,3 +283,182 @@ async def test_settle_event_idempotent(tmp_path):
     finally:
         sportsbook_core.flow_wallet.credit = original
         sportsbook_core.wager_registry.settle_wager = original_settle
+
+
+# ─── settle_event outcome tests ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_settle_event_won(tmp_path):
+    """Won bet: wallet credited with full payout and bet status updated to Won."""
+    db_path = str(tmp_path / "flow.db")
+    sportsbook_core.FLOW_DB = db_path
+    sportsbook_core._settle_locks.clear()
+    await sportsbook_core.setup_db()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            "INSERT INTO events VALUES ('e1','TSL','final','A','B',24,17,'{}',NULL,NULL,NULL)")
+        await db.execute(
+            "INSERT INTO bets VALUES (1,99,'e1','Moneyline','A',NULL,-110,100,'Pending',NULL,NULL)")
+        await db.commit()
+
+    credits = []
+    original = sportsbook_core.flow_wallet.credit
+    async def fake_credit(discord_id, amount, source, **kw):
+        credits.append((discord_id, amount))
+        return 0
+    sportsbook_core.flow_wallet.credit = fake_credit
+    original_settle = sportsbook_core.wager_registry.settle_wager
+    async def fake_settle(*a, **kw):
+        pass
+    sportsbook_core.wager_registry.settle_wager = fake_settle
+    try:
+        await sportsbook_core.settle_event("e1")
+    finally:
+        sportsbook_core.flow_wallet.credit = original
+        sportsbook_core.wager_registry.settle_wager = original_settle
+
+    # payout_calc(100, -110) = int(100 + 100*(100/110)) = 190
+    assert len(credits) == 1
+    assert credits[0] == (99, 190)
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT status FROM bets WHERE bet_id=1")
+        row = await cur.fetchone()
+    assert row["status"] == "Won"
+
+
+@pytest.mark.asyncio
+async def test_settle_event_lost(tmp_path):
+    """Lost bet: wallet not credited and bet status updated to Lost."""
+    db_path = str(tmp_path / "flow.db")
+    sportsbook_core.FLOW_DB = db_path
+    sportsbook_core._settle_locks.clear()
+    await sportsbook_core.setup_db()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            "INSERT INTO events VALUES ('e1','TSL','final','A','B',24,17,'{}',NULL,NULL,NULL)")
+        # Bet on B — B loses
+        await db.execute(
+            "INSERT INTO bets VALUES (1,99,'e1','Moneyline','B',NULL,-110,100,'Pending',NULL,NULL)")
+        await db.commit()
+
+    credits = []
+    original = sportsbook_core.flow_wallet.credit
+    async def fake_credit(discord_id, amount, source, **kw):
+        credits.append((discord_id, amount))
+        return 0
+    sportsbook_core.flow_wallet.credit = fake_credit
+    original_settle = sportsbook_core.wager_registry.settle_wager
+    async def fake_settle(*a, **kw):
+        pass
+    sportsbook_core.wager_registry.settle_wager = fake_settle
+    try:
+        await sportsbook_core.settle_event("e1")
+    finally:
+        sportsbook_core.flow_wallet.credit = original
+        sportsbook_core.wager_registry.settle_wager = original_settle
+
+    assert credits == []  # no credit on loss
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT status FROM bets WHERE bet_id=1")
+        row = await cur.fetchone()
+    assert row["status"] == "Lost"
+
+
+@pytest.mark.asyncio
+async def test_settle_event_push(tmp_path):
+    """Push bet (tied game): wager refunded and bet status updated to Push."""
+    db_path = str(tmp_path / "flow.db")
+    sportsbook_core.FLOW_DB = db_path
+    sportsbook_core._settle_locks.clear()
+    await sportsbook_core.setup_db()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        # Tied game — Moneyline = Push
+        await db.execute(
+            "INSERT INTO events VALUES ('e1','TSL','final','A','B',21,21,'{}',NULL,NULL,NULL)")
+        await db.execute(
+            "INSERT INTO bets VALUES (1,99,'e1','Moneyline','A',NULL,-110,100,'Pending',NULL,NULL)")
+        await db.commit()
+
+    credits = []
+    original = sportsbook_core.flow_wallet.credit
+    async def fake_credit(discord_id, amount, source, **kw):
+        credits.append((discord_id, amount))
+        return 0
+    sportsbook_core.flow_wallet.credit = fake_credit
+    original_settle = sportsbook_core.wager_registry.settle_wager
+    async def fake_settle(*a, **kw):
+        pass
+    sportsbook_core.wager_registry.settle_wager = fake_settle
+    try:
+        await sportsbook_core.settle_event("e1")
+    finally:
+        sportsbook_core.flow_wallet.credit = original
+        sportsbook_core.wager_registry.settle_wager = original_settle
+
+    # Push refunds wager_amount exactly
+    assert len(credits) == 1
+    assert credits[0] == (99, 100)
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT status FROM bets WHERE bet_id=1")
+        row = await cur.fetchone()
+    assert row["status"] == "Push"
+
+
+@pytest.mark.asyncio
+async def test_settle_event_triggers_parlay_completion(tmp_path):
+    """settle_event grades parlay legs then calls _check_parlay_completion → parlay Won + credited."""
+    db_path = str(tmp_path / "flow.db")
+    sportsbook_core.FLOW_DB = db_path
+    sportsbook_core._settle_locks.clear()
+    await sportsbook_core.setup_db()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(
+            "INSERT INTO events VALUES ('e1','TSL','final','A','B',24,17,'{}',NULL,NULL,NULL)")
+        await db.execute(
+            "INSERT INTO parlays VALUES ('P1',99,650,100,'Pending',NULL)")
+        # Two Pending legs both picking A (the winner)
+        await db.execute(
+            "INSERT INTO bets VALUES (1,99,'e1','Moneyline','A',NULL,-110,100,'Pending','P1',NULL)")
+        await db.execute(
+            "INSERT INTO bets VALUES (2,99,'e1','Moneyline','A',NULL,-110,100,'Pending','P1',NULL)")
+        await db.execute("INSERT INTO parlay_legs VALUES (1,'P1',1,0)")
+        await db.execute("INSERT INTO parlay_legs VALUES (2,'P1',2,1)")
+        await db.commit()
+
+    credits = []
+    original = sportsbook_core.flow_wallet.credit
+    async def fake_credit(discord_id, amount, source, reference_key=None, **kw):
+        credits.append({"discord_id": discord_id, "amount": amount, "reference_key": reference_key})
+        return 0
+    sportsbook_core.flow_wallet.credit = fake_credit
+    original_settle = sportsbook_core.wager_registry.settle_wager
+    async def fake_settle(*a, **kw):
+        pass
+    sportsbook_core.wager_registry.settle_wager = fake_settle
+    try:
+        await sportsbook_core.settle_event("e1")
+    finally:
+        sportsbook_core.flow_wallet.credit = original
+        sportsbook_core.wager_registry.settle_wager = original_settle
+
+    # Parlay payout: payout_calc(100, 650) = int(100 + 100*(650/100)) = 750
+    parlay_credit = next(
+        (c for c in credits if c["reference_key"] == "PARLAY_P1_settled"), None)
+    assert parlay_credit is not None, "Expected PARLAY_P1_settled credit"
+    assert parlay_credit["amount"] == 750
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT status FROM parlays WHERE parlay_id='P1'")
+        row = await cur.fetchone()
+    assert row["status"] == "Won"
