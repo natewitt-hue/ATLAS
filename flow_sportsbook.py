@@ -2052,7 +2052,8 @@ class SportsbookWorkspace(discord.ui.View):
         embed.description = (
             f"{source_badge}**{matchup}**\n"
             f"Line: `{_american_to_str(odds)}`\n\n"
-            f"\U0001f4b0 Balance: **${balance:,}**"
+            f"\U0001f4b0 Balance: **${balance:,}**\n\n"
+            f"*Pick an amount to place a straight bet, or add this pick to your parlay cart.*"
         )
 
         # Row 0: Preset amount buttons
@@ -2067,17 +2068,18 @@ class SportsbookWorkspace(discord.ui.View):
             btn.callback = self._make_place_bet_cb(amt)
             self.add_item(btn)
 
-        # Row 1: Custom + Add to Parlay
-        custom_btn = discord.ui.Button(label="\u270f\ufe0f Custom", style=discord.ButtonStyle.secondary, row=1)
+        # Row 1: Custom amount (straight bet)
+        custom_btn = discord.ui.Button(label="\u270f\ufe0f Custom Amount", style=discord.ButtonStyle.secondary, row=1)
         custom_btn.callback = self._custom_wager_cb
         self.add_item(custom_btn)
 
-        parlay_btn = discord.ui.Button(label="\U0001f3b0 Add to Parlay", style=discord.ButtonStyle.primary, row=1)
+        # Row 2: Add to Parlay (distinct flow — own row)
+        parlay_btn = discord.ui.Button(label="\U0001f3b0 Add to Parlay", style=discord.ButtonStyle.success, row=2)
         parlay_btn.callback = self._add_to_parlay_cb
         self.add_item(parlay_btn)
 
-        # Row 2: Back
-        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+        # Row 3: Back
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
         back.callback = self._back_to_match
         self.add_item(back)
 
