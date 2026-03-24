@@ -76,6 +76,166 @@ def grade_bet(bet_row: dict, event_row: dict) -> str:
         return "Won" if pick == resolved else "Lost"
 
     return "Error"
+
+
+_settle_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _check_parlay_completion(parlay_id: str) -> None:
+    """
+    Read all legs' bet statuses and settle parlay if all legs are resolved.
+    Rules (applied in order):
+      1. Any Lost → settle parlay Lost immediately (no payout)
+      2. Any Pending → wait, do nothing
+      3. Treat Cancelled legs as Push for parlay purposes
+      4. All Won (after Cancelled→Push substitution) → Won, credit combined_odds payout
+      5. Mix of Won + Push/Cancelled → Push, refund wager_amount
+    """
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT parlay_id, discord_id, combined_odds, wager_amount, status FROM parlays WHERE parlay_id=?",
+            (parlay_id,))
+        parlay = await cur.fetchone()
+        if not parlay or parlay["status"] != "Pending":
+            return
+        cur = await db.execute("""
+            SELECT b.status FROM parlay_legs pl
+            JOIN bets b ON b.bet_id = pl.bet_id
+            WHERE pl.parlay_id=?
+        """, (parlay_id,))
+        statuses = [r["status"] for r in await cur.fetchall()]
+
+    if not statuses:
+        return
+
+    if "Lost" in statuses:
+        final_status = "Lost"
+        payout = 0
+    elif "Pending" in statuses:
+        return  # still waiting on remaining legs
+    else:
+        # Treat Cancelled as Push for parlay purposes
+        effective = ["Push" if s == "Cancelled" else s for s in statuses]
+        if all(s == "Won" for s in effective):
+            final_status = "Won"
+            payout = _payout_calc(parlay["wager_amount"], parlay["combined_odds"])
+        else:
+            # Any Push/Cancelled in mix → parlay Push → refund wager
+            final_status = "Push"
+            payout = parlay["wager_amount"]
+
+    if payout > 0:
+        await flow_wallet.credit(
+            int(parlay["discord_id"]), payout, "TSL_BET",
+            description=f"Parlay {parlay_id} {final_status}",
+            reference_key=f"PARLAY_{parlay_id}_settled")
+
+    async with aiosqlite.connect(FLOW_DB) as db:
+        await db.execute("PRAGMA foreign_keys=ON")
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT status FROM parlays WHERE parlay_id=?", (parlay_id,))
+        row = await cur.fetchone()
+        if row and row["status"] != "Pending":
+            await db.rollback()
+            return
+        await db.execute(
+            "UPDATE parlays SET status=? WHERE parlay_id=?", (final_status, parlay_id))
+        await db.commit()
+
+    profit = payout - parlay["wager_amount"]
+    await wager_registry.settle_wager("PARLAY", parlay_id, final_status.lower(), profit)
+    log.info(f"[CORE] Parlay {parlay_id} → {final_status}")
+
+
+async def settle_event(event_id: str) -> None:
+    """
+    Grade all Pending bets for a final event.
+    - Acquires per-event asyncio lock (concurrent calls are no-ops)
+    - Credit-first two-DB pattern: wallet credit BEFORE bet status update
+    - Push refunds wager_amount; Won pays payout; Lost = no credit
+    """
+    lock = _settle_locks.setdefault(event_id, asyncio.Lock())
+    if lock.locked():
+        return
+    async with lock:
+        async with aiosqlite.connect(FLOW_DB) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT event_id, source, status, home_participant, away_participant, "
+                "home_score, away_score, result_payload FROM events WHERE event_id=?",
+                (event_id,))
+            event = await cur.fetchone()
+            if not event or event["status"] != "final":
+                return
+            cur = await db.execute(
+                "SELECT bet_id, discord_id, event_id, bet_type, pick, line, odds, "
+                "wager_amount, status, parlay_id FROM bets "
+                "WHERE event_id=? AND status='Pending'",
+                (event_id,))
+            pending = await cur.fetchall()
+
+        if not pending:
+            return
+
+        affected_parlays: set[str] = set()
+        event_dict = dict(event)
+
+        for bet in pending:
+            bet_dict = dict(bet)
+            result = grade_bet(bet_dict, event_dict)
+
+            # Step 1: credit wallet FIRST (idempotent via reference_key)
+            if result == "Won":
+                payout = _payout_calc(bet_dict["wager_amount"], bet_dict["odds"])
+                await flow_wallet.credit(
+                    int(bet_dict["discord_id"]), payout, "BET_SETTLE",
+                    reference_key=f"BET_{bet_dict['bet_id']}_settled")
+            elif result == "Push":
+                await flow_wallet.credit(
+                    int(bet_dict["discord_id"]), bet_dict["wager_amount"], "BET_SETTLE",
+                    reference_key=f"BET_{bet_dict['bet_id']}_settled")
+
+            # Step 2: mark bet status in flow.db (idempotent — re-check Pending)
+            async with aiosqlite.connect(FLOW_DB) as db:
+                await db.execute("PRAGMA foreign_keys=ON")
+                db.row_factory = aiosqlite.Row
+                await db.execute("BEGIN IMMEDIATE")
+                cur = await db.execute(
+                    "SELECT status FROM bets WHERE bet_id=?", (bet_dict["bet_id"],))
+                row = await cur.fetchone()
+                if row and row["status"] != "Pending":
+                    await db.rollback()
+                    continue
+                await db.execute(
+                    "UPDATE bets SET status=? WHERE bet_id=?",
+                    (result, bet_dict["bet_id"]))
+                await db.commit()
+
+            # Step 3: audit trail
+            if result == "Won":
+                profit = _payout_calc(bet_dict["wager_amount"], bet_dict["odds"]) - bet_dict["wager_amount"]
+            elif result == "Push":
+                profit = 0
+            else:
+                profit = -bet_dict["wager_amount"]
+            await wager_registry.settle_wager(
+                "BET", str(bet_dict["bet_id"]), result.lower(), profit)
+
+            if bet_dict["parlay_id"]:
+                affected_parlays.add(bet_dict["parlay_id"])
+
+        for pid in affected_parlays:
+            await _check_parlay_completion(pid)
+
+        await _post_settlement_card(event_dict, [dict(b) for b in pending])
+        log.info(f"[CORE] settle_event({event_id}) — graded {len(pending)} bets")
+
+
 OLD_SB_DB = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
 FLOW_DB   = os.path.join(_DIR, "flow.db")
 
