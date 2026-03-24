@@ -666,6 +666,15 @@ async def update_balance(user_id, delta: int, *, contract_id=None):
 PREDICTION_WAGER_PRESETS = [50, 100, 250, 500, 1000]
 
 
+def _price_to_american(price: float) -> int:
+    """Convert Polymarket price (0.0–1.0) to American odds."""
+    if price <= 0 or price >= 1:
+        return -110  # default
+    if price >= 0.5:
+        return -round((price / (1 - price)) * 100)
+    return round(((1 - price) / price) * 100)
+
+
 async def _execute_prediction_buy(
     user_id: int,
     market_id: str,
@@ -730,7 +739,49 @@ async def _execute_prediction_buy(
                 label=f"{slug}: {side} @ ${price:.2f}",
                 con=db,
             )
+
+            # Fetch end_date for sportsbook_core event registration
+            async with db.execute(
+                "SELECT end_date FROM prediction_markets WHERE market_id = ?",
+                (market_id,),
+            ) as cur2:
+                ed_row = await cur2.fetchone()
+            end_date_str = ed_row[0] if ed_row else None
+
             await db.commit()
+
+    # Register event + bet in sportsbook_core (idempotent — safe to call on every buy)
+    try:
+        import sportsbook_core
+        event_id = f"poly:{market_id}"
+        commence_ts = None
+        if end_date_str:
+            try:
+                commence_ts = int(
+                    datetime.fromisoformat(end_date_str.replace("Z", "+00:00")).timestamp()
+                )
+            except (ValueError, AttributeError):
+                commence_ts = None
+
+        await sportsbook_core.write_event(
+            event_id=event_id,
+            source="POLY",
+            home=title,
+            away="",
+            commence_ts=commence_ts,
+        )
+        await sportsbook_core.write_bet(
+            discord_id=user_id,
+            event_id=event_id,
+            bet_type="Prediction",
+            pick=side,
+            line=None,
+            odds=_price_to_american(price),
+            wager=cost_bucks,
+        )
+    except Exception as exc:
+        log.warning(f"[POLY] sportsbook_core registration failed for contract {contract_id}: {exc}")
+        # Non-fatal — legacy prediction_contracts row is still authoritative during transition
 
     new_bal = balance - cost_bucks
     return {
@@ -2121,11 +2172,8 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         log.info(f"Polymarket sync complete — {upserted} upserted, {garbage_count} garbage-filtered.")
 
-        # ── Pass 2: Auto-resolve closed markets ──────────────────────────
-        await self._auto_resolve_pass()
-
-        # ── Pass 2b: Local DB scan — settle contracts the API pass missed ──
-        await self._local_settle_pass()
+        # ── Pass 2: Emit EVENT_FINALIZED for newly resolved markets ──────
+        await self._finalize_resolved_pass()
 
         # ── Pass 2c: Alert on stale markets with open contracts ──
         await self._stale_market_alert_pass()
@@ -2716,18 +2764,22 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
         ws._markets = [m]
         await ws.show_market_detail(interaction, m, is_initial=True)
 
-    async def _auto_resolve_pass(self):
+    async def _finalize_resolved_pass(self):
         """
-        Fetch recently closed Polymarket markets, detect results from
-        outcomePrices, and auto-resolve any with open contracts.
+        Detect newly resolved Polymarket markets and emit EVENT_FINALIZED so
+        sportsbook_core can settle Prediction bets via grade_bet().
+
+        Replaces the old _auto_resolve_pass + _local_settle_pass pipeline.
+        Direct wallet/contract mutations are now handled by sportsbook_core.settle_event
+        which is subscribed to EVENT_FINALIZED on the flow_bus.
         """
+        import sportsbook_core
+        from flow_events import flow_bus, EVENT_FINALIZED
+
         closed_markets = await self.client.fetch_closed_markets(limit=100)
-        if not closed_markets:
-            return
+        finalized_count = 0
 
-        auto_resolved = []
-
-        for mkt in closed_markets:
+        for mkt in (closed_markets or []):
             market_id = str(mkt.get("id", ""))
             if not market_id:
                 continue
@@ -2736,90 +2788,47 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             if not result:
                 continue  # Not clearly resolved yet
 
-            # Check our DB: only act on markets still marked pending
+            result_upper = result.upper()
+            event_id = f"poly:{market_id}"
+
+            # Guard: skip markets already finalized in sportsbook_core
             async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 async with db.execute(
                     "SELECT resolved_by FROM prediction_markets WHERE market_id = ?",
                     (market_id,)
                 ) as cursor:
                     row = await cursor.fetchone()
+            if row and row[0] and row[0] != "pending":
+                continue  # Already handled
 
-                if not row:
-                    # Market not in our DB — upsert it
-                    prices = extract_prices(mkt)
-                    slug = mkt.get("slug", "")
-                    title = mkt.get("question", "") or mkt.get("title", slug)
-                    category = map_category(mkt.get("category", ""))
-                    now = datetime.now(timezone.utc).isoformat()
-                    await db.execute("""
-                        INSERT OR IGNORE INTO prediction_markets
-                            (market_id, slug, title, category,
-                             yes_price, no_price, status, result,
-                             resolved_by, last_synced)
-                        VALUES (?,?,?,?,?,?,'closed',?,?,?)
-                    """, (
-                        market_id, slug, title, category,
-                        prices["yes_price"], prices["no_price"],
-                        result, "pending", now,
-                    ))
-                    await db.commit()
-                    resolved_by = "pending"
-                else:
-                    resolved_by = row[0] if row else "pending"
+            slug  = mkt.get("slug", "")
+            title = mkt.get("question", "") or mkt.get("title", slug)
 
-                if resolved_by != "pending":
-                    continue  # Already resolved
+            try:
+                await sportsbook_core.finalize_event(
+                    event_id=event_id,
+                    home_score=0,
+                    away_score=0,
+                    result_payload={"resolved_side": result_upper},
+                )
+                await flow_bus.emit(EVENT_FINALIZED, {"event_id": event_id, "source": "POLY"})
+                finalized_count += 1
+                log.info(f"[POLY] Finalized {market_id} → {result_upper} via sportsbook_core")
+            except Exception as exc:
+                log.error(f"[POLY] finalize_event failed for {market_id}: {exc}")
+                continue
 
-                # Check there are open contracts to settle
-                async with db.execute(
-                    "SELECT COUNT(*) FROM prediction_contracts "
-                    "WHERE market_id = ? AND status = 'open'",
-                    (market_id,)
-                ) as cursor:
-                    open_count = (await cursor.fetchone())[0]
+            # Update local prediction_markets table so the guard above fires next time
+            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+                await db.execute(
+                    "UPDATE prediction_markets "
+                    "SET status='closed', result=?, resolved_by='auto' "
+                    "WHERE market_id=?",
+                    (result_upper, market_id)
+                )
+                await db.commit()
 
-                if open_count == 0:
-                    # Mark resolved even with no contracts
-                    await db.execute(
-                        "UPDATE prediction_markets "
-                        "SET status='closed', result=?, resolved_by='auto' "
-                        "WHERE market_id=?",
-                        (result, market_id)
-                    )
-                    await db.commit()
-                    continue
-
-            # ── Settle it ──────────────────────────────────────────────
-            result_upper = result.upper()
-            log.info(
-                f"Auto-resolving {market_id} → {result_upper} "
-                f"({open_count} open contracts)"
-            )
-
-            counts = await self._resolve(market_id, result_upper)
-
-            title = mkt.get("question", "") or mkt.get("title", market_id)
-            auto_resolved.append({
-                "market_id": market_id,
-                "result":    result_upper,
-                "counts":    counts,
-                "title":     title,
-            })
-
-        if auto_resolved:
-            log.info(
-                f"Auto-resolve pass complete — {len(auto_resolved)} market(s) settled."
-            )
-            await self._announce_resolutions(auto_resolved)
-
-    async def _local_settle_pass(self):
-        """
-        Scan the local DB for markets with open contracts that the API-driven
-        _auto_resolve_pass may have missed (e.g. markets that closed >100
-        closures ago and fell off the Polymarket top-100 closed endpoint).
-
-        For each, fetch the market individually by ID and check if resolved.
-        """
+        # ── Local scan: catch markets that fell off the top-100 closed endpoint ──
         async with aiosqlite.connect(DB_PATH, timeout=30) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -2828,72 +2837,43 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 "JOIN prediction_markets m ON m.market_id = c.market_id "
                 "WHERE c.status = 'open' AND m.resolved_by = 'pending'"
             ) as cursor:
-                rows = await cursor.fetchall()
+                stale_rows = await cursor.fetchall()
 
-        if not rows:
-            return
-
-        market_ids = [row[0] for row in rows]
-        log.info(
-            f"Local settle pass: {len(market_ids)} market(s) with open contracts "
-            f"still pending resolution."
-        )
-
-        auto_resolved = []
-
-        for market_id in market_ids:
+        for row in (stale_rows or []):
+            market_id = row[0]
             mkt = await self.client.fetch_market_by_id(market_id)
             if not mkt:
-                log.warning(f"Local settle: could not fetch market {market_id}")
                 continue
-
             result = detect_result(mkt)
             if not result:
-                continue  # Market still open or not clearly resolved
-
-            # Settle it
+                continue
             result_upper = result.upper()
-            async with aiosqlite.connect(DB_PATH, timeout=30) as db:
-                async with db.execute(
-                    "SELECT COUNT(*) FROM prediction_contracts "
-                    "WHERE market_id = ? AND status = 'open'",
-                    (market_id,)
-                ) as cursor:
-                    open_count = (await cursor.fetchone())[0]
-
-            if open_count == 0:
+            event_id = f"poly:{market_id}"
+            try:
+                await sportsbook_core.finalize_event(
+                    event_id=event_id,
+                    home_score=0,
+                    away_score=0,
+                    result_payload={"resolved_side": result_upper},
+                )
+                await flow_bus.emit(EVENT_FINALIZED, {"event_id": event_id, "source": "POLY"})
+                finalized_count += 1
+                log.info(f"[POLY] Local scan finalized {market_id} → {result_upper}")
+            except Exception as exc:
+                log.error(f"[POLY] local finalize_event failed for {market_id}: {exc}")
                 continue
 
-            log.info(
-                f"Local settle: auto-resolving {market_id} → {result_upper} "
-                f"({open_count} open contracts)"
-            )
-
-            counts = await self._resolve(market_id, result_upper)
-
-            # Mark market as auto-resolved
             async with aiosqlite.connect(DB_PATH, timeout=30) as db:
                 await db.execute(
                     "UPDATE prediction_markets "
-                    "SET resolved_by = 'auto', result = ?, status = 'closed' "
-                    "WHERE market_id = ?",
-                    (result, market_id)
+                    "SET resolved_by='auto', result=?, status='closed' "
+                    "WHERE market_id=?",
+                    (result_upper, market_id)
                 )
                 await db.commit()
 
-            title = mkt.get("question", "") or mkt.get("title", market_id)
-            auto_resolved.append({
-                "market_id": market_id,
-                "result":    result_upper,
-                "counts":    counts,
-                "title":     title,
-            })
-
-        if auto_resolved:
-            log.info(
-                f"Local settle pass complete — {len(auto_resolved)} market(s) settled."
-            )
-            await self._announce_resolutions(auto_resolved)
+        if finalized_count:
+            log.info(f"[POLY] Finalize pass complete — {finalized_count} market(s) emitted EVENT_FINALIZED.")
 
     async def _stale_market_alert_pass(self):
         """Alert admin about markets with open contracts that haven't synced in >30 days."""
@@ -3579,151 +3559,43 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             return
 
         market_id, title = row
-        resolved = await self._resolve(market_id, result, resolved_by="admin")
+        event_id = f"poly:{market_id}"
 
-        await self._announce_resolutions([{
-            "market_id": market_id,
-            "result":    result,
-            "counts":    resolved,
-            "title":     title or slug,
-        }])
+        import sportsbook_core
+        from flow_events import flow_bus, EVENT_FINALIZED
 
-        await interaction.followup.send(
-            f"✅ Resolved `{slug}` as **{result}**. "
-            f"Processed {resolved['won']} winning and {resolved['lost']} losing contracts."
-            + (f" Voided {resolved['voided']}." if resolved["voided"] else ""),
-            ephemeral=True,
-        )
+        try:
+            await sportsbook_core.finalize_event(
+                event_id=event_id,
+                home_score=0,
+                away_score=0,
+                result_payload={"resolved_side": result},
+            )
+            await flow_bus.emit(EVENT_FINALIZED, {"event_id": event_id, "source": "POLY"})
+        except Exception as exc:
+            log.error(f"[POLY] Manual finalize_event failed for {market_id}: {exc}")
+            await interaction.followup.send(
+                f"❌ sportsbook_core.finalize_event failed: {exc}", ephemeral=True
+            )
+            return
 
-    async def _resolve(self, market_id: str, result: str,
-                       resolved_by: str = "auto") -> dict:
-        """
-        Settle all open contracts for a market.
-        result: 'YES' | 'NO' | 'VOID'
-        Returns counts of won/lost/voided.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        counts = {"won": 0, "lost": 0, "voided": 0}
-        total_payout = 0
-
+        # Update local DB so the sync guard skips this market
         async with aiosqlite.connect(DB_PATH, timeout=30) as db:
-            await db.execute("BEGIN IMMEDIATE")
-
-            # Guard: prevent double-resolution (TOCTOU between status check and here)
-            async with db.execute(
-                "SELECT title, resolved_by FROM prediction_markets WHERE market_id = ?",
-                (market_id,)
-            ) as cur:
-                row = await cur.fetchone()
-            if row and row[1] and row[1] != 'pending':
-                log.warning(f"_resolve({market_id}) — already resolved by {row[1]}, skipping")
-                await db.rollback()
-                return counts
-            market_title = row[0] if row else market_id
-
-            async with db.execute(
-                "SELECT id, user_id, side, quantity, cost_bucks, potential_payout "
-                "FROM prediction_contracts "
-                "WHERE market_id = ? AND status = 'open'",
-                (market_id,)
-            ) as cursor:
-                contracts = await cursor.fetchall()
-
-            import wager_registry
-            for cid, user_id, side, qty, cost, payout in contracts:
-                if result == "VOID":
-                    await flow_wallet.credit(
-                        int(user_id), cost, "PREDICTION",
-                        description="prediction market voided",
-                        subsystem="PREDICTION", subsystem_id=str(cid),
-                        con=db,
-                    )
-                    await db.execute(
-                        "UPDATE prediction_contracts "
-                        "SET status='voided', resolved_at=? WHERE id=?",
-                        (now, cid)
-                    )
-                    await wager_registry.settle_wager("PREDICTION", str(cid), "voided", 0, con=db)
-                    counts["voided"] += 1
-                elif side == result:
-                    if payout > PREDICTION_MAX_PAYOUT:
-                        log.error(f"[PREDICTION] Insane payout ${payout:,.2f} for contract {cid} — capping to ${PREDICTION_MAX_PAYOUT:,.2f}")
-                        payout = PREDICTION_MAX_PAYOUT
-                    await flow_wallet.credit(
-                        int(user_id), payout, "PREDICTION",
-                        description="prediction market won",
-                        subsystem="PREDICTION", subsystem_id=str(cid),
-                        con=db,
-                    )
-                    await db.execute(
-                        "UPDATE prediction_contracts "
-                        "SET status='won', resolved_at=? WHERE id=?",
-                        (now, cid)
-                    )
-                    await wager_registry.settle_wager("PREDICTION", str(cid), "won", payout - cost, con=db)
-                    counts["won"] += 1
-                    total_payout += payout
-                else:
-                    await db.execute(
-                        "UPDATE prediction_contracts "
-                        "SET status='lost', resolved_at=? WHERE id=?",
-                        (now, cid)
-                    )
-                    await wager_registry.settle_wager("PREDICTION", str(cid), "lost", -cost, con=db)
-                    counts["lost"] += 1
-
-            # Mark market as resolved
             await db.execute(
                 "UPDATE prediction_markets "
-                "SET status='closed', resolved_by=?, result=? WHERE market_id=?",
-                (resolved_by, result, market_id)
+                "SET status='closed', result=?, resolved_by='admin' "
+                "WHERE market_id=?",
+                (result, market_id)
             )
             await db.commit()
 
-        log.info(f"_resolve({market_id}, {result}, by={resolved_by}): {counts}")
+        log.info(f"[POLY] Manual resolve: {market_id} → {result} by admin")
 
-        guild = self.bot.guilds[0] if self.bot.guilds else None
-        guild_id = guild.id if guild else None
-
-        # Post ledger slips for resolution payouts/refunds
-        try:
-            from ledger_poster import post_transaction
-            if guild_id:
-                for cid, user_id, side, qty, cost, payout in contracts:
-                    if result == "VOID":
-                        bal = await flow_wallet.get_balance(user_id)
-                        txn_id = await flow_wallet.get_last_txn_id(user_id)
-                        await post_transaction(
-                            self.bot, guild_id, user_id,
-                            "PREDICTION", cost, bal,
-                            f"Void refund — {market_id[:30]}", txn_id,
-                        )
-                    elif side == result:
-                        bal = await flow_wallet.get_balance(user_id)
-                        txn_id = await flow_wallet.get_last_txn_id(user_id)
-                        await post_transaction(
-                            self.bot, guild_id, user_id,
-                            "PREDICTION", payout, bal,
-                            f"Won: {side} — {market_id[:30]}", txn_id,
-                        )
-        except Exception:
-            log.exception("Ledger post failed for prediction payout")
-
-        # Emit FLOW event for live engagement system
-        try:
-            from flow_events import PredictionEvent, flow_bus
-            pred_event = PredictionEvent(
-                guild_id=guild_id,
-                market_title=market_title,
-                resolution=result,
-                total_payout=total_payout,
-                winners=counts["won"],
-            )
-            await flow_bus.emit("prediction_result", pred_event)
-        except Exception:
-            log.exception("Failed to emit prediction FLOW event")
-
-        return counts
+        await interaction.followup.send(
+            f"✅ Resolved `{slug}` as **{result}**. "
+            f"EVENT_FINALIZED emitted — sportsbook_core will settle open bets.",
+            ephemeral=True,
+        )
 
     # ── Slash: /market_status (admin) ─────────
 
