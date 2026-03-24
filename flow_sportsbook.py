@@ -2384,9 +2384,39 @@ class SportsbookWorkspace(discord.ui.View):
         )
 
     async def _clear_cart_cb(self, interaction: discord.Interaction):
-        """Clear parlay cart and refresh sport selector."""
-        _clear_cart(self.user_id)
-        await self.show_sport_selector(interaction)
+        """Show confirmation before clearing the parlay cart."""
+        cart = _get_cart(self.user_id)
+        n = len(cart)
+        self.clear_items()
+
+        confirm_btn = discord.ui.Button(
+            label=f"Yes, clear {n} leg{'s' if n != 1 else ''}",
+            style=discord.ButtonStyle.danger,
+            row=0,
+        )
+        cancel_btn = discord.ui.Button(
+            label="Cancel",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+        )
+
+        async def _do_clear(i: discord.Interaction):
+            _clear_cart(self.user_id)
+            await self.show_sport_selector(i)
+
+        async def _do_cancel(i: discord.Interaction):
+            await self.show_sport_selector(i)
+
+        confirm_btn.callback = _do_clear
+        cancel_btn.callback = _do_cancel
+        self.add_item(confirm_btn)
+        self.add_item(cancel_btn)
+
+        embed = discord.Embed(
+            description=f"\u26a0\ufe0f Clear all **{n}** leg{'s' if n != 1 else ''} from your parlay cart? This can't be undone.",
+            color=discord.Color.orange(),
+        )
+        await self._update_workspace(interaction, embed, self)
 
     async def _custom_wager_cb(self, interaction: discord.Interaction):
         """Open custom wager modal (straight or real bet)."""
