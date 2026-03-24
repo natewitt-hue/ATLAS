@@ -906,12 +906,12 @@ async def _write_tsl_events(games: list[dict]) -> None:
     from datetime import datetime, timezone
 
     for g in games:
-        schedule_id = g.get("scheduleId") or g.get("game_id", "")
-        if schedule_id and str(schedule_id) not in ("0", ""):
-            event_id = f"tsl:{schedule_id}"
+        game_id = str(g.get("game_id", ""))
+        if game_id and game_id != "0":
+            event_id = f"tsl:{game_id}"
         else:
-            home_id = g.get("homeTeamId", g.get("home", ""))
-            away_id = g.get("awayTeamId", g.get("away", ""))
+            home_id = g.get("home", "")
+            away_id = g.get("away", "")
             event_id = f"tsl:s{dm.CURRENT_SEASON}:w{g.get('bet_week', dm.CURRENT_WEEK)}:{home_id}v{away_id}"
 
         commence_ts = g.get("gameTime") or \
@@ -1336,6 +1336,8 @@ class ParlayWagerModal(discord.ui.Modal):
                 )
 
         # Mirror parlay + legs into sportsbook_core (flow.db)
+        _parlay_mirrored = False
+        _mirrored_bet_ids: list[int] = []
         try:
             import sportsbook_core as _sb_core
             await _sb_core.write_parlay(
@@ -1344,6 +1346,7 @@ class ParlayWagerModal(discord.ui.Modal):
                 combined_odds=int(self.combined_odds),
                 wager=int(amt),
             )
+            _parlay_mirrored = True
             for i, leg in enumerate(self.legs):
                 source = leg.get("source", "TSL")
                 raw_game_id = leg.get("event_id", leg.get("game_id", ""))
@@ -1360,13 +1363,27 @@ class ParlayWagerModal(discord.ui.Modal):
                     wager=int(amt),
                     parlay_id=parlay_id,
                 )
+                _mirrored_bet_ids.append(leg_bet_id)
                 await _sb_core.write_parlay_leg(
                     parlay_id=parlay_id,
                     leg_index=i,
                     bet_id=leg_bet_id,
                 )
         except Exception:
-            log.exception("[PARLAY] Failed to mirror parlay to sportsbook_core")
+            log.error(
+                "[PARLAY] mirror failed — parlay_id=%s discord_id=%s amt=%s legs=%s; attempting cleanup",
+                parlay_id, interaction.user.id, amt, len(self.legs),
+            )
+            try:
+                import aiosqlite as _aiosqlite
+                async with _aiosqlite.connect(_sb_core.FLOW_DB) as _db:
+                    for _bid in _mirrored_bet_ids:
+                        await _db.execute("DELETE FROM bets WHERE bet_id=?", (_bid,))
+                    if _parlay_mirrored:
+                        await _db.execute("DELETE FROM parlays WHERE parlay_id=?", (parlay_id,))
+                    await _db.commit()
+            except Exception:
+                log.exception("[PARLAY] cleanup also failed for parlay_id=%s", parlay_id)
 
         potential = _payout_calc(amt, self.combined_odds) - amt
         _clear_cart(interaction.user.id)

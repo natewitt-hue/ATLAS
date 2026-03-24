@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.19.0"  # feat: unified event-bet architecture v7
+ATLAS_VERSION = "6.20.0"  # fix: v7 code review — 4 Critical + 4 Important issues resolved
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
