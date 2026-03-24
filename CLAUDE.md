@@ -33,6 +33,7 @@ so they can merge cleanly with no conflicts.
 - **Use `_startup_done` flag** to prevent duplicate `load_all()` on reconnect.
 - **`_build_schema()` dynamically includes `dm.CURRENT_SEASON`** so Gemini always has current season context.
 - **Dead files belong in `QUARANTINE/`** — do not reference or import them.
+- **When creating a new `.py` module, add it to the relevant nightly audit task on the same commit.** Audit tasks live at `C:\Users\natew\.claude\scheduled-tasks\`. Map new files to the correct day: Flow/Economy/Sportsbook → Monday, Casino/Rendering → Tuesday, Oracle/Analytics → Wednesday, Genesis/Sentinel → Thursday, AI/Codex/Echo → Friday, Core Infrastructure → Saturday. Sunday auto-covers all files. Update both the `SKILL.md` file list and the task `description` field via `mcp__scheduled-tasks__update_scheduled_task`.
 
 ### MaddenStats API Gotchas
 
@@ -97,7 +98,11 @@ build_member_db              →  tsl_members table (identity registry)
 | **Sentinel** | Rule enforcement, blowout monitor, compliance | `sentinel_cog.py` |
 | **Oracle** | Analytics, stats, power rankings, profiles | `oracle_cog.py` (class: StatsHubCog) |
 | **Genesis** | Trades, roster, dev traits, draft | `genesis_cog.py` |
-| **Flow** | Economy, sportsbook, casino | `flow_sportsbook.py`, `casino/`, `economy_cog.py` |
+| **Flow** | Economy, TSL sportsbook, casino, live engagement | `flow_sportsbook.py`, `casino/`, `economy_cog.py`, `flow_live_cog.py` |
+| **Flow Store** | Store engine — item effects, purchases | `flow_store.py`, `store_effects.py` |
+| **Flow Subsystem** | Wallet, audit, events, wager registry | `flow_wallet.py`, `flow_audit.py`, `flow_events.py`, `wager_registry.py` |
+| **Real Sportsbook** | Real NFL/NBA betting with live ESPN odds | `real_sportsbook_cog.py`, `sportsbook_core.py`, `odds_api_client.py`, `espn_odds.py` |
+| **Boss** | Visual commissioner control room — replaces `/commish` subcommands | `boss_cog.py` |
 | **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
 | **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_html_engine.py` |
@@ -138,7 +143,10 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 | 9 | `codex_cog` | Historical AI queries |
 | 10 | `polymarket_cog` | Prediction markets |
 | 11 | `economy_cog` | Balance ops, payouts, stipends |
-| 12 | `commish_cog` | Unified admin commands |
+| 12 | `flow_store` | Store engine — no UI, Phase 1 |
+| 13 | `flow_live_cog` | Live engagement — pulse dashboard, highlights, recaps |
+| 14 | `real_sportsbook_cog` | Real NFL/NBA sportsbook with ESPN live odds |
+| 15 | `boss_cog` | Visual commissioner control room (`/boss`) |
 
 ### Databases
 
@@ -146,6 +154,8 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 |----|---------|
 | `tsl_history.db` | Game history, player stats, member registry, server config |
 | `sportsbook.db` | Balances, bets, casino economy, affinity scores |
+| `flow.db` | TSL sportsbook bets, Flow economy transactions |
+| `flow_economy.db` | Flow store purchases, wallet ledger |
 | `TSL_Archive.db` | Full Discord chat history archive (Oracle/Codex queries) |
 
 ### Environment Variables
@@ -170,6 +180,46 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 - **Channel routing** — `setup_cog.py` defines `REQUIRED_CHANNELS`. Commands use `require_channel()` decorator. Lazy resolvers call `setup_cog.get_channel_id()` with ImportError fallbacks.
 - **Admin delegation** — `commish_cog.py` delegates to `_impl` methods in other cogs
 - **Permission model** — `is_commissioner()` checks env `ADMIN_USER_IDS`, "Commissioner" role, or guild admin. `is_tsl_owner()` checks "TSL Owner" role. Both have decorator forms.
+
+---
+
+## Agent Roster
+
+All Claude Code subagents are named. **When a new agent type is used for the first time, assign it a name (mythical/superhero for high-power agents, human for utility agents) and add it to this table before the session ends.**
+
+### Tier 1 — Mythical / Superhero (broad scope, high power)
+
+| Agent Type | Name | Role |
+|------------|------|------|
+| `general-purpose` | **Hermes** | Messenger of gods — goes anywhere, does anything |
+| `Explore` | **Argus** | Hundred-eyed giant — sees everything in the codebase |
+| `Plan` | **Athena** | Goddess of wisdom and strategic warfare |
+| `claude-code-guide` | **Odin** | All-knowing — sacrificed everything for knowledge |
+| `superpowers:code-reviewer` | **Themis** | Goddess of justice, order, and law |
+| `feature-dev:code-architect` | **Daedalus** | Legendary master architect and builder |
+| `feature-dev:code-explorer` | **Perseus** | Hero who ventures deep into unknown territory |
+| `feature-dev:code-reviewer` | **Minerva** | Roman goddess of craft and critical judgment |
+
+### Tier 2 — Human (focused, utility-scoped)
+
+| Agent Type | Name | Role |
+|------------|------|------|
+| `code-simplifier:code-simplifier` | **Mia** | Makes things minimal and clean |
+| `pr-review-toolkit:code-reviewer` | **Priya** | Thorough reviewer — catches bugs and smells |
+| `pr-review-toolkit:code-simplifier` | **Sam** | Cuts the fat, keeps the core |
+| `pr-review-toolkit:comment-analyzer` | **Cora** | Reads between the lines |
+| `pr-review-toolkit:pr-test-analyzer` | **Tess** | Tests everything, trusts nothing |
+| `pr-review-toolkit:silent-failure-hunter` | **Chase** | Hunts what hides in plain sight |
+| `pr-review-toolkit:type-design-analyzer` | **Theo** | Types, contracts, and shape of data |
+| `hookify:conversation-analyzer` | **Connie** | Listens to the whole conversation |
+| `agent-sdk-dev:agent-sdk-verifier-ts` | **Tyler** | TypeScript SDK specialist |
+| `agent-sdk-dev:agent-sdk-verifier-py` | **Petra** | Python SDK specialist |
+| `plugin-dev:agent-creator` | **Adam** | Brings new agents into existence |
+| `plugin-dev:plugin-validator` | **Val** | Validates structure and contracts |
+| `plugin-dev:skill-reviewer` | **Skye** | Quality inspector for skills |
+| `statusline-setup` | **Dot** | Configures the status line — small but precise |
+
+> **Naming convention:** Tier 1 (mythical/superhero) = broad scope, orchestration, deep analysis, or cross-cutting concerns. Tier 2 (human) = narrowly scoped, single-purpose, or toolkit utility agents.
 
 ---
 

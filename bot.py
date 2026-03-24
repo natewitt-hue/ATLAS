@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.21.0"  # feat: sportsbook UX overhaul — parlay mode, hub upgrades, bug fixes
+ATLAS_VERSION = "6.22.0"  # ux: hub button overhaul — layout, labels, colors across all 4 hubs
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

@@ -1997,10 +1997,10 @@ class GenesisHubView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    # ── Row 0: Trade Tools ────────────────────────────────────────────────────
+    # ── Row 0: All genesis tools (actions first, passive last) ─────────────
 
     @discord.ui.button(
-        label="💱 Trade", style=discord.ButtonStyle.primary,
+        label="💱 New Trade", style=discord.ButtonStyle.primary,
         row=0, custom_id="genesis:trade",
     )
     async def btn_trade(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -2021,7 +2021,7 @@ class GenesisHubView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(
-        label="📜 Pending Trades", style=discord.ButtonStyle.secondary,
+        label="📜 Pending", style=discord.ButtonStyle.secondary,
         row=0, custom_id="genesis:tradelist",
     )
     async def btn_tradelist(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -2061,17 +2061,15 @@ class GenesisHubView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=_GenesisBackView(self.bot, embed))
 
     @discord.ui.button(
-        label="🔍 Trade Lookup", style=discord.ButtonStyle.secondary,
+        label="🔍 Lookup", style=discord.ButtonStyle.secondary,
         row=0, custom_id="genesis:tradelookup",
     )
     async def btn_tradelookup(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.send_modal(_TradeLookupModal())
 
-    # ── Row 1: Franchise Tools ───────────────────────────────────────────────
-
     @discord.ui.button(
         label="🎰 Lottery", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="genesis:lottery",
+        row=0, custom_id="genesis:lottery",
     )
     async def btn_lottery(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer()

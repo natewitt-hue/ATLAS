@@ -2615,7 +2615,7 @@ class SportsbookHubView(discord.ui.View):
             except Exception:
                 pass  # non-critical; fallback to default "Cart" label
 
-    # ── Row 0: Sport buttons ───────────────────────────────────────────────
+    # ── Row 0: US sports (TSL hero + big 3) ────────────────────────────────
 
     @discord.ui.button(label="TSL", emoji="\U0001f3c8",
                        style=discord.ButtonStyle.primary,
@@ -2633,12 +2633,6 @@ class SportsbookHubView(discord.ui.View):
             await interaction.followup.send(msg, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"\u274c Error loading TSL games: `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="NFL", emoji="\U0001f3c8",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:nfl", row=0)
-    async def nfl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._show_real_sport(interaction, "americanfootball_nfl")
 
     @discord.ui.button(label="NBA", emoji="\U0001f3c0",
                        style=discord.ButtonStyle.secondary,
@@ -2658,7 +2652,7 @@ class SportsbookHubView(discord.ui.View):
     async def nhl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_real_sport(interaction, "icehockey_nhl")
 
-    # ── Row 1: More sports ───────────────────────────────────────────────
+    # ── Row 1: College, combat, international ────────────────────────────
 
     @discord.ui.button(label="NCAAB", emoji="\U0001f3c0",
                        style=discord.ButtonStyle.secondary,
@@ -2684,37 +2678,17 @@ class SportsbookHubView(discord.ui.View):
     async def mls_games(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_real_sport(interaction, "soccer_mls")
 
-    @discord.ui.button(label="WNBA", emoji="\U0001f3c0",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:wnba", row=1)
-    async def wnba_games(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._show_real_sport(interaction, "basketball_wnba")
+    # ── Row 2: Utilities (build → view → track → rank → stats) ──────────
 
-    # ── Row 2: Utility buttons ─────────────────────────────────────────────
-
-    @discord.ui.button(label="Stats", emoji="\U0001f4ca",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:stats", row=2)
-    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Parlay", emoji="\U0001f3b0",
+                       style=discord.ButtonStyle.primary,
+                       custom_id="atlas:sportsbook:build_parlay", row=2)
+    async def build_parlay(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            theme_id = get_theme_for_render(interaction.user.id)
-            img = await build_stats_card(interaction.user.id, theme_id=theme_id)
-            await send_card(interaction, img, filename="stats.png", followup=True, ephemeral=True)
+            await SportsbookWorkspace.open_to_parlay(interaction, self.cog)
         except Exception as e:
-            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="Leaderboard", emoji="\U0001f3c6",
-                       style=discord.ButtonStyle.danger,
-                       custom_id="atlas:sportsbook:leaderboard", row=2)
-    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await self.cog._leaderboard_impl(interaction)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+            await interaction.followup.send(f"\u274c Error: `{e}`", ephemeral=True)
 
     @discord.ui.button(label="Cart", emoji="\U0001f6d2",
                        style=discord.ButtonStyle.secondary,
@@ -2750,33 +2724,9 @@ class SportsbookHubView(discord.ui.View):
             else:
                 await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
-    @discord.ui.button(label="Build Parlay", emoji="\U0001f3b0",
-                       style=discord.ButtonStyle.primary,
-                       custom_id="atlas:sportsbook:build_parlay", row=2)
-    async def build_parlay(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            await SportsbookWorkspace.open_to_parlay(interaction, self.cog)
-        except Exception as e:
-            await interaction.followup.send(f"\u274c Error: `{e}`", ephemeral=True)
-
-    # ── Row 3: Analytics ───────────────────────────────────────────────────
-
-    @discord.ui.button(label="Parlay Stats", emoji="\U0001f4ca",
+    @discord.ui.button(label="Active", emoji="\U0001f4cb",
                        style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:parlay_stats", row=3)
-    async def parlay_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            theme_id = get_theme_for_render(interaction.user.id)
-            img = await build_parlay_analytics_card(interaction.user.id, theme_id=theme_id)
-            await send_card(interaction, img, filename="parlay_analytics.png", followup=True, ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="My Bets", emoji="\U0001f4cb",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:my_bets", row=3)
+                       custom_id="atlas:sportsbook:my_bets", row=2)
     async def my_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.cog._mybets_impl(interaction)
@@ -2785,6 +2735,30 @@ class SportsbookHubView(discord.ui.View):
                 await interaction.response.send_message(f"\u274c Error: `{e}`", ephemeral=True)
             else:
                 await interaction.followup.send(f"\u274c Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Ranks", emoji="\U0001f3c6",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:leaderboard", row=2)
+    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._leaderboard_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="My Stats", emoji="\U0001f4ca",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:stats", row=2)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            theme_id = get_theme_for_render(interaction.user.id)
+            img = await build_stats_card(interaction.user.id, theme_id=theme_id)
+            await send_card(interaction, img, filename="stats.png", followup=True, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
     # ── Internal: real sport drill-down ────────────────────────────────────
 

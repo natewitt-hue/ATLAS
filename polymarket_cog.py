@@ -2801,6 +2801,13 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             title = mkt.get("question", "") or mkt.get("title", slug)
 
             try:
+                await sportsbook_core.write_event(
+                    event_id=event_id,
+                    source="POLY",
+                    home=title,
+                    away="",
+                    commence_ts=None,
+                )
                 await sportsbook_core.finalize_event(
                     event_id=event_id,
                     home_score=0,
@@ -2845,7 +2852,15 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
                 continue
             result_upper = result.upper()
             event_id = f"poly:{market_id}"
+            title = mkt.get("question", "") or mkt.get("title", mkt.get("slug", ""))
             try:
+                await sportsbook_core.write_event(
+                    event_id=event_id,
+                    source="POLY",
+                    home=title,
+                    away="",
+                    commence_ts=None,
+                )
                 await sportsbook_core.finalize_event(
                     event_id=event_id,
                     home_score=0,

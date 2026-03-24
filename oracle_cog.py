@@ -3801,7 +3801,28 @@ class HubView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    # ── Row 0: League-wide ────────────────────────────────────────────────────
+    # ── Row 0: League-wide (most-checked first) ────────────────────────────
+
+    @discord.ui.button(
+        label="🏆 Standings", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:standings",
+    )
+    @_safe_interaction
+    async def btn_standings(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        _, caller_team = _resolve_owner_team(interaction)
+        await interaction.followup.send(
+            embed=_build_standings_embed(caller_team=caller_team), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="📊 Power", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:power",
+    )
+    @_safe_interaction
+    async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.followup.send(embed=_build_power_embed(), ephemeral=True)
 
     @discord.ui.button(
         label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary,
@@ -3829,28 +3850,7 @@ class HubView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(
-        label="📊 Power", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="hub:power",
-    )
-    @_safe_interaction
-    async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        await interaction.followup.send(embed=_build_power_embed(), ephemeral=True)
-
-    @discord.ui.button(
-        label="🏆 Standings", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="hub:standings",
-    )
-    @_safe_interaction
-    async def btn_standings(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        _, caller_team = _resolve_owner_team(interaction)
-        await interaction.followup.send(
-            embed=_build_standings_embed(caller_team=caller_team), ephemeral=True
-        )
-
-    # ── Row 1: Personal / Matchups ────────────────────────────────────────────
+    # ── Row 1: Personal & matchups (your team first) ─────────────────────────
 
     @discord.ui.button(
         label="👤 My Profile", style=discord.ButtonStyle.primary,
@@ -3863,7 +3863,7 @@ class HubView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(
-        label="🆚 Head-to-Head", style=discord.ButtonStyle.primary,
+        label="🆚 Matchup", style=discord.ButtonStyle.primary,
         row=1, custom_id="oracle:h2h",
     )
     @_safe_interaction
@@ -3897,7 +3897,7 @@ class HubView(discord.ui.View):
         embed = await _build_draft_overview_embed()
         await interaction.followup.send(embed=embed, view=DraftSeasonView(), ephemeral=True)
 
-    # ── Row 2: Deep Dives ─────────────────────────────────────────────────────
+    # ── Row 2: Deep dives + AI (hero at end draws eye down) ──────────────────
 
     @discord.ui.button(
         label="🎯 Players", style=discord.ButtonStyle.secondary,
@@ -3912,7 +3912,7 @@ class HubView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="🏈 Team Stats", style=discord.ButtonStyle.secondary,
+        label="🏈 Teams", style=discord.ButtonStyle.secondary,
         row=2, custom_id="hub:teamstats",
     )
     @_safe_interaction
@@ -3941,7 +3941,7 @@ class HubView(discord.ui.View):
         await interaction.followup.send(embed=_build_alltime_embed(), ephemeral=True)
 
     @discord.ui.button(
-        label="📅 Season Recap", style=discord.ButtonStyle.success,
+        label="📅 Season", style=discord.ButtonStyle.secondary,
         row=2, custom_id="oracle:season_recap",
     )
     @_safe_interaction
@@ -3949,8 +3949,8 @@ class HubView(discord.ui.View):
         await interaction.response.send_modal(SeasonRecapModal())
 
     @discord.ui.button(
-        label="🔮 Oracle Hub", style=discord.ButtonStyle.success,
-        row=3, custom_id="hub:ask",
+        label="🔮 ASK", style=discord.ButtonStyle.primary,
+        row=2, custom_id="hub:ask",
     )
     @_safe_interaction
     async def btn_ask(self, interaction: discord.Interaction, _b: discord.ui.Button):
