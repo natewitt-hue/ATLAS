@@ -344,6 +344,13 @@ try:
 except ImportError:
     _affinity_mod = None
 
+# Optional Flow wallet — theme resolution for card rendering
+try:
+    from flow_wallet import get_theme_for_render
+except ImportError:
+    def get_theme_for_render(_uid):  # noqa: E301
+        return None
+
 
 # ── ATLAS branding constants ──────────────────────────────────────────────────
 from constants import ATLAS_ICON_URL
@@ -2791,12 +2798,6 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
 async def _run_and_send(interaction: discord.Interaction, coro, filename: str = "oracle.png"):
     """Run an analysis coroutine and send the result PNG card publicly."""
     try:
-        try:
-            from flow_wallet import get_theme_for_render
-        except ImportError:
-            def get_theme_for_render(_uid):  # noqa: E301
-                return None
-
         uid = interaction.user.id
         theme_id = get_theme_for_render(uid)
 
