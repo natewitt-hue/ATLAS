@@ -339,6 +339,24 @@ async def main() -> None:
         txn_id=9999,
     ))
 
+    # ── Group G — Atlas Home Card ────────────────────────────────────────────
+    print("\n=== Group G: Atlas Home Card ===")
+
+    # Atlas Home Card
+    from atlas_home_renderer import render_home_card
+    sample_home_data = {
+        "user_id": 123456, "display_name": "TestUser", "role_badge": "TSL Owner",
+        "rank": 3, "total_users": 31, "balance": 2400, "weekly_delta": 150,
+        "season_roi": 14.2, "streak": "W3",
+        "record_w": 18, "record_l": 9, "record_p": 0, "win_rate": 66.7, "net_pnl": 400,
+        "tsl_bet_w": 10, "tsl_bet_l": 5, "best_parlay_odds": 4.5,
+        "real_bet_w": 8, "real_bet_l": 4,
+        "casino_sessions": 22, "biggest_win": 850, "fav_game": "Blackjack",
+        "pred_accuracy": 71.4, "pred_markets": 7, "pred_pnl": 320,
+        "theme_name": "Obsidian Gold", "season": 95,
+    }
+    await test_card("atlas_home", render_home_card(sample_home_data))
+
     # ── Drain pool + summary ──────────────────────────────────────────────────
     await drain_pool()
 
