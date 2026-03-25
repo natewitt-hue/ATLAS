@@ -69,7 +69,18 @@ except ImportError:
 # ── Oracle reply-chain tracking (in-memory, session-scoped) ──────────────────
 _oracle_message_ids: set[int] = set()      # All Oracle response message IDs this session
 _chain_roots: dict[int, int] = {}          # Maps any Oracle msg ID → root chain ID
+_oracle_msg_times: dict[int, float] = {}   # msg_id → insertion timestamp (for TTL eviction)
 _followup_counter: int = 0                 # Counter for periodic chain cache cleanup
+
+
+def _fire_and_log(coro, label: str = "") -> asyncio.Task:
+    """Schedule a coroutine as a fire-and-forget task, logging any exceptions."""
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(
+        lambda t: _log.warning("Background task %r failed: %s", label, t.exception())
+        if not t.cancelled() and t.exception() else None
+    )
+    return task
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1196,7 +1207,7 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
                 inline=True,
             )
 
-    recent = dm.get_last_n_games(team, 5)
+    recent = await dm.get_last_n_games(team, 5)
     if recent:
         form_parts = []
         for g in recent:
@@ -1255,7 +1266,7 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
     )
 
     # AI tendency blurb
-    if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and not dm.df_team_stats.empty:
+    if (atlas_ai.is_available()) and not dm.df_team_stats.empty:
         try:
             ts_row = dm.df_team_stats[
                 dm.df_team_stats["teamName"].str.lower().str.contains(team.lower(), na=False)
@@ -2058,7 +2069,7 @@ async def _build_team_card_snapshot(
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # 3-col spacer
 
     # ── 📅 FORM — last 5 with sparkline ──────────────────────────────────────
-    recent = dm.get_last_n_games(team_name, 5)
+    recent = await dm.get_last_n_games(team_name, 5)
     if recent:
         dots, score_lines, win_log = [], [], []
         for g in recent:
@@ -2080,7 +2091,7 @@ async def _build_team_card_snapshot(
         )
 
     # ── 🔬 ATLAS Oracle · Projection ────────────────────────────────────────────────
-    if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and st_row is not None:
+    if (atlas_ai.is_available()) and st_row is not None:
         try:
             games_left = 18 - total_gms
             prompt = (
@@ -2191,7 +2202,7 @@ def _build_team_card_history(team_name: str) -> discord.Embed:
     return embed
 
 
-def _build_team_card_scouting(team_name: str) -> discord.Embed:
+async def _build_team_card_scouting(team_name: str) -> discord.Embed:
     """
     Deep Dive: Scouting report — exploit map, momentum, vulnerability analysis.
     """
@@ -2288,7 +2299,7 @@ def _build_team_card_scouting(team_name: str) -> discord.Embed:
             )
 
     # ── Momentum read ─────────────────────────────────────────────────────────
-    recent = dm.get_last_n_games(team_name, 5)
+    recent = await dm.get_last_n_games(team_name, 5)
     if recent:
         diffs, wins_l5 = [], []
         for g in recent:
@@ -2401,7 +2412,7 @@ async def _build_team_matchup_embed(team_a: str, team_b: str) -> discord.Embed:
         )
 
     # ── AI matchup prediction ─────────────────────────────────────────────────
-    if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and a_row is not None and b_row is not None:
+    if (atlas_ai.is_available()) and a_row is not None and b_row is not None:
         try:
             aw2 = int(a_row.get("totalWins",0)); al2 = int(a_row.get("totalLosses",0))
             bw2 = int(b_row.get("totalWins",0)); bl2 = int(b_row.get("totalLosses",0))
@@ -2587,7 +2598,7 @@ class TeamCardView(discord.ui.View):
     @_safe_interaction
     async def btn_scouting(self, interaction: discord.Interaction, _b: discord.ui.Button):
         await interaction.response.defer()
-        embed = _build_team_card_scouting(self.team_name)
+        embed = await _build_team_card_scouting(self.team_name)
         await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="⚔️ Matchup", style=discord.ButtonStyle.primary, row=0)
@@ -2871,6 +2882,7 @@ class _OracleIntelModal(discord.ui.Modal):
             # Track for reply-chain detection
             _oracle_message_ids.add(sent_msg.id)
             _chain_roots[sent_msg.id] = sent_msg.id  # Root of a new chain
+            _oracle_msg_times[sent_msg.id] = time.time()
             # Store initial turn in chain memory + permanent memory
             if add_chain_turn:
                 await add_chain_turn(
@@ -2880,10 +2892,6 @@ class _OracleIntelModal(discord.ui.Modal):
                     question=q_text,
                     answer=answer[:500],
                 )
-            await _oracle_mem.embed_and_store(
-                interaction.user.id, q_text, answer[:500],
-                message_id=sent_msg.id,
-            )
         except _EarlyReturn:
             pass  # _generate() already sent its own response
         except Exception as e:
@@ -3047,7 +3055,7 @@ class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
         answer = answer_result.text.strip()
 
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer, sql=sql or "")
-        asyncio.ensure_future(_oracle_mem.log_query(
+        _fire_and_log(_oracle_mem.log_query(
             discord_id=interaction.user.id,
             question=q,
             tier=intent_result.tier if intent_result else 2,
@@ -3127,7 +3135,7 @@ class _AskWebModal(_OracleIntelModal):
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
 
         # ── Observability logging ──────────────────────────
-        asyncio.ensure_future(_oracle_mem.log_query(
+        _fire_and_log(_oracle_mem.log_query(
             discord_id=interaction.user.id,
             question=q,
             tier=4,  # Tier 4 = web search
@@ -3287,7 +3295,7 @@ RESPONSE GUIDELINES:
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer, sql=sql or "")
 
         # ── Observability logging ──────────────────────────
-        asyncio.ensure_future(_oracle_mem.log_query(
+        _fire_and_log(_oracle_mem.log_query(
             discord_id=interaction.user.id,
             question=q,
             tier=5,  # Tier 5 = player scout
@@ -3497,7 +3505,7 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
 
         # ── Observability logging ──────────────────────────
-        asyncio.ensure_future(_oracle_mem.log_query(
+        _fire_and_log(_oracle_mem.log_query(
             discord_id=interaction.user.id,
             question=q,
             tier=6,  # Tier 6 = strategy room
@@ -3801,7 +3809,28 @@ class HubView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    # ── Row 0: League-wide ────────────────────────────────────────────────────
+    # ── Row 0: League-wide (most-checked first) ────────────────────────────
+
+    @discord.ui.button(
+        label="🏆 Standings", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:standings",
+    )
+    @_safe_interaction
+    async def btn_standings(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        _, caller_team = _resolve_owner_team(interaction)
+        await interaction.followup.send(
+            embed=_build_standings_embed(caller_team=caller_team), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="📊 Power", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="hub:power",
+    )
+    @_safe_interaction
+    async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.followup.send(embed=_build_power_embed(), ephemeral=True)
 
     @discord.ui.button(
         label="🔥 Hot/Cold", style=discord.ButtonStyle.secondary,
@@ -3829,28 +3858,7 @@ class HubView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(
-        label="📊 Power", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="hub:power",
-    )
-    @_safe_interaction
-    async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        await interaction.followup.send(embed=_build_power_embed(), ephemeral=True)
-
-    @discord.ui.button(
-        label="🏆 Standings", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="hub:standings",
-    )
-    @_safe_interaction
-    async def btn_standings(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        _, caller_team = _resolve_owner_team(interaction)
-        await interaction.followup.send(
-            embed=_build_standings_embed(caller_team=caller_team), ephemeral=True
-        )
-
-    # ── Row 1: Personal / Matchups ────────────────────────────────────────────
+    # ── Row 1: Personal & matchups (your team first) ─────────────────────────
 
     @discord.ui.button(
         label="👤 My Profile", style=discord.ButtonStyle.primary,
@@ -3863,7 +3871,7 @@ class HubView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(
-        label="🆚 Head-to-Head", style=discord.ButtonStyle.primary,
+        label="🆚 Matchup", style=discord.ButtonStyle.primary,
         row=1, custom_id="oracle:h2h",
     )
     @_safe_interaction
@@ -3897,7 +3905,7 @@ class HubView(discord.ui.View):
         embed = await _build_draft_overview_embed()
         await interaction.followup.send(embed=embed, view=DraftSeasonView(), ephemeral=True)
 
-    # ── Row 2: Deep Dives ─────────────────────────────────────────────────────
+    # ── Row 2: Deep dives + AI (hero at end draws eye down) ──────────────────
 
     @discord.ui.button(
         label="🎯 Players", style=discord.ButtonStyle.secondary,
@@ -3912,7 +3920,7 @@ class HubView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="🏈 Team Stats", style=discord.ButtonStyle.secondary,
+        label="🏈 Teams", style=discord.ButtonStyle.secondary,
         row=2, custom_id="hub:teamstats",
     )
     @_safe_interaction
@@ -3941,7 +3949,7 @@ class HubView(discord.ui.View):
         await interaction.followup.send(embed=_build_alltime_embed(), ephemeral=True)
 
     @discord.ui.button(
-        label="📅 Season Recap", style=discord.ButtonStyle.success,
+        label="📅 Season", style=discord.ButtonStyle.secondary,
         row=2, custom_id="oracle:season_recap",
     )
     @_safe_interaction
@@ -3949,8 +3957,8 @@ class HubView(discord.ui.View):
         await interaction.response.send_modal(SeasonRecapModal())
 
     @discord.ui.button(
-        label="🔮 Oracle Hub", style=discord.ButtonStyle.success,
-        row=3, custom_id="hub:ask",
+        label="🔮 ASK", style=discord.ButtonStyle.primary,
+        row=2, custom_id="hub:ask",
     )
     @_safe_interaction
     async def btn_ask(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -4183,8 +4191,16 @@ class StatsHubCog(commands.Cog):
         _followup_counter += 1
 
         # Periodic cleanup of stale chain caches (every 50 follow-ups)
-        if _followup_counter % 50 == 0 and cleanup_stale_chains:
-            cleanup_stale_chains()
+        if _followup_counter % 50 == 0:
+            if cleanup_stale_chains:
+                cleanup_stale_chains()
+            # TTL eviction: purge message tracking older than 6 hours
+            cutoff = time.time() - 6 * 3600
+            stale = {k for k, v in _oracle_msg_times.items() if v < cutoff}
+            for k in stale:
+                _oracle_message_ids.discard(k)
+                _chain_roots.pop(k, None)
+                _oracle_msg_times.pop(k, None)
 
         q = message.content.strip()
         if not q:
@@ -4231,6 +4247,7 @@ class StatsHubCog(commands.Cog):
                 # ── Track for further replies ─────────────────────
                 _oracle_message_ids.add(sent.id)
                 _chain_roots[sent.id] = chain_id  # Points to original root
+                _oracle_msg_times[sent.id] = time.time()
 
                 # ── Store in chain memory + permanent memory ────────
                 if add_chain_turn:
@@ -4372,7 +4389,7 @@ async def _followup_tsl(
         sql = agent_result.sql
         answer_result = await gemini_answer(question, sql, rows, conv_context=context)
         answer = answer_result.text.strip()
-        asyncio.ensure_future(_oracle_mem.log_query(
+        _fire_and_log(_oracle_mem.log_query(
             discord_id=author.id,
             question=question,
             tier=2,
@@ -4412,7 +4429,7 @@ async def _followup_tsl(
 
     answer_result = await gemini_answer(question, sql, rows, conv_context=context)
     answer = answer_result.text.strip()
-    asyncio.ensure_future(_oracle_mem.log_query(
+    _fire_and_log(_oracle_mem.log_query(
         discord_id=author.id,
         question=question,
         tier=3,

@@ -420,7 +420,8 @@ class OracleMemory:
                         "SELECT id, discord_id, question, sql_query, answer, "
                         "       tier, entities, created_at, embedding "
                         "FROM conversation_memory "
-                        "WHERE embedding IS NOT NULL AND discord_id = ? ",
+                        "WHERE embedding IS NOT NULL AND discord_id = ? "
+                        "ORDER BY created_at DESC LIMIT 2000",
                         (discord_id,),
                     )
                 else:
@@ -428,7 +429,8 @@ class OracleMemory:
                         "SELECT id, discord_id, question, sql_query, answer, "
                         "       tier, entities, created_at, embedding "
                         "FROM conversation_memory "
-                        "WHERE embedding IS NOT NULL",
+                        "WHERE embedding IS NOT NULL "
+                        "ORDER BY created_at DESC LIMIT 2000",
                     )
                 rows = await cursor.fetchall()
 
@@ -450,6 +452,24 @@ class OracleMemory:
         except Exception as e:
             log.error("Vector search failed: %s", e)
             return []
+
+    # ── Maintenance ───────────────────────────────────────────────────────
+
+    async def prune_old_turns(self, days: int = 90) -> int:
+        """Delete conversation_memory rows older than `days` days. Returns row count deleted."""
+        await self._ensure()
+        cutoff = time.time() - days * 86400
+        try:
+            async with aiosqlite.connect(self._db_path, timeout=10) as db:
+                cursor = await db.execute(
+                    "DELETE FROM conversation_memory WHERE created_at < ?",
+                    (cutoff,),
+                )
+                await db.commit()
+                return cursor.rowcount
+        except Exception as e:
+            log.error("prune_old_turns failed: %s", e)
+            return 0
 
     # ── Hybrid retrieval (Phase 2) ────────────────────────────────────────
 

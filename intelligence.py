@@ -163,15 +163,13 @@ async def get_draft_class(season: int) -> dict:
 
     # ── Pull from DB (accurate drafting team) ─────────────────────────────
     def _query():
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("""
-            SELECT extendedName, drafting_team, draftRound, draftPick,
-                   dev, playerBestOvr, pos, was_traded
-            FROM player_draft_map
-            WHERE CAST(drafting_season AS INTEGER) = ?
-        """, (season,)).fetchall()
-        conn.close()
-        return rows
+        with sqlite3.connect(DB_PATH) as conn:
+            return conn.execute("""
+                SELECT extendedName, drafting_team, draftRound, draftPick,
+                       dev, playerBestOvr, pos, was_traded
+                FROM player_draft_map
+                WHERE CAST(drafting_season AS INTEGER) = ?
+            """, (season,)).fetchall()
 
     try:
         loop = asyncio.get_running_loop()
@@ -259,15 +257,14 @@ def get_team_draft_class(team_abbr: str, season: int) -> dict:
 
     team_abbr_upper = team_abbr.upper()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("""
-            SELECT extendedName, drafting_team, draftRound, draftPick,
-                   dev, playerBestOvr, pos, was_traded, current_team
-            FROM player_draft_map
-            WHERE CAST(drafting_season AS INTEGER) = ?
-              AND UPPER(drafting_team) LIKE ?
-        """, (season, f"%{team_abbr_upper}%")).fetchall()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("""
+                SELECT extendedName, drafting_team, draftRound, draftPick,
+                       dev, playerBestOvr, pos, was_traded, current_team
+                FROM player_draft_map
+                WHERE CAST(drafting_season AS INTEGER) = ?
+                  AND UPPER(drafting_team) LIKE ?
+            """, (season, f"%{team_abbr_upper}%")).fetchall()
     except Exception as e:
         return {"error": f"DB unavailable: {e}. Run build_tsl_db.py first."}
 
@@ -675,7 +672,7 @@ def record_beef(user_a_id: int, user_b_id: int):
                 profile["beefs"].append({"opponent_id": oid, "count": 1})
 
 
-def get_owner_context(discord_user_id: int, discord_username: str) -> str:
+async def get_owner_context(discord_user_id: int, discord_username: str) -> str:
     profile  = get_or_create_profile(discord_user_id, discord_username)
     nickname = profile.get("nickname", discord_username)
     team     = profile.get("team")
@@ -698,7 +695,7 @@ def get_owner_context(discord_user_id: int, discord_username: str) -> str:
                 lines.append(
                     f"Rank #{int(r.get('rank', 0))} | Net Pts: {r.get('netPts')} | TO Diff: {r.get('tODiff')}"
                 )
-        recent = dm.get_last_n_games(team, 3)
+        recent = await dm.get_last_n_games(team, 3)
         if recent:
             def _wl(g):
                 hs, aws = g.get("home_score", 0), g.get("away_score", 0)

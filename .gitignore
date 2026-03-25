@@ -29,6 +29,7 @@ stress_test_results.txt
 
 # Development session artifacts
 .superpowers/
+theme-studio-preview/
 
 # Render test outputs
 test_*.png

@@ -28,7 +28,7 @@ Helper functions:
   get_league_status()             → "Season X | Week Y"
   get_team_record(team)           → "W-L-T" string
   get_team_owner(team_name)       → string
-  get_last_n_games(team, n)       → list of recent game dicts
+  get_last_n_games(team, n)       → list of recent game dicts  [async]
   get_h2h_record(team_a, team_b)  → {a_wins, b_wins, ties}
   get_weekly_results(week)        → completed games (status 2 or 3) for a given week
   discord_db_exists()             → bool
@@ -80,6 +80,7 @@ Fixes applied (v3 — ATLAS v1.4.2 Code Review):
 ─────────────────────────────────────────────────────────────────────────────
 """
 
+import asyncio
 import io
 import math
 import os
@@ -761,7 +762,7 @@ def get_team_owner(team_name: str) -> str:
     return "Unknown"
 
 
-def get_last_n_games(team: str, n: int = 5) -> list[dict]:
+async def get_last_n_games(team: str, n: int = 5) -> list[dict]:
     abbr = ""
     if not _state.df_teams.empty:
         for col in ("nickName", "displayName"):
@@ -773,7 +774,9 @@ def get_last_n_games(team: str, n: int = 5) -> list[dict]:
     if not abbr:
         return []
 
-    data = _get(f"/teams/{abbr}/games/{_state.CURRENT_SEASON}/{_state.CURRENT_STAGE}")
+    endpoint = f"/teams/{abbr}/games/{_state.CURRENT_SEASON}/{_state.CURRENT_STAGE}"
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, lambda: _get(endpoint))
     if not data:
         return []
 

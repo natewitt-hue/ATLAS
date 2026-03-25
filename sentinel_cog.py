@@ -2838,10 +2838,10 @@ class SentinelHubView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    # ── Row 0: Core Enforcement ──────────────────────────────────────────────
+    # ── Row 0: Actions (create/submit something) ──────────────────────────
 
     @discord.ui.button(
-        label="File Complaint", style=discord.ButtonStyle.primary,
+        label="Complaint", style=discord.ButtonStyle.primary,
         row=0, custom_id="sentinel:complaint", emoji="📋",
     )
     async def btn_complaint(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -2882,59 +2882,22 @@ class SentinelHubView(discord.ui.View):
                 )
 
     @discord.ui.button(
-        label="Force Request", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="sentinel:forcerequest", emoji="🏳️",
+        label="Pos Change", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="sentinel:poschange", emoji="🔄",
     )
-    async def btn_forcerequest(self, interaction: discord.Interaction, _b: discord.ui.Button):
+    async def btn_poschange(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
-            embed = discord.Embed(
-                title="🏳️ Force Win Request",
-                description=(
-                    "Force requests require screenshot evidence of your DM "
-                    "conversation with your opponent.\n\n"
-                    "**How to submit:**\n"
-                    "```/forcerequest opponent:<name> screenshot1:<attach>```\n\n"
-                    "1. Type `/forcerequest` in any channel\n"
-                    "2. Enter your opponent's name\n"
-                    "3. Attach 1-3 screenshots of your DM conversation\n"
-                    "4. ATLAS will analyze the screenshots and file the request"
-                ),
-                color=AtlasColors.WARNING,
-            )
-            embed.set_footer(text="ATLAS Sentinel — Force Request Protocol")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_modal(PositionChangeModal(self.bot))
         except Exception as e:
             traceback.print_exception(type(e), e, e.__traceback__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Could not open the Position Change modal.", ephemeral=True
+                )
 
     @discord.ui.button(
-        label="4th Down", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="sentinel:fourthdown", emoji="🏈",
-    )
-    async def btn_fourthdown(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        try:
-            embed = discord.Embed(
-                title="🏈 4th Down Ruling",
-                description=(
-                    "4th down rulings require a Madden screenshot of the "
-                    "play situation.\n\n"
-                    "**How to submit:**\n"
-                    "```/fourthdown screenshot:<attach>```\n\n"
-                    "1. Type `/fourthdown` in any channel\n"
-                    "2. Attach your Madden game screenshot\n"
-                    "3. ATLAS Vision will analyze the situation and issue a ruling"
-                ),
-                color=AtlasColors.WARNING,
-            )
-            embed.set_footer(text="ATLAS Sentinel — 4th Down Protocol")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except Exception as e:
-            traceback.print_exception(type(e), e, e.__traceback__)
-
-    # ── Row 1: Quick Lookups (modals) ────────────────────────────────────────
-
-    @discord.ui.button(
-        label="DC Protocol", style=discord.ButtonStyle.success,
-        row=1, custom_id="sentinel:dcprotocol", emoji="📡",
+        label="Disconnect", style=discord.ButtonStyle.secondary,
+        row=0, custom_id="sentinel:dcprotocol", emoji="📡",
     )
     async def btn_dcprotocol(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:
@@ -2943,11 +2906,13 @@ class SentinelHubView(discord.ui.View):
             traceback.print_exception(type(e), e, e.__traceback__)
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    "❌ Could not open the DC Protocol modal.", ephemeral=True
+                    "❌ Could not open the Disconnect modal.", ephemeral=True
                 )
 
+    # ── Row 1: Read-only lookups (all gray, no side effects) ─────────────
+
     @discord.ui.button(
-        label="Blowout Check", style=discord.ButtonStyle.success,
+        label="Blowout", style=discord.ButtonStyle.secondary,
         row=1, custom_id="sentinel:blowout", emoji="💥",
     )
     async def btn_blowout(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -2961,7 +2926,7 @@ class SentinelHubView(discord.ui.View):
                 )
 
     @discord.ui.button(
-        label="Stat Check", style=discord.ButtonStyle.success,
+        label="Stat Check", style=discord.ButtonStyle.secondary,
         row=1, custom_id="sentinel:statcheck", emoji="📊",
     )
     async def btn_statcheck(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -2974,25 +2939,9 @@ class SentinelHubView(discord.ui.View):
                     "❌ Could not open the Stat Check modal.", ephemeral=True
                 )
 
-    # ── Row 2: Position Changes ──────────────────────────────────────────────
-
     @discord.ui.button(
-        label="Position Change", style=discord.ButtonStyle.primary,
-        row=2, custom_id="sentinel:poschange", emoji="🔄",
-    )
-    async def btn_poschange(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        try:
-            await interaction.response.send_modal(PositionChangeModal(self.bot))
-        except Exception as e:
-            traceback.print_exception(type(e), e, e.__traceback__)
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "❌ Could not open the Position Change modal.", ephemeral=True
-                )
-
-    @discord.ui.button(
-        label="Position Log", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="sentinel:poslog", emoji="📜",
+        label="Pos Log", style=discord.ButtonStyle.secondary,
+        row=1, custom_id="sentinel:poslog", emoji="📜",
     )
     async def btn_poslog(self, interaction: discord.Interaction, _b: discord.ui.Button):
         try:

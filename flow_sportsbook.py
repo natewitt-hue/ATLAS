@@ -55,7 +55,7 @@ from discord.ext import commands, tasks
 import data_manager as dm
 import flow_wallet
 from real_sportsbook_cog import (
-    EventListView, SPORT_EMOJI, SUPPORTED_SPORTS as REAL_SPORTS,
+    SPORT_EMOJI, SUPPORTED_SPORTS as REAL_SPORTS,
     _parse_commence, _place_real_bet, _short_name as _real_short_name,
     CustomRealWagerModal,
 )
@@ -191,6 +191,7 @@ def setup_db():
                 bet_type   TEXT    NOT NULL,
                 line       REAL    NOT NULL DEFAULT 0,
                 odds       INTEGER NOT NULL,
+                source     TEXT    NOT NULL DEFAULT 'TSL',
                 status     TEXT    NOT NULL DEFAULT 'Pending',
                 UNIQUE(parlay_id, leg_index)
             )
@@ -1693,6 +1694,7 @@ class SportsbookWorkspace(discord.ui.View):
         self._current_event: dict = {}
         self._current_sport_key: str = ""
         self._pending_bet: dict = {}
+        self._parlay_mode: bool = False
 
     # ── Core mechanics ──────────────────────────────────────────────────────
 
@@ -1761,11 +1763,19 @@ class SportsbookWorkspace(discord.ui.View):
 
         balance = _get_balance(self.user_id)
 
-        embed = discord.Embed(title="\U0001f3c6  ATLAS SPORTSBOOK", color=TSL_GOLD)
-        embed.description = (
-            f"\U0001f4b0 **Balance:** ${balance:,}\n"
-            f"Select a sport to browse games."
-        )
+        if self._parlay_mode:
+            embed = discord.Embed(title="\U0001f3b0  BUILD A PARLAY", color=TSL_GOLD)
+            embed.description = (
+                f"\U0001f4b0 **Balance:** ${balance:,}\n"
+                f"*Parlay mode \u2014 selecting a bet will add it as a leg.*\n"
+                f"Select a sport to browse games."
+            )
+        else:
+            embed = discord.Embed(title="\U0001f3c6  ATLAS SPORTSBOOK", color=TSL_GOLD)
+            embed.description = (
+                f"\U0001f4b0 **Balance:** ${balance:,}\n"
+                f"Select a sport to browse games."
+            )
 
         for label, emoji, sport_id, row in _SPORT_BUTTONS:
             btn = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=row)
@@ -1899,7 +1909,7 @@ class SportsbookWorkspace(discord.ui.View):
                 description=f"No **{sport_name}** games available right now.\nOdds sync on a schedule \u2014 check back later!",
                 color=TSL_GOLD,
             )
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
             back.callback = self._back_to_sports
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
@@ -1960,7 +1970,7 @@ class SportsbookWorkspace(discord.ui.View):
 
         if not row:
             embed = discord.Embed(description="No odds available for this game yet.", color=TSL_GOLD)
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
             back.callback = lambda i: self._nav_real_games(i)
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
@@ -1971,7 +1981,7 @@ class SportsbookWorkspace(discord.ui.View):
                        ("moneyline_home", "spread_home", "over_under"))
         if not has_odds:
             embed = discord.Embed(description="No odds available for this game yet.", color=TSL_GOLD)
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
             back.callback = lambda i: self._nav_real_games(i)
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
@@ -2051,7 +2061,8 @@ class SportsbookWorkspace(discord.ui.View):
         embed.description = (
             f"{source_badge}**{matchup}**\n"
             f"Line: `{_american_to_str(odds)}`\n\n"
-            f"\U0001f4b0 Balance: **${balance:,}**"
+            f"\U0001f4b0 Balance: **${balance:,}**\n\n"
+            f"*Pick an amount to place a straight bet, or add this pick to your parlay cart.*"
         )
 
         # Row 0: Preset amount buttons
@@ -2066,19 +2077,73 @@ class SportsbookWorkspace(discord.ui.View):
             btn.callback = self._make_place_bet_cb(amt)
             self.add_item(btn)
 
-        # Row 1: Custom + Add to Parlay
-        custom_btn = discord.ui.Button(label="\u270f\ufe0f Custom", style=discord.ButtonStyle.secondary, row=1)
+        # Row 1: Custom amount (straight bet)
+        custom_btn = discord.ui.Button(label="\u270f\ufe0f Custom Amount", style=discord.ButtonStyle.secondary, row=1)
         custom_btn.callback = self._custom_wager_cb
         self.add_item(custom_btn)
 
-        parlay_btn = discord.ui.Button(label="\U0001f3b0 Add to Parlay", style=discord.ButtonStyle.primary, row=1)
+        # Row 2: Add to Parlay (distinct flow — own row)
+        parlay_btn = discord.ui.Button(label="\U0001f3b0 Add to Parlay", style=discord.ButtonStyle.success, row=2)
         parlay_btn.callback = self._add_to_parlay_cb
         self.add_item(parlay_btn)
 
-        # Row 2: Back
-        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+        # Row 3: Back
+        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=3)
         back.callback = self._back_to_match
         self.add_item(back)
+
+        await self._update_workspace(interaction, embed, self)
+
+    # ── State 7: Parlay Review ──────────────────────────────────────────────
+
+    async def show_parlay_review(self, interaction: discord.Interaction):
+        """Show cart legs before opening wager modal — single submission path."""
+        self.clear_items()
+        cart = _get_cart(self.user_id)
+        if len(cart) < 2:
+            embed = discord.Embed(
+                description="\u274c A parlay requires at least **2 legs**.", color=TSL_GOLD
+            )
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
+            back.callback = self._back_to_sports
+            self.add_item(back)
+            await self._update_workspace(interaction, embed, self)
+            return
+
+        combined = _combine_parlay_odds([l["odds"] for l in cart])
+        embed = discord.Embed(
+            title="\U0001f3b0  PARLAY REVIEW",
+            color=TSL_GOLD,
+            description=(
+                f"**{len(cart)} Legs** \u2014 Combined: **{combined:+d}**\n"
+                f"*Review your legs, then enter your wager.*"
+            ),
+        )
+        for i, leg in enumerate(cart, 1):
+            source_badge = f"[{leg.get('source', 'TSL')}] " if leg.get('source') != 'TSL' else ""
+            embed.add_field(
+                name=f"Leg {i}: {source_badge}{leg['pick']}",
+                value=f"{leg['bet_type']} ({leg['odds']:+d})\n{leg.get('display', '')}",
+                inline=False,
+            )
+
+        submit_btn = discord.ui.Button(
+            label=f"\U0001f4b0 Enter Wager ({_american_to_str(combined)})",
+            style=discord.ButtonStyle.success,
+            row=0,
+        )
+        clear_btn = discord.ui.Button(label="\U0001f5d1\ufe0f Clear", style=discord.ButtonStyle.danger, row=0)
+        back_btn = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=1)
+
+        async def _open_modal(i: discord.Interaction):
+            await i.response.send_modal(ParlayWagerModal(self.user_id, cart, combined))
+
+        submit_btn.callback = _open_modal
+        clear_btn.callback = self._clear_cart_cb
+        back_btn.callback = self._back_to_sports
+        self.add_item(submit_btn)
+        self.add_item(clear_btn)
+        self.add_item(back_btn)
 
         await self._update_workspace(interaction, embed, self)
 
@@ -2202,6 +2267,18 @@ class SportsbookWorkspace(discord.ui.View):
             embed.set_footer(text=ws._cart_footer())
             await interaction.followup.send(embed=embed, view=ws, ephemeral=True)
 
+    @classmethod
+    async def open_to_parlay(cls, interaction: discord.Interaction, cog):
+        """Create workspace in parlay-building mode.
+
+        Every bet type click adds a leg directly — no wager screen shown.
+        Called from the 'Build Parlay' hub button.
+        interaction must already be deferred.
+        """
+        ws = cls(cog, interaction.user.id)
+        ws._parlay_mode = True
+        await ws.show_sport_selector(interaction, is_initial=True)
+
     # ── Callback factories ──────────────────────────────────────────────────
 
     def _make_sport_cb(self, sport_id: str):
@@ -2236,14 +2313,17 @@ class SportsbookWorkspace(discord.ui.View):
         await self.show_tsl_match(interaction, game)
 
     def _make_bet_cb(self, game: dict, pick: str, line, odds: int, bet_type: str):
-        """Factory: TSL bet button \u2192 opens wager presets."""
+        """Factory: TSL bet button \u2192 opens wager presets (or adds leg directly in parlay mode)."""
         async def callback(interaction: discord.Interaction):
             if _is_locked(game["game_id"]):
                 embed = discord.Embed(description="\U0001f534 Game is **locked**.", color=TSL_GOLD)
                 await self._update_workspace(interaction, embed, self)
                 return
             game["_source_label"] = "TSL"
-            await self.show_wager(interaction, game, pick, line, odds, bet_type)
+            if self._parlay_mode:
+                await self._add_leg_direct(interaction, game, pick, line, odds, bet_type)
+            else:
+                await self.show_wager(interaction, game, pick, line, odds, bet_type)
         return callback
 
     def _make_real_bet_cb(self, event: dict, pick: str, bet_type: str, odds: int, line: float | None):
@@ -2265,7 +2345,10 @@ class SportsbookWorkspace(discord.ui.View):
                 "_is_real": True,
                 "_sport_key": sport_key,
             }
-            await self.show_wager(interaction, game_proxy, pick, line, odds, bet_type)
+            if self._parlay_mode:
+                await self._add_leg_direct(interaction, game_proxy, pick, line, odds, bet_type)
+            else:
+                await self.show_wager(interaction, game_proxy, pick, line, odds, bet_type)
         return callback
 
     def _make_place_bet_cb(self, amount: int):
@@ -2277,9 +2360,44 @@ class SportsbookWorkspace(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
             try:
                 if game.get("_is_real"):
+                    # Re-fetch current odds — may have shifted since match detail loaded
+                    fresh_odds = bet["odds"]  # fallback if DB unavailable
+                    try:
+                        async with aiosqlite.connect(DB_PATH) as _db:
+                            _db.row_factory = aiosqlite.Row
+                            async with _db.execute(
+                                "SELECT * FROM real_events "
+                                "WHERE event_id = ? AND locked = 0 AND completed = 0",
+                                (game["event_id"],),
+                            ) as _cur:
+                                _fresh = await _cur.fetchone()
+                        if _fresh is None:
+                            await interaction.followup.send(
+                                "❌ This game is no longer available for betting.",
+                                ephemeral=True,
+                            )
+                            return
+                        _fresh = dict(_fresh)
+                        _home = game.get("home_team", game.get("home", ""))
+                        _bt   = bet["bet_type"]
+                        _pick = bet["pick"]
+                        _col  = {
+                            ("Moneyline", True):  "moneyline_home",
+                            ("Moneyline", False): "moneyline_away",
+                            ("Spread",    True):  "spread_home_odds",
+                            ("Spread",    False): "spread_away_odds",
+                            ("Over",      True):  "over_odds",
+                            ("Over",      False): "over_odds",
+                            ("Under",     True):  "under_odds",
+                            ("Under",     False): "under_odds",
+                        }.get((_bt, _pick == _home))
+                        if _col and _fresh.get(_col) is not None:
+                            fresh_odds = int(_fresh[_col])
+                    except Exception:
+                        pass  # fall back to cached odds on DB error
                     await _place_real_bet(
                         interaction, game, bet["bet_type"], bet["pick"],
-                        bet["odds"], bet.get("line"), amount,
+                        fresh_odds, bet.get("line"), amount,
                         game.get("_source_label", "REAL"),
                     )
                 else:
@@ -2299,7 +2417,7 @@ class SportsbookWorkspace(discord.ui.View):
         return callback
 
     async def _add_to_parlay_cb(self, interaction: discord.Interaction):
-        """Add current selection to parlay cart, then back to sport selector."""
+        """Add current selection to parlay cart, then return to game list."""
         bet = self._pending_bet
         game = bet["game"]
 
@@ -2329,26 +2447,86 @@ class SportsbookWorkspace(discord.ui.View):
             await self._update_workspace(interaction, embed, self)
             return
 
-        await self.show_sport_selector(interaction)
+        # Stay on game list for same sport — cart footer shows updated leg count
+        if self._current_event:
+            await self.show_real_games(interaction, self._current_sport_key)
+        else:
+            await self.show_tsl_games(interaction)
 
-    async def _submit_parlay_cb(self, interaction: discord.Interaction):
-        """Open parlay wager modal."""
-        cart = _get_cart(self.user_id)
-        if len(cart) < 2:
+    async def _add_leg_direct(self, interaction: discord.Interaction,
+                               game: dict, pick: str, line, odds: int, bet_type: str):
+        """Parlay mode: add leg immediately without showing the wager screen."""
+        leg = {
+            "source": game.get("_source_label", "TSL"),
+            "event_id": game.get("game_id", game.get("event_id", "")),
+            "display": (
+                f"{game.get('away', game.get('away_team', ''))}"
+                f" @ {game.get('home', game.get('home_team', ''))}"
+            ),
+            "pick": pick,
+            "bet_type": bet_type,
+            "line": line or 0,
+            "odds": odds,
+        }
+        result = _add_to_cart(self.user_id, leg)
+        if result == -1:
             embed = discord.Embed(
-                description="\u274c A parlay requires at least **2 legs**.", color=TSL_GOLD
+                description="\u26a0\ufe0f You already have a leg from this game in your cart.", color=TSL_GOLD
             )
+            embed.set_footer(text=self._cart_footer())
             await self._update_workspace(interaction, embed, self)
             return
-        combined = _combine_parlay_odds([l["odds"] for l in cart])
-        await interaction.response.send_modal(
-            ParlayWagerModal(self.user_id, cart, combined)
-        )
+        if result == -2:
+            embed = discord.Embed(
+                description=f"\u26a0\ufe0f Cart is full \u2014 max **{MAX_PARLAY_LEGS}** legs.", color=TSL_GOLD
+            )
+            embed.set_footer(text=self._cart_footer())
+            await self._update_workspace(interaction, embed, self)
+            return
+        # Stay on game list — cart footer shows the updated leg count
+        if game.get("_is_real"):
+            await self.show_real_games(interaction, self._current_sport_key)
+        else:
+            await self.show_tsl_games(interaction)
+
+    async def _submit_parlay_cb(self, interaction: discord.Interaction):
+        """Route to parlay review screen before opening wager modal."""
+        await self.show_parlay_review(interaction)
 
     async def _clear_cart_cb(self, interaction: discord.Interaction):
-        """Clear parlay cart and refresh sport selector."""
-        _clear_cart(self.user_id)
-        await self.show_sport_selector(interaction)
+        """Show confirmation before clearing the parlay cart."""
+        cart = _get_cart(self.user_id)
+        n = len(cart)
+        self.clear_items()
+
+        confirm_btn = discord.ui.Button(
+            label=f"Yes, clear {n} leg{'s' if n != 1 else ''}",
+            style=discord.ButtonStyle.danger,
+            row=0,
+        )
+        cancel_btn = discord.ui.Button(
+            label="Cancel",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+        )
+
+        async def _do_clear(i: discord.Interaction):
+            _clear_cart(self.user_id)
+            await self.show_sport_selector(i)
+
+        async def _do_cancel(i: discord.Interaction):
+            await self.show_sport_selector(i)
+
+        confirm_btn.callback = _do_clear
+        cancel_btn.callback = _do_cancel
+        self.add_item(confirm_btn)
+        self.add_item(cancel_btn)
+
+        embed = discord.Embed(
+            description=f"\u26a0\ufe0f Clear all **{n}** leg{'s' if n != 1 else ''} from your parlay cart? This can't be undone.",
+            color=discord.Color.orange(),
+        )
+        await self._update_workspace(interaction, embed, self)
 
     async def _custom_wager_cb(self, interaction: discord.Interaction):
         """Open custom wager modal (straight or real bet)."""
@@ -2373,7 +2551,13 @@ class SportsbookWorkspace(discord.ui.View):
     # ── Navigation callbacks ────────────────────────────────────────────────
 
     async def _back_to_sports(self, interaction: discord.Interaction):
-        await self.show_sport_selector(interaction)
+        """Dismiss the workspace — user returns to the hub card."""
+        await interaction.response.edit_message(
+            content="-# Sportsbook workspace closed. Run `/sportsbook` to reopen.",
+            embed=None,
+            view=None,
+            attachments=[],
+        )
 
     async def _back_to_tsl_games(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -2411,11 +2595,27 @@ class SportsbookWorkspace(discord.ui.View):
 class SportsbookHubView(discord.ui.View):
     """Unified sportsbook hub — TSL simulation + real sports."""
 
-    def __init__(self, cog: "SportsbookCog"):
+    def __init__(self, cog: "SportsbookCog", user_id: int | None = None):
         super().__init__(timeout=None)
         self.cog = cog
+        # Update Cart badge with live count for this user
+        if user_id is not None:
+            try:
+                import sqlite3 as _sq3
+                with _sq3.connect(DB_PATH) as _c:
+                    n = _c.execute(
+                        "SELECT COUNT(*) FROM parlay_cart WHERE discord_id = ?", (user_id,)
+                    ).fetchone()[0]
+                if n > 0:
+                    for item in self.children:
+                        if getattr(item, "custom_id", None) == "atlas:sportsbook:parlay":
+                            item.label = f"Cart [{n}]"
+                            item.style = discord.ButtonStyle.success
+                            break
+            except Exception:
+                pass  # non-critical; fallback to default "Cart" label
 
-    # ── Row 0: Sport buttons ───────────────────────────────────────────────
+    # ── Row 0: US sports (TSL hero + big 3) ────────────────────────────────
 
     @discord.ui.button(label="TSL", emoji="\U0001f3c8",
                        style=discord.ButtonStyle.primary,
@@ -2433,12 +2633,6 @@ class SportsbookHubView(discord.ui.View):
             await interaction.followup.send(msg, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"\u274c Error loading TSL games: `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="NFL", emoji="\U0001f3c8",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:nfl", row=0)
-    async def nfl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._show_real_sport(interaction, "americanfootball_nfl")
 
     @discord.ui.button(label="NBA", emoji="\U0001f3c0",
                        style=discord.ButtonStyle.secondary,
@@ -2458,7 +2652,7 @@ class SportsbookHubView(discord.ui.View):
     async def nhl_games(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_real_sport(interaction, "icehockey_nhl")
 
-    # ── Row 1: More sports ───────────────────────────────────────────────
+    # ── Row 1: College, combat, international ────────────────────────────
 
     @discord.ui.button(label="NCAAB", emoji="\U0001f3c0",
                        style=discord.ButtonStyle.secondary,
@@ -2484,37 +2678,17 @@ class SportsbookHubView(discord.ui.View):
     async def mls_games(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_real_sport(interaction, "soccer_mls")
 
-    @discord.ui.button(label="WNBA", emoji="\U0001f3c0",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:wnba", row=1)
-    async def wnba_games(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._show_real_sport(interaction, "basketball_wnba")
+    # ── Row 2: Utilities (build → view → track → rank → stats) ──────────
 
-    # ── Row 2: Utility buttons ─────────────────────────────────────────────
-
-    @discord.ui.button(label="Stats", emoji="\U0001f4ca",
-                       style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:stats", row=2)
-    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Parlay", emoji="\U0001f3b0",
+                       style=discord.ButtonStyle.primary,
+                       custom_id="atlas:sportsbook:build_parlay", row=2)
+    async def build_parlay(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            theme_id = get_theme_for_render(interaction.user.id)
-            img = await build_stats_card(interaction.user.id, theme_id=theme_id)
-            await send_card(interaction, img, filename="stats.png", followup=True, ephemeral=True)
+            await SportsbookWorkspace.open_to_parlay(interaction, self.cog)
         except Exception as e:
-            await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="Leaderboard", emoji="\U0001f3c6",
-                       style=discord.ButtonStyle.danger,
-                       custom_id="atlas:sportsbook:leaderboard", row=2)
-    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await self.cog._leaderboard_impl(interaction)
-        except Exception as e:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+            await interaction.followup.send(f"\u274c Error: `{e}`", ephemeral=True)
 
     @discord.ui.button(label="Cart", emoji="\U0001f6d2",
                        style=discord.ButtonStyle.secondary,
@@ -2550,17 +2724,39 @@ class SportsbookHubView(discord.ui.View):
             else:
                 await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
-    # ── Row 3: Analytics ───────────────────────────────────────────────────
-
-    @discord.ui.button(label="Parlay Stats", emoji="\U0001f4ca",
+    @discord.ui.button(label="Active", emoji="\U0001f4cb",
                        style=discord.ButtonStyle.secondary,
-                       custom_id="atlas:sportsbook:parlay_stats", row=3)
-    async def parlay_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+                       custom_id="atlas:sportsbook:my_bets", row=2)
+    async def my_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._mybets_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"\u274c Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"\u274c Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Ranks", emoji="\U0001f3c6",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:leaderboard", row=2)
+    async def leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.cog._leaderboard_impl(interaction)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="My Stats", emoji="\U0001f4ca",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="atlas:sportsbook:stats", row=2)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             theme_id = get_theme_for_render(interaction.user.id)
-            img = await build_parlay_analytics_card(interaction.user.id, theme_id=theme_id)
-            await send_card(interaction, img, filename="parlay_analytics.png", followup=True, ephemeral=True)
+            img = await build_stats_card(interaction.user.id, theme_id=theme_id)
+            await send_card(interaction, img, filename="stats.png", followup=True, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: `{e}`", ephemeral=True)
 
@@ -2821,7 +3017,7 @@ class SportsbookCog(commands.Cog):
             theme_id = get_theme_for_render(interaction.user.id)
             img = await build_sportsbook_card(interaction.user.id, theme_id=theme_id)
             await send_card(interaction, img, filename="sportsbook.png",
-                            followup=True, view=SportsbookHubView(self))
+                            followup=True, view=SportsbookHubView(self, interaction.user.id))
         except Exception as e:
             # Fallback to text embed if card rendering fails
             balance = _get_balance(interaction.user.id)
@@ -2832,7 +3028,7 @@ class SportsbookCog(commands.Cog):
                 f"*Card render error: `{e}`*"
             )
             embed.set_footer(text=f"ATLAS Sportsbook {SPORTSBOOK_VERSION}")
-            await interaction.followup.send(embed=embed, view=SportsbookHubView(self))
+            await interaction.followup.send(embed=embed, view=SportsbookHubView(self, interaction.user.id))
 
     # ── User-facing _impl methods (called by board buttons) ────────────────
 

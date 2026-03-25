@@ -1,221 +1,192 @@
 # ATLAS Nightly Code Review
-**Date:** 2026-03-24
-**Scope:** Casino & Rendering Subsystem
-**Auditor:** Claude Code (automated overnight audit)
-**Files audited:** 15 files · 11,705 lines
+**Date:** 2026-03-25
+**Domain:** Oracle & Analytics
+**Auditor:** Automated (Wednesday cadence)
+**Branch:** feat/sportsbook-ux-overhaul
+**Files Audited:** oracle_cog.py, oracle_agent.py, oracle_memory.py, oracle_query_builder.py, analysis.py, intelligence.py, data_manager.py
 
 ---
 
-## CRITICAL
+## Phase 1 — Recent Git Changes (Last 24h)
 
-### C-1 · `_award_jackpot` return type mismatch — `casino/casino_db.py` L495–548
+**Commits reviewed:**
+- `94e9531` — ux(hubs): overhaul button layout, labels, and colors across all 4 hubs; fix poly finalize crash
 
-**Severity:** HIGH
+**Diff summary for oracle_cog.py (HubView):**
+- Buttons reordered: "Standings" and "Power Rankings" moved to Row 0 first positions
+- "Head-to-Head" → "Matchup" (label only; `custom_id` unchanged — persistence maintained ✅)
+- "Team Stats" → "Teams" (label only; `custom_id` unchanged ✅)
+- "Season Recap" style change (label/emoji only)
+- "ASK" (Oracle Hub) moved from Row 3 to Row 2
 
-`_award_jackpot` is annotated as returning `dict` but returns `None` at the early-exit path when `amount < 1`. The caller `process_wager` stores the result and may pass it downstream to streak/highlight logic that accesses dict keys without a None guard. This will surface as an unhandled `TypeError` mid-transaction, silently failing a payout with no user-visible error message.
-
-**Fix:** Change the annotation to `dict | None` and add a None check at all call sites, or return an empty sentinel dict `{}` and guard on `jackpot_info.get("amount", 0)`.
-
----
-
-### C-2 · `get_challenge` column key zip is fragile against schema drift — `casino/casino_db.py` L1419–1430
-
-**Severity:** HIGH
-
-`get_challenge` uses `SELECT *` followed by a hardcoded list of column names to zip into a dict. The DDL confirms `challenger_corr_id` and `opponent_corr_id` were added via `ALTER TABLE` after initial creation. On any production database where the ALTER was applied in a different order, SQLite column ordering may differ from what the zip expects. A misaligned zip produces silently wrong data: money may be credited to the wrong user or correlation IDs swapped, corrupting the ledger without raising an exception.
-
-**Fix:** Replace with an explicit named-column `SELECT` (e.g. `SELECT id, challenger_id, opponent_id, ...`). Never rely on `SELECT *` positional ordering when the schema has been modified via `ALTER TABLE`.
+**Assessment:** All changes are cosmetic/UX — no logic or custom_id mutations. Persistent views across bot restarts are unaffected. No functional regression introduced.
 
 ---
 
-## WARNINGS
+## Phase 2 — Deep File Audit
 
-### W-1 · `post_to_ledger` silently swallows all exceptions — `casino/casino.py` L49–82
+### Pass A — Anti-Pattern Scan
 
-`post_to_ledger` wraps both the ledger DB write and the FLOW event emission in a bare `except Exception: log.exception(...)`. Ledger failures are invisible to the player and to Discord. Wagers can be resolved but never recorded in the transaction ledger — a bookkeeping gap that cannot be detected without manually diffing wager outcomes against ledger entries.
-
-**Recommendation:** Emit a warning to the configured admin channel on ledger write failure.
-
----
-
-### W-2 · `_is_admin` bypasses shared permission helper — `casino/casino.py` L87–93
-
-`CasinoCog._is_admin()` checks `ctx.author.guild_permissions.administrator` and a hardcoded `"Commissioner"` role name directly, bypassing `is_commissioner()` from `permissions.py`. The rest of the bot uses `permissions.py` which also checks `ADMIN_USER_IDS` from env. A commissioner configured only in `ADMIN_USER_IDS` will be denied access to casino commissioner commands.
-
-**Fix:** Replace with `from permissions import is_commissioner; return await is_commissioner(ctx)`.
-
----
-
-### W-3 · `my_stats` handler uses raw `aiosqlite.connect` instead of DB layer — `casino/casino.py` L275–330
-
-The `my_stats` button handler opens `aiosqlite.connect(db.DB_PATH)` directly, bypassing `casino_db` entirely. This bypasses the locking layer (`flow_wallet.get_user_lock()`), runs outside any `BEGIN IMMEDIATE` context, and will not benefit from future schema migrations applied through the DB layer.
-
-**Recommendation:** Extract the stats query into a `casino_db` function.
+| Pattern | Location | Count | Notes |
+|---------|----------|-------|-------|
+| `asyncio.ensure_future()` | oracle_cog.py | 6 | All fire-and-forget `log_query()` calls — no error capture |
+| Bare `except:` | None | 0 | Clean — no bare excepts found in focus files |
+| f-string SQL (user-facing) | oracle_query_builder.py:342 | 1 | SELECT column build only — columns from whitelist, not user input |
+| `_get_claude()/_get_gemini()` private access | oracle_cog.py | 3 | L1258, 2083, 2404 — availability gates only |
+| `embed_and_store()` calls | oracle_cog.py | 5 | Double-store bug on TSL query path (see W-01) |
+| `print()` in load function | data_manager.py | 20+ | All in `load_all()` — run in executor, bypasses log infrastructure |
+| `sqlite3.connect()` without context manager | intelligence.py | 2 | L166, L262 — connection leak on exception path |
+| Unbounded module-level dicts/sets | oracle_cog.py, intelligence.py | 3 | `_oracle_message_ids`, `_chain_roots`, `_owner_profiles` |
 
 ---
 
-### W-4 · `assert` in production code path — `casino/renderer/ledger_renderer.py` L283
+### Pass B — Logic Trace
 
-```python
-assert info is not None
-```
+**oracle_cog.py — Double-store in `_OracleIntelModal` / `AskTSLModal` interaction:**
+`_OracleIntelModal.on_submit` at L2883 calls `embed_and_store()` to persist the query/answer pair. Then `AskTSLModal._generate` at L3049 calls `embed_and_store()` again for the same query. This writes **two `conversation_memory` rows per TSL query**. The second write includes `sql=sql or ""` which differs from the first. Both rows are indexed in FTS5 and included in vector recall. Net effect: TSL queries are double-weighted in memory retrieval, biasing recall toward them.
 
-Python `assert` is a no-op when run with the `-O` (optimize) flag. Even when active, it raises `AssertionError` rather than a graceful error. The rendering caller catches `Exception` (which includes `AssertionError`), so the card render will fail silently.
+**oracle_memory.py — `search_vector()` memory model:**
+`search_vector()` at L399 loads **all rows** with a non-null `embedding` column into Python memory, deserializes each 768-float vector, and computes cosine similarity in a loop. At ~100 Oracle queries/day across 95 seasons of history, this table accumulates ~36K+ rows/year. At ~3KB/embedding, 36K rows = ~108MB loaded into Python on every non-trivial Oracle call. No LIMIT, no FAISS index, no recency pre-filter. The table has no TTL or row cap — `store_turn()` writes indefinitely.
 
-**Fix:** Replace with `if info is None: raise ValueError(f"Unknown ledger source: {source_key}")`.
+**data_manager.py — `get_last_n_games()` blocks event loop:**
+`get_last_n_games()` at L764 makes a synchronous `requests.get()` HTTP call to the MaddenStats API. It is called without `run_in_executor` from async Discord button handlers in oracle_cog.py at L1199, L2061, L2291, and from `intelligence.get_owner_context()` at L701 (itself called from async contexts). Each call blocks the asyncio event loop for the HTTP round trip (200ms–2s). Under concurrent Oracle usage these stall interactions across the entire bot.
 
----
+**oracle_agent.py — Sandbox enforcement (confirmed clean):**
+Traced all DB access paths through the agent sandbox. `build_agent_env()` at L344 exposes only `run_sql` to agent-generated code. `_make_capturing_run_sql()` at L333 proxies `codex_utils.run_sql` which enforces SELECT-only. No `exec`, `eval`, `open`, `import`, or write-path functions are present in `_SAFE_BUILTINS` or the agent env. AST validation runs before `exec()`. 15-second `asyncio.wait_for` timeout at L521–526 caps runaway queries. **No read/write escalation paths confirmed.**
 
-### W-5 · Playwright page pool zombie-check iterates stale `page` reference — `atlas_html_engine.py` L604–613
-
-The `PagePool.acquire()` health-check loop retries up to `self._size` times but reuses the same `page` variable without fetching a fresh candidate from the queue at each iteration. In the failure scenario where one page in the pool is closed, this loop spins `_size` times on the same closed page before falling through to spawn a replacement — a latency spike under concurrent load with multiple closed pages.
-
-**Recommendation:** Re-fetch from the queue at each iteration, or restructure to drain-and-replace individually.
-
----
-
-### W-6 · `asyncio.sleep` calls extend the interaction response window — multiple game files
-
-`blackjack.py:532` (1.5s), `slots.py` (3× 0.9s = 2.7s minimum per spin), `crash.py` (multiple). These yield control to the event loop and are not true blocking calls, but they extend the Discord interaction response window. In `slots.py`, the 2.7s animation sleep plus Playwright render time approaches the 3s Discord interaction timeout window on slow hardware.
+**intelligence.py — `YEAR_TO_SEASON` range stops at season 10:**
+`YEAR_TO_SEASON = {yr: yr - _YEAR_BASE for yr in range(2025, 2035)}` ends at year 2034 / season 10. The league has 95-season history. However `get_draft_class` uses `SEASON_TO_YEAR.get(season, season + 2024)` — the arithmetic fallback is correct for seasons 11+. No data corruption; the hardcoded range is misleading but functional.
 
 ---
 
-### W-7 · `_get_browser()` singleton has no initialization lock — `atlas_html_engine.py`
+### Pass C — Cross-Module Contract
 
-The global `_browser` singleton uses a bare `if _browser is None: _browser = await ...` pattern with no `asyncio.Lock`. Under concurrent startup (two cogs triggering renders simultaneously before the pool is ready), two browser instances can be spawned and the second overwrites the first, leaving the first as a zombie process consuming system resources.
+**oracle_cog.py ↔ atlas_ai.py — private method coupling:**
+Three locations call `atlas_ai._get_claude()` and `atlas_ai._get_gemini()` directly (L1258, L2083, L2404). These are used only as availability gates: `if (atlas_ai._get_claude() or atlas_ai._get_gemini()) and ...`. If `atlas_ai` internals change (lazy init, renamed vars), all three checks silently return `None` and disable AI-enhanced embeds without error. The correct contract is a public `atlas_ai.is_available() -> bool`.
 
-**Recommendation:** Guard initialization with an `asyncio.Lock` stored at module level.
+**intelligence.py ↔ data_manager.py — blocking propagation:**
+`get_owner_context()` at L701 calls `dm.get_last_n_games()` synchronously. Since `get_owner_context()` is itself synchronous and invoked from async oracle_cog.py button handlers, the blocking HTTP call propagates through the chain: async button handler → `get_owner_context()` → `dm.get_last_n_games()` → `requests.get()`.
 
----
-
-## OBSERVATIONS
-
-### O-1 · Dead code block in `check_achievements` — `casino/casino_db.py` L770–773
-
-A cursor is opened with `async with conn.execute("SELECT ...")` and immediately discarded with `pass`. This is a no-op query that wastes a round-trip to SQLite on every wager resolution. The achievement system is a stub that was never implemented.
+**oracle_memory.py ↔ tsl_history.db — concurrent aiosqlite connections:**
+Each `asyncio.ensure_future(log_query(...))` in oracle_cog.py opens a new aiosqlite connection to `tsl_history.db`. With 6 fire-and-forget calls per response, up to 6 concurrent write connections can be active. `oracle_memory.py` does not enable WAL mode before writing, relying on another module (e.g., `data_manager.py`) to have done so. If the bot starts fresh and Oracle is queried before data_manager initializes, WAL is not active for these writes.
 
 ---
 
-### O-2 · Redundant `get_max_bet()` call in coinflip — `casino/games/coinflip.py` L79 and L152
+### Pass D — Performance Audit
 
-`play_coinflip` fetches `max_bet` at L79 for display purposes, then `ChallengeView.accept()` fetches it again at L152 before processing the wager. An unnecessary second DB round-trip; the two calls can theoretically return different values if bet limits change mid-session.
+**Critical:**
+- `get_last_n_games()` blocking HTTP on event loop — oracle_cog.py L1199, L2061, L2291; intelligence.py L701. Stalls all bot interactions during HTTP call. See W-04.
 
----
+**Significant:**
+- `search_vector()` O(n) memory load — oracle_memory.py L399. Grows with conversation history. See W-02.
 
-### O-3 · `coin_gradient`/`coin_rim` CSS values injected as raw f-string — `casino/renderer/casino_html_renderer.py` L1700
-
-Values are constructed from internal logic (not user input), so no practical XSS vector exists today. Noted for future-proofing: if the source ever changes to include user-supplied data, the lack of escaping becomes a real risk.
-
----
-
-### O-4 · Crash round processes O(n) individual DB writes for multi-player rounds — `casino/games/crash.py`
-
-For each losing player in a crash round, `process_wager()` is called individually inside the `_run_round()` loop. Each call acquires `flow_wallet.get_user_lock()` and opens a `BEGIN IMMEDIATE` transaction separately. With 10+ concurrent crash participants, this serializes O(n) exclusive DB writes at end-of-round, creating a burst of lock contention.
+**Minor:**
+- `get_h2h_record()` at data_manager.py L899 uses `iterrows()` (pandas' slowest iteration). At 256 rows/season this is negligible but could be vectorized.
+- `flag_stat_padding()` at data_manager.py L1135 iterates `_players_cache` (1700+ entries) every 15 minutes. Acceptable at current scale.
+- `find_trades_by_player()` at data_manager.py L700 iterates all trades via `iterrows()`. Small dataset, acceptable.
 
 ---
 
-### O-5 · `highlight_renderer.py` defines a local `_wrap_card` that shadows the engine's `wrap_card` — L82
+### Pass E — Security & Data Integrity
 
-Scoped correctly and does not cause a collision, but a future maintainer editing this file may be surprised that `_wrap_card` is not the same function as `wrap_card`. A comment or rename would improve clarity.
+**oracle_agent.py sandbox — CONFIRMED SAFE:**
+- `_SAFE_BUILTINS` whitelist excludes `import`, `open`, `eval`, `exec`, `type`, `__import__`.
+- AST validation via `validate_sandbox_ast()` runs before every `exec()`.
+- `run_sql` is the only DB entry point in the sandbox; it enforces SELECT-only.
+- No balance, bet, or schema mutation is reachable from agent-generated code.
 
----
+**oracle_memory.py FTS5 — CONFIRMED SAFE:**
+`_sanitize_fts()` at L340 properly strips FTS5 operators before user input is used in a MATCH expression. No injection risk.
 
-### O-6 · `biggest_loss` display relies on undocumented sign convention — `casino/renderer/session_recap_renderer.py` L241
+**oracle_query_builder.py — CONFIRMED SAFE:**
+All Layer 1 domain functions use parameterized `?` placeholders. `Query.build()` at L327 generates only `SELECT` statements. The single f-string at L342 builds column names from the internal whitelist-validated state, not user input.
 
-Correctness depends on whether `PlayerSession.biggest_loss` stores losses as a negative integer or a positive loss magnitude. If the convention changes, `abs()` silently displays the wrong sign.
-
----
-
-### O-7 · Scratch card uses `status_class = "win"` for all-revealed non-match outcomes — `casino/renderer/casino_html_renderer.py` L1941–1944
-
-When all 3 tiles are revealed with no triple match, the card renders with a green `"win"` status bar, visually indistinguishable from a jackpot result. Minor UX distinction issue — no functional bug.
-
----
-
-### O-8 · `pulse_renderer.py` footer "Updates every 60s" is hardcoded — L395
-
-If the calling cog changes the refresh interval, the displayed value will be stale. Should be passed as a parameter.
+**intelligence.py sqlite3 bare connect — LOW RISK:**
+Connections at L166 and L262 use `conn.close()` without a `with` statement. If `.execute()` raises, the connection is not explicitly closed. Python GC will collect it eventually, but this holds file handles longer than intended in high-throughput scenarios.
 
 ---
 
-## CROSS-MODULE RISKS
+## Phase 3 — Findings Summary
 
-### XM-1 · `flow_wallet` shared DB — sportsbook settle cycle could block casino wagers
+### Warnings — Should Fix
 
-`sportsbook.db` is shared between `casino_db.py` and `flow_sportsbook.py`. If `flow_sportsbook.py` ever opens a `BEGIN EXCLUSIVE` transaction during a settle cycle, it will block all casino wager deductions for the duration. Currently using `BEGIN IMMEDIATE` (correct). Risk is latent as sportsbook settle complexity grows.
+**W-01 · Double embed_and_store per TSL query (oracle_cog.py)**
+- **Location:** L2883 (`_OracleIntelModal.on_submit`) and L3049 (`AskTSLModal._generate`)
+- **Impact:** Every TSL query writes two `conversation_memory` rows. Double-weights TSL queries in FTS5 index and vector recall. Inflates DB size over time.
+- **Fix:** Remove the `embed_and_store()` call at L2883. The definitive write at L3049 includes the SQL and occurs post-answer. L2883 is a premature duplicate.
 
----
+**W-02 · Unbounded conversation_memory + O(n) vector search (oracle_memory.py)**
+- **Location:** `store_turn()` (no eviction), `search_vector()` L399 (full-table load)
+- **Impact:** At sustained usage, `search_vector()` loads 100MB+ of embeddings into Python memory on every non-trivial Oracle query. No TTL means the table grows permanently.
+- **Fix:** (a) Add `created_at` timestamp column and a periodic prune job removing entries older than N days. (b) In `search_vector()`, add `ORDER BY created_at DESC LIMIT 2000` before the cosine loop to cap memory footprint.
 
-### XM-2 · `reconcile_orphaned_wagers` 10-minute loop may flag in-flight blackjack hands as orphans
+**W-03 · Unbounded _oracle_message_ids / _chain_roots (oracle_cog.py)**
+- **Location:** L70–71 (declarations), insertions at L2872–2873, L4232–4233
+- **Impact:** Both structures grow by one entry per Oracle response and are never evicted. Over a multi-day session these accumulate indefinitely.
+- **Fix:** Add TTL-based eviction on the existing `_followup_counter % 50` cleanup hook. Store `(message_id, timestamp)` pairs and prune entries older than 6 hours.
 
-If a player has a blackjack hand open for more than 10 minutes (Discord view timeout is 5 minutes but hands can be left open), the wager appears orphaned to the reconcile loop. The `on_timeout()` handler resolves the wager on timeout, but the race window exists between the timeout firing and the reconcile loop's `NOT EXISTS` query.
-
----
-
-### XM-3 · Prediction renderer imports `CATEGORY_COLORS_HEX` from `polymarket_cog` with a try/except fallback
-
-If `polymarket_cog` is not loaded (disabled in cog load order), the renderer silently uses a fallback color dict. Prediction cards rendered during polymarket cog absence will have different category colors than when it is loaded — visual inconsistency with no error raised.
-
----
-
-### XM-4 · Ledger write failure (W-1) is invisible to `reconcile_orphaned_wagers`
-
-If `post_to_ledger` fails silently, the wager is marked resolved in `wager_registry` but has no corresponding ledger entry. The reconcile pass will not catch this because the wager shows as resolved — the missing ledger post is permanently invisible to the reconcile system.
-
----
-
-## POSITIVE PATTERNS
-
-1. **SENTINEL pattern used correctly in all concurrent flows.** `active_sessions["PENDING"]`, `active_rounds[ch_id] = "PENDING"`, and `ChallengeView.resolved = True` are all set before the first `await` in their respective paths. This correctly prevents TOCTOU double-entry without requiring a separate lock.
-
-2. **`BEGIN IMMEDIATE` used consistently for all balance-modifying operations.** `process_wager`, `deduct_wager`, and jackpot award all use `BEGIN IMMEDIATE` transactions with explicit rollback on exception. The locking hierarchy (user-lock then BEGIN IMMEDIATE) is consistent throughout `casino_db.py`.
-
-3. **RNG is always server-side and outcome-first.** In slots, the outcome is computed by `_spin_controlled()` before any animation renders. In crash, the crash point is computed via SHA-256 hash of a server secret before players join. In blackjack, the shoe is shuffled server-side. No client-visible state can be used to predict outcomes.
-
-4. **All user-facing text passes through `esc()` (html.escape) in every renderer.** Checked across all 7 renderer files. No unescaped f-string interpolation of user-supplied data was found.
-
-5. **Playwright page pool uses `try/finally` to guarantee page return.** `render_card()` in `atlas_html_engine.py` wraps every render in `try/finally: pool.release(page)`, ensuring pages are never permanently removed from the pool even on render failure.
-
-6. **`atlas_style_tokens.py` is a genuine single source of truth.** All 15 renderer files reference CSS variables generated from `Tokens._CSS_MAP`. No hardcoded color hex values found outside the tokens file and the `atlas_themes.py` override system.
-
-7. **Blackjack `on_timeout()` correctly handles split hands** by iterating all pending hands and resolving each wager individually, preventing money loss on Discord interaction timeout.
-
-8. **Parameterized queries used throughout `casino_db.py`.** Zero SQL string formatting with user data found. All variable data is passed as SQLite parameter tuples.
+**W-04 · get_last_n_games() blocks async event loop (data_manager.py / oracle_cog.py)**
+- **Location:** `data_manager.get_last_n_games()` L764; callers oracle_cog.py L1199, L2061, L2291; intelligence.py L701
+- **Impact:** Synchronous `requests.get()` inside an async button handler stalls the event loop for the HTTP round trip. Stacks under concurrent usage.
+- **Fix:** Either (a) wrap `_get()` call in `get_last_n_games()` with `loop.run_in_executor(None, ...)` and make callers await it, or (b) filter `dm.df_all_games` by team name to serve recent games from the already-loaded DataFrame — avoiding a live API call entirely.
 
 ---
 
-## TEST GAPS
+### Observations — Consider Fixing
 
-- No unit tests for `_award_jackpot` return type contract — the `dict | None` mismatch (C-1) would be caught immediately by a type assertion test.
-- No integration test for `get_challenge` column ordering after `ALTER TABLE` (C-2) — a test that creates a challenge DB with altered column order then calls `get_challenge` would expose the zip misalignment.
-- No test for `reconcile_orphaned_wagers` with a concurrent in-flight wager (XM-2).
-- No smoke tests confirming all 7 renderers produce non-empty PNG bytes — a CSS syntax error in any renderer would only surface when a user triggers that specific game.
-- No test for `post_to_ledger` failure path (W-1) — the silent swallow produces no observable signal.
-- No test for Playwright pool exhaustion (all 4 pages checked out simultaneously).
+**O-01 · Private atlas_ai method access (oracle_cog.py)**
+- **Location:** L1258, L2083, L2404
+- **Suggestion:** Add `atlas_ai.is_available() -> bool` as a public API. Three oracle_cog.py availability checks become `if atlas_ai.is_available() and ...`.
 
----
+**O-02 · SQLite connections without context manager (intelligence.py)**
+- **Location:** `get_draft_class._query()` L166, `get_team_draft_class` L262
+- **Suggestion:** Convert to `with sqlite3.connect(DB_PATH) as conn:` to guarantee close on exception path.
 
-## METRICS
+**O-03 · print() in load_all() bypasses log level (data_manager.py)**
+- **Location:** 20+ `print()` calls throughout `load_all()` (L385–659)
+- **Suggestion:** Replace `print(...)` with `log.info(...)` throughout `load_all()` for consistent log-level filtering.
 
-| Metric | Value |
-|--------|-------|
-| Files read | 15 |
-| Total lines audited | 11,705 |
-| CRITICAL findings | 2 |
-| WARNING findings | 7 |
-| OBSERVATIONS | 8 |
-| CROSS-MODULE RISKS | 4 |
-| SQL injection vectors found | 0 |
-| Unescaped HTML injection vectors found | 0 (1 low-risk internal CSS injection noted in O-3) |
-| `eval`/`exec` calls found | 0 |
-| `SELECT *` with positional zip | 1 (C-2) |
-| Bare `assert` in production paths | 1 (W-4) |
-| `asyncio.sleep` calls in interaction handlers | 6 total (BJ: 1, Slots: 3, Crash: multiple) |
-| `BEGIN IMMEDIATE` transaction sites | 7 |
-| SENTINEL anti-TOCTOU patterns | 3 (blackjack, crash, coinflip) |
-| Dead code blocks | 1 (O-1) |
-| Recent git commits touching casino/rendering scope | 0 (last 5 commits were sportsbook/oracle/atlas_ai) |
+**O-04 · YEAR_TO_SEASON range hardcoded to season 10 (intelligence.py)**
+- **Location:** L45: `{yr: yr - _YEAR_BASE for yr in range(2025, 2035)}`
+- **Suggestion:** Remove the dict; replace with inline arithmetic `yr = season + _YEAR_BASE`. The range is misleading — it implies coverage it doesn't provide for a 95-season league.
+
+**O-05 · ensure_future log_query() silently drops write errors (oracle_cog.py)**
+- **Location:** L3050, L3130, L3290, L3500, L4375, L4415
+- **Suggestion:** Wrap each `asyncio.ensure_future(coro)` in a small error-logging shim so aiosqlite failures are visible at WARNING level rather than silently dropped.
 
 ---
 
-*Priority order for fixes: C-1 (type mismatch — silent payout failure), C-2 (schema drift — silent data corruption), W-4 (assert in renderer), W-2 (permission bypass — admin inconsistency), W-7 (browser singleton lock — startup race).*
+## Phase 4 — CLAUDE.md Health Check
+
+| Check | Status |
+|-------|--------|
+| Focus files in module map | `oracle_cog.py` ✅ (Module Map). `data_manager.py` ✅ (Data Flow). `analysis.py`, `intelligence.py` are Oracle support modules — non-cog files, acceptable to omit from module map. |
+| Wednesday audit task coverage | Should include `intelligence.py` in focus file list — verify scheduled task SKILL.md. |
+| Dead file references in focus files | None found. No QUARANTINE imports detected. |
+| API gotchas respected | `get_weekly_results()` correctly uses `status IN ('2','3')` ✅. `weekIndex` 0-based conversion at L823 confirmed ✅. |
+| atlas_ai.generate() usage | oracle_cog.py and oracle_agent.py both call `atlas_ai.generate()` for AI generation ✅. The three `_get_claude()/_get_gemini()` calls in oracle_cog.py are availability gates only, not generation calls. |
+| ATLAS_VERSION bump required | No — audit pass only, no code changes. |
+
+**CLAUDE.md updates needed:** None. No new modules introduced, no architectural changes. Findings are operational/maintenance.
+
+---
+
+## Summary Table
+
+| ID | Severity | File | Line(s) | Title |
+|----|----------|------|---------|-------|
+| W-01 | Warning | oracle_cog.py | 2883, 3049 | Double embed_and_store per TSL query |
+| W-02 | Warning | oracle_memory.py | 190, 399 | Unbounded conversation_memory + O(n) vector search |
+| W-03 | Warning | oracle_cog.py | 70–71, 2872, 4232 | Unbounded _oracle_message_ids / _chain_roots |
+| W-04 | Warning | data_manager.py:764 / oracle_cog.py:1199,2061,2291 | Multiple | get_last_n_games() blocks async event loop |
+| O-01 | Observation | oracle_cog.py | 1258, 2083, 2404 | Private atlas_ai method access as availability gate |
+| O-02 | Observation | intelligence.py | 166, 262 | SQLite connections without context manager |
+| O-03 | Observation | data_manager.py | 385–659 | print() in load_all() bypasses log level filtering |
+| O-04 | Observation | intelligence.py | 45 | YEAR_TO_SEASON range hardcoded to season 10 |
+| O-05 | Observation | oracle_cog.py | 3050, 3130, 3290, 3500, 4375, 4415 | ensure_future log_query() silently drops write errors |
+
+**Confirmed clean:** oracle_agent.py sandbox (no write escalation), oracle_query_builder.py SQL safety (parameterized + whitelist), analysis.py DataFrame handling (all .copy()), data_manager.py atomic state swap (GIL-safe pointer reassignment), intelligence.py hot/cold/clutch/draft logic.
+
+---
+
+*Priority order for fixes: W-04 (event loop block — immediate latency impact), W-01 (double-store — data integrity), W-02 (memory growth — long-term stability), W-03 (unbounded sets — operational hygiene).*
