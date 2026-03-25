@@ -110,6 +110,11 @@ def _get_gemini():
         return None
 
 
+def is_available() -> bool:
+    """Public availability check — use instead of accessing _get_claude()/_get_gemini() directly."""
+    return _get_claude() is not None or _get_gemini() is not None
+
+
 # ── Internal helpers (sync, pure) ────────────────────────────────────────────
 
 def _build_claude_messages(prompt: str | list[dict]) -> list[dict]:
