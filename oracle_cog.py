@@ -331,7 +331,7 @@ try:
     from oracle_analysis import (
         run_matchup_analysis, run_rivalry_history, run_game_plan,
         run_team_report, run_owner_profile, run_player_scout,
-        run_power_rankings, run_dynasty_profile,
+        run_power_rankings, run_dynasty_profile, run_betting_profile,
     )
     from oracle_renderer import render_oracle_card_to_file
     _ORACLE_INTEL_OK = True
@@ -2987,12 +2987,14 @@ class OracleDualConfView(discord.ui.View):
 
 class OracleIntelView(discord.ui.View):
     """
-    Oracle Intelligence Hub v3 — 8 predefined TSL analysis types.
+    Oracle Intelligence Hub v4 — 9 predefined TSL analysis types.
     Row 0: Matchup Analysis | Rivalry History | Game Plan
     Row 1: Team Report | Owner Profile | Player Scout | Power Rankings | Dynasty Profile
+    Row 2: Betting Profile
 
     All team selection via AFC/NFC buttons → team dropdown (no text modals).
     All responses are public PNG cards. No free-form Q&A. TSL only.
+    v4: Affinity tone injection, memory context, CPU-filtered records, division intel, Elo trajectory.
     """
 
     def __init__(self):
@@ -3002,52 +3004,66 @@ class OracleIntelView(discord.ui.View):
 
     @staticmethod
     async def _do_matchup(interaction: discord.Interaction, team_a: str, team_b: str):
+        uid = interaction.user.id
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_matchup_analysis(team_a, team_b, dm), "matchup.png")
+        await _run_and_send(interaction, run_matchup_analysis(team_a, team_b, dm, discord_id=uid, memory=_oracle_mem), "matchup.png")
 
     @staticmethod
     async def _do_rivalry(interaction: discord.Interaction, team_a: str, team_b: str):
         owner_a = _oracle_owner_from_team(team_a) or team_a
         owner_b = _oracle_owner_from_team(team_b) or team_b
+        uid = interaction.user.id
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_rivalry_history(owner_a, owner_b, dm), "rivalry.png")
+        await _run_and_send(interaction, run_rivalry_history(owner_a, owner_b, dm, discord_id=uid, memory=_oracle_mem), "rivalry.png")
 
     @staticmethod
     async def _do_game_plan(interaction: discord.Interaction, target_team: str):
+        uid = interaction.user.id
         requester_team = None
         if _resolve_db_username_fn:
-            db_user = _resolve_db_username_fn(interaction.user.id)
+            db_user = _resolve_db_username_fn(uid)
             if db_user and not dm.df_teams.empty:
                 mask = dm.df_teams["userName"].str.lower() == db_user.lower()
                 if mask.any():
                     requester_team = dm.df_teams[mask].iloc[0].get("nickName", "")
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_game_plan(target_team, requester_team, dm), "gameplan.png")
+        await _run_and_send(interaction, run_game_plan(target_team, requester_team, dm, discord_id=uid, memory=_oracle_mem), "gameplan.png")
 
     @staticmethod
     async def _do_team_report(interaction: discord.Interaction, team_name: str):
+        uid = interaction.user.id
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_team_report(team_name, dm), "team_report.png")
+        await _run_and_send(interaction, run_team_report(team_name, dm, discord_id=uid, memory=_oracle_mem), "team_report.png")
 
     @staticmethod
     async def _do_owner_profile(interaction: discord.Interaction, team_name: str):
+        uid = interaction.user.id
         owner = _oracle_owner_from_team(team_name) or team_name
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_owner_profile(owner, dm), "owner_profile.png")
+        await _run_and_send(interaction, run_owner_profile(owner, dm, discord_id=uid, memory=_oracle_mem), "owner_profile.png")
 
     @staticmethod
     async def _do_player_scout(interaction: discord.Interaction, player: dict):
+        uid = interaction.user.id
         fn = str(player.get("firstName", "")).strip()
         ln = str(player.get("lastName", "")).strip()
         player_name = f"{fn} {ln}".strip()
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_player_scout(player_name, dm), "player_scout.png")
+        await _run_and_send(interaction, run_player_scout(player_name, dm, discord_id=uid, memory=_oracle_mem), "player_scout.png")
 
     @staticmethod
     async def _do_dynasty(interaction: discord.Interaction, team_name: str):
+        uid = interaction.user.id
         owner = _oracle_owner_from_team(team_name) or team_name
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_dynasty_profile(owner, dm), "dynasty.png")
+        await _run_and_send(interaction, run_dynasty_profile(owner, dm, discord_id=uid, memory=_oracle_mem), "dynasty.png")
+
+    @staticmethod
+    async def _do_betting_profile(interaction: discord.Interaction, team_name: str):
+        uid = interaction.user.id
+        owner = _oracle_owner_from_team(team_name) or team_name
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_betting_profile(owner, dm, discord_id=uid, memory=_oracle_mem), "betting.png")
 
     # Row 0 — Competitive Intel
 
@@ -3120,8 +3136,9 @@ class OracleIntelView(discord.ui.View):
         if not _ORACLE_INTEL_OK:
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
+        uid = interaction.user.id
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_power_rankings(dm), "power_rankings.png")
+        await _run_and_send(interaction, run_power_rankings(dm, discord_id=uid, memory=_oracle_mem), "power_rankings.png")
 
     @discord.ui.button(label="Dynasty Profile", emoji="🏛️", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
@@ -3131,6 +3148,18 @@ class OracleIntelView(discord.ui.View):
             return
         embed = _oracle_conf_embed("Dynasty Profile", "Pick a conference to select an owner's team.")
         view = OracleConfView("Dynasty Profile", self._do_dynasty)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    # Row 2 — Extended Analysis
+
+    @discord.ui.button(label="Betting Profile", emoji="💰", style=discord.ButtonStyle.secondary, row=2)
+    @_safe_interaction
+    async def btn_betting(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
+            return
+        embed = _oracle_conf_embed("Betting Profile", "Pick a conference to select an owner's team.")
+        view = OracleConfView("Betting Profile", self._do_betting_profile)
         await interaction.response.edit_message(embed=embed, view=view)
 
 

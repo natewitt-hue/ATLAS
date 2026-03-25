@@ -36,6 +36,7 @@ _TYPE_META: dict[str, dict] = {
     "player":   {"label": "Player Scout",      "icon": "🔭", "accent": Tokens.BLUE_SKY},
     "power":    {"label": "Power Rankings",    "icon": "📈", "accent": Tokens.WIN},
     "dynasty":  {"label": "Dynasty Profile",   "icon": "🏛️",  "accent": Tokens.GOLD_BRIGHT},
+    "betting":  {"label": "Betting Profile",   "icon": "💰", "accent": Tokens.WIN},
 }
 
 _DEFAULT_META = {"label": "Oracle Analysis", "icon": "🔮", "accent": Tokens.GOLD}
@@ -174,6 +175,70 @@ def _oracle_css(accent: str) -> str:
 """
 
 
+def _sparkline_svg(values: list[float], width: int = 220, height: int = 36, color: str = "#FFD700") -> str:
+    """Render a list of floats as an inline SVG polyline sparkline."""
+    if len(values) < 2:
+        return ""
+    mn, mx = min(values), max(values)
+    span = mx - mn or 1
+    step = width / (len(values) - 1)
+    points = []
+    for i, v in enumerate(values):
+        x = round(i * step, 1)
+        y = round(height - ((v - mn) / span) * (height - 4) - 2, 1)
+        points.append(f"{x},{y}")
+    pts_str = " ".join(points)
+    return (
+        f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg" '
+        f'style="overflow:visible">'
+        f'<polyline points="{pts_str}" fill="none" stroke="{color}" '
+        f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{points[-1].split(",")[0]}" cy="{points[-1].split(",")[1]}" '
+        f'r="3" fill="{color}"/>'
+        f'</svg>'
+    )
+
+
+def _build_comparison_table_html(comp: dict, accent: str) -> str:
+    """Build a two-column stat comparison table for matchup cards."""
+    ta = comp.get("team_a", {})
+    tb = comp.get("team_b", {})
+    rows = [
+        ("Rank",   ta.get("rank", "?"),           tb.get("rank", "?")),
+        ("Record", ta.get("record", "?-?"),       tb.get("record", "?-?")),
+        ("OVR",    ta.get("ovr", "?"),             tb.get("ovr", "?")),
+        ("PPG",    str(ta.get("ppg", 0.0)),        str(tb.get("ppg", 0.0))),
+        ("PA/G",   str(ta.get("pa", 0.0)),         str(tb.get("pa", 0.0))),
+        ("Diff",   f"{ta.get('diff', 0):+d}" if isinstance(ta.get('diff'), int) else "?",
+                   f"{tb.get('diff', 0):+d}" if isinstance(tb.get('diff'), int) else "?"),
+    ]
+    name_a = esc(str(ta.get("name", "Team A")))
+    name_b = esc(str(tb.get("name", "Team B")))
+    rows_html = ""
+    for i, (label, val_a, val_b) in enumerate(rows):
+        bg = f"background:rgba(255,255,255,0.03);" if i % 2 == 0 else ""
+        rows_html += (
+            f'<div style="display:grid;grid-template-columns:90px 1fr 1fr;'
+            f'gap:4px;padding:5px 8px;{bg}border-radius:4px;">'
+            f'<div style="font-size:10px;font-weight:700;color:{accent};'
+            f'text-transform:uppercase;letter-spacing:0.8px;align-self:center;">{esc(label)}</div>'
+            f'<div style="font-size:12px;font-weight:600;color:#fff;text-align:center;">{esc(str(val_a))}</div>'
+            f'<div style="font-size:12px;font-weight:600;color:#fff;text-align:center;">{esc(str(val_b))}</div>'
+            f'</div>'
+        )
+    return (
+        f'<div style="margin-bottom:14px;border:1px solid {accent}33;border-radius:8px;overflow:hidden;">'
+        f'<div style="display:grid;grid-template-columns:90px 1fr 1fr;gap:4px;'
+        f'padding:7px 8px;background:{accent}22;">'
+        f'<div style="font-size:10px;color:{accent};font-weight:700;letter-spacing:0.5px;"></div>'
+        f'<div style="font-size:12px;font-weight:800;color:{accent};text-align:center;">{name_a}</div>'
+        f'<div style="font-size:12px;font-weight:800;color:{accent};text-align:center;">{name_b}</div>'
+        f'</div>'
+        f'{rows_html}'
+        f'</div>'
+    )
+
+
 def _discord_md_to_html(text: str) -> str:
     """Convert basic Discord markdown (**bold**, *italic*) to HTML for card rendering."""
     import re
@@ -191,6 +256,11 @@ def _build_analysis_body(result, accent: str, meta: dict, season: int, week: int
     icon = meta["icon"]
     season_label = esc(f"Season {season} · Week {week}")
     model_label = esc(result.metadata.get("model", "") or "")
+
+    # Comparison table (matchup only — when comparison_data is present)
+    compare_html = ""
+    if getattr(result, "comparison_data", None):
+        compare_html = _build_comparison_table_html(result.comparison_data, accent)
 
     # Build section blocks
     sections_html = ""
@@ -232,6 +302,7 @@ def _build_analysis_body(result, accent: str, meta: dict, season: int, week: int
       <div class="oracle-meta">{season_label}</div>
     </div>
     <div class="oracle-body">
+      {compare_html}
       {sections_html}
       {prediction_html}
     </div>

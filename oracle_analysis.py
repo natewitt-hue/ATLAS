@@ -1,9 +1,18 @@
 """
-oracle_analysis.py — ATLAS Oracle Intelligence Pipelines v2.0
+oracle_analysis.py — ATLAS Oracle Intelligence Pipelines v3.0
 ─────────────────────────────────────────────────────────────────────────────
-Eight predefined analysis functions powering the Oracle Intelligence Hub.
+Nine predefined analysis functions powering the Oracle Intelligence Hub.
 Each function gathers all relevant TSL data, builds a richly structured
 prompt, calls atlas_ai.generate(), and returns an AnalysisResult.
+
+v3 additions:
+  - Affinity tone injection per-user (FRIEND/HOSTILE/DISLIKE)
+  - Conversation memory context injection (oracle_memory hybrid retrieval)
+  - CPU game filtering on _recent_games_block, _h2h_block, _career_block
+  - Division standings + intra-division H2H helpers
+  - Elo trajectory block for dynasty/owner profiles
+  - run_betting_profile() — 9th analysis type (bets_table from flow_economy.db)
+  - comparison_data on AnalysisResult for visual matchup table
 
 Workstream WS-2 — no Discord imports. Pure data + AI logic.
 ─────────────────────────────────────────────────────────────────────────────
@@ -13,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
+from math import log as _math_log
 
 import atlas_ai
 from atlas_ai import Tier
@@ -34,6 +45,17 @@ try:
 except ImportError:
     get_persona = lambda _: "You are ATLAS, the TSL intelligence system."
 
+# ── Affinity tone injection ────────────────────────────────────────────────────
+_get_affinity = None
+_get_affinity_instruction = lambda s: ""
+try:
+    from affinity import get_affinity as _get_affinity, get_affinity_instruction as _get_affinity_instruction
+except ImportError:
+    pass
+
+# ── flow_economy.db path (betting profile queries) ────────────────────────────
+_ECONOMY_DB = os.getenv("FLOW_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "flow_economy.db"))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  RESULT DATACLASS
@@ -43,11 +65,12 @@ except ImportError:
 class AnalysisResult:
     title: str
     analysis_type: str          # "matchup" | "rivalry" | "gameplan" | "team" |
-                                # "owner" | "player" | "power" | "dynasty"
+                                # "owner" | "player" | "power" | "dynasty" | "betting"
     sections: list[dict]        # [{label, content, data_rows?}]
     prediction: str | None      # e.g. "Chiefs 31 – Raiders 17" (matchup only)
     confidence: str | None      # "High" | "Medium" | "Low"
     metadata: dict = field(default_factory=dict)  # {tier, model, season, week}
+    comparison_data: dict | None = None  # matchup visual table: {team_a: {...}, team_b: {...}}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -112,6 +135,59 @@ def _build_tsl_context(dm) -> str:
     )
 
 
+async def _build_affinity_and_memory(discord_id: int | None, memory, label: str) -> tuple[str, str]:
+    """Return (affinity_instruction, conv_block) for a given user and analysis label.
+
+    Both strings may be empty for neutral/anonymous users.
+    """
+    affinity_block = ""
+    if discord_id and _get_affinity:
+        try:
+            score = await _get_affinity(discord_id)
+            affinity_block = _get_affinity_instruction(score)
+        except Exception:
+            pass
+
+    conv_block = ""
+    if discord_id and memory:
+        try:
+            conv_block = await memory.build_context_block(discord_id, label)
+        except Exception:
+            pass
+
+    return affinity_block, conv_block
+
+
+def _persona_with_mods(persona: str, affinity_block: str) -> str:
+    """Append affinity instruction to persona string (empty string = no-op)."""
+    return f"{persona}\n\n{affinity_block}" if affinity_block else persona
+
+
+def _team_metrics(team_name: str, dm) -> dict:
+    """Extract quick comparison metrics for a team (matchup visual table)."""
+    result = {"name": team_name, "record": "?-?", "ppg": 0.0, "pa": 0.0, "rank": "?", "ovr": "?", "diff": 0}
+    if not dm.df_standings.empty:
+        for _, row in dm.df_standings.iterrows():
+            if str(row.get("teamName", "")).lower() == team_name.lower():
+                w = int(row.get("totalWins", 0) or 0)
+                l = int(row.get("totalLosses", 0) or 0)
+                pf = int(row.get("totalPtsFor", 0) or 0)
+                pa = int(row.get("totalPtsAgainst", 0) or 0)
+                g = w + l
+                result["record"] = f"{w}-{l}"
+                result["ppg"] = round(pf / g, 1) if g else 0.0
+                result["pa"] = round(pa / g, 1) if g else 0.0
+                result["diff"] = pf - pa
+                break
+    if not dm.df_power.empty:
+        for _, row in dm.df_power.iterrows():
+            if str(row.get("teamName", "")).lower() == team_name.lower():
+                result["rank"] = f"#{row.get('rank', '?')}"
+                result["ovr"] = str(row.get("ovrRating", "?"))
+                break
+    return result
+
+
 def _standings_block(dm, team_name: str | None = None) -> str:
     """Format standings data as text context. Filter to team_name if provided."""
     if dm.df_standings.empty:
@@ -161,6 +237,7 @@ def _recent_games_block(team_name: str, n: int = 5) -> str:
         "seasonIndex, weekIndex "
         "FROM games "
         "WHERE status IN ('2','3') AND stageIndex='1' "
+        "AND homeUser != 'CPU' AND awayUser != 'CPU' "
         "AND (homeTeamName=? OR awayTeamName=?) "
         "ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC "
         "LIMIT ?",
@@ -187,6 +264,7 @@ def _h2h_block(user_a: str, user_b: str) -> str:
         "winner_user, loser_user, seasonIndex, weekIndex "
         "FROM games "
         "WHERE status IN ('2','3') AND stageIndex='1' "
+        "AND homeUser != 'CPU' AND awayUser != 'CPU' "
         "AND ((winner_user=? AND loser_user=?) OR (winner_user=? AND loser_user=?)) "
         "ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC",
         (user_a, user_b, user_b, user_a),
@@ -218,6 +296,7 @@ def _career_block(db_username: str) -> str:
         "SUM(CASE WHEN loser_user=? THEN 1 ELSE 0 END) AS losses "
         "FROM games "
         "WHERE status IN ('2','3') AND stageIndex='1' "
+        "AND homeUser != 'CPU' AND awayUser != 'CPU' "
         "AND (winner_user=? OR loser_user=?) "
         "GROUP BY seasonIndex ORDER BY CAST(seasonIndex AS INTEGER) ASC",
         (db_username, db_username, db_username, db_username),
@@ -497,6 +576,277 @@ def _team_name_from_id(team_id: int, dm) -> str | None:
     return dm.df_teams[mask].iloc[0].get("nickName")
 
 
+def _division_block(team_name: str, dm) -> str:
+    """Division standings for the team's division — sorted by wins descending."""
+    if dm.df_standings.empty or dm.df_teams.empty:
+        return ""
+    # Find team's divName
+    div_name = ""
+    for _, row in dm.df_teams.iterrows():
+        if str(row.get("nickName", "")).lower() == team_name.lower():
+            div_name = str(row.get("divName", ""))
+            break
+    if not div_name:
+        return ""
+    # Filter standings to same division — join via df_teams since standings may lack divName
+    div_team_names = [
+        str(row.get("nickName", ""))
+        for _, row in dm.df_teams.iterrows()
+        if str(row.get("divName", "")).lower() == div_name.lower()
+    ]
+    div_df = dm.df_standings[
+        dm.df_standings["teamName"].isin(div_team_names)
+    ].copy()
+    if div_df.empty:
+        return ""
+    div_df = div_df.sort_values("totalWins", ascending=False)
+    lines = [f"DIVISION STANDINGS ({div_name}):"]
+    for _, row in div_df.iterrows():
+        tn = row.get("teamName", "?")
+        w = int(row.get("totalWins", 0) or 0)
+        l = int(row.get("totalLosses", 0) or 0)
+        marker = " ←" if tn.lower() == team_name.lower() else ""
+        lines.append(f"  {tn}: {w}-{l}{marker}")
+    return "\n".join(lines)
+
+
+def _division_h2h_block(db_username: str, dm) -> str:
+    """Intra-division vs out-of-division career record for an owner."""
+    if run_sql is None or dm.df_teams.empty:
+        return ""
+    # Find owner's divName
+    div_name = ""
+    for _, row in dm.df_teams.iterrows():
+        if str(row.get("userName", "")).lower() == db_username.lower():
+            div_name = str(row.get("divName", ""))
+            break
+    if not div_name:
+        return ""
+    # Division teammates
+    div_owners = [
+        str(row.get("userName", ""))
+        for _, row in dm.df_teams.iterrows()
+        if str(row.get("divName", "")).lower() == div_name.lower()
+        and str(row.get("userName", "")).lower() != db_username.lower()
+    ]
+    if not div_owners:
+        return ""
+    placeholders = ",".join("?" * len(div_owners))
+    div_rows, div_err = run_sql(
+        f"SELECT winner_user, loser_user FROM games "
+        f"WHERE status IN ('2','3') AND stageIndex='1' "
+        f"AND homeUser != 'CPU' AND awayUser != 'CPU' "
+        f"AND ((winner_user=? AND loser_user IN ({placeholders})) "
+        f"OR (loser_user=? AND winner_user IN ({placeholders})))",
+        (db_username, *div_owners, db_username, *div_owners),
+    )
+    if div_err or not div_rows:
+        return ""
+    div_wins = sum(1 for r in div_rows if r["winner_user"] == db_username)
+    div_losses = len(div_rows) - div_wins
+    # Total career games
+    all_rows, all_err = run_sql(
+        "SELECT winner_user FROM games "
+        "WHERE status IN ('2','3') AND stageIndex='1' "
+        "AND homeUser != 'CPU' AND awayUser != 'CPU' "
+        "AND (winner_user=? OR loser_user=?)",
+        (db_username, db_username),
+    )
+    if all_err or not all_rows:
+        return f"INTRA-DIVISION RECORD ({div_name}): {div_wins}-{div_losses}"
+    total_games = len(all_rows)
+    total_wins = sum(1 for r in all_rows if r["winner_user"] == db_username)
+    out_games = total_games - len(div_rows)
+    out_wins = total_wins - div_wins
+    out_losses = out_games - out_wins
+    return (
+        f"INTRA-DIVISION RECORD ({div_name}): {div_wins}-{div_losses} "
+        f"({len(div_rows)} games) | "
+        f"OUT-OF-DIVISION: {out_wins}-{out_losses} ({out_games} games)"
+    )
+
+
+def _elo_trajectory_block(db_username: str) -> str:
+    """Season-by-season Elo trajectory for an owner using a full league computation."""
+    if run_sql is None:
+        return ""
+    # Pull all completed regular-season games chronologically for full Elo computation
+    rows, err = run_sql(
+        "SELECT homeUser, awayUser, "
+        "CAST(homeScore AS INTEGER) AS hs, CAST(awayScore AS INTEGER) AS as_, "
+        "CAST(seasonIndex AS INTEGER) AS sn, CAST(weekIndex AS INTEGER) AS wk "
+        "FROM games "
+        "WHERE status IN ('2','3') AND stageIndex='1' "
+        "AND homeUser != 'CPU' AND awayUser != 'CPU' "
+        "AND homeUser != '' AND awayUser != '' "
+        "ORDER BY sn ASC, wk ASC"
+    )
+    if err or not rows:
+        return ""
+
+    elo_map: dict[str, float] = {}
+    ELO_INIT, K, REGRESS = 1500.0, 24, 0.75
+    prev_season = None
+    season_snapshots: list[tuple[int, int]] = []
+
+    for r in rows:
+        sn = r["sn"]
+        hu, au = r["homeUser"], r["awayUser"]
+        hs, as_ = r["hs"] or 0, r["as_"] or 0
+
+        if prev_season is not None and sn != prev_season:
+            # Season boundary — record snapshot then regress
+            if db_username in elo_map:
+                season_snapshots.append((prev_season, round(elo_map[db_username])))
+            for u in list(elo_map):
+                elo_map[u] = ELO_INIT + (elo_map[u] - ELO_INIT) * REGRESS
+
+        elo_h = elo_map.get(hu, ELO_INIT)
+        elo_a = elo_map.get(au, ELO_INIT)
+        exp_h = 1.0 / (1.0 + 10 ** ((elo_a - elo_h) / 400))
+        exp_a = 1.0 - exp_h
+        actual_h = 1.0 if hs > as_ else (0.5 if hs == as_ else 0.0)
+        actual_a = 1.0 - actual_h
+        margin = abs(hs - as_)
+        mov = (_math_log(margin + 1) * 0.8) if margin > 0 else 1.0
+        elo_map[hu] = max(1200.0, min(2200.0, elo_h + K * mov * (actual_h - exp_h)))
+        elo_map[au] = max(1200.0, min(2200.0, elo_a + K * mov * (actual_a - exp_a)))
+        prev_season = sn
+
+    # Record final season
+    if prev_season is not None and db_username in elo_map:
+        season_snapshots.append((prev_season, round(elo_map[db_username])))
+
+    if not season_snapshots:
+        return ""
+
+    lines = [f"ELO TRAJECTORY ({db_username}):"]
+    for sn, elo in season_snapshots:
+        trend = "▲" if elo > ELO_INIT else ("▼" if elo < ELO_INIT else "▶")
+        bar_len = max(1, min(20, (elo - 1400) // 20))
+        lines.append(f"  S{sn}: {elo} {trend} {'█' * bar_len}")
+    return "\n".join(lines)
+
+
+async def _betting_block(owner_name: str, dm) -> str:
+    """Pull betting behavior profile from flow_economy.db bets_table."""
+    try:
+        import aiosqlite
+    except ImportError:
+        return ""
+
+    # Resolve owner → discord_id via tsl_members
+    discord_id_val = None
+    if run_sql is not None:
+        db_username = _resolve_owner(owner_name, dm) or owner_name
+        id_rows, id_err = run_sql(
+            "SELECT discord_id FROM tsl_members WHERE db_username = ? LIMIT 1",
+            (db_username,),
+        )
+        if not id_err and id_rows and id_rows[0].get("discord_id"):
+            discord_id_val = int(id_rows[0]["discord_id"])
+
+    if not discord_id_val:
+        return f"BETTING PROFILE ({owner_name}): No Discord ID mapping found in member registry."
+
+    try:
+        async with aiosqlite.connect(_ECONOMY_DB) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Per-type stats
+            async with db.execute(
+                "SELECT bet_type, COUNT(*) AS total, "
+                "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) AS wins, "
+                "SUM(wager_amount) AS wagered "
+                "FROM bets_table WHERE discord_id=? GROUP BY bet_type",
+                (discord_id_val,),
+            ) as cur:
+                type_rows = [dict(r) for r in await cur.fetchall()]
+
+            # Overall totals
+            async with db.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) AS wins, "
+                "SUM(wager_amount) AS wagered "
+                "FROM bets_table WHERE discord_id=?",
+                (discord_id_val,),
+            ) as cur:
+                totals = dict(await cur.fetchone() or {})
+
+            # Parlay record
+            async with db.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) AS wins "
+                "FROM parlays_table WHERE discord_id=?",
+                (discord_id_val,),
+            ) as cur:
+                parlay_row = dict(await cur.fetchone() or {})
+
+            # Last 10 bets for streak
+            async with db.execute(
+                "SELECT status FROM bets_table WHERE discord_id=? "
+                "ORDER BY created_at DESC LIMIT 10",
+                (discord_id_val,),
+            ) as cur:
+                recent = [dict(r) for r in await cur.fetchall()]
+
+            # Biggest single win
+            async with db.execute(
+                "SELECT wager_amount, bet_type, matchup FROM bets_table "
+                "WHERE discord_id=? AND status='won' "
+                "ORDER BY wager_amount DESC LIMIT 1",
+                (discord_id_val,),
+            ) as cur:
+                big_win = dict(await cur.fetchone() or {})
+
+    except Exception as e:
+        _log.warning(f"[betting_block] DB query failed: {e}")
+        return ""
+
+    if not totals or not totals.get("total"):
+        return f"BETTING PROFILE ({owner_name}): No bets found on record."
+
+    total = int(totals.get("total") or 0)
+    wins = int(totals.get("wins") or 0)
+    wagered = int(totals.get("wagered") or 0)
+    win_pct = round(wins / total * 100, 1) if total else 0.0
+
+    # Streak calculation
+    streak = 0
+    streak_type = ""
+    for b in recent:
+        s = b.get("status", "")
+        if not streak_type:
+            streak_type = s
+        if s == streak_type:
+            streak += 1
+        else:
+            break
+    streak_str = f"{streak_type.upper()} {streak}" if streak_type and streak > 1 else "–"
+
+    lines = [f"BETTING PROFILE ({owner_name}):"]
+    lines.append(f"  Overall: {wins}-{total - wins} ({win_pct}%) | Wagered: {wagered:,} coins")
+    lines.append(f"  Current streak: {streak_str}")
+    if big_win.get("wager_amount"):
+        lines.append(f"  Biggest win: {int(big_win['wager_amount']):,} coins ({big_win.get('bet_type','')} — {big_win.get('matchup','')})")
+
+    if type_rows:
+        lines.append("  BY TYPE:")
+        for r in sorted(type_rows, key=lambda x: x.get("total", 0), reverse=True):
+            bt = r.get("bet_type", "?")
+            t = int(r.get("total") or 0)
+            w = int(r.get("wins") or 0)
+            pct = round(w / t * 100, 1) if t else 0.0
+            lines.append(f"    {bt}: {w}-{t-w} ({pct}%) on {t} bets")
+
+    pt = int(parlay_row.get("total") or 0)
+    pw = int(parlay_row.get("wins") or 0)
+    if pt > 0:
+        lines.append(f"  Parlays: {pw}-{pt-pw} ({round(pw/pt*100,1)}%) | {pt} total")
+
+    return "\n".join(lines)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ANALYSIS PIPELINES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -537,9 +887,10 @@ def _validate_team_data(team_name: str, roster: str, standings: str, analysis_ty
     return None
 
 
-async def run_matchup_analysis(team_a: str, team_b: str, dm, bot=None) -> AnalysisResult:
+async def run_matchup_analysis(team_a: str, team_b: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Deep head-to-head matchup analysis with score prediction."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"matchup {team_a} vs {team_b}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     # Gather data — deep
@@ -573,11 +924,17 @@ async def run_matchup_analysis(team_a: str, team_b: str, dm, bot=None) -> Analys
         if err:
             return err
 
+    # Structured comparison data for visual table
+    comparison_data = {
+        "team_a": _team_metrics(team_a, dm),
+        "team_b": _team_metrics(team_b, dm),
+    }
+
     data_block = "\n\n".join(filter(None, [
         ctx, standings_a, standings_b, roster_a, roster_b,
         abilities_a, abilities_b, games_a, games_b,
         trends_a, trends_b, off_a, off_b, def_a, def_b,
-        power_a, power_b, h2h,
+        power_a, power_b, h2h, conv_block,
     ]))
 
     prompt = f"""{persona}
@@ -622,12 +979,14 @@ Be direct. Be specific. Cite real numbers from the data above. ATLAS doesn't hed
         prediction=prediction,
         confidence=confidence,
         metadata={"tier": "OPUS", "model": result.model, "season": dm.CURRENT_SEASON, "week": dm.CURRENT_WEEK},
+        comparison_data=comparison_data,
     )
 
 
-async def run_rivalry_history(owner_a: str, owner_b: str, dm, bot=None) -> AnalysisResult:
+async def run_rivalry_history(owner_a: str, owner_b: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Full historical rivalry breakdown between two TSL owners."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"rivalry {owner_a} vs {owner_b}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     db_a = _resolve_owner(owner_a, dm) or owner_a
@@ -679,7 +1038,7 @@ async def run_rivalry_history(owner_a: str, owner_b: str, dm, bot=None) -> Analy
 
     data_block = "\n\n".join(filter(None, [
         ctx, h2h, career_a, career_b, roster_a, roster_b,
-        abilities_a, abilities_b, trends_a, trends_b, trades_context,
+        abilities_a, abilities_b, trends_a, trends_b, trades_context, conv_block,
     ]))
 
     prompt = f"""{persona}
@@ -711,9 +1070,10 @@ Format with **bold** for names, scores, and key stats. Make it feel like a genui
     )
 
 
-async def run_game_plan(target_team: str, requesting_user_team: str | None, dm, bot=None) -> AnalysisResult:
+async def run_game_plan(target_team: str, requesting_user_team: str | None, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Tactical blueprint for beating a specific opponent."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"game plan vs {target_team}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     # Deep data on the target
@@ -740,7 +1100,7 @@ async def run_game_plan(target_team: str, requesting_user_team: str | None, dm, 
 
     data_block = "\n\n".join(filter(None, [
         ctx, standings_target, roster_target, abilities_target,
-        games_target, trends_target, off_target, def_target, req_data,
+        games_target, trends_target, off_target, def_target, req_data, conv_block,
     ]))
 
     user_context = (
@@ -780,9 +1140,10 @@ Use **bold** for player names, OVR ratings, and abilities. Every point must name
     )
 
 
-async def run_team_report(team_name: str, dm, bot=None) -> AnalysisResult:
+async def run_team_report(team_name: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Full team deep dive — identity, trajectory, strengths and weaknesses."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"team report {team_name}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     standings = _standings_block(dm, team_name)
@@ -801,9 +1162,15 @@ async def run_team_report(team_name: str, dm, bot=None) -> AnalysisResult:
     if err:
         return err
 
+    division_block = _division_block(team_name, dm)
+    div_h2h = ""
+    owner_for_h2h = _resolve_owner(team_name, dm)
+    if owner_for_h2h:
+        div_h2h = _division_h2h_block(owner_for_h2h, dm)
+
     data_block = "\n\n".join(filter(None, [
-        ctx, standings, power_rank, roster, abilities,
-        games, trends, off_leaders, def_leaders, draft, trade_context,
+        ctx, standings, division_block, div_h2h, power_rank, roster, abilities,
+        games, trends, off_leaders, def_leaders, draft, trade_context, conv_block,
     ]))
 
     prompt = f"""{persona}
@@ -836,9 +1203,10 @@ Use **bold** for player names, ratings, and key stats. Be direct — no hedging.
     )
 
 
-async def run_owner_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
+async def run_owner_profile(owner_name: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Owner profile — current season, playstyle, and tendencies."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"owner profile {owner_name}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     db_username = _resolve_owner(owner_name, dm) or owner_name
@@ -860,9 +1228,12 @@ async def run_owner_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
     trade_context = _trade_context_block(team_name, dm) if team_name else ""
     power_rank = _power_rank_block(team_name, dm) if team_name else ""
 
+    div_h2h = _division_h2h_block(db_username, dm)
+    elo_traj = _elo_trajectory_block(db_username)
+
     data_block = "\n\n".join(filter(None, [
-        ctx, career, standings, power_rank, roster, abilities,
-        games, trends, draft, trade_context,
+        ctx, career, elo_traj, standings, power_rank, roster, abilities,
+        games, trends, div_h2h, draft, trade_context, conv_block,
     ]))
 
     prompt = f"""{persona}
@@ -895,9 +1266,10 @@ Use **bold** for their name, key stats, and player names. Keep it analytical —
     )
 
 
-async def run_player_scout(player_name: str, dm, bot=None) -> AnalysisResult:
+async def run_player_scout(player_name: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Full scouting report on a TSL player."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"player scout {player_name}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     # Pull player data from tsl_history.db
@@ -996,7 +1368,7 @@ async def run_player_scout(player_name: str, dm, bot=None) -> AnalysisResult:
     if rows:
         team_power = _power_rank_block(rows[0].get("teamName", ""), dm)
 
-    data_block = "\n\n".join(filter(None, [ctx, player_data, abilities_data, game_stats, peer_comparison, team_power]))
+    data_block = "\n\n".join(filter(None, [ctx, player_data, abilities_data, game_stats, peer_comparison, team_power, conv_block]))
 
     if not player_data:
         return AnalysisResult(
@@ -1039,9 +1411,10 @@ Use **bold** for ratings, the grade, and player names. Be specific — cite actu
     )
 
 
-async def run_power_rankings(dm, bot=None) -> AnalysisResult:
+async def run_power_rankings(dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Tiered power rankings with riser/faller analysis."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, "power rankings")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     # Full standings
@@ -1094,7 +1467,7 @@ async def run_power_rankings(dm, bot=None) -> AnalysisResult:
         if streak_lines:
             momentum = "NOTABLE STREAKS:\n" + "\n".join(streak_lines)
 
-    data_block = "\n\n".join(filter(None, [ctx, power_context, standings, pt_diff, momentum]))
+    data_block = "\n\n".join(filter(None, [ctx, power_context, standings, pt_diff, momentum, conv_block]))
 
     prompt = f"""{persona}
 
@@ -1126,9 +1499,10 @@ Be opinionated. Cite SPECIFIC records, differentials, and power scores. No vague
     )
 
 
-async def run_dynasty_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
+async def run_dynasty_profile(owner_name: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
     """Full legacy analysis — career record, championships, all-time rank."""
-    persona = get_persona("analytical")
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"dynasty profile {owner_name}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
     ctx = _build_tsl_context(dm)
 
     db_username = _resolve_owner(owner_name, dm) or owner_name
@@ -1209,9 +1583,11 @@ async def run_dynasty_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
                 po_lines.append(f"  S{sn}: {home} {hs}–{as_} {away} → {winner} wins")
             playoff_history = "\n".join(po_lines)
 
+    elo_traj = _elo_trajectory_block(db_username)
+
     data_block = "\n\n".join(filter(None, [
-        ctx, career, all_time_context, best_season, cur_standing,
-        playoff_history, roster, abilities, draft, trade_context,
+        ctx, career, elo_traj, all_time_context, best_season, cur_standing,
+        playoff_history, roster, abilities, draft, trade_context, conv_block,
     ]))
 
     prompt = f"""{persona}
@@ -1242,4 +1618,70 @@ Be direct and analytical. This is a definitive assessment, not a tribute piece.{
         prediction=None,
         confidence=None,
         metadata={"tier": "OPUS", "model": result.model, "season": dm.CURRENT_SEASON, "week": dm.CURRENT_WEEK},
+    )
+
+
+async def run_betting_profile(owner_name: str, dm, bot=None, *, discord_id: int | None = None, memory=None) -> AnalysisResult:
+    """Sportsbook behavior analysis — ROI, win rates, bet types, parlay success."""
+    affinity_block, conv_block = await _build_affinity_and_memory(discord_id, memory, f"betting profile {owner_name}")
+    persona = _persona_with_mods(get_persona("analytical"), affinity_block)
+    ctx = _build_tsl_context(dm)
+
+    db_username = _resolve_owner(owner_name, dm) or owner_name
+    betting_data = await _betting_block(owner_name, dm)
+    career = _career_block(db_username)
+
+    # Current season context for calibration
+    team_name = None
+    if not dm.df_teams.empty:
+        mask = dm.df_teams["userName"].str.lower() == db_username.lower()
+        if mask.any():
+            team_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+    standings = _standings_block(dm, team_name) if team_name else ""
+
+    if not betting_data or "No bets found" in betting_data or "No Discord ID" in betting_data:
+        return AnalysisResult(
+            title=f"Betting Profile: {db_username}",
+            analysis_type="betting",
+            sections=[{"label": "No Data", "content": (
+                f"No sportsbook history found for **{db_username}**. "
+                f"They haven't placed any bets yet, or their Discord ID isn't mapped in the member registry."
+            )}],
+            prediction=None,
+            confidence=None,
+            metadata={"tier": "NONE", "model": "none", "season": dm.CURRENT_SEASON},
+        )
+
+    data_block = "\n\n".join(filter(None, [ctx, betting_data, career, standings, conv_block]))
+
+    prompt = f"""{persona}
+
+{data_block}
+
+ANALYSIS TASK: Sportsbook Betting Profile — {db_username}
+
+Analyze this owner's betting behavior using ALL the data above. Reference specific numbers throughout.
+
+1. BETTING IDENTITY: What kind of bettor is {db_username}? Point to their win rate and biggest bet types. Are they a value bettor, a chalk-follower, or a degenerate parlay player?
+2. STRENGTHS: Which bet type are they most profitable in? Cite exact win rate and total wagered.
+3. EXPLOITABLE TENDENCIES: Where do they bleed coins? Any bet type with a win rate below 40%? Cite the numbers.
+4. PARLAY ASSESSMENT: Are their parlay habits smart or reckless? Reference their parlay record and compare to their straight-bet performance.
+5. CURRENT STREAK: Reference their recent streak (winning or losing). Does it correlate with their team's on-field performance?
+6. VERDICT: Rate them as a bettor — Sharp, Average, or Square. One sentence with the evidence.
+
+Use **bold** for percentages, bet types, and key stats. Be direct — this is a financial autopsy.{_TSL_ONLY_RULE}
+"""
+
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=900)
+
+    return AnalysisResult(
+        title=f"Betting Profile: {db_username}",
+        analysis_type="betting",
+        sections=[
+            {"label": "Raw Stats", "content": betting_data},
+            {"label": "Behavioral Analysis", "content": result.text.strip()},
+        ],
+        prediction=None,
+        confidence=None,
+        metadata={"tier": "SONNET", "model": result.model, "season": dm.CURRENT_SEASON, "week": dm.CURRENT_WEEK},
     )
