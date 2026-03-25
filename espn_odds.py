@@ -148,7 +148,7 @@ class ESPNOddsClient:
                             return data
 
                         if resp.status == 404:
-                            log.debug(f"ESPN 404: {url}")
+                            log.warning(f"ESPN 404: {url}")
                             return None
 
                         if resp.status == 429 and attempt < self._MAX_RETRIES - 1:

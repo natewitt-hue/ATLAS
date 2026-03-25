@@ -423,6 +423,7 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
             log.error(f"ESPN odds fetch failed for {sport_key}: {e}")
             return
 
+        log.info(f"ESPN returned {len(games)} games for {sport_key}.")
         if not games:
             log.warning(f"No upcoming games for {sport_key}.")
             return
@@ -500,6 +501,42 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
             await db.commit()
 
         log.info(f"Odds sync complete for {sport_key}: {upserted} events.")
+
+        # Backfill odds via per-game endpoint for games the scoreboard returned without odds.
+        # ESPN embeds odds in NFL scoreboards but not consistently for other sports (e.g. NBA).
+        null_odds_ids = [
+            g["event_id"] for g in games if g.get("spread", {}).get("home") is None
+        ]
+        if null_odds_ids:
+            log.info(f"Backfilling per-game odds for {len(null_odds_ids)} {sport_key} game(s)...")
+            updates = []
+            for eid in null_odds_ids:
+                detail = await self.client.get_game_odds(eid, league_key)
+                if not detail:
+                    continue
+                providers = detail.get("providers", {})
+                p = providers.get(1004) or (next(iter(providers.values()), None) if providers else None)
+                if not p:
+                    continue
+                spread = p.get("spread")
+                updates.append((
+                    spread,
+                    -spread if spread is not None else None,
+                    p.get("home_moneyline"),
+                    p.get("away_moneyline"),
+                    p.get("over_under"),
+                    eid,
+                ))
+            if updates:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.executemany(
+                        "UPDATE real_events SET "
+                        "spread_home=?, spread_away=?, moneyline_home=?, moneyline_away=?, over_under=? "
+                        "WHERE event_id=?",
+                        updates,
+                    )
+                    await db.commit()
+                log.info(f"Backfilled odds for {len(updates)}/{len(null_odds_ids)} {sport_key} game(s).")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # SCORE SYNC + AUTO-GRADE

@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.22.1"  # fix: oracle audit — async get_last_n_games, vector search cap, TTL eviction, dupe embed_and_store, fire-and-log shim
+ATLAS_VERSION = "6.22.2"  # fix: real sportsbook NBA odds — backfill per-game endpoint when scoreboard returns no odds
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
