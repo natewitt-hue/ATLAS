@@ -2802,72 +2802,218 @@ async def _run_and_send(interaction: discord.Interaction, coro, filename: str = 
         await interaction.followup.send(f"❌ Analysis failed: `{e}`", ephemeral=True)
 
 
-# ── Per-button modal classes ───────────────────────────────────────────────────
+# ── Oracle Intel v3 — Team selection helpers ──────────────────────────────────
 
-class _MatchupModal(discord.ui.Modal, title="🏈 Matchup Analysis"):
-    teams = discord.ui.TextInput(
-        label="Enter two teams",
-        placeholder="e.g. Chiefs vs Raiders  or  Cowboys, Eagles",
-        required=True,
-        max_length=80,
-    )
+def _oracle_get_all_teams() -> list[dict]:
+    """Return sorted list of team dicts from dm.df_teams."""
+    if dm.df_teams.empty:
+        return []
+    teams = dm.df_teams.to_dict(orient="records")
+    return sorted(teams, key=lambda t: str(t.get("nickName", t.get("displayName", ""))))
 
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
+
+def _oracle_build_conf_options(conference: str) -> list[discord.SelectOption]:
+    """Build team select options filtered by conference (AFC or NFC). 16 teams each."""
+    conf_upper = conference.upper()
+    options = []
+    for t in _oracle_get_all_teams():
+        div_name = str(t.get("divName", ""))
+        if not div_name.upper().startswith(conf_upper):
+            continue
+        nick = t.get("nickName", t.get("displayName", "Unknown"))
+        owner_label = t.get("userName", "")
+        label = f"{nick} — {owner_label}" if owner_label else nick
+        options.append(discord.SelectOption(label=label[:100], value=str(t.get("teamId", 0))))
+    return options
+
+
+def _oracle_team_name_from_id(team_id: int) -> str | None:
+    """Resolve team ID to canonical nickName."""
+    for t in _oracle_get_all_teams():
+        if str(t.get("teamId", 0)) == str(team_id):
+            return t.get("nickName")
+    return None
+
+
+def _oracle_owner_from_team(team_name: str) -> str | None:
+    """Resolve team nickName to owner db_username."""
+    if dm.df_teams.empty:
+        return None
+    mask = dm.df_teams["nickName"].str.lower() == team_name.lower()
+    if not mask.any():
+        return None
+    return dm.df_teams[mask].iloc[0].get("userName")
+
+
+def _oracle_conf_embed(label: str, description: str, team_a: str | None = None) -> discord.Embed:
+    """Build the conference-selection embed for an Oracle analysis step."""
+    embed = discord.Embed(title=f"Oracle — {label}", description=description, color=C_PURPLE)
+    if team_a:
+        embed.add_field(name="Team A", value=team_a, inline=True)
+    embed.set_footer(text="Pick a conference, then select a team.")
+    return embed
+
+
+# ── Oracle Intel v3 — Single-team selection views ─────────────────────────────
+
+class _OracleTeamSelect(discord.ui.Select):
+    """Select menu showing teams from one conference for Oracle analysis."""
+
+    def __init__(self, options: list[discord.SelectOption], callback_fn, analysis_label: str):
+        self._callback_fn = callback_fn
+        self._analysis_label = analysis_label
+        super().__init__(
+            placeholder="Select a team...",
+            min_values=1, max_values=1, options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        team_id = int(self.values[0])
+        team_name = _oracle_team_name_from_id(team_id)
+        if not team_name:
+            return await interaction.response.send_message("Team not found.", ephemeral=True)
+        await self._callback_fn(interaction, team_name)
+
+
+class _OracleTeamSelectView(discord.ui.View):
+    """Wraps the conference-filtered team select + Back button."""
+
+    def __init__(self, options: list[discord.SelectOption], callback_fn,
+                 analysis_label: str, back_view_fn):
+        super().__init__(timeout=300)
+        self._back_view_fn = back_view_fn
+        self.add_item(_OracleTeamSelect(options, callback_fn, analysis_label))
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        view, embed = self._back_view_fn()
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class OracleConfView(discord.ui.View):
+    """AFC / NFC buttons for single-team Oracle analysis types."""
+
+    def __init__(self, analysis_label: str, callback_fn, hub_view_fn=None):
+        super().__init__(timeout=300)
+        self._analysis_label = analysis_label
+        self._callback_fn = callback_fn
+        self._hub_view_fn = hub_view_fn
+
+    def _make_back(self):
+        embed = _oracle_conf_embed(self._analysis_label, "Pick a conference.")
+        return OracleConfView(self._analysis_label, self._callback_fn, self._hub_view_fn), embed
+
+    @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈", row=0)
+    async def afc_button(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await self._show_teams(interaction, "AFC")
+
+    @discord.ui.button(label="NFC", style=discord.ButtonStyle.secondary, emoji="🏈", row=0)
+    async def nfc_button(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await self._show_teams(interaction, "NFC")
+
+    async def _show_teams(self, interaction: discord.Interaction, conference: str):
+        options = _oracle_build_conf_options(conference)
+        if not options:
+            return await interaction.response.send_message(
+                f"No {conference} teams found.", ephemeral=True)
+        embed = _oracle_conf_embed(self._analysis_label, f"Select a team from the **{conference}**.")
+        view = _OracleTeamSelectView(options, self._callback_fn,
+                                     self._analysis_label, self._make_back)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+# ── Oracle Intel v3 — Dual-team selection views ──────────────────────────────
+
+class OracleDualConfView(discord.ui.View):
+    """AFC/NFC buttons for dual-team analysis (Matchup, Rivalry, Game Plan)."""
+
+    def __init__(self, analysis_label: str, dual_callback_fn, step: str = "A",
+                 team_a_name: str | None = None):
+        super().__init__(timeout=300)
+        self._analysis_label = analysis_label
+        self._dual_callback_fn = dual_callback_fn
+        self._step = step
+        self._team_a_name = team_a_name
+
+    def _make_back(self):
+        embed = self._step_embed()
+        return OracleDualConfView(self._analysis_label, self._dual_callback_fn,
+                                  self._step, self._team_a_name), embed
+
+    def _step_embed(self) -> discord.Embed:
+        step_label = "Team A" if self._step == "A" else "Team B"
+        desc = f"Pick a conference to select **{step_label}**."
+        embed = _oracle_conf_embed(self._analysis_label, desc,
+                                   team_a=self._team_a_name if self._step == "B" else None)
+        return embed
+
+    @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈", row=0)
+    async def afc_button(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await self._show_teams(interaction, "AFC")
+
+    @discord.ui.button(label="NFC", style=discord.ButtonStyle.secondary, emoji="🏈", row=0)
+    async def nfc_button(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        await self._show_teams(interaction, "NFC")
+
+    async def _show_teams(self, interaction: discord.Interaction, conference: str):
+        options = _oracle_build_conf_options(conference)
+        if not options:
+            return await interaction.response.send_message(
+                f"No {conference} teams found.", ephemeral=True)
+        step_label = "Team A" if self._step == "A" else "Team B"
+        embed = _oracle_conf_embed(self._analysis_label,
+                                   f"Select **{step_label}** from the **{conference}**.",
+                                   team_a=self._team_a_name if self._step == "B" else None)
+
+        async def on_team_selected(inter: discord.Interaction, team_name: str):
+            if self._step == "A":
+                # Move to step B
+                embed_b = _oracle_conf_embed(self._analysis_label,
+                                             "Pick a conference to select **Team B**.",
+                                             team_a=team_name)
+                view_b = OracleDualConfView(self._analysis_label, self._dual_callback_fn,
+                                            step="B", team_a_name=team_name)
+                await inter.response.edit_message(embed=embed_b, view=view_b)
+            else:
+                # Both teams selected — fire analysis
+                await self._dual_callback_fn(inter, self._team_a_name, team_name)
+
+        view = _OracleTeamSelectView(options, on_team_selected,
+                                     self._analysis_label, self._make_back)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+# ── Oracle Intelligence Hub View ───────────────────────────────────────────────
+
+class OracleIntelView(discord.ui.View):
+    """
+    Oracle Intelligence Hub v3 — 8 predefined TSL analysis types.
+    Row 0: Matchup Analysis | Rivalry History | Game Plan
+    Row 1: Team Report | Owner Profile | Player Scout | Power Rankings | Dynasty Profile
+
+    All team selection via AFC/NFC buttons → team dropdown (no text modals).
+    All responses are public PNG cards. No free-form Q&A. TSL only.
+    """
+
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    # ── Analysis callbacks (invoked after team selection) ──────────────────────
+
+    @staticmethod
+    async def _do_matchup(interaction: discord.Interaction, team_a: str, team_b: str):
         await interaction.response.defer(thinking=True, ephemeral=False)
-        raw = self.teams.value.strip()
-        sep = " vs " if " vs " in raw.lower() else ("," if "," in raw else None)
-        if sep:
-            parts = raw.split(sep, 1)
-            team_a = parts[0].strip()
-            team_b = parts[1].strip()
-        else:
-            await interaction.followup.send(
-                "⚠️ Please enter two teams separated by 'vs' or a comma (e.g. `Chiefs vs Raiders`).",
-                ephemeral=True,
-            )
-            return
         await _run_and_send(interaction, run_matchup_analysis(team_a, team_b, dm), "matchup.png")
 
-
-class _RivalryModal(discord.ui.Modal, title="⚔️ Rivalry History"):
-    owners = discord.ui.TextInput(
-        label="Enter two owners or teams",
-        placeholder="e.g. KillaKing vs JT  or  Killa, JT",
-        required=True,
-        max_length=80,
-    )
-
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
+    @staticmethod
+    async def _do_rivalry(interaction: discord.Interaction, team_a: str, team_b: str):
+        owner_a = _oracle_owner_from_team(team_a) or team_a
+        owner_b = _oracle_owner_from_team(team_b) or team_b
         await interaction.response.defer(thinking=True, ephemeral=False)
-        raw = self.owners.value.strip()
-        sep = " vs " if " vs " in raw.lower() else ("," if "," in raw else None)
-        if sep:
-            parts = raw.split(sep, 1)
-            owner_a = parts[0].strip()
-            owner_b = parts[1].strip()
-        else:
-            await interaction.followup.send(
-                "⚠️ Please enter two owner/team names separated by 'vs' or a comma.",
-                ephemeral=True,
-            )
-            return
         await _run_and_send(interaction, run_rivalry_history(owner_a, owner_b, dm), "rivalry.png")
 
-
-class _GamePlanModal(discord.ui.Modal, title="🎯 Game Plan"):
-    target = discord.ui.TextInput(
-        label="Who are you preparing to face?",
-        placeholder="e.g. Raiders  or  KillaKing",
-        required=True,
-        max_length=60,
-    )
-
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=False)
-        target_name = self.target.value.strip()
+    @staticmethod
+    async def _do_game_plan(interaction: discord.Interaction, target_team: str):
         requester_team = None
         if _resolve_db_username_fn:
             db_user = _resolve_db_username_fn(interaction.user.id)
@@ -2875,78 +3021,33 @@ class _GamePlanModal(discord.ui.Modal, title="🎯 Game Plan"):
                 mask = dm.df_teams["userName"].str.lower() == db_user.lower()
                 if mask.any():
                     requester_team = dm.df_teams[mask].iloc[0].get("nickName", "")
-        await _run_and_send(interaction, run_game_plan(target_name, requester_team, dm), "gameplan.png")
-
-
-class _TeamReportModal(discord.ui.Modal, title="📊 Team Report"):
-    team = discord.ui.TextInput(
-        label="Team name",
-        placeholder="e.g. Raiders  or  Kansas City",
-        required=True,
-        max_length=60,
-    )
-
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_team_report(self.team.value.strip(), dm), "team_report.png")
+        await _run_and_send(interaction, run_game_plan(target_team, requester_team, dm), "gameplan.png")
 
-
-class _OwnerProfileModal(discord.ui.Modal, title="👤 Owner Profile"):
-    owner = discord.ui.TextInput(
-        label="Owner or team name",
-        placeholder="e.g. KillaKing  or  Raiders",
-        required=True,
-        max_length=60,
-    )
-
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
+    @staticmethod
+    async def _do_team_report(interaction: discord.Interaction, team_name: str):
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_owner_profile(self.owner.value.strip(), dm), "owner_profile.png")
+        await _run_and_send(interaction, run_team_report(team_name, dm), "team_report.png")
 
-
-class _PlayerScoutModal(discord.ui.Modal, title="🔭 Player Scout"):
-    player = discord.ui.TextInput(
-        label="Player name",
-        placeholder="e.g. Patrick Mahomes  or  Lamar Jackson",
-        required=True,
-        max_length=60,
-    )
-
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
+    @staticmethod
+    async def _do_owner_profile(interaction: discord.Interaction, team_name: str):
+        owner = _oracle_owner_from_team(team_name) or team_name
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_player_scout(self.player.value.strip(), dm), "player_scout.png")
+        await _run_and_send(interaction, run_owner_profile(owner, dm), "owner_profile.png")
 
-
-class _DynastyProfileModal(discord.ui.Modal, title="🏛️ Dynasty Profile"):
-    owner = discord.ui.TextInput(
-        label="Owner or team name",
-        placeholder="e.g. KillaKing  or  Raiders",
-        required=True,
-        max_length=60,
-    )
-
-    @_safe_interaction
-    async def on_submit(self, interaction: discord.Interaction):
+    @staticmethod
+    async def _do_player_scout(interaction: discord.Interaction, player: dict):
+        fn = str(player.get("firstName", "")).strip()
+        ln = str(player.get("lastName", "")).strip()
+        player_name = f"{fn} {ln}".strip()
         await interaction.response.defer(thinking=True, ephemeral=False)
-        await _run_and_send(interaction, run_dynasty_profile(self.owner.value.strip(), dm), "dynasty.png")
+        await _run_and_send(interaction, run_player_scout(player_name, dm), "player_scout.png")
 
-
-# ── Oracle Intelligence Hub View ───────────────────────────────────────────────
-
-class OracleIntelView(discord.ui.View):
-    """
-    Oracle Intelligence Hub v2 — 8 predefined TSL analysis types.
-    Row 0: 🏈 Matchup Analysis | ⚔️ Rivalry History | 🎯 Game Plan
-    Row 1: 📊 Team Report | 👤 Owner Profile | 🔭 Player Scout | 📈 Power Rankings | 🏛️ Dynasty Profile
-
-    All responses are public PNG cards. No free-form Q&A. TSL only.
-    """
-
-    def __init__(self):
-        super().__init__(timeout=180)
+    @staticmethod
+    async def _do_dynasty(interaction: discord.Interaction, team_name: str):
+        owner = _oracle_owner_from_team(team_name) or team_name
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_dynasty_profile(owner, dm), "dynasty.png")
 
     # Row 0 — Competitive Intel
 
@@ -2954,25 +3055,31 @@ class OracleIntelView(discord.ui.View):
     @_safe_interaction
     async def btn_matchup(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_MatchupModal())
+        embed = _oracle_conf_embed("Matchup Analysis", "Pick a conference to select **Team A**.")
+        view = OracleDualConfView("Matchup Analysis", self._do_matchup)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Rivalry History", emoji="⚔️", style=discord.ButtonStyle.primary, row=0)
     @_safe_interaction
     async def btn_rivalry(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_RivalryModal())
+        embed = _oracle_conf_embed("Rivalry History", "Pick a conference to select **Owner A's team**.")
+        view = OracleDualConfView("Rivalry History", self._do_rivalry)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Game Plan", emoji="🎯", style=discord.ButtonStyle.primary, row=0)
     @_safe_interaction
     async def btn_gameplan(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_GamePlanModal())
+        embed = _oracle_conf_embed("Game Plan", "Pick a conference to select the **team you want to beat**.")
+        view = OracleConfView("Game Plan", self._do_game_plan)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     # Row 1 — Deep Dives
 
@@ -2980,31 +3087,38 @@ class OracleIntelView(discord.ui.View):
     @_safe_interaction
     async def btn_team(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_TeamReportModal())
+        embed = _oracle_conf_embed("Team Report", "Pick a conference to select a team.")
+        view = OracleConfView("Team Report", self._do_team_report)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Owner Profile", emoji="👤", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
     async def btn_owner(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_OwnerProfileModal())
+        embed = _oracle_conf_embed("Owner Profile", "Pick a conference to select an owner's team.")
+        view = OracleConfView("Owner Profile", self._do_owner_profile)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Player Scout", emoji="🔭", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
     async def btn_player(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_PlayerScoutModal())
+        from player_picker import PlayerPickerView
+        view = PlayerPickerView(callback=self._do_player_scout, multi=False, label="Oracle Player Scout")
+        await interaction.response.edit_message(
+            embed=PlayerPickerView.filter_embed(label="Oracle Player Scout"), view=view)
 
     @discord.ui.button(label="Power Rankings", emoji="📈", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
     async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         await interaction.response.defer(thinking=True, ephemeral=False)
         await _run_and_send(interaction, run_power_rankings(dm), "power_rankings.png")
@@ -3013,9 +3127,11 @@ class OracleIntelView(discord.ui.View):
     @_safe_interaction
     async def btn_dynasty(self, interaction: discord.Interaction, _b: discord.ui.Button):
         if not _ORACLE_INTEL_OK:
-            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        await interaction.response.send_modal(_DynastyProfileModal())
+        embed = _oracle_conf_embed("Dynasty Profile", "Pick a conference to select an owner's team.")
+        view = OracleConfView("Dynasty Profile", self._do_dynasty)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 # ── _format_citations kept for reply-chain follow-up pipeline ─────────────────

@@ -1,5 +1,5 @@
 """
-oracle_analysis.py — ATLAS Oracle Intelligence Pipelines v1.0
+oracle_analysis.py — ATLAS Oracle Intelligence Pipelines v2.0
 ─────────────────────────────────────────────────────────────────────────────
 Eight predefined analysis functions powering the Oracle Intelligence Hub.
 Each function gathers all relevant TSL data, builds a richly structured
@@ -235,6 +235,268 @@ def _career_block(db_username: str) -> str:
     return "\n".join(lines)
 
 
+# ── Dev trait name mapping ────────────────────────────────────────────────────
+_DEV_NAMES = {"0": "Normal", "1": "Star", "2": "Superstar", "3": "X-Factor"}
+
+
+def _abilities_block(team_name: str) -> str:
+    """Pull all player abilities for a team, grouped by player with OVR."""
+    if run_sql is None:
+        return ""
+    rows, err = run_sql(
+        "SELECT p.firstName || ' ' || p.lastName AS name, p.pos, "
+        "CAST(p.playerBestOvr AS INTEGER) AS ovr, p.dev, "
+        "a.abilityTitle "
+        "FROM player_abilities a "
+        "JOIN players p ON a.rosterId = p.rosterId "
+        "WHERE p.teamName = ? AND p.isFA != '1' "
+        "ORDER BY CAST(p.playerBestOvr AS INTEGER) DESC, a.abilityTitle",
+        (team_name,),
+    )
+    if err or not rows:
+        return ""
+    # Group abilities by player
+    from collections import defaultdict
+    grouped: dict[str, dict] = {}
+    for r in rows:
+        key = r["name"]
+        if key not in grouped:
+            grouped[key] = {
+                "pos": r.get("pos", "?"),
+                "ovr": r.get("ovr", "?"),
+                "dev": _DEV_NAMES.get(str(r.get("dev", "0")), "Normal"),
+                "abilities": [],
+            }
+        grouped[key]["abilities"].append(r.get("abilityTitle", ""))
+    lines = []
+    for name, info in grouped.items():
+        ab_str = ", ".join(info["abilities"])
+        lines.append(f"  {name} ({info['pos']}, {info['ovr']} OVR, {info['dev']}) — {ab_str}")
+    return f"ABILITIES ({team_name}):\n" + "\n".join(lines)
+
+
+def _full_roster_block(team_name: str, limit: int = 53) -> str:
+    """Pull full roster with dev traits, age, draft info."""
+    if run_sql is None:
+        return ""
+    rows, err = run_sql(
+        "SELECT firstName || ' ' || lastName AS name, pos, "
+        "CAST(playerBestOvr AS INTEGER) AS ovr, dev, "
+        "age, draftRound, draftPick "
+        "FROM players WHERE teamName = ? AND isFA != '1' "
+        "ORDER BY CAST(playerBestOvr AS INTEGER) DESC LIMIT ?",
+        (team_name, limit),
+    )
+    if err or not rows:
+        return ""
+    lines = []
+    for r in rows:
+        dev = _DEV_NAMES.get(str(r.get("dev", "0")), "Normal")
+        age = r.get("age", "?")
+        ovr = r.get("ovr", "?")
+        draft = ""
+        rd = r.get("draftRound")
+        pk = r.get("draftPick")
+        if rd and rd not in ("", "0"):
+            draft = f" Rd{rd}"
+            if pk:
+                draft += f".{pk}"
+        lines.append(f"  {r['name']} ({r.get('pos','?')}) OVR {ovr} [{dev}] Age {age}{draft}")
+    return f"FULL ROSTER ({team_name}, {len(lines)} players):\n" + "\n".join(lines)
+
+
+def _scoring_trends_block(team_name: str, n: int = 5) -> str:
+    """Calculate PPG scored/allowed and margins from recent games."""
+    if run_sql is None:
+        return ""
+    rows, err = run_sql(
+        "SELECT homeTeamName, awayTeamName, "
+        "CAST(homeScore AS INTEGER) AS hs, CAST(awayScore AS INTEGER) AS as_ "
+        "FROM games "
+        "WHERE status IN ('2','3') AND stageIndex='1' "
+        "AND (homeTeamName=? OR awayTeamName=?) "
+        "ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC "
+        "LIMIT ?",
+        (team_name, team_name, n),
+    )
+    if err or not rows:
+        return ""
+    scored, allowed, wins = [], [], 0
+    for r in rows:
+        if r["homeTeamName"] == team_name:
+            scored.append(r["hs"])
+            allowed.append(r["as_"])
+            if r["hs"] > r["as_"]:
+                wins += 1
+        else:
+            scored.append(r["as_"])
+            allowed.append(r["hs"])
+            if r["as_"] > r["hs"]:
+                wins += 1
+    ppg = sum(scored) / len(scored) if scored else 0
+    ppg_a = sum(allowed) / len(allowed) if allowed else 0
+    margin = ppg - ppg_a
+    return (
+        f"SCORING TRENDS ({team_name}, last {len(rows)} games): "
+        f"{wins}W-{len(rows)-wins}L | "
+        f"PPG: {ppg:.1f} | Allowed: {ppg_a:.1f} | Margin: {margin:+.1f}"
+    )
+
+
+def _offensive_leaders_block(team_name: str, dm=None) -> str:
+    """Top offensive performers for a team this season from offensive_stats."""
+    if run_sql is None:
+        return ""
+    season = dm.CURRENT_SEASON if dm else 6
+    rows, err = run_sql(
+        "SELECT extendedName, pos, "
+        "SUM(CAST(passYds AS INTEGER)) AS passYds, "
+        "SUM(CAST(passTDs AS INTEGER)) AS passTDs, "
+        "SUM(CAST(passInts AS INTEGER)) AS passInts, "
+        "SUM(CAST(rushYds AS INTEGER)) AS rushYds, "
+        "SUM(CAST(rushTDs AS INTEGER)) AS rushTDs, "
+        "SUM(CAST(recYds AS INTEGER)) AS recYds, "
+        "SUM(CAST(recTDs AS INTEGER)) AS recTDs, "
+        "SUM(CAST(receptions AS INTEGER)) AS rec, "
+        "COUNT(*) AS games "
+        "FROM offensive_stats "
+        "WHERE teamName = ? AND CAST(seasonIndex AS INTEGER) = ? "
+        "GROUP BY rosterId "
+        "HAVING (passYds > 0 OR rushYds > 0 OR recYds > 0) "
+        "ORDER BY (passYds + rushYds + recYds) DESC LIMIT 8",
+        (team_name, season),
+    )
+    if err or not rows:
+        return ""
+    lines = []
+    for r in rows:
+        name = r["extendedName"]
+        pos = r.get("pos", "?")
+        g = r.get("games", 0)
+        parts = []
+        if r["passYds"] > 0:
+            parts.append(f"{r['passYds']} pass yds, {r['passTDs']} TD, {r['passInts']} INT")
+        if r["rushYds"] > 0:
+            parts.append(f"{r['rushYds']} rush yds, {r['rushTDs']} TD")
+        if r["recYds"] > 0:
+            parts.append(f"{r['rec']} rec, {r['recYds']} rec yds, {r['recTDs']} TD")
+        stat_str = " | ".join(parts)
+        lines.append(f"  {name} ({pos}, {g}g): {stat_str}")
+    return f"OFFENSIVE LEADERS ({team_name}, Season {season}):\n" + "\n".join(lines)
+
+
+def _defensive_leaders_block(team_name: str, dm=None) -> str:
+    """Top defensive performers for a team this season from defensive_stats."""
+    if run_sql is None:
+        return ""
+    season = dm.CURRENT_SEASON if dm else 6
+    rows, err = run_sql(
+        "SELECT extendedName, pos, "
+        "SUM(CAST(defTotalTackles AS INTEGER)) AS tackles, "
+        "SUM(CAST(defSacks AS INTEGER)) AS sacks, "
+        "SUM(CAST(defInts AS INTEGER)) AS ints, "
+        "SUM(CAST(defForcedFum AS INTEGER)) AS ff, "
+        "COUNT(*) AS games "
+        "FROM defensive_stats "
+        "WHERE teamName = ? AND CAST(seasonIndex AS INTEGER) = ? "
+        "GROUP BY rosterId "
+        "HAVING (tackles > 0 OR sacks > 0 OR ints > 0) "
+        "ORDER BY tackles DESC LIMIT 8",
+        (team_name, season),
+    )
+    if err or not rows:
+        return ""
+    lines = []
+    for r in rows:
+        name = r["extendedName"]
+        pos = r.get("pos", "?")
+        g = r.get("games", 0)
+        lines.append(
+            f"  {name} ({pos}, {g}g): {r['tackles']} tkl, "
+            f"{r['sacks']} sck, {r['ints']} INT, {r['ff']} FF"
+        )
+    return f"DEFENSIVE LEADERS ({team_name}, Season {season}):\n" + "\n".join(lines)
+
+
+def _draft_history_block(team_name: str) -> str:
+    """Show players drafted by this team from player_draft_map."""
+    if run_sql is None:
+        return ""
+    rows, err = run_sql(
+        "SELECT extendedName, drafting_season, draftRound, draftPick, "
+        "current_team, dev, was_traded "
+        "FROM player_draft_map "
+        "WHERE drafting_team = ? "
+        "ORDER BY CAST(drafting_season AS INTEGER) DESC, "
+        "CAST(draftRound AS INTEGER) ASC LIMIT 15",
+        (team_name,),
+    )
+    if err or not rows:
+        return ""
+    lines = []
+    still_on_team = 0
+    traded_away = 0
+    for r in rows:
+        dev = _DEV_NAMES.get(str(r.get("dev", "0")), "Normal")
+        status = "TRADED" if str(r.get("was_traded", "0")) == "1" else "ROSTERED"
+        if status == "TRADED":
+            traded_away += 1
+        else:
+            still_on_team += 1
+        rd = r.get("draftRound", "?")
+        pk = r.get("draftPick", "?")
+        lines.append(
+            f"  S{r['drafting_season']} Rd{rd}.{pk}: {r['extendedName']} [{dev}] — {status}"
+        )
+    summary = f"  Summary: {still_on_team} still rostered, {traded_away} traded away"
+    return f"DRAFT HISTORY ({team_name}):\n{summary}\n" + "\n".join(lines)
+
+
+def _trade_context_block(team_name: str, dm=None) -> str:
+    """Pull recent trades involving a team from dm.df_trades."""
+    if dm is None or dm.df_trades.empty:
+        return ""
+    relevant = dm.df_trades[
+        dm.df_trades.apply(
+            lambda r: team_name.lower() in str(r.get("team1Name", "")).lower() or
+                      team_name.lower() in str(r.get("team2Name", "")).lower(),
+            axis=1,
+        )
+    ].head(6)
+    if relevant.empty:
+        return ""
+    lines = []
+    for _, row in relevant.iterrows():
+        t1, t2 = row.get("team1Name", "?"), row.get("team2Name", "?")
+        s1, s2 = row.get("team1Sent", "?"), row.get("team2Sent", "?")
+        lines.append(f"  {t1} sent {s1} ↔ {t2} sent {s2}")
+    return f"TRADES ({team_name}):\n" + "\n".join(lines)
+
+
+def _power_rank_block(team_name: str, dm=None) -> str:
+    """Pull power ranking for a single team from dm.df_power."""
+    if dm is None or dm.df_power.empty:
+        return ""
+    for _, row in dm.df_power.iterrows():
+        if team_name.lower() in str(row.get("teamName", "")).lower():
+            rank = row.get("rank", "?")
+            score = row.get("score", "?")
+            seed = row.get("seed", "?")
+            ovr = row.get("ovrRating", "?")
+            return f"POWER RANKING ({team_name}): #{rank} (score {score}, seed {seed}, team OVR {ovr})"
+    return ""
+
+
+def _team_name_from_id(team_id: int, dm) -> str | None:
+    """Resolve team ID (from button selection) to canonical nickName."""
+    if dm.df_teams.empty:
+        return None
+    mask = dm.df_teams["teamId"].astype(str) == str(team_id)
+    if not mask.any():
+        return None
+    return dm.df_teams[mask].iloc[0].get("nickName")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ANALYSIS PIPELINES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,18 +508,57 @@ _TSL_ONLY_RULE = (
 )
 
 
+def _validate_team_data(team_name: str, roster: str, standings: str, analysis_type: str,
+                        dm=None) -> AnalysisResult | None:
+    """Return an error AnalysisResult if critical data is missing, else None."""
+    if not roster.strip() and not standings.strip():
+        _log.warning(f"[oracle_analysis] {analysis_type}: no roster or standings for '{team_name}'")
+        return AnalysisResult(
+            title=f"{analysis_type}: {team_name}",
+            analysis_type=analysis_type.lower().replace(" ", ""),
+            sections=[{
+                "label": "Data Error",
+                "content": (
+                    f"No roster or standings data found for **{team_name}**. "
+                    f"This team may not have synced to the database yet. "
+                    f"Try running `/commish sync` to refresh league data."
+                ),
+            }],
+            prediction=None, confidence=None,
+            metadata={
+                "tier": "NONE", "model": "none",
+                "season": dm.CURRENT_SEASON if dm else 0,
+            },
+        )
+    if not roster.strip():
+        _log.warning(f"[oracle_analysis] {analysis_type}: missing roster for '{team_name}'")
+    if not standings.strip():
+        _log.warning(f"[oracle_analysis] {analysis_type}: missing standings for '{team_name}'")
+    return None
+
+
 async def run_matchup_analysis(team_a: str, team_b: str, dm, bot=None) -> AnalysisResult:
     """Deep head-to-head matchup analysis with score prediction."""
     persona = get_persona("analytical")
     ctx = _build_tsl_context(dm)
 
-    # Gather data
+    # Gather data — deep
     standings_a = _standings_block(dm, team_a)
     standings_b = _standings_block(dm, team_b)
-    roster_a = _roster_block(team_a)
-    roster_b = _roster_block(team_b)
+    roster_a = _full_roster_block(team_a)
+    roster_b = _full_roster_block(team_b)
+    abilities_a = _abilities_block(team_a)
+    abilities_b = _abilities_block(team_b)
     games_a = _recent_games_block(team_a, 5)
     games_b = _recent_games_block(team_b, 5)
+    trends_a = _scoring_trends_block(team_a)
+    trends_b = _scoring_trends_block(team_b)
+    off_a = _offensive_leaders_block(team_a, dm)
+    off_b = _offensive_leaders_block(team_b, dm)
+    def_a = _defensive_leaders_block(team_a, dm)
+    def_b = _defensive_leaders_block(team_b, dm)
+    power_a = _power_rank_block(team_a, dm)
+    power_b = _power_rank_block(team_b, dm)
 
     # Resolve usernames for H2H
     owner_a = _resolve_owner(team_a, dm)
@@ -266,17 +567,18 @@ async def run_matchup_analysis(team_a: str, team_b: str, dm, bot=None) -> Analys
     if owner_a and owner_b:
         h2h = _h2h_block(owner_a, owner_b)
 
-    # Power rankings context
-    power_context = ""
-    if not dm.df_power.empty:
-        for _, row in dm.df_power.iterrows():
-            tn = row.get("teamName", "")
-            if team_a.lower() in tn.lower() or team_b.lower() in tn.lower():
-                rank = row.get("rank", "?")
-                score = row.get("score", "?")
-                power_context += f"  {tn} Power Rank: #{rank} (score {score})\n"
+    # Validate critical data
+    for tname, roster, standings in [(team_a, roster_a, standings_a), (team_b, roster_b, standings_b)]:
+        err = _validate_team_data(tname, roster, standings, "Matchup Analysis", dm)
+        if err:
+            return err
 
-    data_block = "\n\n".join(filter(None, [ctx, standings_a, standings_b, roster_a, roster_b, games_a, games_b, h2h, power_context]))
+    data_block = "\n\n".join(filter(None, [
+        ctx, standings_a, standings_b, roster_a, roster_b,
+        abilities_a, abilities_b, games_a, games_b,
+        trends_a, trends_b, off_a, off_b, def_a, def_b,
+        power_a, power_b, h2h,
+    ]))
 
     prompt = f"""{persona}
 
@@ -284,18 +586,19 @@ async def run_matchup_analysis(team_a: str, team_b: str, dm, bot=None) -> Analys
 
 ANALYSIS TASK: Matchup Analysis — {team_a} vs {team_b}
 
-Write a deep pre-game breakdown covering:
-1. OFFENSIVE EDGE: Compare passing and rushing attacks. Name specific players with OVR ratings.
-2. DEFENSIVE EDGE: Which defense has the advantage and why. Name key defensive players.
-3. KEY MATCHUP: The single most important individual matchup that could decide the game.
-4. PREDICTION: Give a concrete score prediction (e.g. "Chiefs 28 – Raiders 17") with a one-line rationale. Do NOT hedge. Commit to a number.
+Write a deep pre-game breakdown using ALL the data above. You MUST reference specific players by name, OVR, and abilities.
+
+1. OFFENSIVE EDGE: Compare passing and rushing attacks. Name specific players with OVR ratings and their season stats. Cite X-Factor/Superstar abilities that create mismatches.
+2. DEFENSIVE EDGE: Which defense has the advantage and why. Name key defensive players with their tackle/sack/INT totals. Identify which defensive abilities could disrupt the opposing offense.
+3. KEY MATCHUP: The single most important individual matchup — cite both players' OVR and abilities. Explain why this matchup decides the game.
+4. PREDICTION: Give a concrete score prediction (e.g. "Chiefs 28 – Raiders 17") grounded in the scoring trends data. Reference each team's PPG and point differential. Do NOT hedge.
 5. CONFIDENCE: Rate your prediction High / Medium / Low based on data quality.
 
 Format using Discord markdown (**bold** for player names and scores).
-Be direct. Be specific. ATLAS doesn't hedge.{_TSL_ONLY_RULE}
+Be direct. Be specific. Cite real numbers from the data above. ATLAS doesn't hedge.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=700)
+    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=1200)
     text = result.text.strip()
 
     # Parse out prediction line
@@ -333,36 +636,51 @@ async def run_rivalry_history(owner_a: str, owner_b: str, dm, bot=None) -> Analy
     career_a = _career_block(db_a)
     career_b = _career_block(db_b)
 
-    # Trades between the two owners
+    # Find each owner's current team for roster comparison
+    team_a_name, team_b_name = None, None
+    if not dm.df_teams.empty:
+        for uname, tvar in [(db_a, "team_a_name"), (db_b, "team_b_name")]:
+            mask = dm.df_teams["userName"].str.lower() == uname.lower()
+            if mask.any():
+                if tvar == "team_a_name":
+                    team_a_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+                else:
+                    team_b_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+
+    # Deep data for both sides
+    roster_a = _full_roster_block(team_a_name) if team_a_name else ""
+    roster_b = _full_roster_block(team_b_name) if team_b_name else ""
+    abilities_a = _abilities_block(team_a_name) if team_a_name else ""
+    abilities_b = _abilities_block(team_b_name) if team_b_name else ""
+    trends_a = _scoring_trends_block(team_a_name) if team_a_name else ""
+    trends_b = _scoring_trends_block(team_b_name) if team_b_name else ""
+
+    # Trades between them
     trades_context = ""
     if not dm.df_trades.empty and "team1Name" in dm.df_trades.columns:
         relevant = dm.df_trades[
             dm.df_trades.apply(
                 lambda r: (
-                    (owner_a.lower() in str(r.get("team1Name", "")).lower() or
-                     db_a.lower() in str(r.get("team1Name", "")).lower()) and
-                    (owner_b.lower() in str(r.get("team2Name", "")).lower() or
-                     db_b.lower() in str(r.get("team2Name", "")).lower())
-                ) or (
-                    (owner_b.lower() in str(r.get("team1Name", "")).lower() or
-                     db_b.lower() in str(r.get("team1Name", "")).lower()) and
-                    (owner_a.lower() in str(r.get("team2Name", "")).lower() or
+                    (db_a.lower() in str(r.get("team1Name", "")).lower() and
+                     db_b.lower() in str(r.get("team2Name", "")).lower()) or
+                    (db_b.lower() in str(r.get("team1Name", "")).lower() and
                      db_a.lower() in str(r.get("team2Name", "")).lower())
                 ),
                 axis=1,
             )
-        ]
+        ].head(5)
         if not relevant.empty:
             trade_lines = []
-            for _, row in relevant.head(5).iterrows():
-                t1 = row.get("team1Name", "?")
-                t2 = row.get("team2Name", "?")
-                s1 = row.get("team1Sent", "?")
-                s2 = row.get("team2Sent", "?")
+            for _, row in relevant.iterrows():
+                t1, t2 = row.get("team1Name", "?"), row.get("team2Name", "?")
+                s1, s2 = row.get("team1Sent", "?"), row.get("team2Sent", "?")
                 trade_lines.append(f"  {t1} sent {s1} ↔ {t2} sent {s2}")
             trades_context = "TRADES BETWEEN THEM:\n" + "\n".join(trade_lines)
 
-    data_block = "\n\n".join(filter(None, [ctx, h2h, career_a, career_b, trades_context]))
+    data_block = "\n\n".join(filter(None, [
+        ctx, h2h, career_a, career_b, roster_a, roster_b,
+        abilities_a, abilities_b, trends_a, trends_b, trades_context,
+    ]))
 
     prompt = f"""{persona}
 
@@ -370,17 +688,18 @@ async def run_rivalry_history(owner_a: str, owner_b: str, dm, bot=None) -> Analy
 
 ANALYSIS TASK: Rivalry History — {db_a} vs {db_b}
 
-Write a compelling rivalry narrative covering:
-1. THE RECORD: Who holds the historical edge and by how much.
-2. ERA ANALYSIS: Have the fortunes ever shifted? Who dominated which era?
-3. DEFINING MOMENTS: The 1-2 most significant games in this rivalry (biggest margin, playoff clash, etc).
-4. THE DYNAMIC: What does this rivalry mean in the TSL ecosystem? Beef? Mutual respect? One-sided?
-5. CURRENT TRAJECTORY: Based on recent form, where is this rivalry headed?
+Write a compelling rivalry narrative using ALL the data above. Reference specific game scores from the H2H record.
 
-Format with **bold** for names and key stats. Make it feel like a genuine sports rivalry piece.{_TSL_ONLY_RULE}
+1. THE RECORD: Who holds the historical edge and by how much. Cite the exact W-L and total games.
+2. ERA ANALYSIS: Have the fortunes shifted? Who dominated which era? Reference specific seasons from the career data.
+3. DEFINING MOMENTS: The 1-2 most significant games — cite the actual scores from H2H data. What made them significant?
+4. ROSTER COMPARISON: Compare their current rosters. Who has more talent right now? Cite X-Factor/Superstar players and OVR ratings.
+5. CURRENT TRAJECTORY: Based on recent scoring trends and records, where is this rivalry headed? Who has momentum?
+
+Format with **bold** for names, scores, and key stats. Make it feel like a genuine sports rivalry piece.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=700)
+    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=1000)
 
     return AnalysisResult(
         title=f"Rivalry History: {db_a} vs {db_b}",
@@ -397,34 +716,38 @@ async def run_game_plan(target_team: str, requesting_user_team: str | None, dm, 
     persona = get_persona("analytical")
     ctx = _build_tsl_context(dm)
 
-    roster_target = _roster_block(target_team)
+    # Deep data on the target
+    roster_target = _full_roster_block(target_team)
+    abilities_target = _abilities_block(target_team)
     games_target = _recent_games_block(target_team, 5)
     standings_target = _standings_block(dm, target_team)
-
-    # Defensive gaps: what they allow
-    def_gaps = ""
-    if run_sql is not None:
-        rows, err = run_sql(
-            "SELECT awayTeamName AS opp, homeScore, awayScore, homeTeamName "
-            "FROM games WHERE status IN ('2','3') AND stageIndex='1' "
-            "AND homeTeamName=? ORDER BY CAST(seasonIndex AS INTEGER) DESC, "
-            "CAST(weekIndex AS INTEGER) DESC LIMIT 6",
-            (target_team,),
-        )
-        if not err and rows:
-            pts_allowed = [int(r.get("awayScore", 0)) for r in rows if r.get("awayScore")]
-            avg_allowed = sum(pts_allowed) / len(pts_allowed) if pts_allowed else 0
-            def_gaps = f"POINTS ALLOWED (home, last 6): avg {avg_allowed:.1f} pts/game\n  " + \
-                       "  ".join([f"{r['awayTeamName']} scored {r['awayScore']}" for r in rows[:4]])
+    trends_target = _scoring_trends_block(target_team)
+    off_target = _offensive_leaders_block(target_team, dm)
+    def_target = _defensive_leaders_block(target_team, dm)
 
     # Requester's roster for personalized advice
-    req_roster = ""
+    req_data = ""
     if requesting_user_team:
-        req_roster = _roster_block(requesting_user_team)
+        req_roster = _full_roster_block(requesting_user_team)
+        req_abilities = _abilities_block(requesting_user_team)
+        req_off = _offensive_leaders_block(requesting_user_team, dm)
+        req_data = "\n\n".join(filter(None, [req_roster, req_abilities, req_off]))
 
-    data_block = "\n\n".join(filter(None, [ctx, standings_target, roster_target, games_target, def_gaps, req_roster]))
+    # Validate target team data
+    err = _validate_team_data(target_team, roster_target, standings_target, "Game Plan", dm)
+    if err:
+        return err
 
-    user_context = f"The user asking owns {requesting_user_team}. Personalize the game plan to their roster where possible." if requesting_user_team else ""
+    data_block = "\n\n".join(filter(None, [
+        ctx, standings_target, roster_target, abilities_target,
+        games_target, trends_target, off_target, def_target, req_data,
+    ]))
+
+    user_context = (
+        f"The user asking owns {requesting_user_team}. Their roster and abilities are included above. "
+        f"Personalize every game plan point to their specific players vs the opponent's players."
+        if requesting_user_team else ""
+    )
 
     prompt = f"""{persona}
 
@@ -434,17 +757,18 @@ ANALYSIS TASK: Game Plan — How to beat {target_team}
 
 {user_context}
 
-Write a concrete tactical blueprint with exactly 3 game plan points:
-1. EXPLOIT THIS WEAKNESS: The single biggest vulnerability in their defense/offense. Be specific about which position group to attack.
-2. NEUTRALIZE THIS THREAT: The one thing {target_team} does well that must be taken away. Who specifically is the threat?
-3. EXECUTE THIS IDENTITY: The offensive or defensive identity that wins this game. What style/approach beats them?
+Write a concrete tactical blueprint with exactly 3 game plan points. Use the SPECIFIC player data above — not generic football advice.
 
-Then give a one-paragraph OVERALL ASSESSMENT of how hard this team is to beat right now.
+1. EXPLOIT THIS WEAKNESS: Name the specific defensive player or position group to attack. Cite their OVR and any ability gaps. If the requester has a matching offensive weapon, name the 1v1 matchup.
+2. NEUTRALIZE THIS THREAT: Name the opponent's best offensive player with their stats, OVR, and abilities. What specific defensive scheme or player assignment shuts them down?
+3. WIN THE TRENCHES: Analyze the OL vs DL matchup. Who has the edge up front? How does this dictate play-calling?
 
-Use **bold** for player names, positions, and key tactical terms. Be specific — not generic football advice.{_TSL_ONLY_RULE}
+Then give a PREDICTION ASSESSMENT: Based on scoring trends (PPG, margin), how likely is a win? What's the score range?
+
+Use **bold** for player names, OVR ratings, and abilities. Every point must name real players from the data.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=650)
+    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=1000)
 
     return AnalysisResult(
         title=f"Game Plan: How to Beat {target_team}",
@@ -462,35 +786,25 @@ async def run_team_report(team_name: str, dm, bot=None) -> AnalysisResult:
     ctx = _build_tsl_context(dm)
 
     standings = _standings_block(dm, team_name)
-    roster = _roster_block(team_name)
+    roster = _full_roster_block(team_name)
+    abilities = _abilities_block(team_name)
     games = _recent_games_block(team_name, 6)
+    trends = _scoring_trends_block(team_name)
+    off_leaders = _offensive_leaders_block(team_name, dm)
+    def_leaders = _defensive_leaders_block(team_name, dm)
+    draft = _draft_history_block(team_name)
+    trade_context = _trade_context_block(team_name, dm)
+    power_rank = _power_rank_block(team_name, dm)
 
-    # Recent trades
-    trade_context = ""
-    if not dm.df_trades.empty:
-        relevant = dm.df_trades[
-            dm.df_trades.apply(
-                lambda r: team_name.lower() in str(r.get("team1Name", "")).lower() or
-                          team_name.lower() in str(r.get("team2Name", "")).lower(),
-                axis=1,
-            )
-        ].head(4)
-        if not relevant.empty:
-            lines = []
-            for _, row in relevant.iterrows():
-                t1, t2 = row.get("team1Name", "?"), row.get("team2Name", "?")
-                s1, s2 = row.get("team1Sent", "?"), row.get("team2Sent", "?")
-                lines.append(f"  {t1} sent {s1} ↔ {t2} sent {s2}")
-            trade_context = f"RECENT TRADES ({team_name}):\n" + "\n".join(lines)
+    # Validate critical data
+    err = _validate_team_data(team_name, roster, standings, "Team Report", dm)
+    if err:
+        return err
 
-    power_rank = ""
-    if not dm.df_power.empty:
-        for _, row in dm.df_power.iterrows():
-            if team_name.lower() in str(row.get("teamName", "")).lower():
-                power_rank = f"POWER RANKING: #{row.get('rank','?')} (score {row.get('score','?')})"
-                break
-
-    data_block = "\n\n".join(filter(None, [ctx, standings, power_rank, roster, games, trade_context]))
+    data_block = "\n\n".join(filter(None, [
+        ctx, standings, power_rank, roster, abilities,
+        games, trends, off_leaders, def_leaders, draft, trade_context,
+    ]))
 
     prompt = f"""{persona}
 
@@ -498,17 +812,19 @@ async def run_team_report(team_name: str, dm, bot=None) -> AnalysisResult:
 
 ANALYSIS TASK: Team Report — {team_name}
 
-Write a complete team analysis covering:
-1. IDENTITY: What kind of team is {team_name}? Are they run-first? Pass-heavy? Defensive? Describe their playstyle identity in 2 sentences.
-2. STRENGTHS: The 2 things this team does best. Name the specific players responsible.
-3. WEAKNESSES: The 1-2 most exploitable gaps in their roster or strategy.
-4. KEY PLAYER: The one player who most defines this team's ceiling. What happens if he underperforms?
-5. TRAJECTORY: Trending up, down, or plateauing? What does the rest of their season look like?
+Write a complete team analysis using ALL the data above. You MUST cite specific players, OVR ratings, abilities, and stats.
 
-Use **bold** for player names and ratings. Be direct — no hedging.{_TSL_ONLY_RULE}
+1. IDENTITY: What kind of team is {team_name}? Reference their offensive leaders (pass vs rush yards) to determine if they're pass-heavy or run-first. Reference their defensive identity from the defensive leaders data.
+2. STAR POWER: Name the X-Factor and Superstar players. What abilities do they have? How do these abilities shape the team's ceiling?
+3. STAT LEADERS: Who drives this offense? Cite the top passer, rusher, and receiver with their actual season stats. Who anchors the defense? Cite tackle/sack/INT leaders.
+4. STRENGTHS & WEAKNESSES: Where is this roster elite (OVR 90+)? Where are there gaps (positions without Star+ dev traits)?
+5. TRAJECTORY: Use the scoring trends (PPG, margin) and recent record to assess momentum. Are they trending up or down? Cite the numbers.
+6. ROSTER BUILDING: Based on draft history and trades — is this team building through the draft or acquiring via trade?
+
+Use **bold** for player names, ratings, and key stats. Be direct — no hedging.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=600)
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=1000)
 
     return AnalysisResult(
         title=f"Team Report: {team_name}",
@@ -536,28 +852,18 @@ async def run_owner_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
             team_name = dm.df_teams[mask].iloc[0].get("nickName", "")
 
     standings = _standings_block(dm, team_name) if team_name else ""
-    roster = _roster_block(team_name) if team_name else ""
+    roster = _full_roster_block(team_name) if team_name else ""
+    abilities = _abilities_block(team_name) if team_name else ""
     games = _recent_games_block(team_name, 5) if team_name else ""
+    trends = _scoring_trends_block(team_name) if team_name else ""
+    draft = _draft_history_block(team_name) if team_name else ""
+    trade_context = _trade_context_block(team_name, dm) if team_name else ""
+    power_rank = _power_rank_block(team_name, dm) if team_name else ""
 
-    # Trade activity
-    trade_context = ""
-    if not dm.df_trades.empty and team_name:
-        relevant = dm.df_trades[
-            dm.df_trades.apply(
-                lambda r: team_name.lower() in str(r.get("team1Name", "")).lower() or
-                          team_name.lower() in str(r.get("team2Name", "")).lower(),
-                axis=1,
-            )
-        ].head(5)
-        if not relevant.empty:
-            lines = []
-            for _, row in relevant.iterrows():
-                t1, t2 = row.get("team1Name", "?"), row.get("team2Name", "?")
-                s1, s2 = row.get("team1Sent", "?"), row.get("team2Sent", "?")
-                lines.append(f"  {t1} sent {s1} ↔ {t2} sent {s2}")
-            trade_context = f"TRADES ({team_name}):\n" + "\n".join(lines)
-
-    data_block = "\n\n".join(filter(None, [ctx, career, standings, roster, games, trade_context]))
+    data_block = "\n\n".join(filter(None, [
+        ctx, career, standings, power_rank, roster, abilities,
+        games, trends, draft, trade_context,
+    ]))
 
     prompt = f"""{persona}
 
@@ -565,17 +871,19 @@ async def run_owner_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
 
 ANALYSIS TASK: Owner Profile — {db_username}
 
-Write a complete owner profile covering:
-1. CURRENT SEASON: How are they performing this season? Record, momentum, trend.
-2. PLAYSTYLE IDENTITY: What kind of manager are they? Trader? Builder? Run-first? Pass-heavy? Defend-first?
-3. STRENGTHS: What do they consistently do well as an owner?
-4. THIS SEASON'S OUTLOOK: Based on roster and schedule position, what's realistic for them?
-5. CAREER CONTEXT: How does this season fit their historical baseline?
+Write a complete owner profile using ALL the data above. Reference specific numbers and players.
 
-Use **bold** for their name and key stats. Keep it analytical — not fluff.{_TSL_ONLY_RULE}
+1. CURRENT SEASON: Record, scoring trends (PPG/margin), momentum. Cite the actual numbers from scoring trends.
+2. PLAYSTYLE IDENTITY: Based on their roster composition and abilities — are they talent-first? Defense-first? Offense-heavy? Reference their X-Factor/Superstar players.
+3. ROSTER BUILDING: Based on draft history and trades — do they build through the draft or acquire via trade? How many drafted players are still rostered vs traded away?
+4. STRENGTHS: What do they consistently do well? Reference their career record trends (best/worst seasons).
+5. THIS SEASON'S OUTLOOK: Based on power ranking, scoring trends, and roster quality — what's realistic?
+6. CAREER CONTEXT: How does this season's record compare to their historical per-season baseline? Trending up or down?
+
+Use **bold** for their name, key stats, and player names. Keep it analytical — not fluff.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=600)
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=900)
 
     return AnalysisResult(
         title=f"Owner Profile: {db_username}",
@@ -622,7 +930,73 @@ async def run_player_scout(player_name: str, dm, bot=None) -> AnalysisResult:
             ab_lines = [f"  [{r['title']}]: {r['description']}" for r in ab_rows]
             abilities_data = "ABILITIES:\n" + "\n".join(ab_lines)
 
-    data_block = "\n\n".join(filter(None, [ctx, player_data, abilities_data]))
+    # Per-game stat trends for this player
+    game_stats = ""
+    if run_sql is not None and rows:
+        p_team = rows[0].get("teamName", "")
+        p_pos = str(rows[0].get("pos", "")).upper()
+        # Determine if offensive or defensive player
+        def_positions = {"LE", "RE", "DT", "MLB", "LOLB", "ROLB", "CB", "FS", "SS",
+                         "LEDGE", "REDGE", "MIKE", "WILL", "SAM"}
+        if p_pos in def_positions:
+            gs_rows, gs_err = run_sql(
+                "SELECT weekIndex, "
+                "CAST(defTotalTackles AS INTEGER) AS tkl, "
+                "CAST(defSacks AS INTEGER) AS sck, "
+                "CAST(defInts AS INTEGER) AS ints "
+                "FROM defensive_stats "
+                "WHERE extendedName LIKE ? AND CAST(seasonIndex AS INTEGER) = ? "
+                "ORDER BY CAST(weekIndex AS INTEGER) DESC LIMIT 5",
+                (f"%{player_name}%", dm.CURRENT_SEASON),
+            )
+            if not gs_err and gs_rows:
+                gs_lines = [f"  W{int(r['weekIndex'])+1}: {r['tkl']} tkl, {r['sck']} sck, {r['ints']} INT" for r in gs_rows]
+                game_stats = f"PER-GAME STATS (last {len(gs_rows)}):\n" + "\n".join(gs_lines)
+        else:
+            gs_rows, gs_err = run_sql(
+                "SELECT weekIndex, "
+                "CAST(passYds AS INTEGER) AS pyd, CAST(passTDs AS INTEGER) AS ptd, "
+                "CAST(rushYds AS INTEGER) AS ryd, CAST(rushTDs AS INTEGER) AS rtd, "
+                "CAST(recYds AS INTEGER) AS reyd, CAST(recTDs AS INTEGER) AS retd "
+                "FROM offensive_stats "
+                "WHERE extendedName LIKE ? AND CAST(seasonIndex AS INTEGER) = ? "
+                "ORDER BY CAST(weekIndex AS INTEGER) DESC LIMIT 5",
+                (f"%{player_name}%", dm.CURRENT_SEASON),
+            )
+            if not gs_err and gs_rows:
+                gs_lines = []
+                for r in gs_rows:
+                    parts = []
+                    if r["pyd"]: parts.append(f"{r['pyd']}py/{r['ptd']}td")
+                    if r["ryd"]: parts.append(f"{r['ryd']}ry/{r['rtd']}td")
+                    if r["reyd"]: parts.append(f"{r['reyd']}rey/{r['retd']}td")
+                    gs_lines.append(f"  W{int(r['weekIndex'])+1}: {' | '.join(parts)}")
+                game_stats = f"PER-GAME STATS (last {len(gs_rows)}):\n" + "\n".join(gs_lines)
+
+    # Positional peer comparison
+    peer_comparison = ""
+    if run_sql is not None and rows:
+        p_pos = rows[0].get("pos", "")
+        peer_rows, peer_err = run_sql(
+            "SELECT firstName || ' ' || lastName AS name, "
+            "CAST(playerBestOvr AS INTEGER) AS ovr, dev, teamName "
+            "FROM players WHERE pos = ? AND isFA != '1' "
+            "ORDER BY CAST(playerBestOvr AS INTEGER) DESC LIMIT 5",
+            (p_pos,),
+        )
+        if not peer_err and peer_rows:
+            peer_lines = []
+            for i, r in enumerate(peer_rows, 1):
+                dev = _DEV_NAMES.get(str(r.get("dev", "0")), "Normal")
+                peer_lines.append(f"  #{i} {r['name']} ({r['ovr']} OVR, {dev}) — {r['teamName']}")
+            peer_comparison = f"TOP {p_pos}s IN TSL:\n" + "\n".join(peer_lines)
+
+    # Team context
+    team_power = ""
+    if rows:
+        team_power = _power_rank_block(rows[0].get("teamName", ""), dm)
+
+    data_block = "\n\n".join(filter(None, [ctx, player_data, abilities_data, game_stats, peer_comparison, team_power]))
 
     if not player_data:
         return AnalysisResult(
@@ -640,18 +1014,20 @@ async def run_player_scout(player_name: str, dm, bot=None) -> AnalysisResult:
 
 ANALYSIS TASK: Player Scout Report — {player_name}
 
-Write a complete scouting report covering:
-1. OVERALL GRADE: Give a letter grade (A+/A/B+/B/C+/C/D) with a one-sentence justification.
-2. ELITE ATTRIBUTES: The 2-3 ratings that make this player dangerous. Cite the actual numbers.
-3. WEAKNESSES: The 1-2 ratings that limit this player. What game situations expose him?
-4. DEVELOPMENT TRAJECTORY: What does their dev trait (Normal/Star/Superstar/XFactor) mean for their future value in TSL?
-5. ABILITIES: Explain their active abilities and how they synergize (or don't).
-6. BOTTOM LINE: One sentence on what this player is worth to a TSL roster.
+Write a complete scouting report using ALL the data above. Cite specific numbers throughout.
 
-Use **bold** for ratings and the grade. Be specific — cite actual rating numbers.{_TSL_ONLY_RULE}
+1. OVERALL GRADE: Give a letter grade (A+/A/B+/B/C+/C/D) with justification based on OVR and positional ranking.
+2. ELITE ATTRIBUTES: The 2-3 ratings that make this player dangerous. Cite the actual numbers from the player data.
+3. WEAKNESSES: The 1-2 ratings that limit this player. What game situations expose him?
+4. GAME LOG: Analyze the per-game stat trends. Is this player producing consistently or boom/bust? Cite specific weeks.
+5. POSITIONAL RANKING: Where does this player rank among TSL's top players at his position? Who's ahead of him and by how much OVR?
+6. ABILITIES: Explain their active abilities and how they synergize (or don't). What ability tier are they?
+7. BOTTOM LINE: One sentence on what this player is worth to a TSL roster, factoring in dev trait and age.
+
+Use **bold** for ratings, the grade, and player names. Be specific — cite actual numbers.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=600)
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=900)
 
     return AnalysisResult(
         title=f"Player Scout: {player_name}",
@@ -671,20 +1047,37 @@ async def run_power_rankings(dm, bot=None) -> AnalysisResult:
     # Full standings
     standings = _standings_block(dm)
 
-    # Power rankings data
+    # ALL power rankings (not capped at 16)
     power_context = ""
     if not dm.df_power.empty:
         lines = []
-        for _, row in dm.df_power.head(16).iterrows():
+        for _, row in dm.df_power.iterrows():
             tn = row.get("teamName", "?")
             rank = row.get("rank", "?")
             score = row.get("score", "?")
-            lines.append(f"  #{rank} {tn} (power score: {score})")
-        power_context = "CURRENT POWER RANKINGS:\n" + "\n".join(lines)
+            ovr = row.get("ovrRating", "?")
+            lines.append(f"  #{rank} {tn} (power: {score}, OVR: {ovr})")
+        power_context = "CURRENT POWER RANKINGS (ALL TEAMS):\n" + "\n".join(lines)
 
-    # Momentum: last 4 weeks results (win/loss streak)
+    # Point differential analysis
+    pt_diff = ""
+    if not dm.df_standings.empty:
+        diff_lines = []
+        for _, row in dm.df_standings.iterrows():
+            tn = row.get("teamName", "")
+            pf = int(row.get("totalPtsFor", 0) or 0)
+            pa = int(row.get("totalPtsAgainst", 0) or 0)
+            diff = pf - pa
+            w = int(row.get("totalWins", 0) or 0)
+            l = int(row.get("totalLosses", 0) or 0)
+            if w + l > 0:
+                diff_lines.append((diff, f"  {tn} ({w}-{l}): PF {pf}, PA {pa}, Diff {diff:+d}"))
+        diff_lines.sort(key=lambda x: x[0], reverse=True)
+        pt_diff = "POINT DIFFERENTIAL (sorted best to worst):\n" + "\n".join(line for _, line in diff_lines)
+
+    # Momentum: streaks
     momentum = ""
-    if run_sql is not None and not dm.df_standings.empty:
+    if not dm.df_standings.empty:
         streak_lines = []
         for _, row in dm.df_standings.iterrows():
             tn = row.get("teamName", "")
@@ -701,7 +1094,7 @@ async def run_power_rankings(dm, bot=None) -> AnalysisResult:
         if streak_lines:
             momentum = "NOTABLE STREAKS:\n" + "\n".join(streak_lines)
 
-    data_block = "\n\n".join(filter(None, [ctx, power_context, standings, momentum]))
+    data_block = "\n\n".join(filter(None, [ctx, power_context, standings, pt_diff, momentum]))
 
     prompt = f"""{persona}
 
@@ -709,18 +1102,19 @@ async def run_power_rankings(dm, bot=None) -> AnalysisResult:
 
 ANALYSIS TASK: TSL Power Rankings — Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK}
 
-Write a power rankings analysis covering:
-1. ELITE TIER: Name the 2-3 teams that are clearly the best right now. What separates them?
-2. CONTENDER TIER: The 4-6 teams with legitimate playoff upside. What do they need to do?
-3. FRINGE / BUBBLE: Teams fighting for their playoff lives. Who's most dangerous from here?
-4. REBUILDING: Teams that are done this season but may matter next year.
-5. BIGGEST RISER: The one team trending up most dramatically. Why?
-6. BIGGEST FALLER: The one team that has disappointed most. What went wrong?
+Write power rankings using ALL the data above. You have every team's record, point differential, power score, and streaks. Use them.
 
-Be opinionated. ATLAS has access to the full league data — use it. Name names. Cite records.{_TSL_ONLY_RULE}
+1. ELITE TIER: The 2-3 best teams. Cite their records, point differentials, and power scores. What separates them from everyone else?
+2. CONTENDER TIER: The 4-6 teams with playoff upside. Cite their records and what they need to improve (point differential trends).
+3. FRINGE / BUBBLE: Teams fighting for their playoff lives. Reference their streaks and recent momentum. Who's most dangerous from here?
+4. REBUILDING: Teams mathematically or practically eliminated. Reference their point differentials to explain why.
+5. BIGGEST RISER: The one team trending up most dramatically. Cite their win streak and scoring trends.
+6. BIGGEST FALLER: The one team that has disappointed most. What does their point differential reveal?
+
+Be opinionated. Cite SPECIFIC records, differentials, and power scores. No vague assessments.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=700)
+    result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=1000)
 
     return AnalysisResult(
         title=f"Power Rankings — Season {dm.CURRENT_SEASON} · Week {dm.CURRENT_WEEK}",
@@ -780,7 +1174,45 @@ async def run_dynasty_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
     # Current season context
     cur_standing = _standings_block(dm)
 
-    data_block = "\n\n".join(filter(None, [ctx, career, all_time_context, best_season, cur_standing]))
+    # Find their current team for roster/draft assessment
+    team_name = None
+    if not dm.df_teams.empty:
+        mask = dm.df_teams["userName"].str.lower() == db_username.lower()
+        if mask.any():
+            team_name = dm.df_teams[mask].iloc[0].get("nickName", "")
+
+    roster = _full_roster_block(team_name) if team_name else ""
+    abilities = _abilities_block(team_name) if team_name else ""
+    draft = _draft_history_block(team_name) if team_name else ""
+    trade_context = _trade_context_block(team_name, dm) if team_name else ""
+
+    # Playoff history
+    playoff_history = ""
+    if run_sql is not None:
+        po_rows, po_err = run_sql(
+            "SELECT seasonIndex, weekIndex, homeTeamName, awayTeamName, "
+            "homeScore, awayScore, winner_user "
+            "FROM games WHERE status IN ('2','3') AND CAST(stageIndex AS INTEGER) > 1 "
+            "AND (winner_user=? OR loser_user=?) "
+            "ORDER BY CAST(seasonIndex AS INTEGER) DESC, CAST(weekIndex AS INTEGER) DESC",
+            (db_username, db_username),
+        )
+        if not po_err and po_rows:
+            po_wins = sum(1 for r in po_rows if r.get("winner_user", "").lower() == db_username.lower())
+            po_losses = len(po_rows) - po_wins
+            po_lines = [f"PLAYOFF HISTORY: {po_wins}W-{po_losses}L ({len(po_rows)} games)"]
+            for r in po_rows[:8]:
+                sn = r.get("seasonIndex", "?")
+                home, away = r["homeTeamName"], r["awayTeamName"]
+                hs, as_ = r["homeScore"], r["awayScore"]
+                winner = r.get("winner_user", "?")
+                po_lines.append(f"  S{sn}: {home} {hs}–{as_} {away} → {winner} wins")
+            playoff_history = "\n".join(po_lines)
+
+    data_block = "\n\n".join(filter(None, [
+        ctx, career, all_time_context, best_season, cur_standing,
+        playoff_history, roster, abilities, draft, trade_context,
+    ]))
 
     prompt = f"""{persona}
 
@@ -788,18 +1220,20 @@ async def run_dynasty_profile(owner_name: str, dm, bot=None) -> AnalysisResult:
 
 ANALYSIS TASK: Dynasty Profile — {db_username}
 
-Write a legacy analysis covering:
-1. ALL-TIME STANDING: Where does {db_username} rank in TSL history? Use their actual win rank.
-2. ERA ANALYSIS: Were they dominant early, mid, or recently? Did they have a dynasty window?
-3. CAREER HIGHLIGHTS: Their best season(s). Peak performance in numbers.
-4. CEILING AND FLOOR: What's the highest they've reached? What's the worst they've sunk to?
-5. LEGACY LINE: A single definitive sentence on what {db_username}'s TSL legacy is. Make it land.
-6. CURRENT SEASON: How does this season fit their arc — rise, fall, or plateau?
+Write a definitive legacy analysis using ALL the data above.
+
+1. ALL-TIME STANDING: Where does {db_username} rank among all TSL owners? Cite their exact position in the win leaders table and total wins.
+2. ERA ANALYSIS: Season-by-season career data is provided. Identify their peak era, rebuild era, and current trajectory. Cite specific season records.
+3. PLAYOFF PEDIGREE: How many playoff games have they won? Any deep runs or championships? Reference specific playoff matchup scores.
+4. ROSTER LEGACY: Based on their current roster and draft history — how have they built this team? Cite their top X-Factor/Superstar players.
+5. CEILING AND FLOOR: Best season record vs worst season record. What's the spread between their peak and valley?
+6. LEGACY LINE: A single definitive sentence on what {db_username}'s TSL legacy is. Make it land.
+7. CURRENT ARC: How does this season fit — rise, fall, or plateau? Reference scoring trends if available.
 
 Be direct and analytical. This is a definitive assessment, not a tribute piece.{_TSL_ONLY_RULE}
 """
 
-    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=700)
+    result = await atlas_ai.generate(prompt, tier=Tier.OPUS, max_tokens=1000)
 
     return AnalysisResult(
         title=f"Dynasty Profile: {db_username}",

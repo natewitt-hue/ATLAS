@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.3.0"  # feat: Oracle Intelligence Hub v2 — 8 predefined TSL analysis types, PNG cards, no free-form Q&A
+ATLAS_VERSION = "7.4.0"  # feat: Oracle Intel Hub v3 — AFC/NFC team selection, deep data enrichment, player abilities/stats
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
