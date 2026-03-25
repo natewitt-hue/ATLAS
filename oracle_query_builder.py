@@ -1002,6 +1002,258 @@ def owner_games(
     return cte + "SELECT * FROM og\nORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)", tuple(params)
 
 
+def pythagorean_wins(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Expected wins from Pythagorean formula (PF^2.37 / (PF^2.37 + PA^2.37)).
+
+    SQLite lacks POWER(), so this returns raw PF/PA/actual_wins/games_played.
+    The code-gen agent computes expected_wins in Python:
+        exp = (pf**2.37 / (pf**2.37 + pa**2.37)) * games_played
+        luck = actual_wins - exp
+    """
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(user_score)  AS points_for,
+    SUM(opp_score)   AS points_against,
+    SUM(won)         AS actual_wins,
+    COUNT(*)         AS games_played
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
+def home_away_record(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Owner's record split by home vs away."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    CASE WHEN is_home = 1 THEN 'Home' ELSE 'Away' END AS location,
+    SUM(won)                     AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+    COUNT(*)                     AS games,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3) AS win_pct
+FROM og
+GROUP BY is_home
+ORDER BY is_home DESC
+"""
+    return sql, tuple(params)
+
+
+def blowout_frequency(
+    user: str,
+    season: int | None = None,
+    margin_threshold: int = 17,
+) -> tuple[str, tuple]:
+    """How often an owner wins or loses by margin_threshold+ points."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(CASE WHEN won = 1 AND ABS(margin) >= ? THEN 1 ELSE 0 END) AS blowout_wins,
+    SUM(CASE WHEN won = 0 AND ABS(margin) >= ? THEN 1 ELSE 0 END) AS blowout_losses,
+    COUNT(*) AS total_games,
+    ROUND(CAST(SUM(CASE WHEN ABS(margin) >= ? THEN 1 ELSE 0 END) AS REAL) / COUNT(*), 3) AS blowout_pct
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    params_extended = list(params) + [margin_threshold, margin_threshold, margin_threshold]
+    return sql, tuple(params_extended)
+
+
+def close_game_record(
+    user: str,
+    season: int | None = None,
+    margin_threshold: int = 7,
+) -> tuple[str, tuple]:
+    """Owner's record in games decided by margin_threshold or fewer points. Clutch metric."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(CASE WHEN won = 1 AND ABS(margin) <= ? THEN 1 ELSE 0 END) AS close_wins,
+    SUM(CASE WHEN won = 0 AND ABS(margin) <= ? THEN 1 ELSE 0 END) AS close_losses,
+    SUM(CASE WHEN ABS(margin) <= ? THEN 1 ELSE 0 END) AS total_close,
+    ROUND(
+        CAST(SUM(CASE WHEN won = 1 AND ABS(margin) <= ? THEN 1 ELSE 0 END) AS REAL)
+        / NULLIF(SUM(CASE WHEN ABS(margin) <= ? THEN 1 ELSE 0 END), 0),
+        3
+    ) AS close_win_pct
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    params_extended = list(params) + [margin_threshold] * 5
+    return sql, tuple(params_extended)
+
+
+def scoring_margin_distribution(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Win/loss count bucketed by margin ranges: 1-3, 4-7, 8-14, 15-21, 22+."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    CASE
+        WHEN ABS(margin) BETWEEN 1 AND 3   THEN '1-3'
+        WHEN ABS(margin) BETWEEN 4 AND 7   THEN '4-7'
+        WHEN ABS(margin) BETWEEN 8 AND 14  THEN '8-14'
+        WHEN ABS(margin) BETWEEN 15 AND 21 THEN '15-21'
+        WHEN ABS(margin) >= 22             THEN '22+'
+        ELSE '0 (tie)'
+    END AS margin_bucket,
+    SUM(won)                                     AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END)     AS losses,
+    COUNT(*)                                     AS total
+FROM og
+GROUP BY margin_bucket
+ORDER BY MIN(ABS(margin))
+"""
+    return sql, tuple(params)
+
+
+def first_half_second_half(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Record in first 8 weeks vs last 8+ weeks. Identifies slow starters / fast finishers.
+
+    weekIndex is 0-based in DB. Weeks 0-7 = first half, 8+ = second half.
+    """
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    CASE WHEN CAST(weekIndex AS INTEGER) < 8 THEN 'First 8' ELSE 'Last 8+' END AS half,
+    SUM(won)                                 AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3) AS win_pct
+FROM og
+GROUP BY half
+ORDER BY half
+"""
+    return sql, tuple(params)
+
+
+def owner_scoring_trend(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Per-week scoring trend. Shows mid-season surges and collapses."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    weekIndex,
+    ROUND(AVG(user_score), 1) AS avg_user_score,
+    ROUND(AVG(opp_score),  1) AS avg_opp_score,
+    ROUND(AVG(margin),     1) AS margin
+FROM og
+GROUP BY seasonIndex, weekIndex
+ORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
+def owner_consistency(
+    user: str,
+    min_games: int = 15,
+) -> tuple[str, tuple]:
+    """Career win consistency. Returns per-season win counts for stddev computation.
+
+    SQLite lacks STDDEV. The code-gen agent computes stddev in Python:
+        import statistics
+        wins = [r['wins'] for r in rows]
+        stddev = statistics.stdev(wins) if len(wins) > 1 else 0
+    """
+    cte, params = _owner_games_cte(user)  # No season filter — all-time
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(won)         AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+    COUNT(*)         AS games_played
+FROM og
+GROUP BY seasonIndex
+HAVING COUNT(*) >= ?
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    params_extended = list(params) + [min_games]
+    return sql, tuple(params_extended)
+
+
+def owner_career_summary(user: str) -> tuple[str, tuple]:
+    """Comprehensive career totals: W/L, win%, seasons, teams controlled."""
+    cte, params = _owner_games_cte(user)
+    sql = cte + """
+SELECT
+    COUNT(DISTINCT seasonIndex)                  AS seasons_played,
+    SUM(won)                                     AS total_wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END)     AS total_losses,
+    COUNT(*)                                     AS total_games,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3)  AS career_win_pct,
+    GROUP_CONCAT(DISTINCT user_team)             AS teams_controlled
+FROM og
+"""
+    return sql, tuple(params)
+
+
+def owner_improvement_arc(user: str) -> tuple[str, tuple]:
+    """Win% per season for trajectory plotting. All-time, no season filter."""
+    cte, params = _owner_games_cte(user)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(won)                                     AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END)     AS losses,
+    COUNT(*)                                     AS games_played,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3)  AS win_pct
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
+def owner_division_record(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Owner's record in intra-division games.
+
+    Joins teams table on displayName to determine division membership.
+    IMPORTANT: Uses teams.displayName (e.g., '49ers') NOT nickName ('Niners').
+    Uses LEFT JOIN with COALESCE fallback for teams not found in the teams table
+    (e.g., franchises that changed names across seasons).
+    """
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    og.seasonIndex,
+    SUM(og.won)                                      AS div_wins,
+    SUM(CASE WHEN og.won = 0 THEN 1 ELSE 0 END)      AS div_losses,
+    COUNT(*)                                         AS total_div_games
+FROM og
+LEFT JOIN teams ut ON og.user_team = ut.displayName
+LEFT JOIN teams ot ON og.opp_team  = ot.displayName
+WHERE ut.divName IS NOT NULL
+  AND ot.divName IS NOT NULL
+  AND ut.divName = ot.divName
+GROUP BY og.seasonIndex
+ORDER BY CAST(og.seasonIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS (Layer 3)
 # ══════════════════════════════════════════════════════════════════════════════
