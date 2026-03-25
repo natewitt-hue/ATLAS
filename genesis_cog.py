@@ -1949,7 +1949,7 @@ def _build_genesis_hub_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🧬 ATLAS Genesis — Trade Hub",
         description=(
-            f"Season {dm.CURRENT_SEASON} | Week {dm.CURRENT_WEEK}\n"
+            f"Season {dm.CURRENT_SEASON} | {dm.week_label(dm.CURRENT_WEEK)}\n"
             "Trade proposals, lookups, and lottery — **private to you**.\u200b"
         ),
         color=AtlasColors.TSL_GOLD,

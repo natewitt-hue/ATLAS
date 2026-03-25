@@ -104,6 +104,40 @@ _HEADERS = {
     "User-Agent":       "ATLAS-Bot/1.4",
 }
 
+# ── Playoff week mapping ──────────────────────────────────────────────────────
+# Madden API continues weekIndex past 17 for playoffs (0-based).
+# Week 18 is the last regular-season week (weekIndex 17).
+_PLAYOFF_WEEK_NAMES: dict[int, tuple[str, str]] = {
+    # 1-based week: (long name, short name)
+    19: ("Wild Card",    "WC"),
+    20: ("Divisional",   "DIV"),
+    21: ("Conf Champ",   "CC"),
+    22: ("Pro Bowl",     "PB"),
+    23: ("Super Bowl",   "SB"),
+}
+
+def week_label(week: int, *, short: bool = False) -> str:
+    """Convert a 1-based week number to a display label.
+
+    Regular season (1-18) → 'Week 5' / 'W5'
+    Playoffs (19+)        → 'Wild Card' / 'WC'
+    """
+    entry = _PLAYOFF_WEEK_NAMES.get(week)
+    if entry:
+        return entry[1] if short else entry[0]
+    return f"W{week}" if short else f"Week {week}"
+
+
+# SQL CASE expression for use inside queries (operates on 0-based weekIndex)
+WEEK_LABEL_SQL = """CASE
+    WHEN CAST(weekIndex AS INTEGER) <= 17 THEN 'W' || (CAST(weekIndex AS INTEGER)+1)
+    WHEN CAST(weekIndex AS INTEGER) = 18 THEN 'WC'
+    WHEN CAST(weekIndex AS INTEGER) = 19 THEN 'DIV'
+    WHEN CAST(weekIndex AS INTEGER) = 20 THEN 'CC'
+    WHEN CAST(weekIndex AS INTEGER) = 22 THEN 'SB'
+    ELSE 'W' || (CAST(weekIndex AS INTEGER)+1)
+END"""
+
 # ── League state (atomically swapped by load_all()) ──────────────────────────
 REGULAR_STAGE  = 1     # stageIndex for regular season in this league
 _CHAMPIONSHIP_STAGE_MIN = 200  # stageIndex >= 200 indicates championship rounds
@@ -672,7 +706,7 @@ def load_all() -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def get_league_status() -> str:
-    return f"Season {_state.CURRENT_SEASON} | Week {_state.CURRENT_WEEK}"
+    return f"Season {_state.CURRENT_SEASON} | {week_label(_state.CURRENT_WEEK)}"
 
 
 def get_sync_age_text() -> str | None:

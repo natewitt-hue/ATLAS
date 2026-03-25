@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.6.0"  # feat: /atlas user home, /god module, admin migration, Oracle theme fix
+ATLAS_VERSION = "7.7.0"  # feat: playoff round labels (Wild Card, Divisional, etc.) replace Week 19+
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -503,7 +503,7 @@ async def blowout_monitor():
             return
         for flag in flags:
             msg = (
-                f"🚨 **Stat Padding Flag** — Week {dm.CURRENT_WEEK}\n"
+                f"🚨 **Stat Padding Flag** — {dm.week_label(dm.CURRENT_WEEK)}\n"
                 f"**{flag['name']}** ({flag['team']}): "
                 f"{flag['delta']} {flag['stat']} (threshold: {flag['threshold']})"
             )

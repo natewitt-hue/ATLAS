@@ -23,6 +23,7 @@ import discord
 
 from atlas_html_engine import render_card, wrap_card, esc, icon_pill
 from atlas_style_tokens import Tokens
+from data_manager import week_label as _week_label
 from odds_utils import american_to_str, payout_calc
 
 # ── Sport icon mapping ────────────────────────────────────────────────────────
@@ -955,7 +956,7 @@ async def build_bet_confirm_card(
     detail_parts.append(f"({odds_str})")
     detail_line = " \u00b7 ".join(detail_parts)
 
-    subtitle = f"WEEK {week} \u00b7 {esc(source)}" if week else esc(source)
+    subtitle = f"{_week_label(week).upper()} \u00b7 {esc(source)}" if week else esc(source)
 
     body = f"""<style>{_BET_CONFIRM_CSS}</style>
 
@@ -1022,7 +1023,7 @@ async def build_parlay_confirm_card(
   <span class="leg-info">{lo_str}</span>
 </div>"""
 
-    subtitle = f"WEEK {week} \u00b7 TSL" if week else "TSL"
+    subtitle = f"{_week_label(week).upper()} \u00b7 TSL" if week else "TSL"
 
     body = f"""<style>{_BET_CONFIRM_CSS}</style>
 
@@ -1061,7 +1062,7 @@ async def build_parlay_confirm_card(
 </div>
 
 <div class="match-footer">
-  <span>ALL LEGS MUST HIT{' \u00b7 WEEK ' + str(week) if week else ''}</span>
+  <span>ALL LEGS MUST HIT{' \u00b7 ' + _week_label(week).upper() if week else ''}</span>
 </div>
 """
     return await render_card(wrap_card(body, status_class="jackpot", theme_id=theme_id))

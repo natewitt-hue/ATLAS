@@ -79,7 +79,7 @@ class StatDef:
     """
     table: str                                       # "offensive_stats" | "defensive_stats" | "team_stats"
     column: str                                      # DB column name
-    agg: Literal["SUM", "AVG"]                       # Aggregation type
+    agg: Literal["SUM", "AVG", "MAX", "MIN"]         # Aggregation type
     pos_filter: str | None                           # "QB" or None (all positions)
     category: Literal["offense", "defense", "team"]  # Stat category
     efficiency_alt: str | None = None                # Column for "worst" queries
@@ -127,6 +127,26 @@ class DomainKnowledge:
         "drops":                StatDef("offensive_stats", "recDrops",         "SUM", None, "offense"),
         "yards after catch":    StatDef("offensive_stats", "recYdsAfterCatch", "SUM", None, "offense"),
 
+        # ── Passing (extended) ───────────────────────────────
+        "yards per attempt":    StatDef("offensive_stats", "passYdsPerAtt",      "AVG", "QB",   "offense", cast_type="REAL"),
+        "pass attempts":        StatDef("offensive_stats", "passAtt",            "SUM", "QB",   "offense"),
+        "sacks taken":          StatDef("offensive_stats", "passSacks",          "SUM", "QB",   "offense"),
+        "longest pass":         StatDef("offensive_stats", "passLongest",        "MAX", "QB",   "offense"),
+
+        # ── Rushing (extended) ───────────────────────────────
+        "rush attempts":        StatDef("offensive_stats", "rushAtt",            "SUM", None,   "offense"),
+        "yards per carry":      StatDef("offensive_stats", "rushYdsPerAtt",      "AVG", None,   "offense", cast_type="REAL"),
+        "broken tackles":       StatDef("offensive_stats", "rushBrokenTackles",  "SUM", None,   "offense"),
+        "yards after contact":  StatDef("offensive_stats", "rushYdsAfterContact","SUM", None,   "offense"),
+        "longest rush":         StatDef("offensive_stats", "rushLongest",        "MAX", None,   "offense"),
+        "20 yard runs":         StatDef("offensive_stats", "rush20PlusYds",      "SUM", None,   "offense"),
+
+        # ── Receiving (extended) ─────────────────────────────
+        "catch percentage":     StatDef("offensive_stats", "recCatchPct",        "AVG", None,   "offense", cast_type="REAL"),
+        "yards per catch":      StatDef("offensive_stats", "recYdsPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
+        "yac per catch":        StatDef("offensive_stats", "recYacPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
+        "longest reception":    StatDef("offensive_stats", "recLongest",         "MAX", None,   "offense"),
+
         # ── Individual Defense (more = better for the defender) ──
         "forced fumbles":       StatDef("defensive_stats", "defForcedFum",     "SUM", None, "defense"),
         "fumble recoveries":    StatDef("defensive_stats", "defFumRec",        "SUM", None, "defense"),
@@ -137,6 +157,11 @@ class DomainKnowledge:
         "tackles":              StatDef("defensive_stats", "defTotalTackles",  "SUM", None, "defense"),
         "sacks":                StatDef("defensive_stats", "defSacks",         "SUM", None, "defense"),
         "interceptions":        StatDef("defensive_stats", "defInts",          "SUM", None, "defense"),
+
+        # ── Individual Defense (extended) ────────────────────
+        "catches allowed":      StatDef("defensive_stats", "defCatchAllowed",   "SUM", None,   "defense", invert_sort=True),
+        "int return yards":     StatDef("defensive_stats", "defIntReturnYds",   "SUM", None,   "defense"),
+        "safeties":             StatDef("defensive_stats", "defSafeties",       "SUM", None,   "defense"),
 
         # ── Team Defense (fewer yards allowed = better → invert_sort) ──
         "team total yards allowed": StatDef("team_stats", "defTotalYds",  "SUM", None, "team",
@@ -157,6 +182,13 @@ class DomainKnowledge:
         "team rush tds":        StatDef("team_stats", "offRushTDs",  "SUM", None, "team"),
         "penalties":            StatDef("team_stats", "penalties",    "SUM", None, "team"),
         "penalty yards":        StatDef("team_stats", "penaltyYds",  "SUM", None, "team"),
+
+        # ── Aliases (shorthand for NL matching) ──────────────
+        "ypa":                  StatDef("offensive_stats", "passYdsPerAtt",      "AVG", "QB",   "offense", cast_type="REAL"),
+        "ypc":                  StatDef("offensive_stats", "rushYdsPerAtt",      "AVG", None,   "offense", cast_type="REAL"),
+        "catch pct":            StatDef("offensive_stats", "recCatchPct",        "AVG", None,   "offense", cast_type="REAL"),
+        "yac":                  StatDef("offensive_stats", "recYacPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
+        "broken tackle rate":   StatDef("offensive_stats", "rushBrokenTackles",  "SUM", None,   "offense"),  # alias: "rate" = frequency/count, not a ratio
     }
 
     # Pre-sorted keys (longest first) for correct substring matching
@@ -876,6 +908,349 @@ def career_trajectory(user: str, stat: str) -> tuple[str, tuple]:
         ORDER BY CAST(s.seasonIndex AS INTEGER)
     """
     return sql, (user,)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OWNER-SCOPED METRICS — shared CTE primitive + public functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _owner_games_cte(
+    user: str,
+    season: int | None = None,
+    include_playoffs: bool = False,
+) -> tuple[str, list]:
+    """Returns (cte_sql, params) for a two-level owner_games CTE.
+
+    Internal helper — not exposed to the agent. Public functions call this,
+    then append their own SELECT against `og`.
+
+    Two-level structure:
+        og_raw: base game rows filtered by user identity + completion status
+        og:     adds pre-computed `margin` = user_score - opp_score
+
+    The `user` param appears 8 times in og_raw:  # document this count
+        5x homeUser CASE: user_team, opp_team, is_home, user_score, opp_score
+        1x winner_user CASE: won
+        2x in WHERE clause:     (homeUser = ? OR awayUser = ?)
+    Total: params = [user] * 8  (plus optional season param)
+
+    CTE output columns (from og):
+        seasonIndex, weekIndex, stageIndex,
+        homeTeamName, awayTeamName, homeScore (INTEGER), awayScore (INTEGER),
+        homeUser, awayUser, winner_user, loser_user,
+        user_team, opp_team,
+        is_home (1 if user was home, 0 if away),
+        user_score, opp_score,
+        won (1 if user won, 0 if lost),
+        margin (user_score - opp_score, positive = win)
+    """
+    if not user:
+        raise ValueError("_owner_games_cte: user must be a non-empty string")
+    stages = "('1','2')" if include_playoffs else "('1')"
+    params: list = [user] * 8  # 6 CASE + 2 WHERE — see docstring
+
+    cte = f"""WITH og_raw AS (
+    SELECT
+        g.seasonIndex, g.weekIndex, g.stageIndex,
+        g.homeTeamName, g.awayTeamName,
+        CAST(g.homeScore AS INTEGER) AS homeScore,
+        CAST(g.awayScore AS INTEGER) AS awayScore,
+        g.homeUser, g.awayUser, g.winner_user, g.loser_user,
+        CASE WHEN g.homeUser = ? THEN g.homeTeamName ELSE g.awayTeamName  END AS user_team,
+        CASE WHEN g.homeUser = ? THEN g.awayTeamName ELSE g.homeTeamName  END AS opp_team,
+        CASE WHEN g.homeUser = ? THEN 1 ELSE 0                            END AS is_home,
+        CASE WHEN g.homeUser = ?
+             THEN CAST(g.homeScore AS INTEGER)
+             ELSE CAST(g.awayScore AS INTEGER)                            END AS user_score,
+        CASE WHEN g.homeUser = ?
+             THEN CAST(g.awayScore AS INTEGER)
+             ELSE CAST(g.homeScore AS INTEGER)                            END AS opp_score,
+        CASE WHEN g.winner_user = ? THEN 1 ELSE 0                        END AS won
+    FROM games g
+    WHERE g.status IN ('2','3')
+      AND g.stageIndex IN {stages}
+      AND (g.homeUser = ? OR g.awayUser = ?)
+      AND g.homeUser NOT IN ('CPU', '')
+      AND g.awayUser NOT IN ('CPU', '')
+"""
+    if season is not None:
+        cte += "      AND g.seasonIndex = ?\n"
+        params.append(str(season))
+
+    cte += """),
+og AS (
+    SELECT *, (user_score - opp_score) AS margin FROM og_raw
+)
+"""
+    return cte, params
+
+
+def owner_games(
+    user: str,
+    season: int | None = None,
+    include_playoffs: bool = False,
+) -> tuple[str, tuple]:
+    """All completed games for an owner — foundation for custom owner queries.
+
+    Returns CTE + SELECT * FROM og. The code-gen agent uses this directly
+    for one-off owner queries not covered by the specific metric functions.
+
+    Excludes CPU games. Scopes by user identity across all teams they have
+    ever controlled (not by franchise).
+    """
+    cte, params = _owner_games_cte(user, season, include_playoffs)
+    return cte + "SELECT * FROM og\nORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)", tuple(params)
+
+
+def pythagorean_wins(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Expected wins from Pythagorean formula (PF^2.37 / (PF^2.37 + PA^2.37)).
+
+    SQLite lacks POWER(), so this returns raw PF/PA/actual_wins/games_played.
+    The code-gen agent computes expected_wins in Python:
+        exp = (pf**2.37 / (pf**2.37 + pa**2.37)) * games_played
+        luck = actual_wins - exp
+    """
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(user_score)  AS points_for,
+    SUM(opp_score)   AS points_against,
+    SUM(won)         AS actual_wins,
+    COUNT(*)         AS games_played
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
+def home_away_record(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Owner's record split by home vs away."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    CASE WHEN is_home = 1 THEN 'Home' ELSE 'Away' END AS location,
+    SUM(won)                     AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+    COUNT(*)                     AS games,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3) AS win_pct
+FROM og
+GROUP BY is_home
+ORDER BY is_home DESC
+"""
+    return sql, tuple(params)
+
+
+def blowout_frequency(
+    user: str,
+    season: int | None = None,
+    margin_threshold: int = 17,
+) -> tuple[str, tuple]:
+    """How often an owner wins or loses by margin_threshold+ points."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(CASE WHEN won = 1 AND ABS(margin) >= ? THEN 1 ELSE 0 END) AS blowout_wins,
+    SUM(CASE WHEN won = 0 AND ABS(margin) >= ? THEN 1 ELSE 0 END) AS blowout_losses,
+    COUNT(*) AS total_games,
+    ROUND(CAST(SUM(CASE WHEN ABS(margin) >= ? THEN 1 ELSE 0 END) AS REAL) / COUNT(*), 3) AS blowout_pct
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    params_extended = list(params) + [margin_threshold, margin_threshold, margin_threshold]
+    return sql, tuple(params_extended)
+
+
+def close_game_record(
+    user: str,
+    season: int | None = None,
+    margin_threshold: int = 7,
+) -> tuple[str, tuple]:
+    """Owner's record in games decided by margin_threshold or fewer points. Clutch metric."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(CASE WHEN won = 1 AND ABS(margin) <= ? THEN 1 ELSE 0 END) AS close_wins,
+    SUM(CASE WHEN won = 0 AND ABS(margin) <= ? THEN 1 ELSE 0 END) AS close_losses,
+    SUM(CASE WHEN ABS(margin) <= ? THEN 1 ELSE 0 END) AS total_close,
+    ROUND(
+        CAST(SUM(CASE WHEN won = 1 AND ABS(margin) <= ? THEN 1 ELSE 0 END) AS REAL)
+        / NULLIF(SUM(CASE WHEN ABS(margin) <= ? THEN 1 ELSE 0 END), 0),
+        3
+    ) AS close_win_pct
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    params_extended = list(params) + [margin_threshold] * 5
+    return sql, tuple(params_extended)
+
+
+def scoring_margin_distribution(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Win/loss count bucketed by margin ranges: 1-3, 4-7, 8-14, 15-21, 22+."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    CASE
+        WHEN ABS(margin) BETWEEN 1 AND 3   THEN '1-3'
+        WHEN ABS(margin) BETWEEN 4 AND 7   THEN '4-7'
+        WHEN ABS(margin) BETWEEN 8 AND 14  THEN '8-14'
+        WHEN ABS(margin) BETWEEN 15 AND 21 THEN '15-21'
+        WHEN ABS(margin) >= 22             THEN '22+'
+        ELSE '0 (tie)'
+    END AS margin_bucket,
+    SUM(won)                                     AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END)     AS losses,
+    COUNT(*)                                     AS total
+FROM og
+GROUP BY margin_bucket
+ORDER BY MIN(ABS(margin))
+"""
+    return sql, tuple(params)
+
+
+def first_half_second_half(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Record in first 8 weeks vs last 8+ weeks. Identifies slow starters / fast finishers.
+
+    weekIndex is 0-based in DB. Weeks 0-7 = first half, 8+ = second half.
+    """
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    CASE WHEN CAST(weekIndex AS INTEGER) < 8 THEN 'First 8' ELSE 'Last 8+' END AS half,
+    SUM(won)                                 AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3) AS win_pct
+FROM og
+GROUP BY half
+ORDER BY half
+"""
+    return sql, tuple(params)
+
+
+def owner_scoring_trend(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Per-week scoring trend. Shows mid-season surges and collapses."""
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    weekIndex,
+    ROUND(AVG(user_score), 1) AS avg_user_score,
+    ROUND(AVG(opp_score),  1) AS avg_opp_score,
+    ROUND(AVG(margin),     1) AS margin
+FROM og
+GROUP BY seasonIndex, weekIndex
+ORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
+def owner_consistency(
+    user: str,
+    min_games: int = 15,
+) -> tuple[str, tuple]:
+    """Career win consistency. Returns per-season win counts for stddev computation.
+
+    SQLite lacks STDDEV. The code-gen agent computes stddev in Python:
+        import statistics
+        wins = [r['wins'] for r in rows]
+        stddev = statistics.stdev(wins) if len(wins) > 1 else 0
+    """
+    cte, params = _owner_games_cte(user)  # No season filter — all-time
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(won)         AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+    COUNT(*)         AS games_played
+FROM og
+GROUP BY seasonIndex
+HAVING COUNT(*) >= ?
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    params_extended = list(params) + [min_games]
+    return sql, tuple(params_extended)
+
+
+def owner_career_summary(user: str) -> tuple[str, tuple]:
+    """Comprehensive career totals: W/L, win%, seasons, teams controlled."""
+    cte, params = _owner_games_cte(user)
+    sql = cte + """
+SELECT
+    COUNT(DISTINCT seasonIndex)                  AS seasons_played,
+    SUM(won)                                     AS total_wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END)     AS total_losses,
+    COUNT(*)                                     AS total_games,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3)  AS career_win_pct,
+    GROUP_CONCAT(DISTINCT user_team)             AS teams_controlled
+FROM og
+"""
+    return sql, tuple(params)
+
+
+def owner_improvement_arc(user: str) -> tuple[str, tuple]:
+    """Win% per season for trajectory plotting. All-time, no season filter."""
+    cte, params = _owner_games_cte(user)
+    sql = cte + """
+SELECT
+    seasonIndex,
+    SUM(won)                                     AS wins,
+    SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END)     AS losses,
+    COUNT(*)                                     AS games_played,
+    ROUND(CAST(SUM(won) AS REAL) / COUNT(*), 3)  AS win_pct
+FROM og
+GROUP BY seasonIndex
+ORDER BY CAST(seasonIndex AS INTEGER)
+"""
+    return sql, tuple(params)
+
+
+def owner_division_record(
+    user: str,
+    season: int | None = None,
+) -> tuple[str, tuple]:
+    """Owner's record in intra-division games.
+
+    Joins teams table on displayName to determine division membership.
+    LEFT JOINs exclude teams not present in the current teams table
+    (games vs. teams without a divName entry are excluded by the WHERE clause).
+    """
+    cte, params = _owner_games_cte(user, season)
+    sql = cte + """
+SELECT
+    og.seasonIndex,
+    SUM(og.won)                                      AS div_wins,
+    SUM(CASE WHEN og.won = 0 THEN 1 ELSE 0 END)      AS div_losses,
+    COUNT(*)                                         AS total_div_games
+FROM og
+LEFT JOIN teams ut ON og.user_team = ut.displayName
+LEFT JOIN teams ot ON og.opp_team  = ot.displayName
+WHERE ut.divName IS NOT NULL
+  AND ot.divName IS NOT NULL
+  AND ut.divName = ot.divName
+GROUP BY og.seasonIndex
+ORDER BY CAST(og.seasonIndex AS INTEGER)
+"""
+    return sql, tuple(params)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

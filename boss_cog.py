@@ -170,7 +170,7 @@ def _home_embed(interaction: discord.Interaction) -> discord.Embed:
     try:
         import data_manager as dm
         embed.add_field(name="Season", value=str(dm.CURRENT_SEASON), inline=True)
-        embed.add_field(name="Week", value=str(dm.CURRENT_WEEK), inline=True)
+        embed.add_field(name="Week", value=dm.week_label(dm.CURRENT_WEEK), inline=True)
     except Exception:
         pass
     try:

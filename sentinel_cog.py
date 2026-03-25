@@ -1863,7 +1863,7 @@ def _result_embed(
         color=color,
         description=f"**{name}** (OVR {ovr}) | {team}",
     )
-    embed.add_field(name="Season / Week", value=f"S{season} W{week}", inline=True)
+    embed.add_field(name="Season / Week", value=f"S{season} {dm.week_label(week, short=True)}", inline=True)
     embed.add_field(name="Log ID",        value=f"`{log_id}`",         inline=True)
 
     if validation["banned"]:
@@ -1934,7 +1934,7 @@ def _announcement_embed(record: dict) -> discord.Embed:
         ),
     )
     embed.add_field(name="Team",      value=record["team"],         inline=True)
-    embed.add_field(name="Season/Wk", value=f"S{record['season']} W{record['week']}", inline=True)
+    embed.add_field(name="Season/Wk", value=f"S{record['season']} {dm.week_label(record['week'], short=True)}", inline=True)
     embed.add_field(name="Log ID",    value=f"`{record['log_id']}`", inline=True)
     embed.set_footer(text=f"Submitted by {record['requested_by']}")
     return embed
@@ -1964,7 +1964,7 @@ def _build_positionchangelog_embed(team: str = "") -> discord.Embed:
         emoji = STATUS_EMOJI.get(r["status"], "❓")
         lines.append(
             f"{emoji} `{r['log_id']}` **{r['player_name']}** ({r['team']}) "
-            f"{r['from_pos']} → {r['to_pos']} — Wk {r['week']} — {r['status'].upper()}"
+            f"{r['from_pos']} → {r['to_pos']} — {dm.week_label(r['week'], short=True)} — {r['status'].upper()}"
         )
     chunks, chunk = [], []
     for line in lines:

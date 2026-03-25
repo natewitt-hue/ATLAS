@@ -558,7 +558,7 @@ def _build_tsl_snapshot() -> str:
 
     stage_label = "Playoffs" if dm.CURRENT_STAGE > 1 else "Regular Season"
     lines: list[str] = [
-        f"[TSL Live Data — Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK} ({stage_label})]",
+        f"[TSL Live Data — Season {dm.CURRENT_SEASON}, {dm.week_label(dm.CURRENT_WEEK)} ({stage_label})]",
         "This week's matchups:",
     ]
 
