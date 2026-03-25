@@ -2813,9 +2813,14 @@ def _oracle_get_all_teams() -> list[dict]:
 
 
 def _oracle_build_conf_options(conference: str) -> list[discord.SelectOption]:
-    """Build team select options filtered by conference (AFC or NFC). 16 teams each."""
+    """Build team select options filtered by conference (AFC or NFC). 16 teams each.
+
+    Uses nickName as the value (guaranteed unique) instead of teamId
+    which can have duplicates/zeroes causing Discord 400 errors.
+    """
     conf_upper = conference.upper()
     options = []
+    seen_values: set[str] = set()
     for t in _oracle_get_all_teams():
         div_name = str(t.get("divName", ""))
         if not div_name.upper().startswith(conf_upper):
@@ -2823,12 +2828,25 @@ def _oracle_build_conf_options(conference: str) -> list[discord.SelectOption]:
         nick = t.get("nickName", t.get("displayName", "Unknown"))
         owner_label = t.get("userName", "")
         label = f"{nick} — {owner_label}" if owner_label else nick
-        options.append(discord.SelectOption(label=label[:100], value=str(t.get("teamId", 0))))
+        value = nick  # nickName is unique across the league
+        if value in seen_values:
+            continue  # skip dupes
+        seen_values.add(value)
+        options.append(discord.SelectOption(label=label[:100], value=value[:100]))
     return options
 
 
-def _oracle_team_name_from_id(team_id: int) -> str | None:
-    """Resolve team ID to canonical nickName."""
+def _oracle_team_name_from_id(team_id) -> str | None:
+    """Resolve team ID or nickName to canonical nickName.
+
+    Accepts both numeric teamId (legacy) and nickName (v4+) values
+    from the select menu.
+    """
+    for t in _oracle_get_all_teams():
+        # Match by nickName first (v4 select values)
+        if t.get("nickName") == str(team_id):
+            return t.get("nickName")
+    # Fallback: match by teamId (legacy)
     for t in _oracle_get_all_teams():
         if str(t.get("teamId", 0)) == str(team_id):
             return t.get("nickName")
@@ -2868,8 +2886,12 @@ class _OracleTeamSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        team_id = int(self.values[0])
-        team_name = _oracle_team_name_from_id(team_id)
+        raw_val = self.values[0]
+        # v4: values are nickNames (strings); legacy: numeric teamIds
+        try:
+            team_name = _oracle_team_name_from_id(int(raw_val))
+        except (ValueError, TypeError):
+            team_name = _oracle_team_name_from_id(raw_val)
         if not team_name:
             return await interaction.response.send_message("Team not found.", ephemeral=True)
         await self._callback_fn(interaction, team_name)
