@@ -341,6 +341,8 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
     async def cog_load(self):
         await self._setup_tables()
+        import sportsbook_core
+        sportsbook_core.init(self.bot)
         # Odds/scores sync is manual-only (via /boss Sportsbook → Sync All)
         # to avoid burning API quota during frequent dev restarts.
         self.lock_started_games.start()

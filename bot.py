@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.22.2"  # fix: real sportsbook NBA odds — backfill per-game endpoint when scoreboard returns no odds
+ATLAS_VERSION = "6.23.0"  # feat: real sportsbook settlement notifications — #flow-live embed on event grade
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

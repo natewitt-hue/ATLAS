@@ -2,12 +2,15 @@
 import os, asyncio, json, logging
 from datetime import datetime, timezone
 import aiosqlite
+import discord
 from discord.ext import tasks
 import flow_wallet
 import wager_registry
 from odds_utils import payout_calc as _payout_calc
 
 log = logging.getLogger("sportsbook_core")
+
+_bot = None  # injected via init() at cog load
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 OLD_SB_DB = os.getenv("FLOW_DB_PATH", os.path.join(_DIR, "flow_economy.db"))
@@ -391,9 +394,91 @@ async def run_migration_v7() -> None:
     log.warning("[CORE] Migration v7 complete — flow.db ready")
 
 
-async def _post_settlement_card(event, bets) -> None:
-    """Stub — post settlement ledger card. Implement when ledger integration is confirmed."""
-    pass
+def init(bot) -> None:
+    """Inject bot reference for settlement notifications. Call from cog_load."""
+    global _bot
+    _bot = bot
+
+
+async def _post_settlement_card(event: dict, bets: list[dict]) -> None:
+    """
+    Post a settlement announcement embed to #flow-live after an event is graded.
+    Skips silently if all bets were Cancelled, or if channel resolution fails.
+    Never raises — settlement must not be blocked by a notification failure.
+    """
+    if _bot is None:
+        log.warning("[CORE] _post_settlement_card: bot not initialized, skipping")
+        return
+
+    active = [b for b in bets if b["status"] != "Cancelled"]
+    if not active:
+        return
+
+    try:
+        from setup_cog import get_channel_id_async
+        ch_id = await get_channel_id_async("flow_live")
+        if not ch_id:
+            log.warning("[CORE] _post_settlement_card: flow_live channel not configured")
+            return
+        channel = _bot.get_channel(ch_id)
+        if channel is None:
+            log.warning("[CORE] _post_settlement_card: channel %s not in cache", ch_id)
+            return
+    except Exception:
+        log.warning("[CORE] _post_settlement_card: channel resolution failed", exc_info=True)
+        return
+
+    # Matchup + final score
+    away = event.get("away_participant", "Away")
+    home = event.get("home_participant", "Home")
+    a_score = int(event.get("away_score") or 0)
+    h_score = int(event.get("home_score") or 0)
+    matchup = f"**{away} @ {home}**  |  {a_score}–{h_score}"
+
+    won_count  = sum(1 for b in active if b["status"] == "Won")
+    lost_count = sum(1 for b in active if b["status"] == "Lost")
+    push_count = sum(1 for b in active if b["status"] == "Push")
+
+    # Payout lines for Won + Push bets only (Lost bets covered by #ledger text audit)
+    payout_lines: list[str] = []
+    for b in active:
+        if b["status"] == "Won":
+            net = _payout_calc(b["wager_amount"], b["odds"]) - b["wager_amount"]
+            payout_lines.append(
+                f"• <@{b['discord_id']}> — {b['bet_type']} **{b['pick']}** (+${net:,})"
+            )
+        elif b["status"] == "Push":
+            payout_lines.append(
+                f"• <@{b['discord_id']}> — Push, ${b['wager_amount']:,} returned"
+            )
+
+    if won_count > 0:
+        color = 0x57F287  # green
+        title = "🏆 Event Settled"
+    elif lost_count == 0 and push_count > 0:
+        color = 0xFEE75C  # gold
+        title = "↩️ Event Settled — Push"
+    else:
+        color = 0xED4245  # red
+        title = "📋 Event Settled"
+
+    embed = discord.Embed(title=title, description=matchup, color=color)
+    embed.add_field(
+        name="Result",
+        value=f"W: **{won_count}**  L: **{lost_count}**  P: **{push_count}**",
+        inline=False,
+    )
+    if payout_lines:
+        payouts_text = "\n".join(payout_lines)
+        if len(payouts_text) > 1024:
+            payouts_text = payouts_text[:1021] + "..."
+        embed.add_field(name="Payouts", value=payouts_text, inline=False)
+    embed.set_footer(text=f"{len(active)} bet(s) graded · {event.get('event_id', '')}")
+
+    try:
+        await channel.send(embed=embed)
+    except Exception:
+        log.warning("[CORE] _post_settlement_card: failed to post embed", exc_info=True)
 
 
 # ─── Parlay helpers ───────────────────────────────────────────────────────────
