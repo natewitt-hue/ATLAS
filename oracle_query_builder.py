@@ -127,6 +127,26 @@ class DomainKnowledge:
         "drops":                StatDef("offensive_stats", "recDrops",         "SUM", None, "offense"),
         "yards after catch":    StatDef("offensive_stats", "recYdsAfterCatch", "SUM", None, "offense"),
 
+        # ── Passing (extended) ───────────────────────────────
+        "yards per attempt":    StatDef("offensive_stats", "passYdsPerAtt",      "AVG", "QB",   "offense", cast_type="REAL"),
+        "pass attempts":        StatDef("offensive_stats", "passAtt",            "SUM", "QB",   "offense"),
+        "sacks taken":          StatDef("offensive_stats", "passSacks",          "SUM", "QB",   "offense"),
+        "longest pass":         StatDef("offensive_stats", "passLongest",        "MAX", "QB",   "offense"),
+
+        # ── Rushing (extended) ───────────────────────────────
+        "rush attempts":        StatDef("offensive_stats", "rushAtt",            "SUM", None,   "offense"),
+        "yards per carry":      StatDef("offensive_stats", "rushYdsPerAtt",      "AVG", None,   "offense", cast_type="REAL"),
+        "broken tackles":       StatDef("offensive_stats", "rushBrokenTackles",  "SUM", None,   "offense"),
+        "yards after contact":  StatDef("offensive_stats", "rushYdsAfterContact","SUM", None,   "offense"),
+        "longest rush":         StatDef("offensive_stats", "rushLongest",        "MAX", None,   "offense"),
+        "20 yard runs":         StatDef("offensive_stats", "rush20PlusYds",      "SUM", None,   "offense"),
+
+        # ── Receiving (extended) ─────────────────────────────
+        "catch percentage":     StatDef("offensive_stats", "recCatchPct",        "AVG", None,   "offense", cast_type="REAL"),
+        "yards per catch":      StatDef("offensive_stats", "recYdsPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
+        "yac per catch":        StatDef("offensive_stats", "recYacPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
+        "longest reception":    StatDef("offensive_stats", "recLongest",         "MAX", None,   "offense"),
+
         # ── Individual Defense (more = better for the defender) ──
         "forced fumbles":       StatDef("defensive_stats", "defForcedFum",     "SUM", None, "defense"),
         "fumble recoveries":    StatDef("defensive_stats", "defFumRec",        "SUM", None, "defense"),
@@ -137,6 +157,11 @@ class DomainKnowledge:
         "tackles":              StatDef("defensive_stats", "defTotalTackles",  "SUM", None, "defense"),
         "sacks":                StatDef("defensive_stats", "defSacks",         "SUM", None, "defense"),
         "interceptions":        StatDef("defensive_stats", "defInts",          "SUM", None, "defense"),
+
+        # ── Individual Defense (extended) ────────────────────
+        "catches allowed":      StatDef("defensive_stats", "defCatchAllowed",   "SUM", None,   "defense", invert_sort=True),
+        "int return yards":     StatDef("defensive_stats", "defIntReturnYds",   "SUM", None,   "defense"),
+        "safeties":             StatDef("defensive_stats", "defSafeties",       "SUM", None,   "defense"),
 
         # ── Team Defense (fewer yards allowed = better → invert_sort) ──
         "team total yards allowed": StatDef("team_stats", "defTotalYds",  "SUM", None, "team",
@@ -157,6 +182,13 @@ class DomainKnowledge:
         "team rush tds":        StatDef("team_stats", "offRushTDs",  "SUM", None, "team"),
         "penalties":            StatDef("team_stats", "penalties",    "SUM", None, "team"),
         "penalty yards":        StatDef("team_stats", "penaltyYds",  "SUM", None, "team"),
+
+        # ── Aliases (shorthand for NL matching) ──────────────
+        "ypa":                  StatDef("offensive_stats", "passYdsPerAtt",      "AVG", "QB",   "offense", cast_type="REAL"),
+        "ypc":                  StatDef("offensive_stats", "rushYdsPerAtt",      "AVG", None,   "offense", cast_type="REAL"),
+        "catch pct":            StatDef("offensive_stats", "recCatchPct",        "AVG", None,   "offense", cast_type="REAL"),
+        "yac":                  StatDef("offensive_stats", "recYacPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
+        "broken tackle rate":   StatDef("offensive_stats", "rushBrokenTackles",  "SUM", None,   "offense"),
     }
 
     # Pre-sorted keys (longest first) for correct substring matching
