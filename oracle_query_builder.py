@@ -79,7 +79,7 @@ class StatDef:
     """
     table: str                                       # "offensive_stats" | "defensive_stats" | "team_stats"
     column: str                                      # DB column name
-    agg: Literal["SUM", "AVG"]                       # Aggregation type
+    agg: Literal["SUM", "AVG", "MAX", "MIN"]         # Aggregation type
     pos_filter: str | None                           # "QB" or None (all positions)
     category: Literal["offense", "defense", "team"]  # Stat category
     efficiency_alt: str | None = None                # Column for "worst" queries
