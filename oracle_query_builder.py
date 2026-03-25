@@ -929,7 +929,8 @@ def _owner_games_cte(
         og:     adds pre-computed `margin` = user_score - opp_score
 
     The `user` param appears 8 times in og_raw:  # document this count
-        6x in CASE expressions: user_team, opp_team, is_home, user_score, opp_score, won
+        5x homeUser CASE: user_team, opp_team, is_home, user_score, opp_score
+        1x winner_user CASE: won
         2x in WHERE clause:     (homeUser = ? OR awayUser = ?)
     Total: params = [user] * 8  (plus optional season param)
 
@@ -943,6 +944,8 @@ def _owner_games_cte(
         won (1 if user won, 0 if lost),
         margin (user_score - opp_score, positive = win)
     """
+    if not user:
+        raise ValueError("_owner_games_cte: user must be a non-empty string")
     stages = "('1','2')" if include_playoffs else "('1')"
     params: list = [user] * 8  # 6 CASE + 2 WHERE — see docstring
 
