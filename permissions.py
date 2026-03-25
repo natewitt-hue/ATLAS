@@ -36,6 +36,7 @@ ADMIN_USER_IDS: list[int] = [
 
 COMMISSIONER_ROLE_NAME = "Commissioner"
 TSL_OWNER_ROLE_NAME = "TSL Owner"
+GOD_ROLE_NAME = "GOD"
 
 
 # ── Core Checks ──────────────────────────────────────────────────────────────
@@ -95,6 +96,25 @@ async def is_tsl_owner(interaction: discord.Interaction) -> bool:
     return await is_commissioner(interaction)
 
 
+async def is_god(interaction: discord.Interaction) -> bool:
+    """
+    Returns True if the user has the GOD role.
+
+    GOD is above Commissioner — has all commissioner powers plus
+    destructive operations (rebuilddb, affinity reset).
+
+    DM context: only env ADMIN_USER_IDS pass.
+    """
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        return interaction.user.id in ADMIN_USER_IDS
+
+    if any(r.name == GOD_ROLE_NAME for r in member.roles):
+        return True
+
+    return False
+
+
 # ── Decorators ────────────────────────────────────────────────────────────────
 
 def commissioner_only():
@@ -111,6 +131,26 @@ def commissioner_only():
             return True
         await interaction.response.send_message(
             "ATLAS: This command is restricted to commissioners.", ephemeral=True
+        )
+        return False
+
+    return app_commands.check(predicate)
+
+
+def require_god():
+    """
+    app_commands.check decorator that restricts a command to GOD-role users.
+
+    Usage:
+        @app_commands.command(...)
+        @require_god()
+        async def god_cmd(self, interaction): ...
+    """
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if await is_god(interaction):
+            return True
+        await interaction.response.send_message(
+            "ATLAS: This command requires the GOD role.", ephemeral=True
         )
         return False
 
