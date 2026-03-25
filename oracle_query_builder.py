@@ -911,6 +911,95 @@ def career_trajectory(user: str, stat: str) -> tuple[str, tuple]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  OWNER-SCOPED METRICS — shared CTE primitive + public functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _owner_games_cte(
+    user: str,
+    season: int | None = None,
+    include_playoffs: bool = False,
+) -> tuple[str, list]:
+    """Returns (cte_sql, params) for a two-level owner_games CTE.
+
+    Internal helper — not exposed to the agent. Public functions call this,
+    then append their own SELECT against `og`.
+
+    Two-level structure:
+        og_raw: base game rows filtered by user identity + completion status
+        og:     adds pre-computed `margin` = user_score - opp_score
+
+    The `user` param appears 8 times in og_raw:  # document this count
+        6x in CASE expressions: user_team, opp_team, is_home, user_score, opp_score, won
+        2x in WHERE clause:     (homeUser = ? OR awayUser = ?)
+    Total: params = [user] * 8  (plus optional season param)
+
+    CTE output columns (from og):
+        seasonIndex, weekIndex, stageIndex,
+        homeTeamName, awayTeamName, homeScore (INTEGER), awayScore (INTEGER),
+        homeUser, awayUser, winner_user, loser_user,
+        user_team, opp_team,
+        is_home (1 if user was home, 0 if away),
+        user_score, opp_score,
+        won (1 if user won, 0 if lost),
+        margin (user_score - opp_score, positive = win)
+    """
+    stages = "('1','2')" if include_playoffs else "('1')"
+    params: list = [user] * 8  # 6 CASE + 2 WHERE — see docstring
+
+    cte = f"""WITH og_raw AS (
+    SELECT
+        g.seasonIndex, g.weekIndex, g.stageIndex,
+        g.homeTeamName, g.awayTeamName,
+        CAST(g.homeScore AS INTEGER) AS homeScore,
+        CAST(g.awayScore AS INTEGER) AS awayScore,
+        g.homeUser, g.awayUser, g.winner_user, g.loser_user,
+        CASE WHEN g.homeUser = ? THEN g.homeTeamName ELSE g.awayTeamName  END AS user_team,
+        CASE WHEN g.homeUser = ? THEN g.awayTeamName ELSE g.homeTeamName  END AS opp_team,
+        CASE WHEN g.homeUser = ? THEN 1 ELSE 0                            END AS is_home,
+        CASE WHEN g.homeUser = ?
+             THEN CAST(g.homeScore AS INTEGER)
+             ELSE CAST(g.awayScore AS INTEGER)                            END AS user_score,
+        CASE WHEN g.homeUser = ?
+             THEN CAST(g.awayScore AS INTEGER)
+             ELSE CAST(g.homeScore AS INTEGER)                            END AS opp_score,
+        CASE WHEN g.winner_user = ? THEN 1 ELSE 0                        END AS won
+    FROM games g
+    WHERE g.status IN ('2','3')
+      AND g.stageIndex IN {stages}
+      AND (g.homeUser = ? OR g.awayUser = ?)
+      AND g.homeUser NOT IN ('CPU', '')
+      AND g.awayUser NOT IN ('CPU', '')
+"""
+    if season is not None:
+        cte += "      AND g.seasonIndex = ?\n"
+        params.append(str(season))
+
+    cte += """),
+og AS (
+    SELECT *, (user_score - opp_score) AS margin FROM og_raw
+)
+"""
+    return cte, params
+
+
+def owner_games(
+    user: str,
+    season: int | None = None,
+    include_playoffs: bool = False,
+) -> tuple[str, tuple]:
+    """All completed games for an owner — foundation for custom owner queries.
+
+    Returns CTE + SELECT * FROM og. The code-gen agent uses this directly
+    for one-off owner queries not covered by the specific metric functions.
+
+    Excludes CPU games. Scopes by user identity across all teams they have
+    ever controlled (not by franchise).
+    """
+    cte, params = _owner_games_cte(user, season, include_playoffs)
+    return cte + "SELECT * FROM og\nORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)", tuple(params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS (Layer 3)
 # ══════════════════════════════════════════════════════════════════════════════
 
