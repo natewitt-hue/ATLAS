@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.5.0"  # feat: Oracle Intel Hub v4 — affinity tone, memory context, betting profile, division intel, Elo trajectory, visual upgrades
+ATLAS_VERSION = "7.6.0"  # feat: /atlas user home, /god module, admin migration, Oracle theme fix
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -258,6 +258,8 @@ async def setup_hook():
         "flow_live_cog",      # ATLAS Flow — live engagement system
         "real_sportsbook_cog",# ATLAS Flow — real NFL/NBA sportsbook
         "boss_cog",           # ATLAS Boss — visual commissioner control room
+        "god_cog",            # ATLAS GOD — privileged administration (/god)
+        "atlas_home_cog",     # ATLAS Home — user baseball card (/atlas)
     ]
 
     for ext in _EXTENSIONS:
@@ -519,6 +521,7 @@ async def on_ready():
     _startup_done = True  # Set BEFORE async work to prevent concurrent on_ready races
 
     _bot_start_time = time.time()
+    bot.start_time = time.time()
 
     # Set presence immediately so the bot shows online during data load
     await bot.change_presence(
@@ -643,185 +646,6 @@ async def on_message(message: discord.Message):
                 await message.reply("ATLAS is currently undergoing maintenance. Try again later.")
 
     await bot.process_commands(message)
-
-# ── /atlas Admin Group ────────────────────────────────────────────────────────
-
-atlas_group = app_commands.Group(
-    name="atlas",
-    description="ATLAS core system administration.",
-    default_permissions=discord.Permissions(administrator=True),
-)
-
-_bot_start_time: float = 0.0  # Set on_ready for /atlas status uptime
-
-
-@atlas_group.command(name="sync", description="Reload league data from MaddenStats API.")
-async def atlas_sync(interaction: discord.Interaction):
-    await _sync_impl(interaction)
-
-
-@atlas_group.command(name="rebuilddb", description="Force rebuild tsl_history.db from MaddenStats API.")
-async def atlas_rebuilddb(interaction: discord.Interaction):
-    await _rebuilddb_impl(interaction)
-
-
-@atlas_group.command(name="clearsync", description="Force re-sync command tree to this server.")
-async def atlas_clearsync(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-    bot.tree.clear_commands(guild=interaction.guild)
-    bot.tree.copy_global_to(guild=interaction.guild)
-    await bot.tree.sync(guild=interaction.guild)
-    await interaction.followup.send("Commands synced. Restart Discord to see updates.")
-
-
-@atlas_group.command(name="status", description="Show ATLAS system status, uptime, and data freshness.")
-async def atlas_status(interaction: discord.Interaction):
-    uptime_sec = int(time.time() - _bot_start_time) if _bot_start_time else 0
-    hours, remainder = divmod(uptime_sec, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    uptime_str = f"{hours}h {minutes}m {seconds}s"
-
-    status = dm.get_league_status() if hasattr(dm, 'get_league_status') else "Unknown"
-
-    cog_names = [name for name, _ in bot.cogs.items()]
-    cog_list = ", ".join(cog_names) if cog_names else "None loaded"
-
-    embed = discord.Embed(
-        title="ATLAS System Status",
-        color=ATLAS_GOLD,
-    )
-    embed.add_field(name="Version", value=f"v{ATLAS_VERSION}", inline=True)
-    embed.add_field(name="Uptime", value=uptime_str, inline=True)
-    embed.add_field(name="League", value=status, inline=True)
-    embed.add_field(name="Cogs Loaded", value=cog_list, inline=False)
-    embed.add_field(name="Guilds", value=str(len(bot.guilds)), inline=True)
-
-    if _echo_available:
-        try:
-            from echo_loader import get_persona_status
-            ps = get_persona_status()
-            echo_lines = []
-            for reg, info in ps.items():
-                state = "LIVE" if info.get("loaded") else ("FALLBACK" if info.get("using_fallback") else "OFF")
-                echo_lines.append(f"**{reg}**: {state}")
-            embed.add_field(name="Echo Personas", value="\n".join(echo_lines), inline=False)
-        except Exception:
-            pass
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@atlas_group.command(name="affinity", description="View or reset a user's ATLAS affinity score.")
-@app_commands.describe(user="The user to check", reset="Reset their score to 0?")
-async def atlas_affinity(interaction: discord.Interaction, user: discord.Member, reset: bool = False):
-    if not _affinity_available:
-        return await interaction.response.send_message(
-            "❌ Affinity system not loaded.", ephemeral=True,
-        )
-    if reset:
-        await affinity_mod.reset_affinity(user.id)
-        await interaction.response.send_message(
-            f"🔄 Reset affinity for **{user.display_name}** to 0.", ephemeral=True,
-        )
-    else:
-        score = await affinity_mod.get_affinity(user.id)
-        tier = affinity_mod.get_tier_label(score)
-        embed = discord.Embed(
-            title=f"User Affinity — {user.display_name}",
-            color=ATLAS_GOLD,
-        )
-        embed.add_field(name="Score", value=f"`{score:.1f}`", inline=True)
-        embed.add_field(name="Tier", value=tier, inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-bot.tree.add_command(atlas_group)
-
-
-# ── Shared Implementations (used by /atlas and deprecated wrappers) ──────────
-
-async def _sync_impl(interaction: discord.Interaction):
-    """Core sync logic — shared by /atlas sync and deprecated /wittsync."""
-    await interaction.response.defer(thinking=True)
-
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, dm.load_all)
-
-    # Refresh roster cache after data reload
-    try:
-        roster.load()
-    except Exception as e:
-        print(f"[Roster] Refresh failed during sync: {e}")
-
-    if intel:
-        try:
-            intel.build_owner_map()
-        except Exception as e:
-            print(f"ATLAS: build_owner_map() failed during sync: {e}")
-
-    try:
-        reasoning._SCHEMA_CACHE     = ""
-        reasoning._SCHEMA_TIMESTAMP = 0.0
-    except AttributeError:
-        pass
-
-    try:
-        if dm._autograde_callback is not None:
-            await dm._autograde_callback()
-    except Exception as e:
-        print(f"ATLAS: auto_grade error: {e}")
-
-    try:
-        db_result = await loop.run_in_executor(
-            None,
-            lambda: db_builder.sync_tsl_db(
-                players=dm.get_players(),
-                abilities=dm.get_player_abilities(),
-            )
-        )
-        if db_result["success"]:
-            db_line = f"\nHistory DB: **{db_result['games']}** games | **{db_result['players']}** players ({db_result['elapsed']}s)"
-        else:
-            db_line = f"\nHistory DB sync had issues: {', '.join(db_result['errors'][:2])}"
-    except Exception as e:
-        db_line = f"\nHistory DB sync failed: `{e}`"
-
-    _invalidate_caches()
-
-    status = dm.get_league_status()
-    await interaction.followup.send(
-        f"Data reloaded. League status: **{status}**{db_line}"
-    )
-
-
-async def _rebuilddb_impl(interaction: discord.Interaction):
-    """Core DB rebuild logic — shared by /atlas rebuilddb and deprecated /rebuilddb."""
-    await interaction.response.defer(thinking=True)
-    loop = asyncio.get_running_loop()
-    players = dm.get_players() if hasattr(dm, 'get_players') else None
-    abilities = dm.get_player_abilities() if hasattr(dm, 'get_player_abilities') else None
-    if players is not None and abilities is not None:
-        db_result = await loop.run_in_executor(
-            None,
-            lambda: db_builder.sync_tsl_db(players=players, abilities=abilities)
-        )
-    else:
-        db_result = await loop.run_in_executor(None, db_builder.sync_tsl_db)
-    if db_result["success"]:
-        lines = [
-            f"**tsl_history.db rebuilt** in {db_result['elapsed']}s",
-            f"Games: **{db_result['games']}**",
-            f"Players: **{db_result['players']}**",
-        ]
-        if db_result["errors"]:
-            lines.append(f"Warnings: {', '.join(db_result['errors'][:3])}")
-    else:
-        lines = [f"DB rebuild failed: {', '.join(db_result['errors'][:3])}"]
-
-    _invalidate_caches()
-
-    await interaction.followup.send("\n".join(lines))
-
 
 # ── Code Snapshot Export ──────────────────────────────────────────────────────
 
