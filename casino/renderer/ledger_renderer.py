@@ -212,7 +212,7 @@ def _build_casino_html(
         f"{multiplier:.1f}x" if multiplier != int(multiplier)
         else f"{int(multiplier)}x"
     )
-    time_str = datetime.now(timezone.utc).strftime("%I:%M %p")
+    time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
     txn_str = f"TXN #{txn_id}" if txn_id else ""
 
     # Highlight bar for big wagers
@@ -285,7 +285,7 @@ def _build_transaction_html(
 
     status_class = "credit" if amount > 0 else "debit" if amount < 0 else "neutral"
     badge_class = "credit" if amount >= 0 else "debit"
-    time_str = datetime.now(timezone.utc).strftime("%I:%M %p")
+    time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
     txn_str = f"TXN #{txn_id}" if txn_id else ""
 
     # Amount label varies by source

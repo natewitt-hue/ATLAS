@@ -335,7 +335,10 @@ class CodexCog(commands.Cog):
             annotated_question, alias_map = resolve_names_in_question(f"{caller_context} {question}")
             sql = await gemini_sql(annotated_question, alias_map)
             if not sql:
-                await interaction.followup.send("❌ No SQL generated.", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Couldn't generate a query — try rephrasing your question, or use a simpler format like \"compare X and Y\" or \"who has the most wins\".",
+                    ephemeral=True,
+                )
                 return
 
             rows, error = await run_sql_async(sql)

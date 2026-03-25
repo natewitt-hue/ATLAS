@@ -392,7 +392,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None, refresh_inte
     <div style="display:flex;align-items:center;justify-content:space-between;
         padding-top:6px;border-top:1px solid rgba(255,255,255,0.06);">
       <div style="font-size:10px;color:var(--text-warm-dim);font-family:var(--font-mono),monospace;">
-        FLOW PULSE v1.1 &middot; Updates every {refresh_interval}s
+        Updates every {refresh_interval}s
       </div>
       <div style="display:flex;gap:var(--space-md);">
         <span style="font-size:10px;color:var(--win);font-family:var(--font-mono),monospace;">

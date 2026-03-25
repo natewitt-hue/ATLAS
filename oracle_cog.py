@@ -2689,7 +2689,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         if not _HISTORY_OK:
-            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
+            await interaction.followup.send("⚠️ Historical database is offline — try again in a moment.", ephemeral=True)
             return
 
         u1 = fuzzy_resolve_user(self.owner1.value.strip())
@@ -2865,7 +2865,7 @@ class _OracleIntelModal(discord.ui.Modal):
 
         if self._requires_history and not _HISTORY_OK:
             await interaction.followup.send(
-                "⚠️ Historical database not available.", ephemeral=True
+                "⚠️ Historical database is offline — try again in a moment.", ephemeral=True
             )
             return
 
@@ -3726,7 +3726,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
             return
 
         if not _HISTORY_OK:
-            await interaction.followup.send("⚠️ Historical database not available.", ephemeral=True)
+            await interaction.followup.send("⚠️ Historical database is offline — try again in a moment.", ephemeral=True)
             return
 
         rows, _ = run_sql("""
