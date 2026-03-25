@@ -188,7 +188,7 @@ class DomainKnowledge:
         "ypc":                  StatDef("offensive_stats", "rushYdsPerAtt",      "AVG", None,   "offense", cast_type="REAL"),
         "catch pct":            StatDef("offensive_stats", "recCatchPct",        "AVG", None,   "offense", cast_type="REAL"),
         "yac":                  StatDef("offensive_stats", "recYacPerCatch",     "AVG", None,   "offense", cast_type="REAL"),
-        "broken tackle rate":   StatDef("offensive_stats", "rushBrokenTackles",  "SUM", None,   "offense"),
+        "broken tackle rate":   StatDef("offensive_stats", "rushBrokenTackles",  "SUM", None,   "offense"),  # alias: "rate" = frequency/count, not a ratio
     }
 
     # Pre-sorted keys (longest first) for correct substring matching
