@@ -2749,7 +2749,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
                 w2 = int(r["u2_wins"] or 0)
                 marker = "🏆" if w1 > w2 else ("💀" if w2 > w1 else "🤝")
                 breakdown += f"Season {r['seasonIndex']}: **{u1}** {w1}–{w2} **{u2}** {marker}\n"
-            embed.add_field(name="📅 Season-by-Season", value=breakdown or "No data", inline=False)
+            embed.add_field(name="📅 Season-by-Season", value=breakdown or "No head-to-head games found in the database.", inline=False)
 
             # ATLAS flair — non-blocking
             try:
@@ -3759,7 +3759,7 @@ class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
         else:
             embed.add_field(
                 name="🏆 Top 5 Records",
-                value=top_str or "No data",
+                value=top_str or "No records found for this season.",
                 inline=False,
             )
             embed.add_field(

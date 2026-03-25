@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.23.1"  # fix: UX audit quick wins — timestamp standardization, error message clarity, pulse footer, hero balance tokens
+ATLAS_VERSION = "6.24.0"  # feat: UX audit batch 2 — prediction palette, bot-restart hints, empty states, status bar docs, session recap pills, ledger commentary
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

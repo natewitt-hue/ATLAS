@@ -51,7 +51,7 @@ class VoteSelect(discord.ui.Select):
         poll = _polls.get(self.poll_id)
         if poll is None:
             return await interaction.response.send_message(
-                "❌ This poll is no longer available (bot may have restarted).",
+                "❌ This poll is no longer available (bot may have restarted). Use `/awards` to start a new vote.",
                 ephemeral=True,
             )
         if not poll.get("open", False):

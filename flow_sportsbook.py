@@ -1929,7 +1929,7 @@ class SportsbookWorkspace(discord.ui.View):
             ct = _parse_commence(ev["commence_time"])
             ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
             lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** \u2014 {ts}")
-        embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
+        embed.add_field(name="Games", value="\n".join(lines) or "No games scheduled right now.", inline=False)
 
         options = []
         for ev in events[:25]:
@@ -2244,7 +2244,7 @@ class SportsbookWorkspace(discord.ui.View):
                 ct = _parse_commence(ev["commence_time"])
                 ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
                 lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** \u2014 {ts}")
-            embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
+            embed.add_field(name="Games", value="\n".join(lines) or "No games scheduled right now.", inline=False)
 
             options = []
             for ev in events[:25]:
@@ -2373,7 +2373,7 @@ class SportsbookWorkspace(discord.ui.View):
                                 _fresh = await _cur.fetchone()
                         if _fresh is None:
                             await interaction.followup.send(
-                                "❌ This game is no longer available for betting.",
+                                "❌ This game is no longer available for betting. Check current games from the sportsbook hub.",
                                 ephemeral=True,
                             )
                             return

@@ -762,7 +762,7 @@ class EventListView(discord.ui.View):
             ct = _parse_commence(ev["commence_time"])
             ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
             lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** — {ts}")
-        embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
+        embed.add_field(name="Games", value="\n".join(lines) or "No games scheduled right now.", inline=False)
         return embed
 
     async def _on_select(self, interaction: discord.Interaction):

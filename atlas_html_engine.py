@@ -514,7 +514,16 @@ def wrap_card(body_html: str, status_class: str = "", *, theme_id: str | None = 
     body_html : str
         Inner HTML content for the card.
     status_class : str
-        CSS class for the status bar gradient (win/loss/push/jackpot/etc.).
+        CSS class for the 5px top gradient status bar. The bar communicates the
+        *outcome of the event* shown on the card — not the card type or user state.
+        Use the following values:
+          "win"       — positive outcome (win, credit, profit, jackpot hit)
+          "loss"      — negative outcome (loss, debit, bust, crash)
+          "push"      — neutral outcome (push, refund, tie)
+          "jackpot"   — special jackpot event (gold gradient)
+          "blackjack" — natural blackjack result
+          "near_miss" — near-miss result (amber)
+          ""          — default gold gradient (hub cards, informational cards)
     theme_id : str | None
         Optional theme key from atlas_themes.THEMES.  When provided, theme
         CSS variable overrides, overlay HTML, extra CSS, and status/border
