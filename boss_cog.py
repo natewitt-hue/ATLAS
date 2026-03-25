@@ -2515,23 +2515,88 @@ class FlowLivePanelView(discord.ui.View):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class BossCog(commands.Cog):
-    """ATLAS Commissioner Control Room — visual hub for all admin operations."""
+    """ATLAS Boss — Commissioner Control Room."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="boss", description="Open the ATLAS Commissioner Control Room")
-    @app_commands.default_permissions(administrator=True)
-    async def boss_cmd(self, interaction: discord.Interaction):
-        """Launch the Commissioner Control Room hub."""
+    boss_group = app_commands.Group(
+        name="boss",
+        description="ATLAS Commissioner operations.",
+        default_permissions=discord.Permissions(administrator=True),
+    )
+
+    @boss_group.command(name="hub", description="Open the ATLAS Commissioner Control Room.")
+    async def boss_hub(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message(
                 "❌ This command is restricted to commissioners.", ephemeral=True,
             )
-
         embed = _home_embed(interaction)
         view = BossHubView(self.bot)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @boss_group.command(name="sync", description="Reload league data from MaddenStats API.")
+    async def boss_sync(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+        await interaction.response.defer(thinking=True)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, dm.load_all)
+        try:
+            import roster as roster_local
+            roster_local.load()
+        except Exception as e:
+            log.warning(f"[Boss] Roster refresh failed: {e}")
+        try:
+            from build_tsl_db import sync_tsl_db
+            players = dm.get_players()
+            abilities = dm.get_player_abilities()
+            db_result = await loop.run_in_executor(
+                None, lambda: sync_tsl_db(players=players, abilities=abilities)
+            )
+            db_line = (
+                f"\nHistory DB: **{db_result['games']}** games | "
+                f"**{db_result['players']}** players ({db_result['elapsed']}s)"
+                if db_result["success"]
+                else f"\nHistory DB sync had issues: {', '.join(db_result['errors'][:2])}"
+            )
+        except Exception as e:
+            db_line = f"\nHistory DB sync failed: `{e}`"
+        status = dm.get_league_status()
+        await interaction.followup.send(f"Data reloaded. League status: **{status}**{db_line}")
+
+    @boss_group.command(name="clearsync", description="Force re-sync command tree to this server.")
+    async def boss_clearsync(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+        await interaction.response.defer(thinking=True)
+        self.bot.tree.clear_commands(guild=interaction.guild)
+        self.bot.tree.copy_global_to(guild=interaction.guild)
+        await self.bot.tree.sync(guild=interaction.guild)
+        await interaction.followup.send("Commands synced. Restart Discord to see updates.")
+
+    @boss_group.command(name="status", description="Show ATLAS system status, uptime, and data freshness.")
+    async def boss_status(self, interaction: discord.Interaction):
+        if not await is_commissioner(interaction):
+            return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
+        import time
+        start_time = getattr(self.bot, "start_time", 0.0)
+        uptime_sec = int(time.time() - start_time) if start_time else 0
+        hours, rem = divmod(uptime_sec, 3600)
+        minutes, seconds = divmod(rem, 60)
+        embed = discord.Embed(title="ATLAS System Status", color=GOLD)
+        try:
+            import bot as bot_mod
+            embed.add_field(name="Version", value=f"v{bot_mod.ATLAS_VERSION}", inline=True)
+        except Exception:
+            pass
+        embed.add_field(name="Uptime", value=f"{hours}h {minutes}m {seconds}s", inline=True)
+        embed.add_field(name="League", value=dm.get_league_status(), inline=True)
+        cog_list = ", ".join(self.bot.cogs.keys()) or "None"
+        embed.add_field(name="Cogs Loaded", value=cog_list, inline=False)
+        embed.add_field(name="Guilds", value=str(len(self.bot.guilds)), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
