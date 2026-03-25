@@ -2242,6 +2242,10 @@ AUTO_DETECT_CHANNEL_IDS: set[int] = set()
 
 # ── TSL Rules Prompt ──────────────────────────────────────────────────────────
 
+# NOTE: This prompt intentionally does NOT use get_persona() from echo_loader.
+# The 4th Down Referee is a specialized sub-persona with its own identity ("4th Down Referee",
+# not "ATLAS"). Prepending the ATLAS persona would create an identity conflict and degrade
+# the structured step-by-step ruling format. This is a documented exception to the convention.
 SYSTEM_PROMPT = """
 You are the official TSL (The Simulation League) 4th Down Referee — an expert football mind, not just a rule-checker.
 

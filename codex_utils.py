@@ -361,9 +361,23 @@ OWNER-FILTERED QUERY PATTERN:
 """
 
 
+def _build_known_users_block() -> str:
+    """Return a KNOWN OWNERS section for AI SQL prompts. Empty string if not loaded."""
+    _ensure_codex_identity()
+    if not KNOWN_USERS:
+        return ""
+    lines = "\n".join(f"  - {u}" for u in sorted(KNOWN_USERS))
+    return (
+        "\nKNOWN TSL OWNERS (exact db_username values — use these in WHERE clauses):\n"
+        + lines + "\n"
+    )
+
+
 def _get_db_schema():
-    """Rebuild schema each call so CURRENT_SEASON is always fresh."""
-    return _build_schema()
+    """Rebuild schema each call so CURRENT_SEASON is always fresh.
+    Appends KNOWN_USERS block so AI always has exact owner username strings.
+    """
+    return _build_schema() + _build_known_users_block()
 
 
 # ── Known users — loaded dynamically from tsl_members DB ─────────────────────

@@ -77,7 +77,7 @@ HISTORY_DB_PATH   = os.path.join(_DIR, "tsl_history.db")
 
 from atlas_colors import AtlasColors
 TSL_GOLD          = AtlasColors.TSL_GOLD.value
-TSL_BLACK         = 0x1A1A1A
+TSL_BLACK         = AtlasColors.TSL_BLACK.value
 TSL_RED           = AtlasColors.ERROR.value
 TSL_GREEN         = AtlasColors.SUCCESS.value
 

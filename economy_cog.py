@@ -73,25 +73,6 @@ async def _setup_economy_tables() -> None:
         await db.commit()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  CORE BALANCE OPERATIONS (all use BEGIN IMMEDIATE for safety)
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def _ensure_user(db, discord_id: int) -> int:
-    """Return current balance, auto-creating user if needed. Must be inside a transaction."""
-    async with db.execute(
-        "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        await db.execute(
-            "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
-            (discord_id, STARTING_BALANCE, STARTING_BALANCE)
-        )
-        return STARTING_BALANCE
-    return row[0]
-
-
 async def admin_give(discord_id: int, amount: int, admin_id: int,
                      reason: str = "", *,
                      reference_key: str | None = None) -> tuple[int, int]:
@@ -295,7 +276,7 @@ class EconomyCog(commands.Cog):
         """Post an audit message to #admin-chat."""
         try:
             from setup_cog import get_channel_id
-            ch_id = get_channel_id("admin_chat")
+            ch_id = get_channel_id("admin_chat", guild_id=self.bot.guilds[0].id if self.bot.guilds else None)
             if ch_id:
                 ch = self.bot.get_channel(ch_id)
                 if ch:
