@@ -714,416 +714,16 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         )
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# DISCORD UI VIEWS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-class EventListView(discord.ui.View):
-    """Shows a list of upcoming events with a select menu to pick one."""
 
-    def __init__(self, cog, events: list[dict], sport_key: str):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.events = events[:25]  # Select max 25 options
-        self.sport_key = sport_key
-
-        options = []
-        for ev in self.events:
-            ct = _parse_commence(ev["commence_time"])
-            time_str = ct.strftime("%m/%d %I:%M %p") if ct else "TBD"
-            label = f"{ev['away_team']} @ {ev['home_team']}"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            options.append(discord.SelectOption(
-                label=label,
-                value=ev["event_id"],
-                description=time_str,
-            ))
-
-        select = discord.ui.Select(
-            placeholder="Select a game to bet on...",
-            options=options,
-        )
-        select.callback = self._on_select
-        self.add_item(select)
-
-    def build_embed(self) -> discord.Embed:
-        sport_name = SUPPORTED_SPORTS.get(self.sport_key, self.sport_key)
-        emoji = SPORT_EMOJI.get(self.sport_key, "\U0001f3c6")
-        embed = discord.Embed(
-            title=f"{emoji} {sport_name} — Upcoming Games",
-            description=f"**{len(self.events)}** games available for betting.",
-            color=TSL_GOLD,
-        )
-        # Show first 10 games in the embed
-        lines = []
-        for ev in self.events[:10]:
-            ct = _parse_commence(ev["commence_time"])
-            ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
-            lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** — {ts}")
-        embed.add_field(name="Games", value="\n".join(lines) or "No games scheduled right now.", inline=False)
-        return embed
-
-    async def _on_select(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        event_id = interaction.data["values"][0]  # type: ignore[index]
-
-        # Find the event
-        event = next((e for e in self.events if e["event_id"] == event_id), None)
-        if not event:
-            return await interaction.followup.send("Event not found.", ephemeral=True)
-
-        # Fetch full event with flat odds from real_events
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM real_events WHERE event_id = ?",
-                (event_id,),
-            ) as cur:
-                row = await cur.fetchone()
-
-        if not row:
-            return await interaction.followup.send(
-                "No odds available for this game yet.", ephemeral=True
-            )
-
-        event_row = dict(row)
-        # Check that at least one odds field is populated
-        has_odds = any(event_row.get(k) is not None for k in
-                       ("moneyline_home", "spread_home", "over_under"))
-        if not has_odds:
-            return await interaction.followup.send(
-                "No odds available for this game yet.", ephemeral=True
-            )
-
-        view = MatchCardView(event_row)
-
-        from sportsbook_cards import build_real_match_detail_card, card_to_file
-        png = await build_real_match_detail_card(event_row, sport_key=self.sport_key)
-        file = card_to_file(png, f"match_{event_id}.png")
-        await interaction.followup.send(file=file, view=view, ephemeral=True)
-
-
-def _short_name(full_name: str, max_len: int = 12) -> str:
-    """Shorten a team name for button labels.  'Houston Cougars' → 'Houston'."""
-    parts = full_name.split()
-    if len(parts) == 1:
-        return full_name[:max_len]
-    # Keep adding words until we'd exceed max_len
-    result = parts[0]
-    for word in parts[1:]:
-        candidate = f"{result} {word}"
-        if len(candidate) > max_len:
-            break
-        result = candidate
-    return result
-
-
-class MatchCardView(discord.ui.View):
-    """6-button view: one button per betting line, shown below the match detail card.
-
-    Row 0 (home / Over):  [ML]  [Spread]  [Total]
-    Row 1 (away / Under): [ML]  [Spread]  [Total]
-
-    Reads from flat event dict (real_events row with flattened odds columns).
-    """
-
-    def __init__(self, event: dict):
-        super().__init__(timeout=120)
-        self.event = event
-
-        home = event["home_team"]
-        away = event["away_team"]
-        short_home = _short_name(home)
-        short_away = _short_name(away)
-
-        # Build buttons from flat odds columns
-        for side, team_full, short, row_idx in [
-            ("home", home, short_home, 0),
-            ("away", away, short_away, 1),
-        ]:
-            # Moneyline
-            ml_key = f"moneyline_{side}"
-            ml_val = event.get(ml_key)
-            if ml_val is not None:
-                label = f"{short} {int(ml_val):+d}"
-                btn = discord.ui.Button(
-                    label=label[:80], style=discord.ButtonStyle.green, row=row_idx,
-                )
-                btn.callback = self._make_line_cb(
-                    team_full, "Moneyline", int(ml_val), None,
-                )
-                self.add_item(btn)
-
-            # Spread
-            spread_key = f"spread_{side}"
-            spread_odds_key = f"spread_{side}_odds"
-            spread_val = event.get(spread_key)
-            spread_odds = event.get(spread_odds_key)
-            if spread_val is not None and spread_odds is not None:
-                point_str = f"{float(spread_val):+g}"
-                label = f"{short} {point_str} ({int(spread_odds):+d})"
-                btn = discord.ui.Button(
-                    label=label[:80], style=discord.ButtonStyle.blurple, row=row_idx,
-                )
-                btn.callback = self._make_line_cb(
-                    team_full, "Spread", int(spread_odds), float(spread_val),
-                )
-                self.add_item(btn)
-
-            # Totals (Over for home row, Under for away row)
-            ou_name = "Over" if side == "home" else "Under"
-            ou_total = event.get("over_under")
-            ou_odds_key = "over_odds" if side == "home" else "under_odds"
-            ou_odds = event.get(ou_odds_key)
-            if ou_total is not None and ou_odds is not None:
-                label = f"{ou_name} {float(ou_total)} ({int(ou_odds):+d})"
-                btn = discord.ui.Button(
-                    label=label[:80], style=discord.ButtonStyle.gray, row=row_idx,
-                )
-                btn.callback = self._make_line_cb(
-                    ou_name, ou_name, int(ou_odds), float(ou_total),
-                )
-                self.add_item(btn)
-
-    def _make_line_cb(self, pick: str, bet_type: str, odds: int, line: float | None):
-        """Factory that returns a callback for a specific betting line."""
-        event = self.event
-
-        async def callback(interaction: discord.Interaction):
-            from flow_sportsbook import WagerPresetView, _get_balance
-
-            balance = await flow_wallet.get_balance(interaction.user.id)
-            sport_key = event.get("sport_key", "")
-            source_label = SUPPORTED_SPORTS.get(
-                sport_key, sport_key.split("_")[-1].upper()
-            )
-
-            async def place_bet(inter, amt):
-                await inter.response.defer(ephemeral=True)
-                await _place_real_bet(
-                    inter, event, bet_type, pick, odds, line, amt, source_label,
-                )
-
-            view = WagerPresetView(
-                pick=pick, bet_type=bet_type, odds=odds,
-                display_info={
-                    "matchup": f"{event['away_team']} @ {event['home_team']}",
-                    "line_str": _american_to_str(odds),
-                    "source_label": source_label,
-                },
-                user_balance=balance,
-                place_bet=place_bet,
-                parlay_leg={
-                    "source": source_label,
-                    "event_id": event["event_id"],
-                    "display": f"{event['away_team']} @ {event['home_team']}",
-                    "pick": pick,
-                    "bet_type": bet_type,
-                    "line": line or 0,
-                    "odds": odds,
-                },
-                custom_modal_factory=lambda: CustomRealWagerModal(
-                    event, bet_type, pick, odds, line,
-                ),
-            )
-            embed = view._build_embed()
-            await interaction.response.send_message(
-                embed=embed, view=view, ephemeral=True,
-            )
-
-        return callback
-
-
-class BetTypeView(discord.ui.View):
-    """Shows odds for a single event with buttons to place bets.
-    (Legacy — replaced by MatchCardView, kept for backward compatibility.)
-    Now reads from flat event dict instead of odds_rows.
-    """
-
-    def __init__(self, cog, event: dict):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.event = event
-
-    def build_embed(self) -> discord.Embed:
-        ev = self.event
-        ct = _parse_commence(ev["commence_time"])
-        ts = f"<t:{int(ct.timestamp())}:f>" if ct else "TBD"
-
-        embed = discord.Embed(
-            title=f"{ev['away_team']} @ {ev['home_team']}",
-            description=f"Kickoff: {ts}",
-            color=TSL_GOLD,
-        )
-
-        # Moneyline
-        ml_h, ml_a = ev.get("moneyline_home"), ev.get("moneyline_away")
-        if ml_h is not None:
-            embed.add_field(
-                name="Moneyline",
-                value=f"**{ev['home_team']}** {_american_to_str(int(ml_h))}\n"
-                      f"**{ev['away_team']}** {_american_to_str(int(ml_a or 0))}",
-                inline=True,
-            )
-
-        # Spread
-        sp_h = ev.get("spread_home")
-        if sp_h is not None:
-            sp_h_odds = ev.get("spread_home_odds") or -110
-            sp_a = ev.get("spread_away") or -sp_h
-            sp_a_odds = ev.get("spread_away_odds") or -110
-            embed.add_field(
-                name="Spread",
-                value=f"**{ev['home_team']}** {float(sp_h):+g} ({_american_to_str(int(sp_h_odds))})\n"
-                      f"**{ev['away_team']}** {float(sp_a):+g} ({_american_to_str(int(sp_a_odds))})",
-                inline=True,
-            )
-
-        # Totals
-        ou = ev.get("over_under")
-        if ou is not None:
-            o_odds = ev.get("over_odds") or -110
-            u_odds = ev.get("under_odds") or -110
-            embed.add_field(
-                name="Total",
-                value=f"**Over** {float(ou)} ({_american_to_str(int(o_odds))})\n"
-                      f"**Under** {float(ou)} ({_american_to_str(int(u_odds))})",
-                inline=True,
-            )
-
-        return embed
-
-    @discord.ui.button(label="Moneyline", style=discord.ButtonStyle.green)
-    async def ml_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.event.get("moneyline_home") is None:
-            return await interaction.response.send_message("No moneyline odds.", ephemeral=True)
-        options = []
-        for side, team_key, ml_key in [("home", "home_team", "moneyline_home"),
-                                        ("away", "away_team", "moneyline_away")]:
-            team = self.event[team_key]
-            ml_val = self.event.get(ml_key)
-            if ml_val is not None:
-                label = f"{team} — {_american_to_str(int(ml_val))}"
-                if len(label) > 100:
-                    label = label[:97] + "..."
-                options.append(discord.SelectOption(
-                    label=label, value=f"{team}|{int(ml_val)}|",
-                ))
-        view = PickSelectView(self.cog, self.event, "Moneyline", options)
-        await interaction.response.send_message("Select your **Moneyline** pick:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Spread", style=discord.ButtonStyle.blurple)
-    async def spread_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.event.get("spread_home") is None:
-            return await interaction.response.send_message("No spread odds.", ephemeral=True)
-        options = []
-        for side in ("home", "away"):
-            team = self.event[f"{side}_team"]
-            sp = self.event.get(f"spread_{side}")
-            sp_odds = self.event.get(f"spread_{side}_odds")
-            if sp is not None and sp_odds is not None:
-                label = f"{team} {float(sp):+g} ({_american_to_str(int(sp_odds))})"
-                if len(label) > 100:
-                    label = label[:97] + "..."
-                options.append(discord.SelectOption(
-                    label=label, value=f"{team}|{int(sp_odds)}|{float(sp)}",
-                ))
-        view = PickSelectView(self.cog, self.event, "Spread", options)
-        await interaction.response.send_message("Select your **Spread** pick:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Over/Under", style=discord.ButtonStyle.gray)
-    async def totals_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ou = self.event.get("over_under")
-        if ou is None:
-            return await interaction.response.send_message("No totals odds.", ephemeral=True)
-        options = []
-        for name, odds_key in [("Over", "over_odds"), ("Under", "under_odds")]:
-            odds_val = self.event.get(odds_key)
-            if odds_val is not None:
-                label = f"{name} {float(ou)} ({_american_to_str(int(odds_val))})"
-                if len(label) > 100:
-                    label = label[:97] + "..."
-                options.append(discord.SelectOption(
-                    label=label, value=f"{name}|{int(odds_val)}|{float(ou)}",
-                ))
-        view = PickSelectView(self.cog, self.event, "OU", options)
-        await interaction.response.send_message("Select **Over** or **Under**:", view=view, ephemeral=True)
-
-
-class PickSelectView(discord.ui.View):
-    """Select menu for picking a specific outcome, then opens wager modal."""
-
-    def __init__(self, cog, event: dict,
-                 bet_type: str, options: list[discord.SelectOption]):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.event = event
-        self.bet_type = bet_type
-
-        select = discord.ui.Select(
-            placeholder="Choose your pick...",
-            options=options,
-        )
-        select.callback = self._on_select
-        self.add_item(select)
-
-    async def _on_select(self, interaction: discord.Interaction):
-        from flow_sportsbook import WagerPresetView, _get_balance
-
-        raw = interaction.data["values"][0]  # type: ignore[index]
-        parts = raw.split("|")
-        pick = parts[0]
-        odds = int(parts[1])
-        line = float(parts[2]) if parts[2] and parts[2] != 'None' else None
-
-        # Map OU bet_type
-        actual_bet_type = self.bet_type
-        if self.bet_type == "OU":
-            actual_bet_type = pick  # "Over" or "Under"
-
-        event = self.event
-        balance = await flow_wallet.get_balance(interaction.user.id)
-
-        # Derive source label from sport_key
-        sport_key = event.get("sport_key", "")
-        source_label = SUPPORTED_SPORTS.get(sport_key, sport_key.split("_")[-1].upper())
-
-        async def place_bet(inter, amt):
-            await inter.response.defer(ephemeral=True)
-            await _place_real_bet(inter, event, actual_bet_type, pick, odds, line, amt, source_label)
-
-        view = WagerPresetView(
-            pick=pick, bet_type=actual_bet_type, odds=odds,
-            display_info={
-                "matchup": f"{event['away_team']} @ {event['home_team']}",
-                "line_str": _american_to_str(odds),
-                "source_label": source_label,
-            },
-            user_balance=balance,
-            place_bet=place_bet,
-            parlay_leg={
-                "source": source_label,
-                "event_id": event["event_id"],
-                "display": f"{event['away_team']} @ {event['home_team']}",
-                "pick": pick,
-                "bet_type": actual_bet_type,
-                "line": line or 0,
-                "odds": odds,
-            },
-            custom_modal_factory=lambda: CustomRealWagerModal(
-                event, actual_bet_type, pick, odds, line,
-            ),
-        )
-        embed = view._build_embed()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, source_label):
-    """Place a real sport bet. Called by WagerPresetView preset callbacks.
+    """Place a real sport bet.
 
-    Handles: event re-check, commence time check, debit, DB insert, confirm card.
+    Returns (new_balance, profit, matchup) on success so the caller can render
+    the confirmation inline. Returns None if the bet was blocked (error already sent).
     Raises InsufficientFundsError if balance too low.
     """
     # Re-check event is still open
@@ -1135,24 +735,25 @@ async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, s
         ) as cur:
             row = await cur.fetchone()
 
-    if not row:
+    async def _send_err(msg: str):
         if not interaction.response.is_done():
-            return await interaction.response.send_message("Event not found.", ephemeral=True)
-        return await interaction.followup.send("Event not found.", ephemeral=True)
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+
+    if not row:
+        await _send_err("Event not found.")
+        return None
 
     locked, completed, commence_str = row
     if locked or completed:
-        msg = "This game is already **locked**."
-        if not interaction.response.is_done():
-            return await interaction.response.send_message(msg, ephemeral=True)
-        return await interaction.followup.send(msg, ephemeral=True)
+        await _send_err("This game is already **locked**.")
+        return None
 
     ct = _parse_commence(commence_str)
     if ct and ct <= datetime.now(timezone.utc) + timedelta(minutes=5):
-        msg = "This game starts too soon to bet on."
-        if not interaction.response.is_done():
-            return await interaction.response.send_message(msg, ephemeral=True)
-        return await interaction.followup.send(msg, ephemeral=True)
+        await _send_err("This game starts too soon to bet on.")
+        return None
 
     uid = interaction.user.id
 
@@ -1196,13 +797,8 @@ async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, s
             )
         except Exception:
             log.exception(f"[REAL-SB] CRITICAL: refund also failed for uid={uid} — manual intervention required")
-        if not interaction.response.is_done():
-            return await interaction.response.send_message(
-                "⚠️ Bet placement failed — your funds have been returned. Please try again.", ephemeral=True
-            )
-        return await interaction.followup.send(
-            "⚠️ Bet placement failed — your funds have been returned. Please try again.", ephemeral=True
-        )
+        await _send_err("⚠️ Bet placement failed — your funds have been returned. Please try again.")
+        return None
 
     # Register in wager registry (was missing from the old RealBetModal)
     import wager_registry
@@ -1214,17 +810,7 @@ async def _place_real_bet(interaction, event, bet_type, pick, odds, line, amt, s
 
     profit = _profit_calc(amt, odds)
     matchup = f"{event['away_team']} @ {event['home_team']}"
-
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
-    from sportsbook_cards import build_bet_confirm_card, card_to_file
-    png = await build_bet_confirm_card(
-        pick=pick, bet_type=bet_type, odds=odds,
-        risk=amt, to_win=profit, balance=new_balance,
-        matchup=matchup, line=line, source=source_label,
-    )
-    file = card_to_file(png, "bet_confirm.png")
-    await interaction.followup.send(file=file, ephemeral=True)
+    return new_balance, profit, matchup
 
 
 class CustomRealWagerModal(discord.ui.Modal):
@@ -1269,7 +855,7 @@ class CustomRealWagerModal(discord.ui.Modal):
             self.event.get("sport_key", "SPORTS").split("_")[-1].upper(),
         )
         try:
-            await _place_real_bet(
+            result = await _place_real_bet(
                 interaction, self.event, self.bet_type, self.pick,
                 self.odds, self.line, amt, source_label,
             )
@@ -1277,6 +863,20 @@ class CustomRealWagerModal(discord.ui.Modal):
             bal = await flow_wallet.get_balance(interaction.user.id)
             await interaction.response.send_message(
                 f"Insufficient funds. Balance: **${bal:,}**.", ephemeral=True)
+            return
+
+        if result is not None:
+            new_balance, profit, matchup = result
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            from sportsbook_cards import build_bet_confirm_card, card_to_file
+            png = await build_bet_confirm_card(
+                pick=self.pick, bet_type=self.bet_type, odds=self.odds,
+                risk=amt, to_win=profit, balance=new_balance,
+                matchup=matchup, line=self.line, source=source_label,
+            )
+            file = card_to_file(png, "bet_confirm.png")
+            await interaction.followup.send(file=file, ephemeral=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
