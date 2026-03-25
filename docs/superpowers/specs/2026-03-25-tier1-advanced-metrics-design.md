@@ -55,7 +55,7 @@ def _owner_games_cte(
         is_home (1 if user was home team, 0 if away),
         user_score (points scored by this user),
         opp_score (points scored by opponent),
-        margin (user_score - opp_score, positive = win),
+        margin (user_score - opp_score, positive = win, pre-computed in CTE),
         won (1 if user won, 0 if lost)
     """
 ```
@@ -66,7 +66,7 @@ Key behaviors:
 - Filters `stageIndex = '1'` by default; `include_playoffs=True` uses `stageIndex IN ('1','2')`
 - Excludes CPU: `homeUser != 'CPU' AND awayUser != 'CPU' AND homeUser != '' AND awayUser != ''`
 - Computes derived columns: `user_team`, `opp_team`, `is_home`, `user_score`, `opp_score`, `margin`, `won`
-- The `user` param appears **7 times** in the CTE (4 CASE expressions + 2 WHERE matches + 1 for user_team). Document this count prominently in the code.
+- The `user` param appears **8 times** in the CTE: 6 CASE expressions (user_team, opp_team, is_home, user_score, opp_score, won) + 2 WHERE conditions (`homeUser = ?` and `awayUser = ?`). Document this count prominently in the code so it is not undercounted.
 
 Public functions consume it like:
 
@@ -397,7 +397,7 @@ No other files affected. No new dependencies. No schema changes.
 - **All TEXT columns**: Every numeric comparison needs `CAST(col AS INTEGER)` or `CAST(col AS REAL)`. The Query builder handles this automatically for aggregations, but raw WHERE clauses need manual CAST.
 
 ### _owner_games_cte() Implementation Strategy
-Use a CTE (Common Table Expression) pattern. The `user` param is repeated **7 times** (documented in-code):
+Use a two-level CTE pattern. The `user` param is repeated **8 times** in the inner CTE (documented in-code):
 
 ```python
 def _owner_games_cte(
@@ -410,20 +410,15 @@ def _owner_games_cte(
     Domain functions call this, append their SELECT against `og`, and
     combine params: tuple(cte_params + their_own_params).
 
-    The `user` param appears 7 times:  # ← document this prominently
-      - 2x in CASE for user_team/opp_team
-      - 1x in CASE for is_home
-      - 1x in CASE for user_score
-      - 1x in CASE for opp_score
-      - 1x in CASE for won (winner_user match)
-      - But wait — we need homeUser match in WHERE too.
-    Total: user appears in 4 CASE blocks + 2 WHERE conditions = 7 params.
+    The `user` param appears 8 times:  # ← document this count in the code
+      - 6x in CASE expressions: user_team, opp_team, is_home, user_score, opp_score, won
+      - 2x in WHERE clause: (homeUser = ? OR awayUser = ?)
+    Total: params = [user] * 8
     """
-    # 7 occurrences of user in the CTE
-    params = [user] * 7
+    params = [user] * 8
     stages = "('1','2')" if include_playoffs else "('1')"
 
-    cte = f"""WITH og AS (
+    cte = f"""WITH og_raw AS (
     SELECT
         g.seasonIndex, g.weekIndex, g.stageIndex,
         g.homeTeamName, g.awayTeamName,
@@ -456,17 +451,22 @@ def _owner_games_cte(
     params = [user] * 8
 
     if season is not None:
-        # Inject season filter before the closing paren of the CTE
-        # Easiest: add to WHERE before the closing )
         cte = cte.replace(
             "AND g.homeUser != '' AND g.awayUser != ''",
             "AND g.homeUser != '' AND g.awayUser != ''\n      AND g.seasonIndex = ?"
         )
         params.append(str(season))
+
+    # Wrap og in a second CTE that adds margin = user_score - opp_score.
+    # SQLite cannot reference column aliases in the same SELECT, so we use
+    # a wrapping layer. This keeps the base CTE at exactly 8 user params.
+    cte = cte.rstrip().rstrip(")").rstrip()
+    cte += """\n),\nog AS (\n    SELECT *, (user_score - opp_score) AS margin FROM og_raw\n)\n"""
+
     return cte, params
 ```
 
-Note: The CTE now includes `user_team`, `opp_team`, and computes `margin` is NOT in the CTE (to keep it simple) — downstream functions compute `(user_score - opp_score)` as needed in their own SELECT. This avoids adding another derived column to every row.
+Note: The CTE includes `margin` as a pre-computed column (`user_score - opp_score`). This is required because `blowout_frequency` and `close_game_record` both filter on `ABS(margin)` — they cannot recompute it inline without duplicating the CASE logic. All downstream functions use the CTE's `margin` column directly.
 
 The public `owner_games()` wrapper simply returns the CTE + `SELECT * FROM og`:
 ```python

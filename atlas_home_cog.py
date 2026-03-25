@@ -19,7 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from atlas_home_renderer import gather_home_data, render_home_card_to_file
+from atlas_home_renderer import gather_home_data, render_home_card_to_file, render_theme_preview_to_file
 from atlas_themes import THEMES
 
 log = logging.getLogger("atlas.home")
@@ -114,10 +114,17 @@ class HomeView(discord.ui.View):
             original_theme=self.theme_id,
         )
         await interaction.response.defer()
-        disc_file = await render_home_card_to_file(
-            self.data, theme_id=self.theme_id, filename="atlas_home.png"
+        theme_id = self.theme_id or "obsidian_gold"
+        theme_label = THEMES[theme_id].get("label", theme_id) if theme_id in THEMES else theme_id
+        idx_display = f"{current_idx + 1}/{len(theme_keys)}"
+        disc_file = await render_theme_preview_to_file(
+            theme_id, filename="theme_preview.png"
         )
-        await interaction.edit_original_response(attachments=[disc_file], view=theme_view)
+        await interaction.edit_original_response(
+            content=f"Preview: **{theme_label}** ({idx_display})",
+            attachments=[disc_file],
+            view=theme_view,
+        )
 
 
 class ThemeCycleView(discord.ui.View):
@@ -153,11 +160,12 @@ class ThemeCycleView(discord.ui.View):
         await interaction.response.defer()
         theme_id = self._current_theme_id()
         theme_label = THEMES[theme_id].get("label", theme_id) if theme_id in THEMES else theme_id
-        disc_file = await render_home_card_to_file(
-            self.data, theme_id=theme_id, filename="atlas_home.png"
+        idx_display = f"{self.current_idx + 1}/{len(self.theme_keys)}"
+        disc_file = await render_theme_preview_to_file(
+            theme_id, filename="theme_preview.png"
         )
         await interaction.edit_original_response(
-            content=f"Preview: **{theme_label}**",
+            content=f"Preview: **{theme_label}** ({idx_display})",
             attachments=[disc_file],
             view=self,
         )

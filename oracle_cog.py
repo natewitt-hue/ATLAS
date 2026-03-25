@@ -749,7 +749,7 @@ _POS_GROUP_MAP: dict[str, list[str]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _season_label() -> str:
-    return f"Season {dm.CURRENT_SEASON} | Week {dm.CURRENT_WEEK}"
+    return f"Season {dm.CURRENT_SEASON} | {dm.week_label(dm.CURRENT_WEEK)}"
 
 
 def _rank_emoji(rank: int) -> str:
@@ -1017,9 +1017,9 @@ def _build_hotcold_single(data: dict) -> discord.Embed:
     if games:
         game_lines = []
         for g in games:
-            wk    = g.get("weekIndex", "?")
+            wk    = dm.week_label(int(g.get("weekIndex", 0)) + 1, short=True)
             parts = [f"{lbl}: {g[col]}" for col, lbl in STAT_LABELS.items() if col in g and g[col] != 0]
-            game_lines.append(f"**Wk {wk}** — " + " | ".join(parts[:4]))
+            game_lines.append(f"**{wk}** — " + " | ".join(parts[:4]))
         embed.add_field(name=f"🗂️ Last {n} Games", value="\n".join(game_lines), inline=False)
 
     embed.set_footer(text=f"ATLAS™ Oracle · {_season_label()}", icon_url=ATLAS_ICON_URL)
@@ -1329,7 +1329,7 @@ def _build_recap_embed(week: int | None = None) -> discord.Embed:
     data = an.weekly_recap(week=week)
     if not data.get("games"):
         return discord.Embed(
-            title=f"📅 Week {week or dm.CURRENT_WEEK} Recap",
+            title=f"📅 {dm.week_label(week or dm.CURRENT_WEEK)} Recap",
             description="No completed games found for this week.",
             color=C_NEUTRAL,
         )
@@ -1339,7 +1339,7 @@ def _build_recap_embed(week: int | None = None) -> discord.Embed:
     highlights  = data.get("highlights", {})
 
     embed = discord.Embed(
-        title=f"📅 TSL Week {actual_week} Recap",
+        title=f"📅 TSL {dm.week_label(actual_week)} Recap",
         description=f"*{len(games)} games played · {_season_label()}*",
         color=C_BLUE,
         timestamp=datetime.datetime.now(datetime.timezone.utc),
@@ -1577,12 +1577,11 @@ def _build_trade_card_embed(player_name: str) -> discord.Embed:
         inline=False,
     )
     s = t.get("seasonIndex", "?")
-    w = t.get("weekIndex", "?")
     try:
-        w = int(float(w)) + 1
+        w = dm.week_label(int(float(t.get("weekIndex", 0))) + 1)
     except (ValueError, TypeError):
-        pass
-    embed.set_footer(text=f"Season {s} · Week {w} · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+        w = "?"
+    embed.set_footer(text=f"Season {s} · {w} · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
     return embed
 
 
@@ -2123,7 +2122,7 @@ async def _build_team_card_snapshot(
                 f"Net pts/game: {net_per_gm:+.1f}. Streak: {streak_disp or 'none'}. "
                 f"Off rank: #{off_rank}. Def rank: #{def_rank}. TO diff: {to_diff:+d}. "
                 f"Clutch: {clutch_winpct:.0%}. Games remaining: {games_left}. "
-                f"TSL Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK}. "
+                f"TSL Season {dm.CURRENT_SEASON}, {dm.week_label(dm.CURRENT_WEEK)}. "
                 f"Be specific. Be ruthless. No sugarcoating."
             )
             projection = await _ai_blurb(prompt, max_tokens=100)
@@ -2186,15 +2185,15 @@ def _build_team_card_history(team_name: str) -> discord.Embed:
         hs, as_ = big_w["homeScore"], big_w["awayScore"]
         m  = big_w["margin"]
         s  = int(big_w.get("seasonIndex", 0)) + 1
-        wk = int(big_w.get("weekIndex",   0)) + 1
-        moments.append(f"🏆 **Biggest W:** {ht} **{hs}**–{as_} {at}  (+{m} · S{s} Wk{wk})")
+        wk = dm.week_label(int(big_w.get("weekIndex", 0)) + 1, short=True)
+        moments.append(f"🏆 **Biggest W:** {ht} **{hs}**–{as_} {at}  (+{m} · S{s} {wk})")
     if worst_l:
         ht, at = worst_l["homeTeamName"], worst_l["awayTeamName"]
         hs, as_ = worst_l["homeScore"], worst_l["awayScore"]
         m  = worst_l["margin"]
         s  = int(worst_l.get("seasonIndex", 0)) + 1
-        wk = int(worst_l.get("weekIndex",   0)) + 1
-        moments.append(f"💀 **Worst L:** {ht} {hs}–**{as_}** {at}  (–{m} · S{s} Wk{wk})")
+        wk = dm.week_label(int(worst_l.get("weekIndex", 0)) + 1, short=True)
+        moments.append(f"💀 **Worst L:** {ht} {hs}–**{as_}** {at}  (–{m} · S{s} {wk})")
     if moments:
         embed.add_field(name="🎭 Signature Moments", value="\n".join(moments), inline=False)
 
@@ -2522,7 +2521,7 @@ def _build_alltime_embed() -> discord.Embed:
                 name="💥 Highest Scoring Game",
                 value=(
                     f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
-                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['total']} total pts"
+                    f"S{r['seasonIndex']} · {dm.week_label(int(r.get('weekIndex', 0))+1, short=True)} · {r['total']} total pts"
                 ),
                 inline=False,
             )
@@ -2543,7 +2542,7 @@ def _build_alltime_embed() -> discord.Embed:
                 name="🔨 Biggest Blowout",
                 value=(
                     f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
-                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['margin']} pt margin"
+                    f"S{r['seasonIndex']} · {dm.week_label(int(r.get('weekIndex', 0))+1, short=True)} · {r['margin']} pt margin"
                 ),
                 inline=True,
             )
@@ -2565,7 +2564,7 @@ def _build_alltime_embed() -> discord.Embed:
                 name="⚡ Closest Game Ever",
                 value=(
                     f"**{r['homeTeamName']}** {r['homeScore']} – {r['awayScore']} **{r['awayTeamName']}**\n"
-                    f"S{r['seasonIndex']} · Wk {int(r.get('weekIndex', 0))+1} · {r['margin']} pt margin"
+                    f"S{r['seasonIndex']} · {dm.week_label(int(r.get('weekIndex', 0))+1, short=True)} · {r['margin']} pt margin"
                 ),
                 inline=True,
             )
@@ -3766,8 +3765,8 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
                 t2 = row.get("team2Name", "?")
                 sent1 = row.get("team1Sent", "?")
                 sent2 = row.get("team2Sent", "?")
-                wk = row.get("weekIndex", "?")
-                trade_lines.append(f"  {t1} sent {sent1} ↔ {t2} sent {sent2} (Wk {wk})")
+                wk = dm.week_label(int(row.get("weekIndex", 0)) + 1, short=True)
+                trade_lines.append(f"  {t1} sent {sent1} ↔ {t2} sent {sent2} ({wk})")
             context_parts.append("RECENT TRADES:\n" + "\n".join(trade_lines))
 
         # ── Caller's roster summary ─────────────────────────
@@ -4055,7 +4054,7 @@ class WeekRecapView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
         options = [
-            discord.SelectOption(label=f"Week {w}", value=str(w))
+            discord.SelectOption(label=dm.week_label(w), value=str(w))
             for w in range(1, dm.CURRENT_WEEK + 1)
         ]
         # Only send the 25 most recent weeks (Discord limit)

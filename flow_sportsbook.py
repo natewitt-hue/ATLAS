@@ -1828,7 +1828,7 @@ class SportsbookWorkspace(discord.ui.View):
         embed = discord.Embed(title="\U0001f3c8  TSL SPORTSBOOK", color=TSL_GOLD)
         embed.description = (
             f"```\n"
-            f"WEEK {bet_week} BOARD  \u2022  SEASON {dm.CURRENT_SEASON}\n"
+            f"{dm.week_label(bet_week).upper()} BOARD  \u2022  SEASON {dm.CURRENT_SEASON}\n"
             f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
             f"\U0001f4b0 Your Balance:  ${balance:,}\n"
             f"\U0001f3ae Games:         {len(ui_games)}\n"
@@ -2223,7 +2223,7 @@ class SportsbookWorkspace(discord.ui.View):
             embed = discord.Embed(title="\U0001f3c8  TSL SPORTSBOOK", color=TSL_GOLD)
             embed.description = (
                 f"```\n"
-                f"WEEK {bet_week} BOARD  \u2022  SEASON {dm.CURRENT_SEASON}\n"
+                f"{dm.week_label(bet_week).upper()} BOARD  \u2022  SEASON {dm.CURRENT_SEASON}\n"
                 f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
                 f"\U0001f4b0 Your Balance:  ${balance:,}\n"
                 f"\U0001f3ae Games:         {len(ws._cached_tsl_games)}\n"
@@ -2974,7 +2974,7 @@ class PropListView(discord.ui.View):
         embed.description = f"**{desc}**"
         embed.add_field(name=f"Option A: {opt_a}", value=f"Odds: {_american_to_str(odds_a)}", inline=True)
         embed.add_field(name=f"Option B: {opt_b}", value=f"Odds: {_american_to_str(odds_b)}", inline=True)
-        embed.set_footer(text=f"Week {week} Prop")
+        embed.set_footer(text=f"{dm.week_label(week)} Prop")
 
         view = PropBetButtons(pid, desc, opt_a, opt_b, odds_a, odds_b)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -3198,7 +3198,7 @@ class SportsbookCog(commands.Cog):
                     profit = _payout_calc(amt, odds) - amt
                     lines.append(
                         f"**{pick}** ({btype}) @ {_american_to_str(int(odds))} | "
-                        f"${amt:,} → +${profit:,} | W{week}"
+                        f"${amt:,} → +${profit:,} | {dm.week_label(week, short=True)}"
                     )
                 embed.add_field(name="🎯 Straight Bets", value="\n".join(lines), inline=False)
             if parlays:
@@ -3274,7 +3274,7 @@ class SportsbookCog(commands.Cog):
                 matchup, btype, pick, amt, odds, status, week = b
                 icon = {"Won": "✅", "Lost": "❌", "Push": "🔁", "Pending": "⏳"}.get(status, "•")
                 lines.append(
-                    f"{icon} W{week} | **{pick}** ({btype}) | ${amt:,} | {_american_to_str(int(odds))}"
+                    f"{icon} {dm.week_label(week, short=True)} | **{pick}** ({btype}) | ${amt:,} | {_american_to_str(int(odds))}"
                 )
             embed.add_field(name="🕐 Recent Bets", value="\n".join(lines), inline=False)
 
@@ -3293,7 +3293,7 @@ class SportsbookCog(commands.Cog):
             return await interaction.followup.send("No bettors found yet.", ephemeral=True)
 
         embed = discord.Embed(title="🏆  TSL SPORTSBOOK LEADERBOARD", color=TSL_GOLD)
-        embed.description = f"**Season {dm.CURRENT_SEASON} • Week {dm.CURRENT_WEEK}**\n"
+        embed.description = f"**Season {dm.CURRENT_SEASON} • {dm.week_label(dm.CURRENT_WEEK)}**\n"
 
         medals = ["🥇", "🥈", "🥉"]
         lines  = []
@@ -3371,7 +3371,7 @@ class SportsbookCog(commands.Cog):
                 bet_counts[matchup.lower().strip()] = cnt
 
         embed = discord.Embed(
-            title=f"📊  SPORTSBOOK STATUS — Week {bet_week}",
+            title=f"📊  SPORTSBOOK STATUS — {dm.week_label(bet_week)}",
             color=TSL_GOLD
         )
         embed.description = f"Season {dm.CURRENT_SEASON}  •  League Avg: **{_LEAGUE_AVG_SCORE:.1f} pts/team**\n"
@@ -3480,7 +3480,7 @@ class SportsbookCog(commands.Cog):
             lines = []
             for bet, src in chunk:
                 bid, uid, wk, matchup, btype, pick, wager, odds, created = bet
-                wk_str = f"W{wk}" if wk else ""
+                wk_str = dm.week_label(wk, short=True) if wk else ""
                 lines.append(
                     f"`#{bid}` **{src}** {wk_str} | {matchup}\n"
                     f"  {btype}: {pick} | ${wager:,} @ {odds}"
@@ -3647,7 +3647,7 @@ class SportsbookCog(commands.Cog):
         ui_games = await loop.run_in_executor(None, _build_game_lines, raw_games)
 
         embed = discord.Embed(
-            title=f"🔬  Line Debug — Week {bet_week}  (Elo Engine {SPORTSBOOK_VERSION})",
+            title=f"🔬  Line Debug — {dm.week_label(bet_week)}  (Elo Engine {SPORTSBOOK_VERSION})",
             color=AtlasColors.INFO
         )
         for g in ui_games[:8]:   # Discord embed field limit
@@ -3781,7 +3781,7 @@ class SportsbookCog(commands.Cog):
                 count += 1
 
         await interaction.followup.send(
-            f"🔴 **Locked {count} game(s)** for Week {bet_week}. No new bets accepted.",
+            f"🔴 **Locked {count} game(s)** for {dm.week_label(bet_week)}. No new bets accepted.",
             ephemeral=True
         )
 

@@ -177,7 +177,7 @@ def get_h2h_sql_and_params(
             SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS u2_wins,
             COUNT(*) AS games_played,
             GROUP_CONCAT(
-                'S' || seasonIndex || ' W' || (CAST(weekIndex AS INTEGER)+1) ||
+                'S' || seasonIndex || ' ' || """ + dm.WEEK_LABEL_SQL + """ ||
                 ': ' || homeTeamName || ' ' || homeScore || '-' || awayScore || ' ' || awayTeamName
             ) AS game_log
         FROM games

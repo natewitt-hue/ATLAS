@@ -28,6 +28,7 @@ from math import log as _math_log
 
 import atlas_ai
 from atlas_ai import Tier
+from data_manager import week_label as _week_label
 
 _log = logging.getLogger("oracle_analysis")
 
@@ -131,7 +132,7 @@ def _build_tsl_context(dm) -> str:
     return (
         f"LEAGUE: The Simulation League (TSL) — Madden NFL sim league, 31 active teams, "
         f"{dm.CURRENT_SEASON} Super Bowl seasons of history.\n"
-        f"CURRENT SEASON: Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK}.\n"
+        f"CURRENT SEASON: Season {dm.CURRENT_SEASON}, {_week_label(dm.CURRENT_WEEK)}.\n"
     )
 
 
@@ -249,9 +250,9 @@ def _recent_games_block(team_name: str, n: int = 5) -> str:
     for r in rows:
         home, away = r["homeTeamName"], r["awayTeamName"]
         hs, as_ = r["homeScore"], r["awayScore"]
-        wk = int(r.get("weekIndex", 0)) + 1
+        wk = _week_label(int(r.get("weekIndex", 0)) + 1, short=True)
         sn = r.get("seasonIndex", "?")
-        lines.append(f"  S{sn}·W{wk}: {home} {hs} – {as_} {away}")
+        lines.append(f"  S{sn}·{wk}: {home} {hs} – {as_} {away}")
     return f"RECENT GAMES ({team_name}, last {n}):\n" + "\n".join(lines)
 
 
@@ -278,9 +279,9 @@ def _h2h_block(user_a: str, user_b: str) -> str:
         home, away = r["homeTeamName"], r["awayTeamName"]
         hs, as_ = r["homeScore"], r["awayScore"]
         sn = r.get("seasonIndex", "?")
-        wk = int(r.get("weekIndex", 0)) + 1
+        wk = _week_label(int(r.get("weekIndex", 0)) + 1, short=True)
         winner = r.get("winner_user", "?")
-        lines.append(f"  S{sn}·W{wk}: {home} {hs}–{as_} {away}  → {winner} wins")
+        lines.append(f"  S{sn}·{wk}: {home} {hs}–{as_} {away}  → {winner} wins")
     if len(rows) > 10:
         lines.append(f"  ... and {len(rows) - 10} more games")
     return "\n".join(lines)
@@ -1322,7 +1323,7 @@ async def run_player_scout(player_name: str, dm, bot=None, *, discord_id: int | 
                 (f"%{player_name}%", dm.CURRENT_SEASON),
             )
             if not gs_err and gs_rows:
-                gs_lines = [f"  W{int(r['weekIndex'])+1}: {r['tkl']} tkl, {r['sck']} sck, {r['ints']} INT" for r in gs_rows]
+                gs_lines = [f"  {_week_label(int(r['weekIndex'])+1, short=True)}: {r['tkl']} tkl, {r['sck']} sck, {r['ints']} INT" for r in gs_rows]
                 game_stats = f"PER-GAME STATS (last {len(gs_rows)}):\n" + "\n".join(gs_lines)
         else:
             gs_rows, gs_err = run_sql(
@@ -1342,7 +1343,7 @@ async def run_player_scout(player_name: str, dm, bot=None, *, discord_id: int | 
                     if r["pyd"]: parts.append(f"{r['pyd']}py/{r['ptd']}td")
                     if r["ryd"]: parts.append(f"{r['ryd']}ry/{r['rtd']}td")
                     if r["reyd"]: parts.append(f"{r['reyd']}rey/{r['retd']}td")
-                    gs_lines.append(f"  W{int(r['weekIndex'])+1}: {' | '.join(parts)}")
+                    gs_lines.append(f"  {_week_label(int(r['weekIndex'])+1, short=True)}: {' | '.join(parts)}")
                 game_stats = f"PER-GAME STATS (last {len(gs_rows)}):\n" + "\n".join(gs_lines)
 
     # Positional peer comparison
@@ -1473,7 +1474,7 @@ async def run_power_rankings(dm, bot=None, *, discord_id: int | None = None, mem
 
 {data_block}
 
-ANALYSIS TASK: TSL Power Rankings — Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK}
+ANALYSIS TASK: TSL Power Rankings — Season {dm.CURRENT_SEASON}, {_week_label(dm.CURRENT_WEEK)}
 
 Write power rankings using ALL the data above. You have every team's record, point differential, power score, and streaks. Use them.
 
@@ -1490,7 +1491,7 @@ Be opinionated. Cite SPECIFIC records, differentials, and power scores. No vague
     result = await atlas_ai.generate(prompt, tier=Tier.SONNET, max_tokens=1000)
 
     return AnalysisResult(
-        title=f"Power Rankings — Season {dm.CURRENT_SEASON} · Week {dm.CURRENT_WEEK}",
+        title=f"Power Rankings — Season {dm.CURRENT_SEASON} · {_week_label(dm.CURRENT_WEEK)}",
         analysis_type="power",
         sections=[{"label": "Rankings Analysis", "content": result.text.strip()}],
         prediction=None,

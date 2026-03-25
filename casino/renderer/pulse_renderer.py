@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from atlas_html_engine import render_card, wrap_card, esc
+from data_manager import week_label as _week_label
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -347,7 +348,7 @@ def _build_pulse_html(data: PulseData, theme_id: str | None = None, refresh_inte
             <span style="font-size:14px;font-weight:700;color:var(--text-primary);">SPORTSBOOK</span>
           </div>
           <div style="font-size:9px;font-weight:700;color:#111;background:var(--gold);
-              padding:2px 5px;border-radius:var(--border-radius-sm);font-family:var(--font-mono),monospace;">WK {data.sb_week}</div>
+              padding:2px 5px;border-radius:var(--border-radius-sm);font-family:var(--font-mono),monospace;">{_week_label(data.sb_week, short=True)}</div>
         </div>
         <div style="font-family:var(--font-mono),monospace;font-size:var(--font-lg);font-weight:700;
             color:var(--gold);margin-bottom:var(--space-xs);">{data.sb_bets} bets &middot; ${data.sb_volume:,} vol</div>

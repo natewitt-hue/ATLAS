@@ -18,6 +18,7 @@ import html as html_mod
 import io
 
 from atlas_html_engine import esc, render_card, wrap_card
+from data_manager import week_label as _week_label
 from atlas_style_tokens import Tokens
 
 # ── ATLAS identity ─────────────────────────────────────────────────────────────
@@ -254,7 +255,7 @@ def _build_analysis_body(result, accent: str, meta: dict, season: int, week: int
     title_escaped = esc(result.title)
     label = esc(meta["label"])
     icon = meta["icon"]
-    season_label = esc(f"Season {season} · Week {week}")
+    season_label = esc(f"Season {season} · {_week_label(week)}")
     model_label = esc(result.metadata.get("model", "") or "")
 
     # Comparison table (matchup only — when comparison_data is present)
