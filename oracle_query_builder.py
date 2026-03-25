@@ -1441,6 +1441,9 @@ def rb_composite(
         broken_tackle_weight = 50.0  (applied per-carry: broken_tackles / attempts)
         yac_weight           = 5.0   (applied per-carry: yac / attempts)
         fumble_penalty       = 30.0  (negative, fumble rate: fumbles / attempts)
+
+    NOTE: Composite scores are NOT comparable across position groups.
+    Use within a single position group only.
     """
     params: list = ["1"]
     if season is not None:
@@ -1472,6 +1475,7 @@ SELECT
     ) AS composite_score
 FROM offensive_stats
 WHERE stageIndex = ? {season_filter}
+  AND pos = 'RB'
 GROUP BY fullName, teamName
 HAVING COUNT(*) >= 4
    AND SUM(CAST(rushAtt AS INTEGER)) >= 20
@@ -1494,6 +1498,10 @@ def wr_composite(
         yac_weight       = 3.0   (per-catch YAC)
         td_weight        = 10.0  (per-TD)
         drop_penalty     = 20.0  (negative, drop rate: drops / (catches + drops))
+
+    NOTE: Composite scores are NOT comparable across position groups.
+    WR scores scale ~50x higher than QB composites due to catch% (0-100) * 50.0 weight.
+    Use within a single position group only.
     """
     params: list = ["1"]
     if season is not None:
