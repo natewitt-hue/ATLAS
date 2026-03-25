@@ -1254,6 +1254,127 @@ ORDER BY CAST(og.seasonIndex AS INTEGER)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  STANDINGS-BASED METRICS (Group D)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def team_efficiency(team: str | None = None) -> tuple[str, tuple]:
+    """Offensive/defensive yardage, points scored/allowed, turnover diff from standings."""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(offTotalYds  AS INTEGER) AS offTotalYds,
+    CAST(offPassYds   AS INTEGER) AS offPassYds,
+    CAST(offRushYds   AS INTEGER) AS offRushYds,
+    CAST(defTotalYds  AS INTEGER) AS defTotalYds,
+    CAST(defPassYds   AS INTEGER) AS defPassYds,
+    CAST(defRushYds   AS INTEGER) AS defRushYds,
+    CAST(ptsFor       AS INTEGER) AS ptsFor,
+    CAST(ptsAgainst   AS INTEGER) AS ptsAgainst,
+    CAST(netPts       AS INTEGER) AS netPts,
+    CAST(tODiff       AS INTEGER) AS tODiff,
+    ROUND(CAST(winPct AS REAL), 3) AS winPct
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY CAST(netPts AS INTEGER) DESC"
+    return sql, tuple(params)
+
+
+def strength_of_schedule(team: str | None = None) -> tuple[str, tuple]:
+    """Pre-computed strength of schedule from standings table."""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(totalSoS     AS REAL) AS totalSoS,
+    CAST(playedSoS    AS REAL) AS playedSoS,
+    CAST(remainingSoS AS REAL) AS remainingSoS,
+    CAST(initialSoS   AS REAL) AS initialSoS,
+    CAST(totalWins    AS INTEGER) AS totalWins,
+    CAST(totalLosses  AS INTEGER) AS totalLosses
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY CAST(totalSoS AS REAL) DESC"
+    return sql, tuple(params)
+
+
+def team_home_away(team: str | None = None) -> tuple[str, tuple]:
+    """Home/away win-loss splits from standings."""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(homeWins   AS INTEGER) AS homeWins,
+    CAST(homeLosses AS INTEGER) AS homeLosses,
+    CAST(awayWins   AS INTEGER) AS awayWins,
+    CAST(awayLosses AS INTEGER) AS awayLosses
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY (CAST(homeWins AS INTEGER) + CAST(awayWins AS INTEGER)) DESC"
+    return sql, tuple(params)
+
+
+def team_division_standings(
+    division: str | None = None,
+    conference: str | None = None,
+) -> tuple[str, tuple]:
+    """Division and conference records from standings."""
+    params: list = []
+    wheres: list[str] = []
+    sql = """
+SELECT
+    teamName,
+    CAST(divWins    AS INTEGER) AS divWins,
+    CAST(divLosses  AS INTEGER) AS divLosses,
+    CAST(confWins   AS INTEGER) AS confWins,
+    CAST(confLosses AS INTEGER) AS confLosses,
+    divisionName,
+    conferenceName
+FROM standings
+"""
+    if division:
+        wheres.append("divisionName = ?")
+        params.append(division)
+    if conference:
+        wheres.append("conferenceName = ?")
+        params.append(conference)
+    if wheres:
+        sql += "WHERE " + " AND ".join(wheres) + "\n"
+    sql += "ORDER BY divisionName, CAST(divWins AS INTEGER) DESC"
+    return sql, tuple(params)
+
+
+def team_rankings(team: str | None = None) -> tuple[str, tuple]:
+    """All rank columns from standings — useful for 'where does team X rank?'"""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(rank            AS INTEGER) AS rank,
+    CAST(prevRank        AS INTEGER) AS prevRank,
+    CAST(offTotalYdsRank AS INTEGER) AS offTotalYdsRank,
+    CAST(defTotalYdsRank AS INTEGER) AS defTotalYdsRank,
+    CAST(ptsForRank      AS INTEGER) AS ptsForRank,
+    CAST(ptsAgainstRank  AS INTEGER) AS ptsAgainstRank
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY CAST(rank AS INTEGER)"
+    return sql, tuple(params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS (Layer 3)
 # ══════════════════════════════════════════════════════════════════════════════
 
