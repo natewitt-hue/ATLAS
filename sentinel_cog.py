@@ -2162,14 +2162,17 @@ class PositionChangeCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         record["status"]      = "approved"
         record["approved_by"] = str(interaction.user)
         record["approved_at"] = dt.now(timezone.utc).isoformat()
         _save_state()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Position change `{log_id.upper()}` approved: "
-            f"**{record['player_name']}** ({record['from_pos']} → {record['to_pos']})."
+            f"**{record['player_name']}** ({record['from_pos']} → {record['to_pos']}).",
+            ephemeral=True,
         )
 
         # Post public announcement
@@ -2192,16 +2195,19 @@ class PositionChangeCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         record["status"]     = "denied"
         record["denied_by"]  = str(interaction.user)
         record["denied_at"]  = dt.now(timezone.utc).isoformat()
         record["denial_reason"] = reason
         _save_state()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ Position change `{log_id.upper()}` denied: "
             f"**{record['player_name']}** ({record['from_pos']} → {record['to_pos']}).\n"
-            f"Reason: {reason}"
+            f"Reason: {reason}",
+            ephemeral=True,
         )
 
         # Notify in roster moves channel

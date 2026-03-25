@@ -165,9 +165,8 @@ _LEDGER_CSS = """\
 """
 
 
-def _esc(text: str) -> str:
-    """HTML-escape user-controlled text."""
-    return esc(text)
+# Use esc() directly from atlas_html_engine — kept as alias for grep-ability
+_esc = esc
 
 
 def _pl_color(value: int) -> str:

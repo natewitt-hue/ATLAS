@@ -33,7 +33,7 @@ CHANGES v5.0 vs v4.0:
   ADD  _safe_float()/_safe_int() — fixes Python `or` falsiness bug where
        0.0 win% or 0 rank was silently replaced with defaults
   FIX  CPU games filtered from Elo history (98 games were inflating stats)
-  FIX  Only status='3' (final) games used in Elo computation
+  FIX  Only status IN ('2','3') (completed/final) games used in Elo computation
   FIX  ML table extended for spreads up to 21+ points
   KEEP all admin commands, UI components, grading logic unchanged
 ─────────────────────────────────────────────────────────────────────────────
@@ -445,7 +445,7 @@ def _compute_elo_ratings() -> dict:
     Applies season regression (25% toward 1500) at each season boundary.
 
     Filters:
-      - Only status='3' (final) games
+      - Only status IN ('2','3') (final/completed) games
       - Excludes CPU games and games with empty owners
 
     Returns { userName: elo_float } and populates _OWNER_SCORING_CACHE as side-effect.
@@ -822,7 +822,8 @@ def _build_game_lines(games_raw: list) -> list[dict]:
         week_idx = _safe_int(rg.get("weekIndex", 99), 99)
 
         # Auto-lock finished or past-week games
-        if status >= 2 or week_idx < dm.CURRENT_WEEK:
+        # weekIndex is 0-based (API), CURRENT_WEEK is 1-based — convert to same base
+        if status >= 2 or week_idx < (dm.CURRENT_WEEK - 1):
             _set_locked(game_id, True)
 
         home_data = power_map.get(home, _FALLBACK_TEAM)
@@ -1074,6 +1075,11 @@ async def _place_straight_bet(
     if amount < MIN_BET:
         return await _send_error(f"❌ Minimum bet is **${MIN_BET}**.")
 
+    # Defer early to avoid Discord 3s timeout during DB operations
+    if not already_deferred:
+        await interaction.response.defer(ephemeral=True)
+        already_deferred = True
+
     # Per-user lock prevents double-spend across concurrent bets
     async with flow_wallet.get_user_lock(interaction.user.id):
         try:
@@ -1125,9 +1131,6 @@ async def _place_straight_bet(
             )
 
     profit = _payout_calc(amount, odds) - amount
-
-    if not already_deferred:
-        await interaction.response.defer(ephemeral=True)
 
     from sportsbook_cards import build_bet_confirm_card
     theme_id = get_theme_for_render(interaction.user.id)
@@ -1290,6 +1293,9 @@ class ParlayWagerModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
 
+        # Defer early to avoid Discord 3s timeout during DB operations
+        await interaction.response.defer(ephemeral=True)
+
         # Per-user lock prevents double-spend across concurrent bets
         async with flow_wallet.get_user_lock(interaction.user.id):
             # Atomic balance check + debit inside single transaction
@@ -1330,7 +1336,7 @@ class ParlayWagerModal(discord.ui.Modal):
                     con.commit()
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     f"❌ Insufficient funds. Balance: **${balance:,}**.\n"
                     f"Your parlay cart has been preserved — add funds and try again.",
                     ephemeral=True,
@@ -1389,7 +1395,6 @@ class ParlayWagerModal(discord.ui.Modal):
         potential = _payout_calc(amt, self.combined_odds) - amt
         _clear_cart(interaction.user.id)
 
-        await interaction.response.defer(ephemeral=True)
         from sportsbook_cards import build_parlay_confirm_card
         theme_id = get_theme_for_render(interaction.user.id)
         png = await build_parlay_confirm_card(
@@ -1440,6 +1445,9 @@ class PropBetModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
 
+        # Defer early to avoid Discord 3s timeout during DB operations
+        await interaction.response.defer(ephemeral=True)
+
         # Per-user lock prevents double-spend across concurrent bets
         async with flow_wallet.get_user_lock(interaction.user.id):
             # Atomic: verify prop open + balance check + debit in single transaction
@@ -1451,7 +1459,7 @@ class PropBetModal(discord.ui.Modal):
                     ).fetchone()
                     if not prop or prop[0] != 'Open':
                         con.rollback()
-                        return await interaction.response.send_message(
+                        return await interaction.followup.send(
                             "❌ This prop bet is no longer open.", ephemeral=True
                         )
                     con.execute(
@@ -1473,7 +1481,7 @@ class PropBetModal(discord.ui.Modal):
                     con.commit()
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
                 )
 
@@ -1485,7 +1493,7 @@ class PropBetModal(discord.ui.Modal):
         embed.add_field(name="Risk",    value=f"**${amt:,}**",       inline=True)
         embed.add_field(name="To Win",  value=f"**${profit:,}**",    inline=True)
         embed.add_field(name="Balance", value=f"${new_bal:,}",       inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
         # Post to #ledger
         try:

@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.25.0"  # fix: boss module audit — interaction safety, FlowLive highlight routing, setup guard
+ATLAS_VERSION = "7.0.0"  # fix: pre-7.0 comprehensive audit — Flow, Casino, Render, Core, Analytics
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

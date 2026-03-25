@@ -426,6 +426,8 @@ class EconomyCog(commands.Cog):
     async def _eco_give_impl(self, interaction: discord.Interaction,
                              member: discord.Member, amount: int,
                              reason: str = "Commissioner grant"):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         old, new = await admin_give(member.id, amount, interaction.user.id, reason)
         await self._post_audit(
             f"**{interaction.user.display_name}** gave **{amount:,}** to "
@@ -447,11 +449,13 @@ class EconomyCog(commands.Cog):
             ),
             color=AtlasColors.SUCCESS,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _eco_take_impl(self, interaction: discord.Interaction,
                              member: discord.Member, amount: int,
                              reason: str = "Commissioner deduction"):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         old, new = await admin_take(member.id, amount, interaction.user.id, reason)
         taken = old - new
         await self._post_audit(
@@ -475,11 +479,13 @@ class EconomyCog(commands.Cog):
             ),
             color=AtlasColors.ERROR,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _eco_set_impl(self, interaction: discord.Interaction,
                             member: discord.Member, amount: int,
                             reason: str = "Commissioner set"):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         old, new = await admin_set(member.id, amount, interaction.user.id, reason)
         await self._post_audit(
             f"**{interaction.user.display_name}** set **{member.display_name}** "
@@ -503,17 +509,19 @@ class EconomyCog(commands.Cog):
             ),
             color=AtlasColors.ECONOMY,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _eco_check_impl(self, interaction: discord.Interaction,
                               member: discord.Member):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         bal = await admin_check(member.id)
         embed = discord.Embed(
             title=f"💰 {member.display_name}",
             description=f"**Balance:** {bal:,} TSL Bucks",
             color=AtlasColors.ECONOMY,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── Role-based ────────────────────────────────────────────────────────
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from format_utils import fmt_volume
+from atlas_style_tokens import Tokens
 from atlas_html_engine import (
     render_card,
     wrap_card,
@@ -31,12 +32,13 @@ from atlas_html_engine import (
 try:
     from polymarket_cog import CATEGORY_COLORS_HEX
 except ImportError:
+    # Fallback — aligned with ATLAS token system (atlas_style_tokens.py)
     CATEGORY_COLORS_HEX: dict[str, str] = {
-        "Elections": "#5B9BD5", "Government": "#3498DB",
-        "Pop Culture": "#FF69B4", "Entertainment": "#E91E63",
-        "Economics": "#27AE60", "Science": "#9B59B6",
-        "Tech": "#1ABC9C", "AI": "#00CED1",
-        "World": "#E67E22", "Other": "#95A5A6",
+        "Elections": Tokens.JEWEL_PURPLE, "Government": Tokens.JEWEL_PURPLE,
+        "Pop Culture": Tokens.PINK, "Entertainment": Tokens.PINK,
+        "Economics": Tokens.WIN_DARK, "Science": Tokens.PURPLE,
+        "Tech": Tokens.JEWEL_BLUE, "AI": Tokens.JEWEL_BLUE,
+        "World": Tokens.ORANGE, "Other": Tokens.SLATE,
     }
 
 _DEFAULT_CATEGORY_COLOR = "#95A5A6"

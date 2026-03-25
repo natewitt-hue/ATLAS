@@ -599,12 +599,25 @@ class PagePool:
         self._render_counts: dict[int, int] = {}
 
     async def _new_page(self):
-        """Create a fresh page from the current browser."""
+        """Create a fresh page from the current browser.
+
+        If page creation fails (e.g. browser crashed/disconnected),
+        force a browser reconnection and retry once.
+        """
         browser = await _get_browser()
-        return await browser.new_page(
-            viewport={"width": self._width, "height": 1200},
-            device_scale_factor=self._scale,
-        )
+        try:
+            return await browser.new_page(
+                viewport={"width": self._width, "height": 1200},
+                device_scale_factor=self._scale,
+            )
+        except Exception:
+            log.warning("Page creation failed — forcing browser reconnect")
+            await close_browser()
+            browser = await _get_browser()
+            return await browser.new_page(
+                viewport={"width": self._width, "height": 1200},
+                device_scale_factor=self._scale,
+            )
 
     async def warm(self):
         """Pre-create pages and add them to the pool."""
