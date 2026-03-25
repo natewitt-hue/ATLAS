@@ -314,7 +314,7 @@ class SBPanelView(discord.ui.View):
     async def status(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_status_impl(interaction)
@@ -323,7 +323,7 @@ class SBPanelView(discord.ui.View):
     async def lockall(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_lockall_impl(interaction)
@@ -332,7 +332,7 @@ class SBPanelView(discord.ui.View):
     async def unlockall(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_unlockall_impl(interaction)
@@ -401,7 +401,7 @@ class SBLinesPanelView(discord.ui.View):
     async def reset_lines(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_resetlines_impl(interaction)
@@ -410,7 +410,7 @@ class SBLinesPanelView(discord.ui.View):
     async def view_lines(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_lines_impl(interaction)
@@ -452,7 +452,6 @@ class SBBetsPanelView(discord.ui.View):
     async def open_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog") or interaction.client.get_cog("SportsbookCog")
         sb_cog = interaction.client.get_cog("SportsbookCog")
         if not sb_cog:
             return await _send_cog_error(interaction, "Sportsbook")
@@ -578,7 +577,7 @@ class SBSpreadFollowUpModal(discord.ui.Modal, title="Set Spread Override"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -599,7 +598,7 @@ class SBMLFollowUpModal(discord.ui.Modal, title="Set Moneyline Override"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -620,7 +619,7 @@ class SBOUFollowUpModal(discord.ui.Modal, title="Set Over/Under Override"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -639,7 +638,7 @@ class SBLockConfirmView(discord.ui.View):
     async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_lock_impl(interaction, self.matchup, True)
@@ -648,10 +647,14 @@ class SBLockConfirmView(discord.ui.View):
     async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_lock_impl(interaction, self.matchup, False)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled.", view=None)
 
 
 class SBCancelConfirmView(discord.ui.View):
@@ -663,7 +666,7 @@ class SBCancelConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         await cog._sb_cancelgame_impl(interaction, self.matchup)
@@ -693,7 +696,7 @@ class BossSBRefundModal(discord.ui.Modal, title="Refund a Bet"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -744,7 +747,7 @@ class SBBalanceFollowUpModal(discord.ui.Modal, title="Adjust Member Balance"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -768,7 +771,7 @@ class BossSBAddPropModal(discord.ui.Modal, title="Create Prop Bet"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -807,7 +810,7 @@ class SettlePropFollowUpModal(discord.ui.Modal, title="Settle Prop Bet"):
     async def on_submit(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
-        cog = interaction.client.get_cog("RealSportsbookCog")
+        cog = interaction.client.get_cog("SportsbookCog")
         if not cog:
             return await _send_cog_error(interaction, "Sportsbook")
         try:
@@ -975,6 +978,8 @@ class CasinoMemberSelectView(discord.ui.View):
             await cog._casino_clear_session_impl(interaction, member)
         elif self.mode == "givescratch":
             await cog._casino_give_scratch_impl(interaction, member)
+        else:
+            await interaction.response.send_message("❌ Unknown operation.", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1216,6 +1221,8 @@ class EcoTransferFollowUpModal(discord.ui.Modal):
             await cog._eco_take_impl(interaction, self.member, amt, reason)
         elif self.mode == "set":
             await cog._eco_set_impl(interaction, self.member, amt, reason)
+        else:
+            await interaction.response.send_message(f"❌ Unknown mode `{self.mode}`.", ephemeral=True)
 
 
 class EcoCheckMemberSelectView(discord.ui.View):
@@ -1267,6 +1274,8 @@ class EcoRoleFollowUpModal(discord.ui.Modal):
             await cog._eco_give_role_impl(interaction, self.role, amt, reason)
         elif self.mode == "take":
             await cog._eco_take_role_impl(interaction, self.role, amt, reason)
+        else:
+            await interaction.response.send_message(f"❌ Unknown mode `{self.mode}`.", ephemeral=True)
 
 
 class StipendIntervalSelectView(discord.ui.View):
@@ -1482,6 +1491,8 @@ class BossRealSBEventModal(discord.ui.Modal):
             await cog.lock_impl(interaction, self.event_id.value)
         elif self.mode == "void":
             await cog.void_impl(interaction, self.event_id.value)
+        else:
+            await interaction.followup.send(f"❌ Unknown mode `{self.mode}`.", ephemeral=True)
 
 
 class RealSBSyncSelectView(discord.ui.View):
@@ -1583,7 +1594,7 @@ class RosterPanelView(discord.ui.View):
             else:
                 nfc_lines.append(line)
 
-        embed = discord.Embed(title="🏈 TSL Roster", color=GOLD)
+        embed = discord.Embed(title="🏈 TSL Roster", color=AtlasColors.TSL_GOLD)
         embed.add_field(
             name="🏈 AFC", value="\n".join(afc_lines) or "None", inline=True,
         )
@@ -1944,11 +1955,13 @@ def _boss_build_player_ability_embed(result) -> discord.Embed:
     if result.is_clean:
         embed.set_footer(text="All abilities earned. No action required.")
     else:
-        embed.add_field(
-            name="📋 Commissioner Actions",
-            value="\n".join(result.action_lines()),
-            inline=False,
-        )
+        actions = result.action_lines()
+        if actions:
+            embed.add_field(
+                name="📋 Commissioner Actions",
+                value="\n".join(actions),
+                inline=False,
+            )
     return embed
 
 
@@ -2311,7 +2324,7 @@ class AssignMemberSelectView(discord.ui.View):
         embed = discord.Embed(
             title="Team Assignment",
             description=f"Pick a conference to assign **{member.display_name}** to a team.",
-            color=GOLD,
+            color=AtlasColors.TSL_GOLD,
         )
         view = roster.AssignConferenceView(member)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -2329,6 +2342,7 @@ class UnassignMemberSelectView(discord.ui.View):
             return await interaction.response.send_message(
                 f"❌ **{member.display_name}** has no team assignment.", ephemeral=True,
             )
+        await interaction.response.defer(ephemeral=True)
         success = await asyncio.get_running_loop().run_in_executor(None, roster.unassign, member.id)
         if success:
             embed = discord.Embed(
@@ -2339,9 +2353,9 @@ class UnassignMemberSelectView(discord.ui.View):
                 ),
                 color=AtlasColors.WARNING,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            await interaction.response.send_message("❌ Failed to unassign.", ephemeral=True)
+            await interaction.followup.send("❌ Failed to unassign.", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2448,7 +2462,7 @@ class FlowLivePanelView(discord.ui.View):
         super().__init__(timeout=300)
         self.bot = bot
 
-    @discord.ui.button(label="Force Pulse Refresh", emoji="🔄", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Force Pulse Refresh", emoji="🔄", style=discord.ButtonStyle.primary, row=0)
     async def force_pulse_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("Admin only.", ephemeral=True)
@@ -2475,7 +2489,7 @@ class FlowLivePanelView(discord.ui.View):
             channel = None
         if not channel:
             return await interaction.followup.send("❌ #flow-live channel not configured.", ephemeral=True)
-        await cog._test_highlight_impl(interaction.guild, channel)
+        await cog._test_highlight_impl(interaction.guild, channel, interaction=interaction)
         await interaction.followup.send("✅ Test highlight sent.", ephemeral=True)
 
     @discord.ui.button(label="Session Dump", emoji="📋", style=discord.ButtonStyle.secondary, row=0)
@@ -2521,5 +2535,8 @@ class BossCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(BossCog(bot))
-    print("ATLAS: Boss \u00b7 Commissioner Control Room loaded. \U0001f3db\ufe0f")
+    try:
+        await bot.add_cog(BossCog(bot))
+        print("ATLAS: Boss \u00b7 Commissioner Control Room loaded. \U0001f3db\ufe0f")
+    except Exception as e:
+        print(f"ATLAS: Boss \u00b7 FAILED to load ({e})")
