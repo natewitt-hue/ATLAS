@@ -312,7 +312,7 @@ def _build_analysis_body(result, accent: str, meta: dict, season: int, week: int
     </div>"""
 
 
-async def render_oracle_card(result) -> bytes:
+async def render_oracle_card(result, *, theme_id: str | None = None) -> bytes:
     """
     Render an AnalysisResult to a PNG card.
     Works for all 8 analysis types — matchup prediction block included when present.
@@ -339,17 +339,17 @@ async def render_oracle_card(result) -> bytes:
     # We embed the CSS as a style block inside the body HTML, which wrap_card
     # will include alongside the shared card CSS.
     body_with_css = f"<style>{css}</style>{body_html}"
-    full_html = wrap_card(body_with_css, "")
+    full_html = wrap_card(body_with_css, "", theme_id=theme_id)
     return await render_card(full_html)
 
 
-async def render_oracle_card_to_file(result, filename: str = "oracle_card.png"):
+async def render_oracle_card_to_file(result, filename: str = "oracle_card.png", *, theme_id: str | None = None):
     """
     Render and return a discord.File-compatible bytes buffer.
     Import discord locally to avoid circular imports.
     """
     import discord
-    png_bytes = await render_oracle_card(result)
+    png_bytes = await render_oracle_card(result, theme_id=theme_id)
     buf = io.BytesIO(png_bytes)
     buf.seek(0)
     return discord.File(buf, filename=filename)
