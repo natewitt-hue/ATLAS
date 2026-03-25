@@ -1231,9 +1231,8 @@ def owner_division_record(
     """Owner's record in intra-division games.
 
     Joins teams table on displayName to determine division membership.
-    IMPORTANT: Uses teams.displayName (e.g., '49ers') NOT nickName ('Niners').
-    Uses LEFT JOIN with COALESCE fallback for teams not found in the teams table
-    (e.g., franchises that changed names across seasons).
+    LEFT JOINs exclude teams not present in the current teams table
+    (games vs. teams without a divName entry are excluded by the WHERE clause).
     """
     cte, params = _owner_games_cte(user, season)
     sql = cte + """
