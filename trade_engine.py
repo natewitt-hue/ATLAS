@@ -223,6 +223,10 @@ def player_value(player: dict, selling_team_id: int = 0, bundle_already_evaluate
     meta = _meta_cap_bonus(player)
     subtotal = core + flat + contract_delta - ufa_pen + meta
     scar_mult = _scarcity_multiplier(pos)
+    # TODO (post-7.0): Use drafting team's rings, not selling team's.
+    # Per CLAUDE.md, ring count should credit the team that originally drafted the player
+    # (player_draft_map.drafting_team). Requires team_name → team_id lookup since
+    # player_draft_map stores name strings and get_rings_count() takes an int.
     rings_mult = _rings_tax_multiplier(selling_team_id)
     market_adjusted = subtotal * scar_mult * rings_mult
     bundle_mult = _bundling_penalty(bundle, player)

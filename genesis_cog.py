@@ -1917,7 +1917,7 @@ class ParityCog(commands.Cog):
             msg = f"✅ **{team}** orphan flag cleared. Cap-clear is now blocked again."
 
         _save_state()
-        await interaction.response.send_message(msg)
+        await interaction.response.send_message(msg, ephemeral=True)
 
     # ── Cap integrity gate (called by trade_cog / admin commands) ─────────────
 

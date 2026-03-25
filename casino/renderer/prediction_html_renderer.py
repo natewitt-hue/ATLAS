@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from format_utils import fmt_volume
+from atlas_style_tokens import Tokens
 from atlas_html_engine import (
     render_card,
     wrap_card,
@@ -31,12 +32,13 @@ from atlas_html_engine import (
 try:
     from polymarket_cog import CATEGORY_COLORS_HEX
 except ImportError:
+    # Fallback — aligned with ATLAS token system (atlas_style_tokens.py)
     CATEGORY_COLORS_HEX: dict[str, str] = {
-        "Elections": "#5B9BD5", "Government": "#3498DB",
-        "Pop Culture": "#FF69B4", "Entertainment": "#E91E63",
-        "Economics": "#27AE60", "Science": "#9B59B6",
-        "Tech": "#1ABC9C", "AI": "#00CED1",
-        "World": "#E67E22", "Other": "#95A5A6",
+        "Elections": Tokens.JEWEL_PURPLE, "Government": Tokens.JEWEL_PURPLE,
+        "Pop Culture": Tokens.PINK, "Entertainment": Tokens.PINK,
+        "Economics": Tokens.WIN_DARK, "Science": Tokens.PURPLE,
+        "Tech": Tokens.JEWEL_BLUE, "AI": Tokens.JEWEL_BLUE,
+        "World": Tokens.ORANGE, "Other": Tokens.SLATE,
     }
 
 _DEFAULT_CATEGORY_COLOR = "#95A5A6"
@@ -97,13 +99,13 @@ def _prediction_css() -> str:
 .globe-icon {
   width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(circle at 40% 35%, rgba(124,138,255,0.2), rgba(124,138,255,0.06));
-  border: 1px solid rgba(124,138,255,0.12);
+  background: radial-gradient(circle at 40% 35%, rgba(212,175,55,0.2), rgba(212,175,55,0.06));
+  border: 1px solid rgba(212,175,55,0.12);
   position: relative; overflow: hidden;
 }
 .globe-icon::before, .globe-icon::after {
   content: ''; position: absolute;
-  background: rgba(124,138,255,0.25);
+  background: rgba(212,175,55,0.25);
 }
 .globe-icon::before { width: 1px; height: 60%; top: 20%; left: 50%; }
 .globe-icon::after { width: 60%; height: 1px; top: 50%; left: 20%; }
@@ -128,8 +130,8 @@ def _prediction_css() -> str:
 .page-pill {
   display: inline-block; margin-top: 4px;
   font-family: var(--font-mono), monospace; font-size: 12px; font-weight: 600;
-  color: rgba(124,138,255,0.75);
-  background: rgba(88,101,242,0.08); border: 1px solid rgba(88,101,242,0.12);
+  color: rgba(212,175,55,0.75);
+  background: rgba(212,175,55,0.08); border: 1px solid rgba(212,175,55,0.12);
   border-radius: 5px; padding: 2px 8px;
 }
 
@@ -1347,7 +1349,6 @@ def _build_curated_list_html(
         category = m.get("category", "Other")
         yes_price = m.get("yes_price", 0.5)
         no_price = m.get("no_price", 1 - yes_price)
-        cat_color = _category_color(category)
         parts = category.split(" ", 1)
         cat_name = parts[1] if len(parts) > 1 else parts[0]
 
@@ -1372,7 +1373,7 @@ def _build_curated_list_html(
           <div class="market-index">{i + 1}</div>
           <div style="flex: 1; min-width: 0;">
             <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: 3px;">
-              <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+              <div class="category-badge" data-cat="{_cat_data(category)}">{esc(cat_name)}</div>
               <div class="market-title-text">{esc(title)}</div>
             </div>
             {sentiment_html}
@@ -1587,7 +1588,6 @@ async def render_daily_drop_card(
 
     # Spotlight section
     sp = spotlight
-    cat_color = _category_color(sp.get("category", "Other"))
     parts = sp.get("category", "Other").split(" ", 1)
     cat_name = parts[1] if len(parts) > 1 else parts[0]
     yes_p = sp.get("yes_price", 0.5)
@@ -1606,7 +1606,7 @@ async def render_daily_drop_card(
     <div class="spotlight-section">
       <div class="spotlight-badge">MARKET OF THE DAY</div>
       <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: 6px;">
-        <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+        <div class="category-badge" data-cat="{_cat_data(sp.get('category', 'Other'))}">{esc(cat_name)}</div>
       </div>
       <div class="spotlight-title">{esc(sp.get('title', ''))}</div>
       <div class="prob-bar">
@@ -1620,7 +1620,6 @@ async def render_daily_drop_card(
     # Supporting markets
     supporting_html = ""
     for s in supporting:
-        s_cat_color = _category_color(s.get("category", "Other"))
         s_parts = s.get("category", "Other").split(" ", 1)
         s_cat_name = s_parts[1] if len(s_parts) > 1 else s_parts[0]
         s_yes = s.get("yes_price", 0.5)
@@ -1634,7 +1633,7 @@ async def render_daily_drop_card(
         <div class="supporting-row">
           <div style="flex: 1; min-width: 0;">
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px;">
-              <div class="category-badge" style="background: {s_cat_color}; font-size: 9px;">{esc(s_cat_name)}</div>
+              <div class="category-badge" data-cat="{_cat_data(s.get('category', 'Other'))}" style="font-size: 9px;">{esc(s_cat_name)}</div>
               <div class="market-title-text" style="font-size: 12px;">{esc(s.get('title', ''))}</div>
             </div>
             {hook_html}
@@ -1711,7 +1710,6 @@ async def render_price_alert_card(
 
     title = market.get("title", "")
     category = market.get("category", "Other")
-    cat_color = _category_color(category)
     parts = category.split(" ", 1)
     cat_name = parts[1] if len(parts) > 1 else parts[0]
 
@@ -1733,7 +1731,7 @@ async def render_price_alert_card(
     body = f"""
     <div class="alert-body">
       <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: 10px;">
-        <div class="category-badge" style="background: {cat_color};">{esc(cat_name)}</div>
+        <div class="category-badge" data-cat="{_cat_data(category)}">{esc(cat_name)}</div>
       </div>
       <div class="market-question">{esc(title)}</div>
       <div class="alert-direction {direction}">{arrow} {delta:.0%}</div>

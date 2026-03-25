@@ -182,11 +182,12 @@ def _build_session_recap_html(
     if session.best_streak >= 3:
         best_streak_html = f'<span class="best-streak-note">Best streak: W{session.best_streak}</span>'
 
-    # Game breakdown pills
+    # Game breakdown pills (capped at top 2 + overflow count)
     game_breakdown_html = ""
     if session.games_by_type:
         pills = []
-        for game_type, count in sorted(session.games_by_type.items(), key=lambda x: x[1], reverse=True):
+        sorted_games = sorted(session.games_by_type.items(), key=lambda x: x[1], reverse=True)
+        for game_type, count in sorted_games[:2]:
             icon = GAME_ICONS.get(game_type, "&#127922;")
             label = GAME_LABELS.get(game_type, game_type.title())
             pills.append(
@@ -194,6 +195,13 @@ def _build_session_recap_html(
                 f'  <span class="game-pill-icon">{icon}</span>'
                 f'  <span class="game-pill-label">{esc(label)}</span>'
                 f'  <span class="game-pill-count">{count}x</span>'
+                f'</div>'
+            )
+        overflow = len(sorted_games) - 2
+        if overflow > 0:
+            pills.append(
+                f'<div class="game-pill">'
+                f'  <span class="game-pill-label">+{overflow} more</span>'
                 f'</div>'
             )
         game_breakdown_html = f"""

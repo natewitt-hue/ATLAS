@@ -171,7 +171,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "6.23.0"  # feat: real sportsbook settlement notifications — #flow-live embed on event grade
+ATLAS_VERSION = "7.1.0"  # feat: real sportsbook UX overhaul — edit-in-place workspace, pagination, PNG caching, orphaned view cleanup
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

@@ -628,13 +628,13 @@ class FlowLiveCog(commands.Cog):
             is_loss = evt.outcome == "loss"
             icon = "&#128293;" if not is_loss else "&#128128;"
             amount_str = f"+${evt.payout - evt.wager:,}" if not is_loss else f"-${evt.wager:,}"
-            desc = f'<span style="color:#FBBF24;font-weight:600;">{name}</span>'
+            desc = f'<span style="color:var(--gold);font-weight:600;">{name}</span>'
             if evt.game_type == "blackjack":
-                desc += f' <span style="color:#c0b8a8;">{"won" if not is_loss else "lost"} at blackjack</span>'
+                desc += f' <span style="color:var(--text-muted);">{"won" if not is_loss else "lost"} at blackjack</span>'
             elif evt.game_type == "slots":
-                desc += f' <span style="color:#c0b8a8;">{"hit" if not is_loss else "lost"} on slots</span>'
+                desc += f' <span style="color:var(--text-muted);">{"hit" if not is_loss else "lost"} on slots</span>'
             else:
-                desc += f' <span style="color:#c0b8a8;">{evt.game_type}</span>'
+                desc += f' <span style="color:var(--text-muted);">{evt.game_type}</span>'
             highlights.append(HighlightRow(
                 icon=icon, description_html=desc,
                 amount_html=amount_str, time_ago="now", is_loss=is_loss

@@ -514,7 +514,16 @@ def wrap_card(body_html: str, status_class: str = "", *, theme_id: str | None = 
     body_html : str
         Inner HTML content for the card.
     status_class : str
-        CSS class for the status bar gradient (win/loss/push/jackpot/etc.).
+        CSS class for the 5px top gradient status bar. The bar communicates the
+        *outcome of the event* shown on the card — not the card type or user state.
+        Use the following values:
+          "win"       — positive outcome (win, credit, profit, jackpot hit)
+          "loss"      — negative outcome (loss, debit, bust, crash)
+          "push"      — neutral outcome (push, refund, tie)
+          "jackpot"   — special jackpot event (gold gradient)
+          "blackjack" — natural blackjack result
+          "near_miss" — near-miss result (amber)
+          ""          — default gold gradient (hub cards, informational cards)
     theme_id : str | None
         Optional theme key from atlas_themes.THEMES.  When provided, theme
         CSS variable overrides, overlay HTML, extra CSS, and status/border
@@ -590,12 +599,25 @@ class PagePool:
         self._render_counts: dict[int, int] = {}
 
     async def _new_page(self):
-        """Create a fresh page from the current browser."""
+        """Create a fresh page from the current browser.
+
+        If page creation fails (e.g. browser crashed/disconnected),
+        force a browser reconnection and retry once.
+        """
         browser = await _get_browser()
-        return await browser.new_page(
-            viewport={"width": self._width, "height": 1200},
-            device_scale_factor=self._scale,
-        )
+        try:
+            return await browser.new_page(
+                viewport={"width": self._width, "height": 1200},
+                device_scale_factor=self._scale,
+            )
+        except Exception:
+            log.warning("Page creation failed — forcing browser reconnect")
+            await close_browser()
+            browser = await _get_browser()
+            return await browser.new_page(
+                viewport={"width": self._width, "height": 1200},
+                device_scale_factor=self._scale,
+            )
 
     async def warm(self):
         """Pre-create pages and add them to the pool."""

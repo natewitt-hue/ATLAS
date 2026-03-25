@@ -101,7 +101,7 @@ build_member_db              →  tsl_members table (identity registry)
 | **Flow** | Economy, TSL sportsbook, casino, live engagement | `flow_sportsbook.py`, `casino/`, `economy_cog.py`, `flow_live_cog.py` |
 | **Flow Store** | Store engine — item effects, purchases | `flow_store.py`, `store_effects.py` |
 | **Flow Subsystem** | Wallet, audit, events, wager registry | `flow_wallet.py`, `flow_audit.py`, `flow_events.py`, `wager_registry.py` |
-| **Real Sportsbook** | Real NFL/NBA betting with live ESPN odds | `real_sportsbook_cog.py`, `sportsbook_core.py`, `odds_api_client.py`, `espn_odds.py` |
+| **Real Sportsbook** | Real NFL/NBA betting with live ESPN odds | `real_sportsbook_cog.py`, `sportsbook_core.py`, `espn_odds.py` |
 | **Boss** | Visual commissioner control room — replaces `/commish` subcommands | `boss_cog.py` |
 | **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |

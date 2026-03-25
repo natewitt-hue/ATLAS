@@ -165,9 +165,8 @@ _LEDGER_CSS = """\
 """
 
 
-def _esc(text: str) -> str:
-    """HTML-escape user-controlled text."""
-    return esc(text)
+# Use esc() directly from atlas_html_engine — kept as alias for grep-ability
+_esc = esc
 
 
 def _pl_color(value: int) -> str:
@@ -192,6 +191,20 @@ def _format_amount(value: int) -> str:
     return f"{value:,}"
 
 
+def _commentary_html(commentary: str) -> str:
+    """Build an optional ATLAS voice commentary block (gold left-border, italic)."""
+    if not commentary:
+        return ""
+    return (
+        f'<div style="margin:var(--space-md) 0 0;padding:10px 14px;'
+        f'border-radius:var(--border-radius);background:rgba(255,255,255,0.03);'
+        f'border-left:3px solid rgba(212,175,55,0.5);">'
+        f'<div style="font-size:12px;font-style:italic;color:var(--text-warm);'
+        f'line-height:1.45;">{_esc(commentary)}</div>'
+        f'</div>'
+    )
+
+
 def _build_casino_html(
     player_name: str,
     game_type: str,
@@ -202,6 +215,7 @@ def _build_casino_html(
     new_balance: int,
     txn_id: Optional[int] = None,
     theme_id: str | None = None,
+    commentary: str = "",
 ) -> str:
     """Build HTML for a casino game ledger slip (4-column)."""
     game = GAME_INFO.get(game_type, {"label": game_type.upper(), "icon": "\u2B22"})
@@ -212,7 +226,7 @@ def _build_casino_html(
         f"{multiplier:.1f}x" if multiplier != int(multiplier)
         else f"{int(multiplier)}x"
     )
-    time_str = datetime.now(timezone.utc).strftime("%I:%M %p")
+    time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
     txn_str = f"TXN #{txn_id}" if txn_id else ""
 
     # Highlight bar for big wagers
@@ -257,6 +271,7 @@ def _build_casino_html(
     </div>
   </div>
   {highlight_html}
+  {_commentary_html(commentary)}
   <div class="ledger-divider"></div>
   <div class="ledger-footer">
     <div class="footer-left">
@@ -277,6 +292,7 @@ def _build_transaction_html(
     description: str = "",
     txn_id: Optional[int] = None,
     theme_id: str | None = None,
+    commentary: str = "",
 ) -> str:
     """Build HTML for a non-casino transaction slip (3-column + description)."""
     info = SOURCE_INFO.get(source, SOURCE_INFO.get("ADMIN"))
@@ -285,7 +301,7 @@ def _build_transaction_html(
 
     status_class = "credit" if amount > 0 else "debit" if amount < 0 else "neutral"
     badge_class = "credit" if amount >= 0 else "debit"
-    time_str = datetime.now(timezone.utc).strftime("%I:%M %p")
+    time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
     txn_str = f"TXN #{txn_id}" if txn_id else ""
 
     # Amount label varies by source
@@ -322,6 +338,7 @@ def _build_transaction_html(
       <div class="ledger-value">{balance_after:,}</div>
     </div>
   </div>
+  {_commentary_html(commentary)}
   <div class="ledger-divider"></div>
   <div class="ledger-footer">
     <div class="footer-left">
@@ -351,6 +368,7 @@ async def render_ledger_card(
     new_balance: int,
     txn_id: Optional[int] = None,
     theme_id: str | None = None,
+    commentary: str = "",
 ) -> bytes:
     """
     Render a casino game ledger slip as a PNG.
@@ -359,7 +377,7 @@ async def render_ledger_card(
     html_content = _build_casino_html(
         player_name, game_type, wager, outcome,
         payout, multiplier, new_balance, txn_id,
-        theme_id=theme_id,
+        theme_id=theme_id, commentary=commentary,
     )
     return await _render_html_to_png(html_content)
 
@@ -372,6 +390,7 @@ async def render_transaction_slip(
     description: str = "",
     txn_id: Optional[int] = None,
     theme_id: str | None = None,
+    commentary: str = "",
 ) -> bytes:
     """
     Render a general transaction slip as a PNG.
@@ -380,6 +399,6 @@ async def render_transaction_slip(
     """
     html_content = _build_transaction_html(
         source, player_name, amount, balance_after, description, txn_id,
-        theme_id=theme_id,
+        theme_id=theme_id, commentary=commentary,
     )
     return await _render_html_to_png(html_content)

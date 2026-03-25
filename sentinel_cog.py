@@ -2162,14 +2162,17 @@ class PositionChangeCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         record["status"]      = "approved"
         record["approved_by"] = str(interaction.user)
         record["approved_at"] = dt.now(timezone.utc).isoformat()
         _save_state()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Position change `{log_id.upper()}` approved: "
-            f"**{record['player_name']}** ({record['from_pos']} → {record['to_pos']})."
+            f"**{record['player_name']}** ({record['from_pos']} → {record['to_pos']}).",
+            ephemeral=True,
         )
 
         # Post public announcement
@@ -2192,16 +2195,19 @@ class PositionChangeCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         record["status"]     = "denied"
         record["denied_by"]  = str(interaction.user)
         record["denied_at"]  = dt.now(timezone.utc).isoformat()
         record["denial_reason"] = reason
         _save_state()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ Position change `{log_id.upper()}` denied: "
             f"**{record['player_name']}** ({record['from_pos']} → {record['to_pos']}).\n"
-            f"Reason: {reason}"
+            f"Reason: {reason}",
+            ephemeral=True,
         )
 
         # Notify in roster moves channel
@@ -2236,6 +2242,10 @@ AUTO_DETECT_CHANNEL_IDS: set[int] = set()
 
 # ── TSL Rules Prompt ──────────────────────────────────────────────────────────
 
+# NOTE: This prompt intentionally does NOT use get_persona() from echo_loader.
+# The 4th Down Referee is a specialized sub-persona with its own identity ("4th Down Referee",
+# not "ATLAS"). Prepending the ATLAS persona would create an identity conflict and degrade
+# the structured step-by-step ruling format. This is a documented exception to the convention.
 SYSTEM_PROMPT = """
 You are the official TSL (The Simulation League) 4th Down Referee — an expert football mind, not just a rule-checker.
 

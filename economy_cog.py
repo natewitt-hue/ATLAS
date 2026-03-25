@@ -73,25 +73,6 @@ async def _setup_economy_tables() -> None:
         await db.commit()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  CORE BALANCE OPERATIONS (all use BEGIN IMMEDIATE for safety)
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def _ensure_user(db, discord_id: int) -> int:
-    """Return current balance, auto-creating user if needed. Must be inside a transaction."""
-    async with db.execute(
-        "SELECT balance FROM users_table WHERE discord_id=?", (discord_id,)
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        await db.execute(
-            "INSERT INTO users_table (discord_id, balance, season_start_balance) VALUES (?,?,?)",
-            (discord_id, STARTING_BALANCE, STARTING_BALANCE)
-        )
-        return STARTING_BALANCE
-    return row[0]
-
-
 async def admin_give(discord_id: int, amount: int, admin_id: int,
                      reason: str = "", *,
                      reference_key: str | None = None) -> tuple[int, int]:
@@ -295,7 +276,7 @@ class EconomyCog(commands.Cog):
         """Post an audit message to #admin-chat."""
         try:
             from setup_cog import get_channel_id
-            ch_id = get_channel_id("admin_chat")
+            ch_id = get_channel_id("admin_chat", guild_id=self.bot.guilds[0].id if self.bot.guilds else None)
             if ch_id:
                 ch = self.bot.get_channel(ch_id)
                 if ch:
@@ -426,6 +407,8 @@ class EconomyCog(commands.Cog):
     async def _eco_give_impl(self, interaction: discord.Interaction,
                              member: discord.Member, amount: int,
                              reason: str = "Commissioner grant"):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         old, new = await admin_give(member.id, amount, interaction.user.id, reason)
         await self._post_audit(
             f"**{interaction.user.display_name}** gave **{amount:,}** to "
@@ -447,11 +430,13 @@ class EconomyCog(commands.Cog):
             ),
             color=AtlasColors.SUCCESS,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _eco_take_impl(self, interaction: discord.Interaction,
                              member: discord.Member, amount: int,
                              reason: str = "Commissioner deduction"):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         old, new = await admin_take(member.id, amount, interaction.user.id, reason)
         taken = old - new
         await self._post_audit(
@@ -475,11 +460,13 @@ class EconomyCog(commands.Cog):
             ),
             color=AtlasColors.ERROR,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _eco_set_impl(self, interaction: discord.Interaction,
                             member: discord.Member, amount: int,
                             reason: str = "Commissioner set"):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         old, new = await admin_set(member.id, amount, interaction.user.id, reason)
         await self._post_audit(
             f"**{interaction.user.display_name}** set **{member.display_name}** "
@@ -503,17 +490,19 @@ class EconomyCog(commands.Cog):
             ),
             color=AtlasColors.ECONOMY,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _eco_check_impl(self, interaction: discord.Interaction,
                               member: discord.Member):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         bal = await admin_check(member.id)
         embed = discord.Embed(
             title=f"💰 {member.display_name}",
             description=f"**Balance:** {bal:,} TSL Bucks",
             color=AtlasColors.ECONOMY,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── Role-based ────────────────────────────────────────────────────────
 

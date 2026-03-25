@@ -37,6 +37,7 @@ class AtlasColors:
     # -- Brand Colors ---------------------------------------------------
     TSL_GOLD    = discord.Color(0xD4AF37)  # Canonical ATLAS gold (#D4AF37)
     TSL_DARK    = discord.Color(0x0A0A0A)  # Near-black background
+    TSL_BLACK   = discord.Color(0x1A1A1A)  # Sportsbook embed background (slightly lighter than TSL_DARK)
     TSL_BLUE    = discord.Color(0x1E90FF)  # Dodger blue accent
 
     # -- Status Colors --------------------------------------------------

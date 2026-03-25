@@ -24,6 +24,8 @@ import time
 from dataclasses import dataclass, field, asdict
 import aiosqlite
 
+from atlas_colors import AtlasColors
+
 log = logging.getLogger("flow_audit")
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -76,8 +78,8 @@ class AuditReport:
 
     def to_embed_dict(self) -> dict:
         """Return dict suitable for discord.Embed construction."""
-        color = 0x2ECC71 if not self.findings else (
-            0xE74C3C if self.has_critical_or_high() else 0xF39C12
+        color = AtlasColors.SUCCESS.value if not self.findings else (
+            AtlasColors.ERROR.value if self.has_critical_or_high() else AtlasColors.WARNING.value
         )
         desc_lines = [self.summary_text(), ""]
         by_sev = self.by_severity()

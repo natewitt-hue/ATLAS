@@ -189,7 +189,7 @@ _FLOW_CSS = """\
   color: var(--gold-dim); letter-spacing: 2.5px; text-transform: uppercase;
 }
 .hero-value {
-  font-family: var(--font-mono); font-weight: 800; font-size: 44px;
+  font-family: var(--font-mono); font-weight: 800; font-size: var(--font-hero);
   color: var(--text-primary); line-height: 1.1; margin-top: 4px;
 }
 .hero-delta {

@@ -1631,7 +1631,7 @@ class PredictionWorkspace(discord.ui.View):
         # Build embed
         embed = discord.Embed(
             title=f"📋  {side} — {market['title'][:60]}",
-            color=0x2ECC71 if side == "YES" else 0xE74C3C,
+            color=AtlasColors.SUCCESS if side == "YES" else AtlasColors.ERROR,
         )
         embed.description = (
             f"**Price:** {price:.0%} · **Cost per contract:** ${cost_per:,}\n"
@@ -1662,11 +1662,11 @@ class PredictionWorkspace(discord.ui.View):
                     title=market["title"],
                 )
             except (ValueError, flow_wallet.InsufficientFundsError) as e:
-                embed = discord.Embed(description=f"❌ {e}", color=0xE74C3C)
+                embed = discord.Embed(description=f"❌ {e}", color=AtlasColors.ERROR)
                 await self._update_workspace(interaction, embed)
                 return
             except Exception as e:
-                embed = discord.Embed(description=f"❌ Failed: {e}", color=0xE74C3C)
+                embed = discord.Embed(description=f"❌ Failed: {e}", color=AtlasColors.ERROR)
                 await self._update_workspace(interaction, embed)
                 return
 
@@ -1695,7 +1695,7 @@ class PredictionWorkspace(discord.ui.View):
                     f"{side} × {result['quantity']} · Cost: **${result['cost']:,}**\n"
                     f"Potential: **${result['payout']:,}**"
                 ),
-                color=0x2ECC71 if side == "YES" else 0xE74C3C,
+                color=AtlasColors.SUCCESS if side == "YES" else AtlasColors.ERROR,
             )
             try:
                 png = await render_bet_confirmation_card(
@@ -1939,7 +1939,7 @@ class PredictionWorkspace(discord.ui.View):
         pnl_str = f"+${pnl:,}" if pnl >= 0 else f"-${abs(pnl):,}"
         embed = discord.Embed(
             title=f"{position['title'][:70]}",
-            color=0x2ECC71 if pnl >= 0 else 0xE74C3C,
+            color=AtlasColors.SUCCESS if pnl >= 0 else AtlasColors.ERROR,
         )
         embed.set_footer(text=f"Sell price: ${sell_price_bucks:,}/contract · P/L: {pnl_str}")
         await self._update_workspace(interaction, embed, file=card_file)
@@ -1956,11 +1956,11 @@ class PredictionWorkspace(discord.ui.View):
                     current_price=position["current_price"],
                 )
             except (ValueError, flow_wallet.InsufficientFundsError) as e:
-                embed = discord.Embed(description=f"❌ {e}", color=0xE74C3C)
+                embed = discord.Embed(description=f"❌ {e}", color=AtlasColors.ERROR)
                 await self._update_workspace(interaction, embed)
                 return
             except Exception as e:
-                embed = discord.Embed(description=f"❌ Failed: {e}", color=0xE74C3C)
+                embed = discord.Embed(description=f"❌ Failed: {e}", color=AtlasColors.ERROR)
                 await self._update_workspace(interaction, embed)
                 return
 
@@ -2008,7 +2008,7 @@ class PredictionWorkspace(discord.ui.View):
                     f"Sold **{quantity}** {position['side']} contracts\n"
                     f"Proceeds: **${result['proceeds']:,}** · {pnl_emoji} P/L: **{pnl_str}**"
                 ),
-                color=0x2ECC71 if pnl >= 0 else 0xE74C3C,
+                color=AtlasColors.SUCCESS if pnl >= 0 else AtlasColors.ERROR,
             )
             embed.set_footer(text=f"Balance: ${result['new_balance']:,}")
             await self._update_workspace(interaction, embed, file=card_file)
@@ -2928,7 +2928,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
             embed = discord.Embed(
                 title="Stale Prediction Markets (>30 days)",
                 description="\n".join(lines),
-                color=0xE74C3C,
+                color=AtlasColors.ERROR,
             )
             embed.set_footer(
                 text=f"{len(stale)} market(s) unresolved >30d. "
@@ -3639,7 +3639,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         embed = discord.Embed(
             title="📊 Polymarket Integration Status",
-            color=0x2ECC71 if api_ok else 0xE74C3C,
+            color=AtlasColors.SUCCESS if api_ok else AtlasColors.ERROR,
         )
         embed.add_field(
             name="Auth Method",

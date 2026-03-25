@@ -310,7 +310,7 @@ def _sparkline_svg(data: list[int], width: int = 440, height: int = 40) -> str:
 _SPORTSBOOK_CSS = """\
 .hero-section { padding: 20px; text-align: center; }
 .hero-label { font-family: var(--font-display); font-weight: 700; font-size: var(--font-sm); color: var(--gold-dim); letter-spacing: 2px; text-transform: uppercase; }
-.hero-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-display-size); color: var(--text-primary); }
+.hero-value { font-family: var(--font-mono); font-weight: 800; font-size: var(--font-hero); color: var(--text-primary); }
 .hero-delta { font-family: var(--font-mono); font-weight: 600; font-size: var(--font-sm); margin-top: var(--space-xs); }
 .hero-delta.positive { color: var(--win); }
 .hero-delta.negative { color: var(--loss); }

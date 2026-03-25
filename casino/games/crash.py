@@ -122,7 +122,7 @@ def _current_multiplier(elapsed: float) -> float:
     1.00x at t=0, doubles roughly every 5 seconds at low values,
     accelerates as it climbs.
     """
-    return min(round(1.0 * (1.06 ** elapsed), 2), 100.0)
+    return min(round(1.0 * (1.06 ** elapsed), 2), MAX_CRASH_MULTIPLIER)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

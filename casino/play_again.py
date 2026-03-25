@@ -93,19 +93,10 @@ class PlayAgainView(discord.ui.View):
             )
         self._used = True
 
-        # Disable buttons immediately for visual feedback before async work
-        self.btn_play.disabled = True
-        self.btn_double.disabled = True
-        self.btn_hub.disabled = True
-        await interaction.message.edit(view=self)
-
+        # Check balance BEFORE consuming the interaction response
         bal = await get_balance(self.user_id)
         if bal < self.wager:
             self._used = False
-            self.btn_play.disabled = False
-            self.btn_double.disabled = False
-            self.btn_hub.disabled = False
-            await interaction.message.edit(view=self)
             return await interaction.response.send_message(
                 f"❌ Not enough Bucks — need **${self.wager:,}**, have **${bal:,}**.",
                 ephemeral=True,
@@ -126,23 +117,14 @@ class PlayAgainView(discord.ui.View):
             )
         self._used = True
 
-        # Disable buttons immediately for visual feedback before async work
-        self.btn_play.disabled = True
-        self.btn_double.disabled = True
-        self.btn_hub.disabled = True
-        await interaction.message.edit(view=self)
-
         # Cap at player's max bet tier
         max_bet = await get_max_bet(self.user_id)
         actual_wager = min(self.double_wager, max_bet)
 
+        # Check balance BEFORE consuming the interaction response
         bal = await get_balance(self.user_id)
         if bal < actual_wager:
             self._used = False
-            self.btn_play.disabled = False
-            self.btn_double.disabled = False
-            self.btn_hub.disabled = False
-            await interaction.message.edit(view=self)
             return await interaction.response.send_message(
                 f"❌ Not enough Bucks — need **${actual_wager:,}**, have **${bal:,}**.",
                 ephemeral=True,

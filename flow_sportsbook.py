@@ -33,7 +33,7 @@ CHANGES v5.0 vs v4.0:
   ADD  _safe_float()/_safe_int() — fixes Python `or` falsiness bug where
        0.0 win% or 0 rank was silently replaced with defaults
   FIX  CPU games filtered from Elo history (98 games were inflating stats)
-  FIX  Only status='3' (final) games used in Elo computation
+  FIX  Only status IN ('2','3') (completed/final) games used in Elo computation
   FIX  ML table extended for spreads up to 21+ points
   KEEP all admin commands, UI components, grading logic unchanged
 ─────────────────────────────────────────────────────────────────────────────
@@ -56,9 +56,23 @@ import data_manager as dm
 import flow_wallet
 from real_sportsbook_cog import (
     SPORT_EMOJI, SUPPORTED_SPORTS as REAL_SPORTS,
-    _parse_commence, _place_real_bet, _short_name as _real_short_name,
+    _parse_commence, _place_real_bet,
     CustomRealWagerModal,
 )
+
+
+def _real_short_name(full_name: str, max_len: int = 12) -> str:
+    """Shorten a team name to fit button labels.  'Houston Cougars' → 'Houston'."""
+    parts = full_name.split()
+    if len(parts) == 1:
+        return full_name[:max_len]
+    result = parts[0]
+    for word in parts[1:]:
+        candidate = f"{result} {word}"
+        if len(candidate) > max_len:
+            break
+        result = candidate
+    return result
 from sportsbook_cards import (
     build_sportsbook_card, build_stats_card, build_parlay_analytics_card,
     build_match_detail_card, build_real_match_detail_card, card_to_file,
@@ -77,7 +91,7 @@ HISTORY_DB_PATH   = os.path.join(_DIR, "tsl_history.db")
 
 from atlas_colors import AtlasColors
 TSL_GOLD          = AtlasColors.TSL_GOLD.value
-TSL_BLACK         = 0x1A1A1A
+TSL_BLACK         = AtlasColors.TSL_BLACK.value
 TSL_RED           = AtlasColors.ERROR.value
 TSL_GREEN         = AtlasColors.SUCCESS.value
 
@@ -445,7 +459,7 @@ def _compute_elo_ratings() -> dict:
     Applies season regression (25% toward 1500) at each season boundary.
 
     Filters:
-      - Only status='3' (final) games
+      - Only status IN ('2','3') (final/completed) games
       - Excludes CPU games and games with empty owners
 
     Returns { userName: elo_float } and populates _OWNER_SCORING_CACHE as side-effect.
@@ -822,7 +836,8 @@ def _build_game_lines(games_raw: list) -> list[dict]:
         week_idx = _safe_int(rg.get("weekIndex", 99), 99)
 
         # Auto-lock finished or past-week games
-        if status >= 2 or week_idx < dm.CURRENT_WEEK:
+        # weekIndex is 0-based (API), CURRENT_WEEK is 1-based — convert to same base
+        if status >= 2 or week_idx < (dm.CURRENT_WEEK - 1):
             _set_locked(game_id, True)
 
         home_data = power_map.get(home, _FALLBACK_TEAM)
@@ -1074,6 +1089,11 @@ async def _place_straight_bet(
     if amount < MIN_BET:
         return await _send_error(f"❌ Minimum bet is **${MIN_BET}**.")
 
+    # Defer early to avoid Discord 3s timeout during DB operations
+    if not already_deferred:
+        await interaction.response.defer(ephemeral=True)
+        already_deferred = True
+
     # Per-user lock prevents double-spend across concurrent bets
     async with flow_wallet.get_user_lock(interaction.user.id):
         try:
@@ -1125,9 +1145,6 @@ async def _place_straight_bet(
             )
 
     profit = _payout_calc(amount, odds) - amount
-
-    if not already_deferred:
-        await interaction.response.defer(ephemeral=True)
 
     from sportsbook_cards import build_bet_confirm_card
     theme_id = get_theme_for_render(interaction.user.id)
@@ -1290,6 +1307,9 @@ class ParlayWagerModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
 
+        # Defer early to avoid Discord 3s timeout during DB operations
+        await interaction.response.defer(ephemeral=True)
+
         # Per-user lock prevents double-spend across concurrent bets
         async with flow_wallet.get_user_lock(interaction.user.id):
             # Atomic balance check + debit inside single transaction
@@ -1330,7 +1350,7 @@ class ParlayWagerModal(discord.ui.Modal):
                     con.commit()
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     f"❌ Insufficient funds. Balance: **${balance:,}**.\n"
                     f"Your parlay cart has been preserved — add funds and try again.",
                     ephemeral=True,
@@ -1389,7 +1409,6 @@ class ParlayWagerModal(discord.ui.Modal):
         potential = _payout_calc(amt, self.combined_odds) - amt
         _clear_cart(interaction.user.id)
 
-        await interaction.response.defer(ephemeral=True)
         from sportsbook_cards import build_parlay_confirm_card
         theme_id = get_theme_for_render(interaction.user.id)
         png = await build_parlay_confirm_card(
@@ -1440,6 +1459,9 @@ class PropBetModal(discord.ui.Modal):
         if amt < MIN_BET:
             return await interaction.response.send_message(f"❌ Min bet is **${MIN_BET}**.", ephemeral=True)
 
+        # Defer early to avoid Discord 3s timeout during DB operations
+        await interaction.response.defer(ephemeral=True)
+
         # Per-user lock prevents double-spend across concurrent bets
         async with flow_wallet.get_user_lock(interaction.user.id):
             # Atomic: verify prop open + balance check + debit in single transaction
@@ -1451,7 +1473,7 @@ class PropBetModal(discord.ui.Modal):
                     ).fetchone()
                     if not prop or prop[0] != 'Open':
                         con.rollback()
-                        return await interaction.response.send_message(
+                        return await interaction.followup.send(
                             "❌ This prop bet is no longer open.", ephemeral=True
                         )
                     con.execute(
@@ -1473,7 +1495,7 @@ class PropBetModal(discord.ui.Modal):
                     con.commit()
             except flow_wallet.InsufficientFundsError:
                 balance = _get_balance(interaction.user.id)
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     f"❌ Insufficient funds. Balance: **${balance:,}**.", ephemeral=True
                 )
 
@@ -1485,7 +1507,7 @@ class PropBetModal(discord.ui.Modal):
         embed.add_field(name="Risk",    value=f"**${amt:,}**",       inline=True)
         embed.add_field(name="To Win",  value=f"**${profit:,}**",    inline=True)
         embed.add_field(name="Balance", value=f"${new_bal:,}",       inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
         # Post to #ledger
         try:
@@ -1695,6 +1717,8 @@ class SportsbookWorkspace(discord.ui.View):
         self._current_sport_key: str = ""
         self._pending_bet: dict = {}
         self._parlay_mode: bool = False
+        self._real_page: int = 0                        # pagination cursor for real-sports game list
+        self._match_card_cache: dict[str, bytes] = {}   # event_id → PNG bytes (session cache)
 
     # ── Core mechanics ──────────────────────────────────────────────────────
 
@@ -1886,22 +1910,27 @@ class SportsbookWorkspace(discord.ui.View):
     # ── State 4: Real Sport Game List ───────────────────────────────────────
 
     async def show_real_games(self, interaction: discord.Interaction, sport_key: str):
-        """Real sports game list — select dropdown."""
+        """Real sports game list — select dropdown with optional pagination."""
         self.clear_items()
-        self._current_sport_key = sport_key
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT event_id, sport_key, home_team, away_team, commence_time "
-                "FROM real_events WHERE sport_key = ? AND commence_time > ? "
-                "ORDER BY commence_time",
-                (sport_key, now_str),
-            ) as cur:
-                events = [dict(row) for row in await cur.fetchall()]
+        # Re-query only when switching sports; use cache for back-navigation and paging
+        if sport_key != self._current_sport_key or not self._cached_real_events:
+            self._current_sport_key = sport_key
+            self._real_page = 0
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT event_id, sport_key, home_team, away_team, commence_time "
+                    "FROM real_events WHERE sport_key = ? AND commence_time > ? "
+                    "ORDER BY commence_time",
+                    (sport_key, now_str),
+                ) as cur:
+                    self._cached_real_events = [dict(row) for row in await cur.fetchall()]
+        else:
+            self._current_sport_key = sport_key
 
-        self._cached_real_events = events
+        events = self._cached_real_events
 
         if not events:
             sport_name = REAL_SPORTS.get(sport_key, sport_key)
@@ -1909,7 +1938,7 @@ class SportsbookWorkspace(discord.ui.View):
                 description=f"No **{sport_name}** games available right now.\nOdds sync on a schedule \u2014 check back later!",
                 color=TSL_GOLD,
             )
-            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+            back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=0)
             back.callback = self._back_to_sports
             self.add_item(back)
             await self._update_workspace(interaction, embed, self)
@@ -1917,37 +1946,59 @@ class SportsbookWorkspace(discord.ui.View):
 
         sport_name = REAL_SPORTS.get(sport_key, sport_key)
         emoji = SPORT_EMOJI.get(sport_key, "\U0001f3c6")
+        total_pages = max(1, (len(events) + 24) // 25)
+        page = max(0, min(self._real_page, total_pages - 1))
+        self._real_page = page
+
+        page_events = events[page * 25 : (page + 1) * 25]
 
         embed = discord.Embed(
-            title=f"{emoji} {sport_name} \u2014 Upcoming Games",
-            description=f"**{len(events)}** games available for betting.",
+            title=f"{emoji}  {sport_name} \u2014 Upcoming Games",
+            description=(
+                f"**{len(events)}** game{'s' if len(events) != 1 else ''} available for betting."
+                + (f"  \u2022  Page {page + 1}/{total_pages}" if total_pages > 1 else "")
+            ),
             color=TSL_GOLD,
         )
 
-        lines = []
-        for ev in events[:10]:
-            ct = _parse_commence(ev["commence_time"])
-            ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
-            lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** \u2014 {ts}")
-        embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
-
         options = []
-        for ev in events[:25]:
+        for ev in page_events:
             ct = _parse_commence(ev["commence_time"])
             time_str = ct.strftime("%m/%d %I:%M %p") if ct else "TBD"
             label = f"{ev['away_team']} @ {ev['home_team']}"
-            if len(label) > 100:
-                label = label[:97] + "..."
+            if len(label) > 80:
+                label = label[:77] + "..."
             options.append(discord.SelectOption(label=label, value=ev["event_id"], description=time_str))
 
-        sel = discord.ui.Select(placeholder="Select a game to bet on...", options=options, row=1)
+        sel = discord.ui.Select(placeholder="\u2501\u2501 Select a game \u2501\u2501", options=options, row=0)
         sel.callback = self._on_real_game_select
         self.add_item(sel)
 
-        back = discord.ui.Button(label="\u2190 Back", style=discord.ButtonStyle.secondary, row=2)
+        # Pagination row (only when needed)
+        if total_pages > 1:
+            prev_btn = discord.ui.Button(
+                label="\u25c4 Prev", style=discord.ButtonStyle.secondary,
+                disabled=(page == 0), row=1,
+            )
+            page_lbl = discord.ui.Button(
+                label=f"{page + 1} / {total_pages}", style=discord.ButtonStyle.secondary,
+                disabled=True, row=1,
+            )
+            next_btn = discord.ui.Button(
+                label="Next \u25ba", style=discord.ButtonStyle.secondary,
+                disabled=(page >= total_pages - 1), row=1,
+            )
+            prev_btn.callback = self._make_real_page_cb(-1)
+            next_btn.callback = self._make_real_page_cb(1)
+            self.add_item(prev_btn)
+            self.add_item(page_lbl)
+            self.add_item(next_btn)
+
+        nav_row = 2 if total_pages > 1 else 1
+        back = discord.ui.Button(label="\u2190 Hub", style=discord.ButtonStyle.secondary, row=nav_row)
         back.callback = self._back_to_sports
         self.add_item(back)
-        self._add_cart_buttons(row=2)
+        self._add_cart_buttons(row=nav_row)
 
         await self._update_workspace(interaction, embed, self)
 
@@ -1988,7 +2039,12 @@ class SportsbookWorkspace(discord.ui.View):
             return
 
         theme_id = get_theme_for_render(self.user_id)
-        png = await build_real_match_detail_card(event_row, sport_key=sport_key, theme_id=theme_id)
+        event_cache_key = event["event_id"]
+        if event_cache_key in self._match_card_cache:
+            png = self._match_card_cache[event_cache_key]
+        else:
+            png = await build_real_match_detail_card(event_row, sport_key=sport_key, theme_id=theme_id)
+            self._match_card_cache[event_cache_key] = png
         file = card_to_file(png, f"match_{event['event_id']}.png")
 
         embed = discord.Embed(color=TSL_GOLD)
@@ -2244,7 +2300,7 @@ class SportsbookWorkspace(discord.ui.View):
                 ct = _parse_commence(ev["commence_time"])
                 ts = f"<t:{int(ct.timestamp())}:R>" if ct else "TBD"
                 lines.append(f"**{ev['away_team']}** @ **{ev['home_team']}** \u2014 {ts}")
-            embed.add_field(name="Games", value="\n".join(lines) or "None", inline=False)
+            embed.add_field(name="Games", value="\n".join(lines) or "No games scheduled right now.", inline=False)
 
             options = []
             for ev in events[:25]:
@@ -2373,7 +2429,7 @@ class SportsbookWorkspace(discord.ui.View):
                                 _fresh = await _cur.fetchone()
                         if _fresh is None:
                             await interaction.followup.send(
-                                "❌ This game is no longer available for betting.",
+                                "❌ This game is no longer available for betting. Check current games from the sportsbook hub.",
                                 ephemeral=True,
                             )
                             return
@@ -2395,11 +2451,25 @@ class SportsbookWorkspace(discord.ui.View):
                             fresh_odds = int(_fresh[_col])
                     except Exception:
                         pass  # fall back to cached odds on DB error
-                    await _place_real_bet(
+                    result = await _place_real_bet(
                         interaction, game, bet["bet_type"], bet["pick"],
                         fresh_odds, bet.get("line"), amount,
                         game.get("_source_label", "REAL"),
                     )
+                    if result is not None:
+                        new_balance, profit, matchup = result
+                        await self.show_real_bet_confirm(
+                            interaction,
+                            pick=bet["pick"],
+                            bet_type=bet["bet_type"],
+                            odds=fresh_odds,
+                            line=bet.get("line"),
+                            amt=amount,
+                            profit=profit,
+                            new_balance=new_balance,
+                            matchup=matchup,
+                            source=game.get("_source_label", ""),
+                        )
                 else:
                     bet_week = game.get("bet_week", dm.CURRENT_WEEK + 1)
                     await _place_straight_bet(
@@ -2575,6 +2645,56 @@ class SportsbookWorkspace(discord.ui.View):
     async def _nav_real_games(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self.show_real_games(interaction, self._current_sport_key)
+
+    def _make_real_page_cb(self, delta: int):
+        """Factory: pagination button → advance page and re-render game list."""
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+            self._real_page += delta
+            await self.show_real_games(interaction, self._current_sport_key)
+        return callback
+
+    # ── State 8: Real Sport Bet Confirmation ────────────────────────────────
+
+    async def show_real_bet_confirm(
+        self,
+        interaction: discord.Interaction,
+        pick: str,
+        bet_type: str,
+        odds: int,
+        line,
+        amt: int,
+        profit: int,
+        new_balance: int,
+        matchup: str,
+        source: str = "",
+    ):
+        """Inline bet confirmation — replaces the workspace state after a real bet lands."""
+        self.clear_items()
+
+        source_badge = f"**[{source}]** " if source else ""
+        line_str = f" ({line:+g})" if line else ""
+        embed = discord.Embed(
+            title="\u2705  Bet Placed",
+            description=(
+                f"{source_badge}**{matchup}**\n\n"
+                f"**Pick:** {pick} \u2014 {bet_type}{line_str}\n"
+                f"**Odds:** {_american_to_str(odds)}\n"
+                f"**Risk:** ${amt:,}   \u2022   **To Win:** ${profit:,}\n\n"
+                f"\U0001f4b0 New Balance: **${new_balance:,}**"
+            ),
+            color=discord.Color.green(),
+        )
+
+        again_btn = discord.ui.Button(label="\U0001f501 Bet Again", style=discord.ButtonStyle.primary, row=0)
+        games_btn = discord.ui.Button(label="\U0001f4cb Back to Games", style=discord.ButtonStyle.secondary, row=0)
+        again_btn.callback = self._back_to_match
+        games_btn.callback = self._nav_real_games
+        self.add_item(again_btn)
+        self.add_item(games_btn)
+        self._add_cart_buttons(row=1)
+
+        await self._update_workspace(interaction, embed, self)
 
     async def _on_real_game_select(self, interaction: discord.Interaction):
         """User selected a real sport game from dropdown."""

@@ -43,9 +43,8 @@ from atlas_html_engine import render_card as engine_render_card, wrap_card, esc
 from atlas_style_tokens import Tokens
 
 
-def _esc(text) -> str:
-    """Escape user-controlled text for safe HTML embedding."""
-    return esc(text)
+# Use esc() directly from atlas_html_engine — kept as alias for grep-ability
+_esc = esc
 
 # ── Genesis icon loader (base64 for inline HTML) ─────────────────────────────
 

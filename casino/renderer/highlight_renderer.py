@@ -109,9 +109,11 @@ def _wrap_card(
     commentary_block = _commentary_html(commentary)
     footer_block = _footer_html(player)
 
+    # Override the engine's .status-bar with the highlight-specific gradient
+    status_override_css = f"<style>.status-bar {{ {status_bar_css} }}</style>"
+
     inner_html = f"""
-  <!-- 5px status bar -->
-  <div style="height:5px;width:100%;{status_bar_css}"></div>
+  {status_override_css}
 
   <div style="padding:18px 22px;">
 
