@@ -325,6 +325,19 @@ try:
 except ImportError:
     pass
 
+# ── Oracle Intelligence v2 — analysis pipelines + renderer ───────────────────
+_ORACLE_INTEL_OK = False
+try:
+    from oracle_analysis import (
+        run_matchup_analysis, run_rivalry_history, run_game_plan,
+        run_team_report, run_owner_profile, run_player_scout,
+        run_power_rankings, run_dynasty_profile,
+    )
+    from oracle_renderer import render_oracle_card_to_file
+    _ORACLE_INTEL_OK = True
+except ImportError as _oracle_import_err:
+    print(f"[oracle_cog] oracle_analysis/renderer not available: {_oracle_import_err}")
+
 # Optional affinity module
 try:
     import affinity as _affinity_mod
@@ -2771,49 +2784,241 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ASK ATLAS — MODE SELECTOR + TWO MODALS
+#  ORACLE INTELLIGENCE HUB v2 — 8 predefined analysis types
 # ─────────────────────────────────────────────────────────────────────────────
 
-class OracleHubView(discord.ui.View):
+
+async def _run_and_send(interaction: discord.Interaction, coro, filename: str = "oracle.png"):
+    """Run an analysis coroutine and send the result PNG card publicly."""
+    try:
+        result = await coro
+        disc_file = await render_oracle_card_to_file(result, filename=filename)
+        sent = await interaction.followup.send(file=disc_file, wait=True)
+        _oracle_message_ids.add(sent.id)
+        _chain_roots[sent.id] = sent.id
+        _oracle_msg_times[sent.id] = time.time()
+    except Exception as e:
+        _log.error(f"[Oracle Intel] Analysis failed: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send(f"❌ Analysis failed: `{e}`", ephemeral=True)
+
+
+# ── Per-button modal classes ───────────────────────────────────────────────────
+
+class _MatchupModal(discord.ui.Modal, title="🏈 Matchup Analysis"):
+    teams = discord.ui.TextInput(
+        label="Enter two teams",
+        placeholder="e.g. Chiefs vs Raiders  or  Cowboys, Eagles",
+        required=True,
+        max_length=80,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        raw = self.teams.value.strip()
+        sep = " vs " if " vs " in raw.lower() else ("," if "," in raw else None)
+        if sep:
+            parts = raw.split(sep, 1)
+            team_a = parts[0].strip()
+            team_b = parts[1].strip()
+        else:
+            await interaction.followup.send(
+                "⚠️ Please enter two teams separated by 'vs' or a comma (e.g. `Chiefs vs Raiders`).",
+                ephemeral=True,
+            )
+            return
+        await _run_and_send(interaction, run_matchup_analysis(team_a, team_b, dm), "matchup.png")
+
+
+class _RivalryModal(discord.ui.Modal, title="⚔️ Rivalry History"):
+    owners = discord.ui.TextInput(
+        label="Enter two owners or teams",
+        placeholder="e.g. KillaKing vs JT  or  Killa, JT",
+        required=True,
+        max_length=80,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        raw = self.owners.value.strip()
+        sep = " vs " if " vs " in raw.lower() else ("," if "," in raw else None)
+        if sep:
+            parts = raw.split(sep, 1)
+            owner_a = parts[0].strip()
+            owner_b = parts[1].strip()
+        else:
+            await interaction.followup.send(
+                "⚠️ Please enter two owner/team names separated by 'vs' or a comma.",
+                ephemeral=True,
+            )
+            return
+        await _run_and_send(interaction, run_rivalry_history(owner_a, owner_b, dm), "rivalry.png")
+
+
+class _GamePlanModal(discord.ui.Modal, title="🎯 Game Plan"):
+    target = discord.ui.TextInput(
+        label="Who are you preparing to face?",
+        placeholder="e.g. Raiders  or  KillaKing",
+        required=True,
+        max_length=60,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        target_name = self.target.value.strip()
+        requester_team = None
+        if _resolve_db_username_fn:
+            db_user = _resolve_db_username_fn(interaction.user.id)
+            if db_user and not dm.df_teams.empty:
+                mask = dm.df_teams["userName"].str.lower() == db_user.lower()
+                if mask.any():
+                    requester_team = dm.df_teams[mask].iloc[0].get("nickName", "")
+        await _run_and_send(interaction, run_game_plan(target_name, requester_team, dm), "gameplan.png")
+
+
+class _TeamReportModal(discord.ui.Modal, title="📊 Team Report"):
+    team = discord.ui.TextInput(
+        label="Team name",
+        placeholder="e.g. Raiders  or  Kansas City",
+        required=True,
+        max_length=60,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_team_report(self.team.value.strip(), dm), "team_report.png")
+
+
+class _OwnerProfileModal(discord.ui.Modal, title="👤 Owner Profile"):
+    owner = discord.ui.TextInput(
+        label="Owner or team name",
+        placeholder="e.g. KillaKing  or  Raiders",
+        required=True,
+        max_length=60,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_owner_profile(self.owner.value.strip(), dm), "owner_profile.png")
+
+
+class _PlayerScoutModal(discord.ui.Modal, title="🔭 Player Scout"):
+    player = discord.ui.TextInput(
+        label="Player name",
+        placeholder="e.g. Patrick Mahomes  or  Lamar Jackson",
+        required=True,
+        max_length=60,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_player_scout(self.player.value.strip(), dm), "player_scout.png")
+
+
+class _DynastyProfileModal(discord.ui.Modal, title="🏛️ Dynasty Profile"):
+    owner = discord.ui.TextInput(
+        label="Owner or team name",
+        placeholder="e.g. KillaKing  or  Raiders",
+        required=True,
+        max_length=60,
+    )
+
+    @_safe_interaction
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_dynasty_profile(self.owner.value.strip(), dm), "dynasty.png")
+
+
+# ── Oracle Intelligence Hub View ───────────────────────────────────────────────
+
+class OracleIntelView(discord.ui.View):
     """
-    Oracle Hub — 5 Ask ATLAS modes.
-    📊 TSL League   → SQL pipeline against tsl_history.db
-    🌐 Open Intel   → General AI + web search
-    🏈 Sports Intel → NFL / real-world sports + web search
-    🎯 Player Scout → Player ratings, dev traits, abilities from roster data
-    🧠 Strategy     → Trade advice, roster tips, game strategy
+    Oracle Intelligence Hub v2 — 8 predefined TSL analysis types.
+    Row 0: 🏈 Matchup Analysis | ⚔️ Rivalry History | 🎯 Game Plan
+    Row 1: 📊 Team Report | 👤 Owner Profile | 🔭 Player Scout | 📈 Power Rankings | 🏛️ Dynasty Profile
+
+    All responses are public PNG cards. No free-form Q&A. TSL only.
     """
 
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=180)
 
-    @discord.ui.button(label="📊 TSL League", style=discord.ButtonStyle.primary, row=0)
+    # Row 0 — Competitive Intel
+
+    @discord.ui.button(label="Matchup Analysis", emoji="🏈", style=discord.ButtonStyle.primary, row=0)
     @_safe_interaction
-    async def btn_tsl(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(AskTSLModal())
+    async def btn_matchup(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_MatchupModal())
 
-    @discord.ui.button(label="🌐 Open Intel", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Rivalry History", emoji="⚔️", style=discord.ButtonStyle.primary, row=0)
     @_safe_interaction
-    async def btn_open(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(AskOpenModal())
+    async def btn_rivalry(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_RivalryModal())
 
-    @discord.ui.button(label="🏈 Sports Intel", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Game Plan", emoji="🎯", style=discord.ButtonStyle.primary, row=0)
     @_safe_interaction
-    async def btn_sports(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(SportsIntelModal())
+    async def btn_gameplan(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_GamePlanModal())
 
-    @discord.ui.button(label="🎯 Player Scout", style=discord.ButtonStyle.primary, row=1)
+    # Row 1 — Deep Dives
+
+    @discord.ui.button(label="Team Report", emoji="📊", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
-    async def btn_scout(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(PlayerScoutModal())
+    async def btn_team(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_TeamReportModal())
 
-    @discord.ui.button(label="🧠 Strategy", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Owner Profile", emoji="👤", style=discord.ButtonStyle.secondary, row=1)
     @_safe_interaction
-    async def btn_strategy(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        await interaction.response.send_modal(StrategyRoomModal())
+    async def btn_owner(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_OwnerProfileModal())
+
+    @discord.ui.button(label="Player Scout", emoji="🔭", style=discord.ButtonStyle.secondary, row=1)
+    @_safe_interaction
+    async def btn_player(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_PlayerScoutModal())
+
+    @discord.ui.button(label="Power Rankings", emoji="📈", style=discord.ButtonStyle.secondary, row=1)
+    @_safe_interaction
+    async def btn_power(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True, ephemeral=False)
+        await _run_and_send(interaction, run_power_rankings(dm), "power_rankings.png")
+
+    @discord.ui.button(label="Dynasty Profile", emoji="🏛️", style=discord.ButtonStyle.secondary, row=1)
+    @_safe_interaction
+    async def btn_dynasty(self, interaction: discord.Interaction, _b: discord.ui.Button):
+        if not _ORACLE_INTEL_OK:
+            await interaction.response.send_message("⚠️ Oracle analysis module offline.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_DynastyProfileModal())
 
 
-# ── Oracle Intelligence Modal Base ────────────────────────────────────────────
+# ── _format_citations kept for reply-chain follow-up pipeline ─────────────────
 
 def _format_citations(result) -> str:
     """Format grounding_chunks from an AIResult into a compact sources string."""
@@ -2935,7 +3140,10 @@ class _OracleIntelModal(discord.ui.Modal):
         return embed
 
 
-# ── Oracle Intelligence Modals ────────────────────────────────────────────────
+# ── Legacy modals — dead code, preserved for _OracleIntelModal._build_embed dependency ──
+# The classes below (AskTSLModal, _AskWebModal, PlayerScoutModal, StrategyRoomModal)
+# are no longer reachable from any button. OracleIntelView (above) owns all Oracle entry points.
+# _OracleIntelModal._build_embed is called by the reply-chain follow-up handler at _generate_followup.
 
 class AskTSLModal(_OracleIntelModal, title="📊 Ask ATLAS — TSL League"):
     """TSL League mode: natural language → SQL → AI-powered answer against tsl_history.db."""
@@ -4124,18 +4332,21 @@ class StatsHubCog(commands.Cog):
 
     # ── /oracle ────────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="oracle", description="🔮 ATLAS Oracle Hub — Ask questions across 5 intelligence modes.")
+    @app_commands.command(name="oracle", description="🔮 ATLAS Oracle Intelligence Hub — Deep TSL analysis.")
     @app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
     async def oracle(self, interaction: discord.Interaction):
         embed = discord.Embed(
-            title="🔮 ATLAS Oracle Hub",
+            title="🔮 ATLAS Oracle Intelligence",
             description=(
-                "**Choose your intelligence mode:**\n\n"
-                "📊 **TSL League** — Query the TSL history database\n"
-                "🌐 **Open Intel** — General knowledge + web search\n"
-                "🏈 **Sports Intel** — Real-world NFL stats & news\n"
-                "🎯 **Player Scout** — Madden ratings, dev traits, abilities\n"
-                "🧠 **Strategy** — Trade advice, roster tips, game strategy"
+                "**TSL-only analysis. Eight predefined intelligence types.**\n\n"
+                "🏈 **Matchup Analysis** — Deep head-to-head breakdown + score prediction\n"
+                "⚔️ **Rivalry History** — Full H2H record across all 95+ seasons\n"
+                "🎯 **Game Plan** — Tactical blueprint for beating a specific opponent\n\n"
+                "📊 **Team Report** — Offensive/defensive identity, strengths, trajectory\n"
+                "👤 **Owner Profile** — Career stats, playstyle, season outlook\n"
+                "🔭 **Player Scout** — OVR breakdown, dev trait, abilities grade\n"
+                "📈 **Power Rankings** — Tiered league analysis with risers/fallers\n"
+                "🏛️ **Dynasty Profile** — All-time legacy and career rank"
             ),
             color=AtlasColors.TSL_GOLD,
         )
@@ -4143,10 +4354,10 @@ class StatsHubCog(commands.Cog):
             name="ATLAS · Autonomous TSL League Administration System",
             icon_url=ATLAS_ICON_URL
         )
-        embed.set_footer(text="ATLAS™ Oracle Module · Pick a mode to begin")
+        embed.set_footer(text="ATLAS™ Oracle v2 · All analyses post publicly as PNG cards")
         await interaction.response.send_message(
             embed=embed,
-            view=OracleHubView(),
+            view=OracleIntelView(),
             ephemeral=True,
         )
 

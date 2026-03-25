@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.2.0"  # feat: @mention + Oracle Ask modals route through TSL NL→SQL pipeline; no web search; fix text-embedding-005
+ATLAS_VERSION = "7.3.0"  # feat: Oracle Intelligence Hub v2 — 8 predefined TSL analysis types, PNG cards, no free-form Q&A
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
