@@ -128,6 +128,7 @@ from discord.ext import tasks
 from dotenv import load_dotenv
 
 import atlas_ai
+import codex_utils
 import data_manager as dm
 import reasoning
 import build_tsl_db as db_builder
@@ -171,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.1.0"  # feat: real sportsbook UX overhaul — edit-in-place workspace, pagination, PNG caching, orphaned view cleanup
+ATLAS_VERSION = "7.2.0"  # feat: @mention + Oracle Ask modals route through TSL NL→SQL pipeline; no web search; fix text-embedding-005
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -380,7 +381,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # ── ATLAS Persona Call ──────────────────────────────────────────────────────
 
 async def call_atlas(user_input: str, context: str, persona_type: str = "casual") -> str:
-    """Synthesizes data into ATLAS's Echo voice persona with Search enabled.
+    """Synthesizes data into ATLAS's Echo voice persona. No web search.
 
     persona_type: "casual" | "official" | "analytical"
     Sourced from echo_loader.get_persona() — falls back to inline stub if
@@ -389,7 +390,7 @@ async def call_atlas(user_input: str, context: str, persona_type: str = "casual"
     system_instruction = get_persona(persona_type)
     prompt = f"CONTEXT:\n{context}\n\nUSER QUERY: {user_input}"
     try:
-        result = await atlas_ai.generate_with_search(prompt, system=system_instruction)
+        result = await atlas_ai.generate(prompt, system=system_instruction)
         return result.text
     except Exception as e:
         print(f"[atlas_ai] call_atlas failed: {e}")
@@ -613,7 +614,14 @@ async def on_message(message: discord.Message):
                 if conv_block:
                     context = f"{conv_block}\n\n{context}"
 
-                wit = await call_atlas(user_input, context, persona_type=persona_type)
+                # Try TSL DB pipeline first; fall back to ATLAS persona if no DB answer
+                db_answer, _sql = await codex_utils.tsl_ask_async(
+                    user_input, conv_context=conv_block
+                )
+                if db_answer:
+                    wit = db_answer
+                else:
+                    wit = await call_atlas(user_input, context, persona_type=persona_type)
                 await message.reply(wit)
 
                 # ── Record this exchange in permanent memory ──────

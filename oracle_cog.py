@@ -290,6 +290,7 @@ try:
         ai_resolve_names as _ai_resolve_names,
         _build_schema as _build_schema_fn,
         KNOWN_USERS,
+        tsl_ask_async,
     )
     from codex_cog import gemini_sql, gemini_answer
     from conversation_memory import (
@@ -300,6 +301,7 @@ try:
 except ImportError:
     _HISTORY_OK = False
     _ai_resolve_names = None
+    async def tsl_ask_async(*_a, **_kw): return None, None  # noqa: E704
     print("[oracle_cog] codex_cog not available — /ask history queries disabled")
 
 # Shared H2H SQL from intent system
@@ -3115,22 +3117,19 @@ class _AskWebModal(_OracleIntelModal):
         conv_block = ""
         conv_block = await _oracle_mem.build_context_block(interaction.user.id, q)
 
-        system_instruction = get_persona("analytical")
-        contents = f"{conv_block}\n\n{q}" if conv_block else q
-        result = await atlas_ai.generate_with_search(contents, system=system_instruction)
-
         if self.mode == "sports":
             embed_title = "🏈 ATLAS Intelligence — Sports Intel"
             embed_color = ATLAS_GOLD
             footer_mode = "Sports Intel mode"
-            fallback_msg = "ATLAS couldn't pull intel on that one."
+            fallback_msg = "ATLAS only answers TSL questions right now. Try `/codex ask` for historical stats."
         else:
             embed_title = "🌐 ATLAS Intelligence — Open Intel"
             embed_color = C_BLUE
             footer_mode = "Open Intel mode"
-            fallback_msg = "ATLAS couldn't pull a response on that one."
+            fallback_msg = "ATLAS only answers TSL questions right now. Try `/codex ask` for historical stats."
 
-        answer = result.text or fallback_msg
+        db_answer, _sql = await tsl_ask_async(q, conv_context=conv_block)
+        answer = db_answer or fallback_msg
 
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
 
@@ -3138,24 +3137,16 @@ class _AskWebModal(_OracleIntelModal):
         _fire_and_log(_oracle_mem.log_query(
             discord_id=interaction.user.id,
             question=q,
-            tier=4,  # Tier 4 = web search
+            tier=4,  # Tier 4 = TSL DB ask
             latency_ms=int((time.time() - pipeline_start) * 1000),
-            intent=f"web_{self.mode}",
-            model=result.model if hasattr(result, "model") else None,
-            input_tokens=result.input_tokens if hasattr(result, "input_tokens") else None,
-            output_tokens=result.output_tokens if hasattr(result, "output_tokens") else None,
+            intent=f"tsl_{self.mode}",
+            model=None,
+            input_tokens=None,
+            output_tokens=None,
         ))
 
-        footer = f"{footer_mode} · Web search enabled · ATLAS™ Oracle"
-        if result.fallback_used:
-            footer += "  ·  ⚡ via Gemini fallback"
-
-        fields = []
-        citations = _format_citations(result)
-        if citations:
-            fields.append(("📚 Sources", citations))
-
-        return answer, {"title": embed_title, "color": embed_color, "footer": footer, "fields": fields}
+        footer = f"{footer_mode} · TSL database · ATLAS™ Oracle"
+        return answer, {"title": embed_title, "color": embed_color, "footer": footer, "fields": []}
 
 
 # Backwards-compatible aliases for hub view button callbacks
@@ -3494,12 +3485,15 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
             if tsl_context else q
         )
 
-        if use_web_search:
-            result = await atlas_ai.generate_with_search(contents, system=system_instruction)
+        db_answer, _sql = await tsl_ask_async(q, conv_context=conv_block)
+        if db_answer:
+            result_text = db_answer
         else:
-            result = await atlas_ai.generate(contents, system=system_instruction, tier=Tier.SONNET)
+            # Fall back to local generate with the assembled TSL context
+            _fallback = await atlas_ai.generate(contents, system=system_instruction, tier=Tier.SONNET)
+            result_text = _fallback.text or "ATLAS couldn't formulate a strategy for that one."
 
-        answer = result.text or "ATLAS couldn't formulate a strategy for that one."
+        answer = result_text
 
         # ── Store conversation turn ─────────────────────────
         await _oracle_mem.embed_and_store(interaction.user.id, q, answer)
@@ -3511,26 +3505,20 @@ class StrategyRoomModal(_OracleIntelModal, title="🧠 Ask ATLAS — Strategy Ro
             tier=6,  # Tier 6 = strategy room
             latency_ms=int((time.time() - pipeline_start) * 1000),
             intent="strategy_room",
-            model=result.model if hasattr(result, "model") else None,
-            input_tokens=result.input_tokens if hasattr(result, "input_tokens") else None,
-            output_tokens=result.output_tokens if hasattr(result, "output_tokens") else None,
+            model=None,
+            input_tokens=None,
+            output_tokens=None,
         ))
 
         # ── Footer ──────────────────────────────────────────
         footer_parts = ["Strategy Room"]
         if team_name:
             footer_parts.append(team_name)
-        footer_parts.append("Web search" if use_web_search else "TSL analysis")
+        footer_parts.append("TSL database")
         footer_parts.append("ATLAS™ Oracle")
         footer = " · ".join(footer_parts)
-        if hasattr(result, 'fallback_used') and result.fallback_used:
-            footer += "  ·  ⚡ via Gemini fallback"
 
         fields = []
-        if use_web_search:
-            citations = _format_citations(result)
-            if citations:
-                fields.append(("📚 Sources", citations))
 
         return answer, {
             "title": "🧠 ATLAS Intelligence — Strategy Room",
@@ -4537,15 +4525,11 @@ async def _followup_strategy(
     tsl_context = "\n\n".join(tsl_parts) if tsl_parts else ""
     contents = f"TSL CONTEXT:\n{tsl_context}\n\n{context}\n\nUSER QUESTION: {question}" if tsl_context else f"{context}\n\n{question}"
 
-    # Default to web search for strategy follow-ups (safer)
-    result = await atlas_ai.generate_with_search(contents, system=system_instruction)
-    answer = result.text or "ATLAS couldn't formulate a strategy for that."
+    db_answer, _sql = await tsl_ask_async(question, conv_context=context)
+    answer = db_answer or "ATLAS only answers TSL questions right now. Try `/codex ask` for historical stats."
 
     footer = "Follow-up · Strategy Room · ATLAS™ Oracle"
     fields = []
-    citations = _format_citations(result)
-    if citations:
-        fields.append(("📚 Sources", citations))
 
     return answer, {
         "title": "🧠 ATLAS Intelligence — Strategy Room",
@@ -4561,10 +4545,7 @@ async def _followup_web(
     system_instruction: str,
     domain: str,
 ) -> tuple[str, dict]:
-    """Web search follow-up — Open Intel or Sports Intel."""
-    contents = f"{context}\n\n{question}" if context else question
-    result = await atlas_ai.generate_with_search(contents, system=system_instruction)
-
+    """TSL database follow-up — Open Intel or Sports Intel."""
     if domain == "SPORTS":
         title = "🏈 ATLAS Intelligence — Sports Intel"
         color = ATLAS_GOLD
@@ -4574,17 +4555,11 @@ async def _followup_web(
         color = C_BLUE
         mode_label = "Open Intel"
 
-    answer = result.text or "ATLAS couldn't pull intel on that."
+    db_answer, _sql = await tsl_ask_async(question, conv_context=context)
+    answer = db_answer or "ATLAS only answers TSL questions right now. Try `/codex ask` for historical stats."
     footer = f"Follow-up · {mode_label} · ATLAS™ Oracle"
-    if hasattr(result, 'fallback_used') and result.fallback_used:
-        footer += "  ·  ⚡ Gemini fallback"
 
-    fields = []
-    citations = _format_citations(result)
-    if citations:
-        fields.append(("📚 Sources", citations))
-
-    return answer, {"title": title, "color": color, "footer": footer, "fields": fields}
+    return answer, {"title": title, "color": color, "footer": footer, "fields": []}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

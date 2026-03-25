@@ -542,3 +542,199 @@ def resolve_names_in_question(question: str) -> tuple[str, dict[str, str]]:
         annotated = annotated.replace(nickname, f"{nickname} (username: '{username}')")
 
     return annotated, alias_map
+
+
+# ── Live data snapshot ────────────────────────────────────────────────────────
+
+def _build_tsl_snapshot() -> str:
+    """Build a short text block of live TSL data from data_manager.
+
+    Includes current season/week/stage, this week's schedule with scores,
+    and top standings. Grounds the AI in live data before SQL generation so
+    schedule and basic standings questions can be answered without a DB query.
+    """
+    if dm.df_games.empty:
+        return ""
+
+    stage_label = "Playoffs" if dm.CURRENT_STAGE > 1 else "Regular Season"
+    lines: list[str] = [
+        f"[TSL Live Data — Season {dm.CURRENT_SEASON}, Week {dm.CURRENT_WEEK} ({stage_label})]",
+        "This week's matchups:",
+    ]
+
+    # Score map for completed games
+    score_map: dict[str, str] = {}
+    try:
+        for r in dm.get_weekly_results():
+            key = f"{r['away']} @ {r['home']}"
+            score_map[key] = (
+                f"{r['away']} {r['away_score']} — {r['home']} {r['home_score']} (Final)"
+            )
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for _, row in dm.df_games.iterrows():
+        key = str(row.get("matchup_key", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        score_txt = score_map.get(key)
+        lines.append(f"  {score_txt if score_txt else key + ' (Pending)'}")
+
+    # Top standings
+    if not dm.df_standings.empty and "teamName" in dm.df_standings.columns:
+        lines.append("Current standings (top 8 by wins):")
+        try:
+            df = dm.df_standings.copy()
+            for col in ("totalWins", "totalLosses"):
+                if col in df.columns:
+                    df[col] = df[col].astype(str).str.extract(r"(\d+)").fillna(0).astype(int)
+            if "totalWins" in df.columns:
+                df = df.sort_values("totalWins", ascending=False)
+            for _, srow in df.head(8).iterrows():
+                name = srow.get("teamName", "?")
+                w = int(srow.get("totalWins", 0))
+                l = int(srow.get("totalLosses", 0))
+                t = int(srow.get("totalTies", 0))
+                record = f"{w}-{l}" + (f"-{t}" if t else "")
+                lines.append(f"  {name}: {record}")
+        except Exception:
+            pass
+
+    return "\n".join(lines)
+
+
+# ── Unified NL→SQL→answer pipeline (for @mention and Oracle Ask modals) ───────
+
+_MENTION_SQL_PROMPT = """\
+You are a SQLite expert for The Simulation League (TSL) Madden franchise database.
+Your job: convert natural-language questions into a single correct SQLite SELECT query.
+
+{schema}
+{alias_block}{conv_block}
+RULES:
+1. Return ONLY the raw SQL query — no markdown, no explanation, no code fences.
+2. ALL columns are stored as TEXT. Use CAST(col AS INTEGER) or CAST(col AS REAL) for math/comparisons.
+3. Completed games: ALWAYS filter status IN ('2','3'). Never include unplayed games.
+4. Default to stageIndex='1' (regular season) unless the user asks about playoffs.
+5. For owner queries: use EXACT usernames from the KNOWN TSL OWNERS list. Never use LIKE or wildcards.
+6. For "record" questions: count wins AND losses separately, not just total games.
+7. When a user could appear as home OR away, handle both: (homeUser='X' OR awayUser='X').
+8. For owner-specific history across seasons, ALWAYS JOIN owner_tenure to track team changes.
+9. For draft queries, use player_draft_map — NEVER players.teamName.
+10. Limit results to 30 rows unless the user needs more.
+11. Never use DROP, INSERT, UPDATE, DELETE, or any DDL.
+
+Now generate a query for this question:
+"{question}"
+"""
+
+_MENTION_ANSWER_PROMPT = """\
+{persona}
+{conv_block}
+A TSL member asked: "{question}"
+
+Query results ({n_rows} rows):
+{results_str}
+{no_data_instruction}
+RESPONSE GUIDELINES:
+- Lead with the DIRECT answer — the specific stat, name, or fact.
+- Use **bold** for key numbers and names (Discord markdown).
+- Include supporting context: season, team, comparison when relevant.
+- Keep it under 300 words unless a full breakdown was requested.
+- NEVER repeat the SQL query or mention databases/tables.
+- NEVER invent stats not in the results above.
+- ALWAYS use third person. Refer to players/owners by name.
+- Use sports language and dramatic flair.
+"""
+
+
+async def tsl_ask_async(
+    question: str,
+    conv_context: str = "",
+) -> tuple[str | None, str | None]:
+    """Full NL→SQL→answer pipeline for @mention and Oracle Ask modals.
+
+    Reuses the existing retry_sql() cascade and codex_utils infrastructure
+    without touching the /codex slash command flow in codex_cog.py.
+
+    Returns:
+        (answer_str, sql_used) on success
+        (None, None) if the question cannot be answered from the TSL DB
+    """
+    _ensure_codex_identity()
+
+    # 1. Name resolution
+    annotated_q, alias_map = resolve_names_in_question(question)
+
+    _san = lambda s: re.sub(r"['\";\\]", "", s)
+    alias_block = ""
+    if alias_map:
+        alias_lines = [
+            f"  '{_san(nick)}' → use username '{_san(user)}' in SQL"
+            for nick, user in alias_map.items()
+        ]
+        alias_block = (
+            "\nRESOLVED NAME ALIASES (use these exact values in WHERE clauses):\n"
+            + "\n".join(alias_lines) + "\n"
+        )
+
+    conv_block = f"\n{conv_context}\n" if conv_context else ""
+
+    # 2. Schema + live snapshot
+    schema = _get_db_schema()
+    snapshot = _build_tsl_snapshot()
+    full_schema = f"{schema}\n\n{snapshot}" if snapshot else schema
+
+    # 3. Generate SQL
+    sql_prompt = _MENTION_SQL_PROMPT.format(
+        schema=full_schema,
+        alias_block=alias_block,
+        conv_block=conv_block,
+        question=annotated_q,
+    )
+    try:
+        sql_result = await atlas_ai.generate(sql_prompt, tier=Tier.SONNET, temperature=0.05)
+        sql = extract_sql(sql_result.text)
+    except Exception as e:
+        log.warning(f"[tsl_ask] SQL generation failed: {e}")
+        return None, None
+
+    if not sql:
+        return None, None
+
+    # 4. Execute with self-correcting retry cascade
+    try:
+        rows, final_sql, error, _attempt, _warnings = await retry_sql(sql, schema)
+    except Exception as e:
+        log.warning(f"[tsl_ask] SQL execution failed: {e}")
+        return None, None
+
+    if error or not rows:
+        return None, final_sql
+
+    # 5. Format answer in ATLAS voice
+    try:
+        from echo_loader import get_persona as _gp
+    except ImportError:
+        _gp = lambda mode="analytical": "You are ATLAS. Speak in third person. Be concise and direct."
+
+    results_str = json.dumps(rows[:50], indent=2)
+    if len(results_str) > 6000:
+        results_str = results_str[:6000] + "\n... (truncated)"
+
+    answer_prompt = _MENTION_ANSWER_PROMPT.format(
+        persona=_gp("analytical"),
+        conv_block=conv_block,
+        question=question,
+        n_rows=len(rows),
+        results_str=results_str,
+        no_data_instruction="",
+    )
+    try:
+        answer_result = await atlas_ai.generate(answer_prompt, tier=Tier.SONNET)
+        return answer_result.text, final_sql
+    except Exception as e:
+        log.warning(f"[tsl_ask] Answer formatting failed: {e}")
+        return None, final_sql
