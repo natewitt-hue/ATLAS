@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.7.1"  # fix: 4th down analyzer — Signal D, possession self-check, territory re-mapping, score re-anchor, play clock/game clock, FG range
+ATLAS_VERSION = "7.7.2"  # fix: embedding model 404 — text-embedding-005 does not exist, use text-embedding-004
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

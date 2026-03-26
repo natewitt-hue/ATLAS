@@ -730,7 +730,7 @@ async def generate_stream(
 # ── Embedding API ────────────────────────────────────────────────────────────
 
 async def embed_text(text: str) -> list[float] | None:
-    """Generate a text embedding via Gemini text-embedding-005.
+    """Generate a text embedding via Gemini text-embedding-004.
 
     Free tier: 1,500 requests/day. Returns a 768-dim float vector,
     or None if Gemini is unavailable or the call fails.
@@ -744,7 +744,7 @@ async def embed_text(text: str) -> list[float] | None:
         result = await loop.run_in_executor(
             None,
             lambda: gemini.models.embed_content(
-                model="text-embedding-005",
+                model="text-embedding-004",
                 contents=text,
             ),
         )
