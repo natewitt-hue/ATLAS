@@ -2932,16 +2932,19 @@ class OracleConfView(discord.ui.View):
 
         # Add "My Team" button if user has an assigned team
         if user_id:
-            entry = roster.get_entry_by_id(user_id)
-            if entry:
-                btn = discord.ui.Button(
-                    label=f"My Team ({entry.team_name})",
-                    style=discord.ButtonStyle.success,
-                    emoji="⭐",
-                    row=0,
-                )
-                btn.callback = self._my_team_cb(entry.team_name)
-                self.add_item(btn)
+            try:
+                entry = roster.get_entry_by_id(user_id)
+                if entry:
+                    btn = discord.ui.Button(
+                        label=f"My Team ({entry.team_name})",
+                        style=discord.ButtonStyle.success,
+                        emoji="⭐",
+                        row=0,
+                    )
+                    btn.callback = self._my_team_cb(entry.team_name)
+                    self.add_item(btn)
+            except Exception:
+                pass  # Graceful fallback: no My Team button
 
     def _my_team_cb(self, team_name: str):
         async def callback(interaction: discord.Interaction):
@@ -2988,16 +2991,19 @@ class OracleDualConfView(discord.ui.View):
 
         # For step B, add "My Team" button (if it's not the same as Team A)
         if user_id and step == "B":
-            entry = roster.get_entry_by_id(user_id)
-            if entry and entry.team_name != team_a_name:
-                btn = discord.ui.Button(
-                    label=f"My Team ({entry.team_name})",
-                    style=discord.ButtonStyle.success,
-                    emoji="⭐",
-                    row=0,
-                )
-                btn.callback = self._my_team_cb(entry.team_name)
-                self.add_item(btn)
+            try:
+                entry = roster.get_entry_by_id(user_id)
+                if entry and entry.team_name != team_a_name:
+                    btn = discord.ui.Button(
+                        label=f"My Team ({entry.team_name})",
+                        style=discord.ButtonStyle.success,
+                        emoji="⭐",
+                        row=0,
+                    )
+                    btn.callback = self._my_team_cb(entry.team_name)
+                    self.add_item(btn)
+            except Exception:
+                pass  # Graceful fallback: no My Team button
 
     def _my_team_cb(self, team_name: str):
         async def callback(interaction: discord.Interaction):
