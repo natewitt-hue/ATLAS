@@ -1786,16 +1786,31 @@ class TradeCenterCog(commands.Cog):
             return await interaction.response.send_message(
                 "⚠️ Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True,
             )
-        embed = discord.Embed(
-            title="💱 Trade Center — Step 1",
-            description="Pick a conference to select **Team A** (the team sending).",
-            color=AtlasColors.INFO,
-        )
-        embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
-        view = ConferenceSelectView(
-            bot=self.bot, proposer_id=interaction.user.id, step="A",
-            user_id=interaction.user.id,
-        )
+        # Auto-preselect user's team as Team A if they have one
+        user_team = roster.get_team_dict(interaction.user.id)
+        if user_team:
+            embed = _conference_select_embed(
+                "B",
+                "Pick a conference to select **Team B** (the team receiving).",
+                team_a=user_team,
+            )
+            embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
+            view = ConferenceSelectView(
+                bot=self.bot, proposer_id=interaction.user.id,
+                step="B", team_a=user_team,
+                user_id=interaction.user.id,
+            )
+        else:
+            embed = discord.Embed(
+                title="💱 Trade Center — Step 1",
+                description="Pick a conference to select **Team A** (the team sending).",
+                color=AtlasColors.INFO,
+            )
+            embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
+            view = ConferenceSelectView(
+                bot=self.bot, proposer_id=interaction.user.id, step="A",
+                user_id=interaction.user.id,
+            )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     async def _tradelist_impl(self, interaction: discord.Interaction):
@@ -2060,16 +2075,31 @@ class GenesisHubView(discord.ui.View):
             return await interaction.response.send_message(
                 "Roster data not loaded yet. Run `/wittsync` first.", ephemeral=True,
             )
-        embed = discord.Embed(
-            title="💱 Trade Center — Step 1",
-            description="Pick a conference to select **Team A** (the team sending).",
-            color=AtlasColors.INFO,
-        )
-        embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
-        view = ConferenceSelectView(
-            bot=self.bot, proposer_id=interaction.user.id, step="A",
-            user_id=interaction.user.id,
-        )
+        # Auto-preselect user's team as Team A if they have one
+        user_team = roster.get_team_dict(interaction.user.id)
+        if user_team:
+            embed = _conference_select_embed(
+                "B",
+                "Pick a conference to select **Team B** (the team receiving).",
+                team_a=user_team,
+            )
+            embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
+            view = ConferenceSelectView(
+                bot=self.bot, proposer_id=interaction.user.id,
+                step="B", team_a=user_team,
+                user_id=interaction.user.id,
+            )
+        else:
+            embed = discord.Embed(
+                title="💱 Trade Center — Step 1",
+                description="Pick a conference to select **Team A** (the team sending).",
+                color=AtlasColors.INFO,
+            )
+            embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
+            view = ConferenceSelectView(
+                bot=self.bot, proposer_id=interaction.user.id, step="A",
+                user_id=interaction.user.id,
+            )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(
