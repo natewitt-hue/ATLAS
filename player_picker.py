@@ -49,6 +49,11 @@ from __future__ import annotations
 import discord
 import data_manager as dm
 
+try:
+    import roster
+except ImportError:
+    roster = None  # type: ignore[assignment]
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Canonical position groups for the filter dropdown.
@@ -231,6 +236,7 @@ class PlayerPickerView(discord.ui.View):
         team_filter: str  = "ALL",
         pos_filter:  str  = "ALL",
         label:       str  = "Player Picker",
+        user_id:     int | None = None,
     ):
         super().__init__(timeout=300)
         self._callback    = callback
@@ -240,6 +246,12 @@ class PlayerPickerView(discord.ui.View):
         self._team        = team_filter
         self._cart:  list[dict] = []
         self._label       = label
+
+        # Auto-default team filter to user's team if not explicitly set
+        if user_id and roster and self._team == "ALL":
+            user_team = roster.get_team_name(user_id)
+            if user_team:
+                self._team = user_team
 
         # Build initial player list
         self._players = _filter_players(self._pos_group, self._team)
@@ -397,11 +409,15 @@ class PlayerPickerView(discord.ui.View):
 
 # ── Convenience factory functions ─────────────────────────────────────────────
 
-def make_single_picker(callback, team_filter: str = "ALL", label: str = "Select Player") -> PlayerPickerView:
+def make_single_picker(callback, team_filter: str = "ALL", label: str = "Select Player",
+                       user_id: int | None = None) -> PlayerPickerView:
     """Convenience: single-player picker, optionally pre-filtered to a team."""
-    return PlayerPickerView(callback=callback, multi=False, team_filter=team_filter, label=label)
+    return PlayerPickerView(callback=callback, multi=False, team_filter=team_filter,
+                            label=label, user_id=user_id)
 
 
-def make_multi_picker(callback, team_filter: str = "ALL", max_picks: int = 5, label: str = "Select Players") -> PlayerPickerView:
+def make_multi_picker(callback, team_filter: str = "ALL", max_picks: int = 5,
+                      label: str = "Select Players", user_id: int | None = None) -> PlayerPickerView:
     """Convenience: multi-player picker (cart mode), optionally pre-filtered to a team."""
-    return PlayerPickerView(callback=callback, multi=True, max_picks=max_picks, team_filter=team_filter, label=label)
+    return PlayerPickerView(callback=callback, multi=True, max_picks=max_picks,
+                            team_filter=team_filter, label=label, user_id=user_id)

@@ -3218,7 +3218,8 @@ class OracleIntelView(discord.ui.View):
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         from player_picker import PlayerPickerView
-        view = PlayerPickerView(callback=self._do_player_scout, multi=False, label="Oracle Player Scout")
+        view = PlayerPickerView(callback=self._do_player_scout, multi=False, label="Oracle Player Scout",
+                                user_id=interaction.user.id)
         await interaction.response.edit_message(
             embed=PlayerPickerView.filter_embed(label="Oracle Player Scout"), view=view)
 
