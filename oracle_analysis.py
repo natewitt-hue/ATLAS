@@ -166,26 +166,53 @@ def _persona_with_mods(persona: str, affinity_block: str) -> str:
 
 def _team_metrics(team_name: str, dm) -> dict:
     """Extract quick comparison metrics for a team (matchup visual table)."""
-    result = {"name": team_name, "record": "?-?", "ppg": 0.0, "pa": 0.0, "rank": "?", "ovr": "?", "diff": 0}
+    result = {
+        "name": team_name, "record": "?-?", "ppg": 0.0, "pa": 0.0,
+        "rank": "?", "ovr": "?", "diff": 0,
+        "off_rank": 0, "def_rank": 0, "to_diff": 0, "win_pct": 0.0,
+    }
     if not dm.df_standings.empty:
+        def _apply_standings(row):
+            w = int(row.get("totalWins", 0) or 0)
+            l = int(row.get("totalLosses", 0) or 0)
+            pf = int(row.get("ptsFor", 0) or 0)       # API field is ptsFor, not totalPtsFor
+            pa_val = int(row.get("ptsAgainst", 0) or 0)
+            g = w + l
+            result["record"] = f"{w}-{l}"
+            result["ppg"] = round(pf / g, 1) if g else 0.0
+            result["pa"] = round(pa_val / g, 1) if g else 0.0
+            result["diff"] = int(row.get("netPts", 0) or 0)
+            result["off_rank"] = int(row.get("offTotalYdsRank", 0) or 0)
+            result["def_rank"] = int(row.get("defTotalYdsRank", 0) or 0)
+            result["to_diff"] = int(row.get("tODiff", 0) or 0)
+            result["win_pct"] = float(row.get("winPct", 0.0) or 0.0)
+
+        matched = False
         for _, row in dm.df_standings.iterrows():
             if str(row.get("teamName", "")).lower() == team_name.lower():
-                w = int(row.get("totalWins", 0) or 0)
-                l = int(row.get("totalLosses", 0) or 0)
-                pf = int(row.get("totalPtsFor", 0) or 0)
-                pa = int(row.get("totalPtsAgainst", 0) or 0)
-                g = w + l
-                result["record"] = f"{w}-{l}"
-                result["ppg"] = round(pf / g, 1) if g else 0.0
-                result["pa"] = round(pa / g, 1) if g else 0.0
-                result["diff"] = pf - pa
+                _apply_standings(row)
+                matched = True
                 break
+        if not matched:
+            for _, row in dm.df_standings.iterrows():
+                if team_name.lower() in str(row.get("teamName", "")).lower():
+                    _apply_standings(row)
+                    break
+
     if not dm.df_power.empty:
+        matched = False
         for _, row in dm.df_power.iterrows():
             if str(row.get("teamName", "")).lower() == team_name.lower():
                 result["rank"] = f"#{row.get('rank', '?')}"
                 result["ovr"] = str(row.get("ovrRating", "?"))
+                matched = True
                 break
+        if not matched:
+            for _, row in dm.df_power.iterrows():
+                if team_name.lower() in str(row.get("teamName", "")).lower():
+                    result["rank"] = f"#{row.get('rank', '?')}"
+                    result["ovr"] = str(row.get("ovrRating", "?"))
+                    break
     return result
 
 

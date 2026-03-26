@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.7.2"  # fix: embedding model 404 — text-embedding-005 does not exist, use text-embedding-004
+ATLAS_VERSION = "7.8.0"  # feat: matchup card — fix PPG/PA/DIFF stats, edge indicators, win probability, confidence colors
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
