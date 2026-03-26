@@ -337,6 +337,9 @@ class Query:
             best = self._resolve_best_direction(col)
             self._order_dir = "ASC" if best == "DESC" else "DESC"
             self._apply_worst_guard(col)
+            # Always require min games for "worst" to prevent single-game outliers
+            if not any("COUNT(*)" in h for h in self._havings):
+                self._havings.append("COUNT(*) >= 4")
         else:
             self._order_dir = "DESC"
 
@@ -417,16 +420,17 @@ class Query:
 
         return sql, tuple(params)
 
-    def execute(self) -> list[dict]:
-        """Build and execute synchronously via codex_utils.run_sql()."""
+    def execute(self) -> tuple[list[dict], str | None]:
+        """Build and execute synchronously via codex_utils.run_sql().
+
+        Returns (rows, error) matching the run_sql() contract so callers
+        can handle errors without catching exceptions.
+        """
         utils = _get_codex_utils()
         if utils is None:
-            raise RuntimeError("codex_utils not available")
+            return [], "codex_utils not available"
         sql, params = self.build()
-        rows, error = utils.run_sql(sql, params)
-        if error:
-            raise RuntimeError(f"Query execution failed: {error}")
-        return rows
+        return utils.run_sql(sql, params)
 
     async def execute_async(self) -> list[dict]:
         """Build and execute asynchronously via codex_utils.run_sql_async()."""
