@@ -44,6 +44,7 @@ import json
 import math
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -837,7 +838,7 @@ def _build_game_lines(games_raw: list) -> list[dict]:
 
         # Auto-lock finished or past-week games
         # weekIndex is 0-based (API), CURRENT_WEEK is 1-based — convert to same base
-        if status >= 2 or week_idx < (dm.CURRENT_WEEK - 1):
+        if status >= 2 or week_idx < dm.CURRENT_WEEK:
             _set_locked(game_id, True)
 
         home_data = power_map.get(home, _FALLBACK_TEAM)
@@ -1095,25 +1096,28 @@ async def _place_straight_bet(
         already_deferred = True
 
     # Per-user lock prevents double-spend across concurrent bets
-    async with flow_wallet.get_user_lock(interaction.user.id):
+    uid = interaction.user.id
+    debit_ref = f"TSL_BET_DEBIT_{uid}_{game_id}_{int(time.time())}"
+    async with flow_wallet.get_user_lock(uid):
         try:
             with _db_con() as con:
                 con.execute("BEGIN IMMEDIATE")
                 safe_line = line if isinstance(line, (int, float)) else 0.0
                 new_bal = flow_wallet.update_balance_sync(
-                    interaction.user.id, -amount, source="TSL_BET", con=con,
-                    subsystem="TSL_BET", subsystem_id="pending",
+                    uid, -amount, source="TSL_BET", con=con,
+                    subsystem="TSL_BET", subsystem_id=f"tsl:{game_id}",
+                    reference_key=debit_ref,
                 )
                 con.commit()
         except flow_wallet.InsufficientFundsError:
-            balance = _get_balance(interaction.user.id)
+            balance = _get_balance(uid)
             return await _send_error(f"❌ Insufficient balance. You have **${balance:,}**.")
 
         # Write bet to sportsbook_core (flow.db) after funds confirmed
         import sportsbook_core as _sb_core
         try:
             bet_id = await _sb_core.write_bet(
-                discord_id=int(interaction.user.id),
+                discord_id=int(uid),
                 event_id=f"tsl:{game_id}",
                 bet_type=bet_type,
                 pick=team,
@@ -1122,13 +1126,13 @@ async def _place_straight_bet(
                 wager=int(amount),
             )
         except Exception as e:
-            log.exception(f"[SB] write_bet failed for uid={interaction.user.id} event_id={game_id}: {e}")
+            log.exception(f"[SB] write_bet failed for uid={uid} event_id={game_id}: {e}")
             # Refund the debit since we can't record the bet
             try:
                 with _db_con() as con:
-                    _update_balance(interaction.user.id, amount, con,
-                                    subsystem="TSL_BET", subsystem_id="pending",
-                                    reference_key="TSL_BET_WRITE_FAILED_REFUND")
+                    _update_balance(uid, amount, con,
+                                    subsystem="TSL_BET", subsystem_id=f"tsl:{game_id}",
+                                    reference_key=f"TSL_BET_WRITE_FAILED_{uid}_{game_id}_{int(time.time())}")
                     con.commit()
             except Exception:
                 log.exception("[SB] CRITICAL: refund also failed after write_bet failure")

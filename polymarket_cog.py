@@ -26,7 +26,7 @@ import math
 import random
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_time
 from typing import Optional
 import os
 
@@ -3035,7 +3035,7 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
     # ── Daily Drop Task ─────────────────────────
 
-    @tasks.loop(time=datetime(2000, 1, 1, 14, 0).time())  # 9 AM EST = 14:00 UTC
+    @tasks.loop(time=dt_time(14, 0, tzinfo=timezone.utc))  # 9 AM EST = 14:00 UTC
     async def daily_drop_task(self):
         """Generate and post the daily curated market drop."""
         await self._ensure_db()

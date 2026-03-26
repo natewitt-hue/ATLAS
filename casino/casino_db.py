@@ -895,7 +895,6 @@ async def process_wager(
                     ) as cur:
                         jp_row = await cur.fetchone()
                     if jp_row and jp_row[0] >= bonus_amount:
-                        payout += bonus_amount
                         await db.execute(
                             "UPDATE casino_jackpot SET pool = pool - ? WHERE tier='mini'",
                             (bonus_amount,),
@@ -904,14 +903,14 @@ async def process_wager(
                     else:
                         bonus_amount = 0
 
-            # 3. Cold streak mercy
+            # 3. Cold streak mercy (loss_refund_pct credited separately after step 6)
+            refund = 0
             if outcome == "loss":
                 mercy = get_cold_streak_mercy(streak_info)
                 if mercy:
                     if mercy["type"] == "loss_refund_pct" and streak_info["len"] >= 10:
                         refund = int(wager * mercy["value"])
                         if refund > 0:
-                            payout += refund
                             cold_mercy = {"type": "loss_refund", "amount": refund}
 
             # 4. Apply payout sanity cap
@@ -944,6 +943,30 @@ async def process_wager(
                 )
             else:
                 new_balance = await flow_wallet.get_balance(discord_id, con=db)
+
+            # 6b. Streak bonus credit (idempotency-keyed, funded from mini jackpot pool)
+            if bonus_amount > 0:
+                streak_bonus_ref = f"streak_bonus_{discord_id}_{game_type}_{streak_info['len']}"
+                new_balance = await flow_wallet.credit(
+                    discord_id, bonus_amount, "CASINO",
+                    description=f"{game_type} streak bonus",
+                    reference_key=streak_bonus_ref,
+                    subsystem="CASINO",
+                    subsystem_id=sid,
+                    con=db,
+                )
+
+            # 6c. Cold streak loss refund credit (idempotency-keyed)
+            if refund > 0:
+                cold_refund_ref = f"cold_streak_mercy_{discord_id}_{now}"
+                new_balance = await flow_wallet.credit(
+                    discord_id, refund, "CASINO",
+                    description="cold streak loss refund",
+                    reference_key=cold_refund_ref,
+                    subsystem="CASINO",
+                    subsystem_id=sid,
+                    con=db,
+                )
 
             # 7. Cold streak free credit (at 8+ losses, once per streak)
             if outcome == "loss" and streak_info["type"] == "loss" and streak_info["len"] >= 8:

@@ -82,6 +82,8 @@ except ImportError:
 #  GENESIS · TRADE CENTER
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Trade approval lock (prevents TOCTOU double-approve) ─────────────────────
+_trade_approval_lock = asyncio.Lock()
 
 # ── Player dict sanitizer ─────────────────────────────────────────────────────
 
@@ -1519,54 +1521,55 @@ class TradeActionView(discord.ui.View):
         if not trade:
             return await interaction.response.send_message("❌ Trade not found.", ephemeral=True)
 
-        # Guard against double-approve/reject (status already resolved)
-        if trade.get("status") in ("approved", "rejected"):
-            return await interaction.response.send_message(
-                f"⚠️ This trade has already been **{trade['status']}**.", ephemeral=True
-            )
-
-        # ── Validate roster integrity before approval ────────────────────
-        if new_status == "approved" and dm.df_players is not None and not dm.df_players.empty:
-            stale = []
-            for side_key, team_name_key in [
-                ("players_a_data", "team_a_name"),
-                ("players_b_data", "team_b_name"),
-            ]:
-                players = trade.get(side_key) or []
-                expected_team = trade.get(team_name_key, "")
-                for p in players:
-                    rid = p.get("rosterId")
-                    if rid is None:
-                        continue
-                    match = dm.df_players[dm.df_players["rosterId"] == rid]
-                    if match.empty:
-                        stale.append(
-                            f"**{p.get('firstName', '')} {p.get('lastName', '')}** "
-                            f"— no longer on any roster"
-                        )
-                    elif match.iloc[0].get("teamName", "") != expected_team:
-                        stale.append(
-                            f"**{p.get('firstName', '')} {p.get('lastName', '')}** "
-                            f"— now on {match.iloc[0].get('teamName', 'unknown')}"
-                        )
-            if stale:
+        async with _trade_approval_lock:
+            # Guard against double-approve/reject (status already resolved)
+            if trade.get("status") in ("approved", "rejected"):
                 return await interaction.response.send_message(
-                    "❌ **Cannot approve — roster has changed since proposal:**\n"
-                    + "\n".join(f"• {s}" for s in stale)
-                    + "\n\nReject this trade and have owners resubmit.",
-                    ephemeral=True,
+                    f"⚠️ This trade has already been **{trade['status']}**.", ephemeral=True
                 )
 
-        # ── FIX: Defer immediately — buys 15 min instead of 3-second timeout.
-        # Without this, the trade eval + image render below exceeds Discord's
-        # 3-second interaction deadline → 404 Unknown Interaction on every
-        # approve/reject click.
-        await interaction.response.defer()
+            # ── Validate roster integrity before approval ─────────────────
+            if new_status == "approved" and dm.df_players is not None and not dm.df_players.empty:
+                stale = []
+                for side_key, team_name_key in [
+                    ("players_a_data", "team_a_name"),
+                    ("players_b_data", "team_b_name"),
+                ]:
+                    players = trade.get(side_key) or []
+                    expected_team = trade.get(team_name_key, "")
+                    for p in players:
+                        rid = p.get("rosterId")
+                        if rid is None:
+                            continue
+                        match = dm.df_players[dm.df_players["rosterId"] == rid]
+                        if match.empty:
+                            stale.append(
+                                f"**{p.get('firstName', '')} {p.get('lastName', '')}** "
+                                f"— no longer on any roster"
+                            )
+                        elif match.iloc[0].get("teamName", "") != expected_team:
+                            stale.append(
+                                f"**{p.get('firstName', '')} {p.get('lastName', '')}** "
+                                f"— now on {match.iloc[0].get('teamName', 'unknown')}"
+                            )
+                if stale:
+                    return await interaction.response.send_message(
+                        "❌ **Cannot approve — roster has changed since proposal:**\n"
+                        + "\n".join(f"• {s}" for s in stale)
+                        + "\n\nReject this trade and have owners resubmit.",
+                        ephemeral=True,
+                    )
 
-        trade["status"]      = new_status
-        trade["resolved_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        trade["resolved_by"] = interaction.user.id
-        _save_trade_state()
+            # ── FIX: Defer immediately — buys 15 min instead of 3-second timeout.
+            # Without this, the trade eval + image render below exceeds Discord's
+            # 3-second interaction deadline → 404 Unknown Interaction on every
+            # approve/reject click.
+            await interaction.response.defer()
+
+            trade["status"]      = new_status
+            trade["resolved_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            trade["resolved_by"] = interaction.user.id
+            _save_trade_state()
 
         # Disable all buttons after resolution
         disabled_view = discord.ui.View()
@@ -2144,11 +2147,7 @@ class GenesisHubView(discord.ui.View):
         row=0, custom_id="genesis:tradelist",
     )
     async def btn_tradelist(self, interaction: discord.Interaction, _b: discord.ui.Button):
-        is_admin = (
-            interaction.user.id in ADMIN_USER_IDS or
-            (interaction.guild and any(r.name == "Commissioner" for r in interaction.user.roles))
-        )
-        if not is_admin:
+        if not await is_commissioner(interaction):
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
 
         pending = [t for t in _trades.values() if t.get("status") == "pending"]

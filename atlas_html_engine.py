@@ -650,7 +650,12 @@ class PagePool:
                 raise RuntimeError("recycling")
         except Exception:
             # Replace dead or recycled page with a fresh one
-            page = await self._new_page()
+            try:
+                page = await self._new_page()
+            except Exception as e:
+                log.error(f"PagePool: failed to replace dead page: {e}")
+                # page is lost — pool shrinks by 1
+                return
         await self._available.put(page)
 
     async def drain(self):

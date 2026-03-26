@@ -21,7 +21,10 @@ import json           # FIX #4: moved to top-level
 import logging        # FIX #3: proper logging for caught exceptions
 import math           # FIX #5: moved to top-level
 import os             # FIX #4: moved to top-level
+import pathlib
 import data_manager as dm
+
+_PARITY_STATE_PATH = pathlib.Path(__file__).parent / "parity_state.json"
 
 log = logging.getLogger(__name__)
 
@@ -335,8 +338,8 @@ def evaluate_trade(side_a: TradeSide, side_b: TradeSide) -> TradeEvalResult:
     # Also: json and os are now top-level imports.
     cornerstone_data: dict = {}
     try:
-        if os.path.exists("parity_state.json"):
-            with open("parity_state.json") as f:
+        if _PARITY_STATE_PATH.exists():
+            with open(_PARITY_STATE_PATH) as f:
                 cornerstone_data = json.load(f).get("cornerstones", {})
     except Exception as e:
         log.warning(f"[Trade] Failed to read parity_state.json: {e}")

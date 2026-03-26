@@ -262,14 +262,14 @@ def _get_total_won(user_id: int) -> int:
     total = 0
     for wager, odds in rows:
         if odds > 0:
-            total += int(wager * odds / 100)
+            total += wager + int(wager * odds / 100)
         else:
-            total += int(wager * 100 / abs(odds))
+            total += wager + int(wager * 100 / abs(odds))
     for wager, odds in parlay_rows:
         if odds > 0:
-            total += int(wager * odds / 100)
+            total += wager + int(wager * odds / 100)
         else:
-            total += int(wager * 100 / abs(odds))
+            total += wager + int(wager * 100 / abs(odds))
     return total
 
 
@@ -499,6 +499,7 @@ def _gather_stats_data(user_id: int) -> dict:
     wins, losses, pushes = _get_lifetime_record(user_id)
     return {
         "balance": _get_balance(user_id),
+        "season_start": _get_season_start_balance(user_id),
         "delta": _get_weekly_delta(user_id),
         "spark_data": _get_sparkline_data(user_id, days=30),
         "results_record": _get_last_n_results(user_id, n=10),
@@ -518,6 +519,7 @@ async def build_stats_card(user_id: int, *, theme_id: str | None = None) -> byte
     """
     d = await asyncio.get_running_loop().run_in_executor(None, _gather_stats_data, user_id)
     balance = d["balance"]
+    season_start = d["season_start"]
     delta = d["delta"]
     spark_data = d["spark_data"]
     results, record = d["results_record"]
@@ -530,7 +532,7 @@ async def build_stats_card(user_id: int, *, theme_id: str | None = None) -> byte
 
     total_bets = wins + losses + pushes
     win_rate = (wins / total_bets * 100) if total_bets > 0 else 0
-    roi = ((balance - STARTING_BALANCE) / STARTING_BALANCE * 100) if STARTING_BALANCE > 0 else 0
+    roi = ((balance - season_start) / season_start * 100) if season_start > 0 else 0
 
     # ── Delta string ──────────────────────────────────────────────────────
     delta_str = f"+${delta:,}" if delta >= 0 else f"-${abs(delta):,}"

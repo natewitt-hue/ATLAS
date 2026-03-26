@@ -158,12 +158,7 @@ try:
 except ImportError:
     _echo_available = False
     def get_persona(context_type: str = "casual") -> str:
-        return (
-            "You are ATLAS, the official AI intelligence system for The Simulation League (TSL). "
-            "ALWAYS refer to yourself as ATLAS in the 3rd person. "
-            "Keep responses concise and direct. Use profanity sparingly but effectively. "
-            "Deliver the factual answer with a dismissive, authoritative tone."
-        )
+        return "You are ATLAS, the TSL league bot."
     def infer_context(**kwargs) -> str:
         return "casual"
     def load_all_personas() -> dict:
@@ -172,7 +167,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.9.1"  # fix: add "Change Team A" override button when trade Team A is auto-resolved
+ATLAS_VERSION = "7.9.2"  # fix: core infrastructure bug fixes (loop, schema leak, affinity tx)
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -201,8 +196,9 @@ class ATLASBot(commands.Bot):
 bot = ATLASBot(command_prefix="!", intents=intents)
 
 # ── FIX #8: Startup guard — prevents re-running load_all() on reconnect ──────
-_startup_done = False
-_data_ready   = False  # Set True after _startup_load() completes
+_startup_done  = False
+_data_ready    = False  # Set True after _startup_load() completes
+_bot_start_time: float = 0.0
 
 
 @bot.tree.interaction_check

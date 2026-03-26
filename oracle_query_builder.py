@@ -537,8 +537,8 @@ def team_record(team: str, season: int | None = None) -> tuple[str, tuple]:
     sql = """
         SELECT
             seasonIndex,
-            SUM(CASE WHEN winner_team = ? THEN 1 ELSE 0 END) AS wins,
-            SUM(CASE WHEN loser_team = ? THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN winner_user = ? THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN loser_user = ? THEN 1 ELSE 0 END) AS losses,
             COUNT(*) AS games_played
         FROM games
         WHERE status IN ('2','3')
@@ -614,6 +614,10 @@ def stat_leaders(
         Query(sd.table)
         .select("fullName", "teamName")
         .filter(stage="regular")
+        .where(
+            "EXISTS (SELECT 1 FROM games g WHERE g.seasonIndex = seasonIndex"
+            " AND g.weekIndex = weekIndex AND g.status IN ('2','3'))"
+        )
         .aggregate(**{sd.column: sd.agg})
         .group_by("fullName", "teamName")
         .sort_by(sd.column, sort)
@@ -643,6 +647,10 @@ def team_stat_leaders(
         Query(table)
         .select("teamName")
         .filter(stage="regular")
+        .where(
+            "EXISTS (SELECT 1 FROM games g WHERE g.seasonIndex = seasonIndex"
+            " AND g.weekIndex = weekIndex AND g.status IN ('2','3'))"
+        )
         .aggregate(**{sd.column: sd.agg})
         .group_by("teamName")
         .sort_by(sd.column, sort)

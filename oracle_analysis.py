@@ -233,8 +233,8 @@ def _standings_block(dm, team_name: str | None = None) -> str:
         tn = row.get("teamName", "?")
         w = row.get("totalWins", 0)
         l = row.get("totalLosses", 0)
-        pf = row.get("totalPtsFor", "?")
-        pa = row.get("totalPtsAgainst", "?")
+        pf = row.get("ptsFor", "?")
+        pa = row.get("ptsAgainst", "?")
         lines.append(f"  {tn}: {w}-{l}  PF:{pf}  PA:{pa}")
     return "STANDINGS:\n" + "\n".join(lines)
 

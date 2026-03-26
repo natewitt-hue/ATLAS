@@ -126,8 +126,13 @@ def _player_label(p: dict) -> str:
 
 
 def _get_team_options() -> list[discord.SelectOption]:
-    """Build team dropdown options from live df_teams (sorted by nickName)."""
-    options = [discord.SelectOption(label="All Teams", value="ALL", default=True)]
+    """Build team dropdown options from live df_teams (sorted by nickName).
+
+    Discord select menus are capped at 25 options. With 31 teams + "All Teams"
+    that would be 32 entries. We always show "All Teams" first, then the first
+    23 alphabetical teams, then a visible overflow indicator as option 25 so
+    the user knows teams were omitted rather than silently dropping them.
+    """
     players = _all_players()
     seen: set[str] = set()
     teams: list[str] = []
@@ -136,9 +141,23 @@ def _get_team_options() -> list[discord.SelectOption]:
         if tn and tn not in seen:
             seen.add(tn)
             teams.append(tn)
-    for tn in sorted(teams):
+    sorted_teams = sorted(teams)
+
+    # Slot 1: "All Teams"; slots 2–25: up to 23 teams + optional overflow marker
+    _MAX_TEAMS = 23
+    options = [discord.SelectOption(label="All Teams", value="ALL", default=True)]
+    for tn in sorted_teams[:_MAX_TEAMS]:
         options.append(discord.SelectOption(label=tn, value=tn))
-    return options[:25]
+
+    overflow_count = len(sorted_teams) - _MAX_TEAMS
+    if overflow_count > 0:
+        options.append(discord.SelectOption(
+            label=f"(+{overflow_count} more — use /players filter)",
+            value="__overflow__",
+            description="Too many teams to list. Use /players with a name search instead.",
+        ))
+
+    return options
 
 
 def _get_pos_options() -> list[discord.SelectOption]:
@@ -341,7 +360,11 @@ class PlayerPickerView(discord.ui.View):
         await interaction.response.edit_message(embed=self.current_embed(), view=self)
 
     async def _on_team_change(self, interaction: discord.Interaction):
-        self._team    = interaction.data["values"][0]
+        selected = interaction.data["values"][0]
+        if selected == "__overflow__":
+            # User clicked the overflow placeholder — ignore and keep current state
+            return await interaction.response.defer()
+        self._team    = selected
         self._players = _filter_players(self._pos_group, self._team)
         self._rebuild_items()
         await interaction.response.edit_message(embed=self.current_embed(), view=self)

@@ -363,33 +363,39 @@ class EconomyCog(commands.Cog):
 
         paid_count = 0
         last_paid = stipend.get("last_paid", "init")
-        for member in members:
-            # Deterministic ref_key: same stipend + member + period = same key,
-            # so reruns after partial failure are idempotent.
-            stip_ref = f"STIPEND_{stipend['stipend_id']}_{member.id}_{last_paid}"
-            if stipend["amount"] > 0:
-                old, new_bal = await admin_give(
-                    member.id, stipend["amount"], stipend["created_by"],
-                    f"Stipend: {stipend['reason']}",
-                    reference_key=stip_ref,
+        try:
+            for member in members:
+                # Deterministic ref_key: same stipend + member + period = same key,
+                # so reruns after partial failure are idempotent.
+                stip_ref = f"STIPEND_{stipend['stipend_id']}_{member.id}_{last_paid}"
+                if stipend["amount"] > 0:
+                    old, new_bal = await admin_give(
+                        member.id, stipend["amount"], stipend["created_by"],
+                        f"Stipend: {stipend['reason']}",
+                        reference_key=stip_ref,
+                    )
+                else:
+                    old, new_bal = await admin_take(
+                        member.id, abs(stipend["amount"]), stipend["created_by"],
+                        f"Deduction: {stipend['reason']}",
+                        reference_key=stip_ref,
+                    )
+                # Post to #ledger
+                txn_id = await flow_wallet.get_last_txn_id(member.id)
+                from ledger_poster import post_transaction
+                await post_transaction(
+                    self.bot, guild.id, member.id,
+                    "STIPEND", stipend["amount"], new_bal,
+                    stipend["reason"] or "Stipend payout", txn_id,
                 )
-            else:
-                old, new_bal = await admin_take(
-                    member.id, abs(stipend["amount"]), stipend["created_by"],
-                    f"Deduction: {stipend['reason']}",
-                    reference_key=stip_ref,
-                )
-            # Post to #ledger
-            txn_id = await flow_wallet.get_last_txn_id(member.id)
-            from ledger_poster import post_transaction
-            await post_transaction(
-                self.bot, guild.id, member.id,
-                "STIPEND", stipend["amount"], new_bal,
-                stipend["reason"] or "Stipend payout", txn_id,
-            )
-            paid_count += 1
+                paid_count += 1
 
-        await mark_stipend_paid(stipend["stipend_id"])
+            await mark_stipend_paid(stipend["stipend_id"])
+        except Exception as e:
+            log.error(
+                "Stipend %s failed mid-loop after %d/%d members: %s",
+                stipend["stipend_id"], paid_count, len(members), e,
+            )
 
         if paid_count > 0:
             await self._post_audit(

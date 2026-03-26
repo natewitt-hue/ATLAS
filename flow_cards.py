@@ -209,7 +209,7 @@ _FLOW_CSS = """\
   border-radius: var(--border-radius-sm); padding: 14px 12px;
   text-align: center;
   border: 1px solid var(--panel-border);
-  border-top: 1px solid var(--panel-border-top);
+  border-top: 1px solid var(--panel-border);
 }
 .stat-box-label {
   font-family: var(--font-display); font-weight: 700; font-size: 10px;
@@ -640,7 +640,7 @@ _MY_BETS_CSS = """\
 .bet-card {
   background: linear-gradient(180deg, var(--panel-bg) 0%, var(--bg) 100%);
   border: 1px solid var(--panel-border);
-  border-top: 1px solid var(--panel-border-top);
+  border-top: 1px solid var(--panel-border);
   border-radius: var(--border-radius-sm);
   padding: 10px 14px;
   margin: 0 20px var(--space-sm);

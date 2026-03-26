@@ -198,6 +198,7 @@ class BossHubView(discord.ui.View):
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=300)
         self.bot = bot
+        self.message = None
 
     @discord.ui.button(label="Sportsbook", emoji="\U0001f4ca", style=discord.ButtonStyle.primary, row=0)
     async def sb(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -272,11 +273,9 @@ class BossHubView(discord.ui.View):
         )
 
     async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if hasattr(self, "message") and self.message:
+        if self.message:
             try:
-                await self.message.edit(view=self)
+                await self.message.edit(view=None)
             except Exception:
                 pass
 
@@ -2535,12 +2534,13 @@ class BossCog(commands.Cog):
         embed = _home_embed(interaction)
         view = BossHubView(self.bot)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.original_response()
 
     @boss_group.command(name="sync", description="Reload league data from MaddenStats API.")
     async def boss_sync(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, dm.load_all)
         try:

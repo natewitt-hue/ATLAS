@@ -376,7 +376,7 @@ class CodexCog(commands.Cog):
 
     async def _h2h_impl(self, interaction: discord.Interaction, owner1: str, owner2: str):
         """Head-to-head record — used by oracle HubView H2H modal."""
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         u1 = fuzzy_resolve_user(owner1)
         u2 = fuzzy_resolve_user(owner2)
@@ -459,7 +459,7 @@ note any sweep seasons, and make it entertaining.
             text=f"ATLAS Codex Module · Regular season only · All seasons 1-{dm.CURRENT_SEASON}",
             icon_url="https://cdn.discordapp.com/attachments/977007320259244055/1479928571022544966/ATLASLOGO.png?ex=69add263&is=69ac80e3&hm=227036e833a3ca497e5ece0bf88f0aca593f08f138eab6482f9bddc9dd320cd9&"
         )
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _season_recap_impl(self, interaction: discord.Interaction, season: int):
         """Season recap — used by oracle HubView Season Recap modal."""

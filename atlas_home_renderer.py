@@ -50,166 +50,166 @@ def gather_home_data(user_id: int) -> dict:
 
     try:
         con = sqlite3.connect(_DB_PATH, timeout=_DB_TIMEOUT)
-
-        # Hero — balance, season_start_balance
-        row = con.execute(
-            "SELECT balance, season_start_balance FROM users_table WHERE discord_id = ?",
-            (user_id,),
-        ).fetchone()
-        if row:
-            balance = int(row[0] or 0)
-            season_start = int(row[1] or 0)
-            data["balance"] = balance
-            if season_start > 0:
-                pnl = balance - season_start
-                data["season_roi"] = round(pnl / season_start * 100, 1)
-                data["net_pnl"] = pnl
-
-        # Rank
-        ranks = con.execute(
-            "SELECT discord_id FROM users_table ORDER BY balance DESC"
-        ).fetchall()
-        data["total_users"] = len(ranks)
-        for i, (uid,) in enumerate(ranks, 1):
-            if uid == user_id:
-                data["rank"] = i
-                break
-
-        # Weekly delta from transactions
         try:
-            delta_row = con.execute(
-                """SELECT COALESCE(SUM(amount), 0) FROM transactions
-                   WHERE discord_id = ? AND created_at >= datetime('now', '-7 days')""",
+            # Hero — balance, season_start_balance
+            row = con.execute(
+                "SELECT balance, season_start_balance FROM users_table WHERE discord_id = ?",
                 (user_id,),
             ).fetchone()
-            if delta_row:
-                data["weekly_delta"] = int(delta_row[0] or 0)
-        except Exception:
-            pass
+            if row:
+                balance = int(row[0] or 0)
+                season_start = int(row[1] or 0)
+                data["balance"] = balance
+                if season_start > 0:
+                    pnl = balance - season_start
+                    data["season_roi"] = round(pnl / season_start * 100, 1)
+                    data["net_pnl"] = pnl
 
-        # TSL Sportsbook bets (bets_table, status: won/lost/push)
-        try:
-            tsl_rows = con.execute(
-                "SELECT status FROM bets_table WHERE discord_id = ? AND status IN ('won','lost','push')",
-                (user_id,),
+            # Rank
+            ranks = con.execute(
+                "SELECT discord_id FROM users_table ORDER BY balance DESC"
             ).fetchall()
-            for (s,) in tsl_rows:
-                if s == "won": data["tsl_bet_w"] += 1
-                elif s == "lost": data["tsl_bet_l"] += 1
-                elif s == "push": data["record_p"] += 1
-        except Exception:
-            pass
+            data["total_users"] = len(ranks)
+            for i, (uid,) in enumerate(ranks, 1):
+                if uid == user_id:
+                    data["rank"] = i
+                    break
 
-        # Real sports bets (real_bets table, separate)
-        try:
-            real_rows = con.execute(
-                "SELECT status FROM real_bets WHERE discord_id = ? AND status IN ('won','lost')",
-                (user_id,),
-            ).fetchall()
-            for (s,) in real_rows:
-                if s == "won": data["real_bet_w"] += 1
-                elif s == "lost": data["real_bet_l"] += 1
-        except Exception:
-            pass
+            # Weekly delta from transactions
+            try:
+                delta_row = con.execute(
+                    """SELECT COALESCE(SUM(amount), 0) FROM transactions
+                       WHERE discord_id = ? AND created_at >= datetime('now', '-7 days')""",
+                    (user_id,),
+                ).fetchone()
+                if delta_row:
+                    data["weekly_delta"] = int(delta_row[0] or 0)
+            except Exception:
+                pass
 
-        # Casino sessions, biggest win, favorite game
-        try:
-            sess_count = con.execute(
-                "SELECT COUNT(*) FROM casino_sessions WHERE discord_id = ?",
-                (user_id,),
-            ).fetchone()
-            data["casino_sessions"] = int(sess_count[0] or 0) if sess_count else 0
+            # TSL Sportsbook bets (bets_table, status: Won/Lost/Push)
+            try:
+                tsl_rows = con.execute(
+                    "SELECT status FROM bets_table WHERE discord_id = ? AND status IN ('Won','Lost','Push')",
+                    (user_id,),
+                ).fetchall()
+                for (s,) in tsl_rows:
+                    if s == "Won": data["tsl_bet_w"] += 1
+                    elif s == "Lost": data["tsl_bet_l"] += 1
+                    elif s == "Push": data["record_p"] += 1
+            except Exception:
+                pass
 
-            # Biggest win = max(payout - wager) for wins
-            big_win = con.execute(
-                """SELECT MAX(payout - wager) FROM casino_sessions
-                   WHERE discord_id = ? AND outcome = 'win'""",
-                (user_id,),
-            ).fetchone()
-            if big_win and big_win[0]:
-                data["biggest_win"] = int(big_win[0])
+            # Real sports bets (real_bets table, separate)
+            try:
+                real_rows = con.execute(
+                    "SELECT status FROM real_bets WHERE discord_id = ? AND status IN ('Won','Lost')",
+                    (user_id,),
+                ).fetchall()
+                for (s,) in real_rows:
+                    if s == "Won": data["real_bet_w"] += 1
+                    elif s == "Lost": data["real_bet_l"] += 1
+            except Exception:
+                pass
 
-            fav = con.execute(
-                """SELECT game_type, COUNT(*) AS cnt FROM casino_sessions
-                   WHERE discord_id = ?
-                   GROUP BY game_type ORDER BY cnt DESC LIMIT 1""",
-                (user_id,),
-            ).fetchone()
-            if fav:
-                data["fav_game"] = str(fav[0]).capitalize()
-        except Exception:
-            pass
+            # Casino sessions, biggest win, favorite game
+            try:
+                sess_count = con.execute(
+                    "SELECT COUNT(*) FROM casino_sessions WHERE discord_id = ?",
+                    (user_id,),
+                ).fetchone()
+                data["casino_sessions"] = int(sess_count[0] or 0) if sess_count else 0
 
-        # Predictions (prediction_contracts, user_id is TEXT)
-        try:
-            uid_str = str(user_id)
-            pred_rows = con.execute(
-                """SELECT status, cost_bucks, potential_payout FROM prediction_contracts
-                   WHERE user_id = ?""",
-                (uid_str,),
-            ).fetchall()
-            if pred_rows:
-                data["pred_markets"] = len(pred_rows)
-                resolved = [(s, c, p) for s, c, p in pred_rows if s == "resolved"]
-                if resolved:
-                    # Approximate: resolved + payout means won
-                    wins = sum(1 for s, c, p in resolved if (p or 0) > (c or 0))
-                    data["pred_accuracy"] = round(wins / len(resolved) * 100, 1) if resolved else 0.0
-                total_cost = sum(c or 0 for _, c, _ in pred_rows)
-                total_payout = sum(p or 0 for s, _, p in pred_rows if s == "resolved")
-                data["pred_pnl"] = total_payout - total_cost
-        except Exception:
-            pass
+                # Biggest win = max(payout - wager) for wins
+                big_win = con.execute(
+                    """SELECT MAX(payout - wager) FROM casino_sessions
+                       WHERE discord_id = ? AND outcome = 'win'""",
+                    (user_id,),
+                ).fetchone()
+                if big_win and big_win[0]:
+                    data["biggest_win"] = int(big_win[0])
 
-        # Streak — last N resolved TSL bets
-        try:
-            streak_rows = con.execute(
-                """SELECT status FROM bets_table
-                   WHERE discord_id = ? AND status IN ('won','lost')
-                   ORDER BY created_at DESC LIMIT 20""",
-                (user_id,),
-            ).fetchall()
-            if streak_rows:
-                first = streak_rows[0][0]
-                is_win = (first == "won")
-                count = 0
-                for (s,) in streak_rows:
-                    if (s == "won") == is_win:
-                        count += 1
+                fav = con.execute(
+                    """SELECT game_type, COUNT(*) AS cnt FROM casino_sessions
+                       WHERE discord_id = ?
+                       GROUP BY game_type ORDER BY cnt DESC LIMIT 1""",
+                    (user_id,),
+                ).fetchone()
+                if fav:
+                    data["fav_game"] = str(fav[0]).capitalize()
+            except Exception:
+                pass
+
+            # Predictions (prediction_contracts, user_id is TEXT)
+            try:
+                uid_str = str(user_id)
+                pred_rows = con.execute(
+                    """SELECT status, cost_bucks, potential_payout FROM prediction_contracts
+                       WHERE user_id = ?""",
+                    (uid_str,),
+                ).fetchall()
+                if pred_rows:
+                    data["pred_markets"] = len(pred_rows)
+                    resolved = [(s, c, p) for s, c, p in pred_rows if s == "resolved"]
+                    if resolved:
+                        # Approximate: resolved + payout means won
+                        wins = sum(1 for s, c, p in resolved if (p or 0) > (c or 0))
+                        data["pred_accuracy"] = round(wins / len(resolved) * 100, 1) if resolved else 0.0
+                    total_cost = sum(c or 0 for _, c, _ in pred_rows)
+                    total_payout = sum(p or 0 for s, _, p in pred_rows if s == "resolved")
+                    data["pred_pnl"] = total_payout - total_cost
+            except Exception:
+                pass
+
+            # Streak — last N resolved TSL bets
+            try:
+                streak_rows = con.execute(
+                    """SELECT status FROM bets_table
+                       WHERE discord_id = ? AND status IN ('Won','Lost')
+                       ORDER BY created_at DESC LIMIT 20""",
+                    (user_id,),
+                ).fetchall()
+                if streak_rows:
+                    first = streak_rows[0][0]
+                    is_win = (first == "Won")
+                    count = 0
+                    for (s,) in streak_rows:
+                        if (s == "Won") == is_win:
+                            count += 1
+                        else:
+                            break
+                    data["streak"] = f"W{count}" if is_win else f"L{count}"
+            except Exception:
+                pass
+
+            # Best parlay odds (parlays_table, status='Won')
+            try:
+                parlay_row = con.execute(
+                    """SELECT MAX(combined_odds) FROM parlays_table
+                       WHERE discord_id = ? AND status = 'Won'""",
+                    (user_id,),
+                ).fetchone()
+                if parlay_row and parlay_row[0]:
+                    # combined_odds is stored as American odds (e.g. 450 = +450)
+                    # Convert to decimal multiplier for display
+                    american = int(parlay_row[0])
+                    if american > 0:
+                        data["best_parlay_odds"] = round(american / 100 + 1, 2)
                     else:
-                        break
-                data["streak"] = f"W{count}" if is_win else f"L{count}"
-        except Exception:
-            pass
+                        data["best_parlay_odds"] = round(100 / abs(american) + 1, 2)
+            except Exception:
+                pass
 
-        # Best parlay odds (parlays_table, status='won')
-        try:
-            parlay_row = con.execute(
-                """SELECT MAX(combined_odds) FROM parlays_table
-                   WHERE discord_id = ? AND status = 'won'""",
-                (user_id,),
-            ).fetchone()
-            if parlay_row and parlay_row[0]:
-                # combined_odds is stored as American odds (e.g. 450 = +450)
-                # Convert to decimal multiplier for display
-                american = int(parlay_row[0])
-                if american > 0:
-                    data["best_parlay_odds"] = round(american / 100 + 1, 2)
-                else:
-                    data["best_parlay_odds"] = round(100 / abs(american) + 1, 2)
-        except Exception:
-            pass
-
-        # Economy record totals
-        total_w = data["tsl_bet_w"] + data["real_bet_w"]
-        total_l = data["tsl_bet_l"] + data["real_bet_l"]
-        data["record_w"] = total_w
-        data["record_l"] = total_l
-        total = total_w + total_l + data["record_p"]
-        if total > 0:
-            data["win_rate"] = round(total_w / total * 100, 1)
-
-        con.close()
+            # Economy record totals
+            total_w = data["tsl_bet_w"] + data["real_bet_w"]
+            total_l = data["tsl_bet_l"] + data["real_bet_l"]
+            data["record_w"] = total_w
+            data["record_l"] = total_l
+            total = total_w + total_l + data["record_p"]
+            if total > 0:
+                data["win_rate"] = round(total_w / total * 100, 1)
+        finally:
+            con.close()
     except Exception:
         pass
 

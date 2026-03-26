@@ -102,36 +102,31 @@ async def update_affinity(discord_id: int, sentiment: str) -> float:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            async with db.execute(
-                "SELECT affinity_score, interaction_count FROM user_affinity WHERE discord_id=?",
-                (discord_id,),
-            ) as cur:
-                row = await cur.fetchone()
+        async with db.execute(
+            "SELECT affinity_score, interaction_count FROM user_affinity WHERE discord_id=?",
+            (discord_id,),
+        ) as cur:
+            row = await cur.fetchone()
 
-            if row:
-                new_score = _clamp_score(row[0] + delta)
-                new_count = row[1] + 1
-                await db.execute(
-                    "UPDATE user_affinity SET affinity_score=?, interaction_count=?, "
-                    "last_interaction=? WHERE discord_id=?",
-                    (new_score, new_count, now, discord_id),
-                )
-            else:
-                new_score = _clamp_score(float(delta))
-                new_count = 1
-                await db.execute(
-                    "INSERT INTO user_affinity "
-                    "(discord_id, affinity_score, interaction_count, last_interaction) "
-                    "VALUES (?, ?, ?, ?)",
-                    (discord_id, new_score, new_count, now),
-                )
+        if row:
+            new_score = _clamp_score(row[0] + delta)
+            new_count = row[1] + 1
+            await db.execute(
+                "UPDATE user_affinity SET affinity_score=?, interaction_count=?, "
+                "last_interaction=? WHERE discord_id=?",
+                (new_score, new_count, now, discord_id),
+            )
+        else:
+            new_score = _clamp_score(float(delta))
+            new_count = 1
+            await db.execute(
+                "INSERT INTO user_affinity "
+                "(discord_id, affinity_score, interaction_count, last_interaction) "
+                "VALUES (?, ?, ?, ?)",
+                (discord_id, new_score, new_count, now),
+            )
 
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        await db.commit()
 
     _affinity_cache[discord_id] = new_score
     return new_score

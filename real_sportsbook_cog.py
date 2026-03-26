@@ -583,7 +583,6 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                             last_score_sync = ?
                         WHERE event_id = ?
                     """, (home_score, away_score, 1 if completed else 0, now, espn_event_id))
-                    await db.commit()
 
                     if completed:
                         event_id = f"real:{sport_key}:{espn_event_id}"
@@ -603,6 +602,8 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
                             log.exception(
                                 f"[REAL-SB] Failed to finalize event {event_id}"
                             )
+
+                await db.commit()
 
         log.info(f"[REAL-SB] Score sync complete. Finalized {finalized_total} events.")
 
@@ -836,18 +837,19 @@ class CustomRealWagerModal(discord.ui.Modal):
         self.add_item(self.amount_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
             amt = int(self.amount_input.value.replace(",", "").replace("$", ""))
         except ValueError:
-            return await interaction.response.send_message("Enter a valid number.", ephemeral=True)
+            return await interaction.followup.send("Enter a valid number.", ephemeral=True)
 
         if amt < MIN_BET:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"Minimum bet is **${MIN_BET}**.", ephemeral=True)
 
         max_bet = await _get_max_bet()
         if amt > max_bet:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"Maximum bet is **${max_bet:,}**.", ephemeral=True)
 
         source_label = SUPPORTED_SPORTS.get(
@@ -861,14 +863,12 @@ class CustomRealWagerModal(discord.ui.Modal):
             )
         except InsufficientFundsError:
             bal = await flow_wallet.get_balance(interaction.user.id)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Insufficient funds. Balance: **${bal:,}**.", ephemeral=True)
             return
 
         if result is not None:
             new_balance, profit, matchup = result
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
             from sportsbook_cards import build_bet_confirm_card, card_to_file
             png = await build_bet_confirm_card(
                 pick=self.pick, bet_type=self.bet_type, odds=self.odds,

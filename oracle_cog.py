@@ -1653,19 +1653,22 @@ class DraftClassView(discord.ui.View):
             nfc_select.callback = self._team_selected
             self.add_item(nfc_select)
 
-        # Season select
+        # Season select — show most recent 25 seasons (newest first) so the
+        # latest seasons are always reachable regardless of total season count.
+        all_seasons = list(range(2, dm.CURRENT_SEASON + 1))
+        recent_seasons = all_seasons[-25:]  # most recent 25
         season_options = [
             discord.SelectOption(
                 label=f"Season {s}",
                 value=str(s),
                 default=(s == dm.CURRENT_SEASON),
             )
-            for s in range(2, dm.CURRENT_SEASON + 1)
+            for s in sorted(recent_seasons, reverse=True)
         ]
         if season_options:
             season_select = discord.ui.Select(
                 placeholder="Season...",
-                options=season_options[:25],
+                options=season_options,
                 row=2,
             )
             season_select.callback = self._season_selected
@@ -2161,7 +2164,7 @@ def _build_team_card_history(team_name: str) -> discord.Embed:
         max_w  = max(int(r.get("wins", 0)) for r in seasons) or 1
         lines  = []
         for r in seasons:
-            s   = int(r.get("seasonIndex", 0)) + 1
+            s   = int(r.get("seasonIndex", 0))
             sw  = int(r.get("wins",   0))
             sl  = int(r.get("losses", 0))
             bar = "█" * round((sw / max_w) * 12) + "░" * (12 - round((sw / max_w) * 12))
@@ -2182,14 +2185,14 @@ def _build_team_card_history(team_name: str) -> discord.Embed:
         ht, at = big_w["homeTeamName"], big_w["awayTeamName"]
         hs, as_ = big_w["homeScore"], big_w["awayScore"]
         m  = big_w["margin"]
-        s  = int(big_w.get("seasonIndex", 0)) + 1
+        s  = int(big_w.get("seasonIndex", 0))
         wk = dm.week_label(int(big_w.get("weekIndex", 0)) + 1, short=True)
         moments.append(f"🏆 **Biggest W:** {ht} **{hs}**–{as_} {at}  (+{m} · S{s} {wk})")
     if worst_l:
         ht, at = worst_l["homeTeamName"], worst_l["awayTeamName"]
         hs, as_ = worst_l["homeScore"], worst_l["awayScore"]
         m  = worst_l["margin"]
-        s  = int(worst_l.get("seasonIndex", 0)) + 1
+        s  = int(worst_l.get("seasonIndex", 0))
         wk = dm.week_label(int(worst_l.get("weekIndex", 0)) + 1, short=True)
         moments.append(f"💀 **Worst L:** {ht} {hs}–**{as_}** {at}  (–{m} · S{s} {wk})")
     if moments:
@@ -2217,7 +2220,7 @@ def _build_team_card_history(team_name: str) -> discord.Embed:
     if rival_lines:
         embed.add_field(name="⚔️ Eternal Rivalries", value="\n".join(rival_lines), inline=False)
 
-    embed.set_footer(text="ATLAS™ Oracle · Franchise History · All 6 Seasons · Regular Season", icon_url=ATLAS_ICON_URL)
+    embed.set_footer(text=f"ATLAS™ Oracle · Franchise History · All {dm.CURRENT_SEASON} Seasons · Regular Season", icon_url=ATLAS_ICON_URL)
     return embed
 
 
@@ -2586,7 +2589,7 @@ def _build_alltime_embed() -> discord.Embed:
     except Exception as e:
         embed.add_field(name="⚠️ Error", value=str(e), inline=False)
 
-    embed.set_footer(text="ATLAS™ Oracle · All-Time Records · Seasons 1–6 · Regular Season Only", icon_url=ATLAS_ICON_URL)
+    embed.set_footer(text=f"ATLAS™ Oracle · All-Time Records · Seasons 1–{dm.CURRENT_SEASON} · Regular Season Only", icon_url=ATLAS_ICON_URL)
     return embed
 
 

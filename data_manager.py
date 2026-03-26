@@ -809,7 +809,7 @@ async def get_last_n_games(team: str, n: int = 5) -> list[dict]:
         return []
 
     endpoint = f"/teams/{abbr}/games/{_state.CURRENT_SEASON}/{_state.CURRENT_STAGE}"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, lambda: _get(endpoint))
     if not data:
         return []
@@ -987,20 +987,22 @@ def get_discord_db_schema() -> str:
         return "Discord history DB not found."
     try:
         con = sqlite3.connect(_DB_PATH)
-        # Enable WAL mode for better concurrent read performance
-        if not _wal_enabled:
-            con.execute("PRAGMA journal_mode=WAL")
-            _wal_enabled = True
-        cur = con.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cur.fetchall()]
-        lines = []
-        for t in tables:
-            cur.execute(f'PRAGMA table_info("{t}")')
-            cols = [r[1] for r in cur.fetchall()]
-            lines.append(f"{t}({', '.join(cols)})")
-        con.close()
-        result = "\n".join(lines)
+        try:
+            # Enable WAL mode for better concurrent read performance
+            if not _wal_enabled:
+                con.execute("PRAGMA journal_mode=WAL")
+                _wal_enabled = True
+            cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+            lines = []
+            for t in tables:
+                cur.execute(f'PRAGMA table_info("{t}")')
+                cols = [r[1] for r in cur.fetchall()]
+                lines.append(f"{t}({', '.join(cols)})")
+            result = "\n".join(lines)
+        finally:
+            con.close()
         _discord_schema_cache = result
         _discord_schema_ts = now
         return result
