@@ -2978,17 +2978,37 @@ class OracleDualConfView(discord.ui.View):
     """AFC/NFC buttons for dual-team analysis (Matchup, Rivalry, Game Plan)."""
 
     def __init__(self, analysis_label: str, dual_callback_fn, step: str = "A",
-                 team_a_name: str | None = None):
+                 team_a_name: str | None = None, user_id: int | None = None):
         super().__init__(timeout=300)
         self._analysis_label = analysis_label
         self._dual_callback_fn = dual_callback_fn
         self._step = step
         self._team_a_name = team_a_name
+        self._user_id = user_id
+
+        # For step B, add "My Team" button (if it's not the same as Team A)
+        if user_id and step == "B":
+            entry = roster.get_entry_by_id(user_id)
+            if entry and entry.team_name != team_a_name:
+                btn = discord.ui.Button(
+                    label=f"My Team ({entry.team_name})",
+                    style=discord.ButtonStyle.success,
+                    emoji="⭐",
+                    row=0,
+                )
+                btn.callback = self._my_team_cb(entry.team_name)
+                self.add_item(btn)
+
+    def _my_team_cb(self, team_name: str):
+        async def callback(interaction: discord.Interaction):
+            await self._dual_callback_fn(interaction, self._team_a_name, team_name)
+        return callback
 
     def _make_back(self):
         embed = self._step_embed()
         return OracleDualConfView(self._analysis_label, self._dual_callback_fn,
-                                  self._step, self._team_a_name), embed
+                                  self._step, self._team_a_name,
+                                  user_id=self._user_id), embed
 
     def _step_embed(self) -> discord.Embed:
         step_label = "Team A" if self._step == "A" else "Team B"
@@ -3022,7 +3042,8 @@ class OracleDualConfView(discord.ui.View):
                                              "Pick a conference to select **Team B**.",
                                              team_a=team_name)
                 view_b = OracleDualConfView(self._analysis_label, self._dual_callback_fn,
-                                            step="B", team_a_name=team_name)
+                                            step="B", team_a_name=team_name,
+                                            user_id=self._user_id)
                 await inter.response.edit_message(embed=embed_b, view=view_b)
             else:
                 # Both teams selected — fire analysis
@@ -3123,8 +3144,19 @@ class OracleIntelView(discord.ui.View):
         if not _ORACLE_INTEL_OK:
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        embed = _oracle_conf_embed("Matchup Analysis", "Pick a conference to select **Team A**.")
-        view = OracleDualConfView("Matchup Analysis", self._do_matchup)
+        user_team_name = roster.get_team_name(interaction.user.id)
+        if user_team_name:
+            # Auto-preselect user's team as Team A, jump to step B
+            embed = _oracle_conf_embed("Matchup Analysis",
+                                       "Pick a conference to select **Team B**.",
+                                       team_a=user_team_name)
+            view = OracleDualConfView("Matchup Analysis", self._do_matchup,
+                                      step="B", team_a_name=user_team_name,
+                                      user_id=interaction.user.id)
+        else:
+            embed = _oracle_conf_embed("Matchup Analysis", "Pick a conference to select **Team A**.")
+            view = OracleDualConfView("Matchup Analysis", self._do_matchup,
+                                      user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Rivalry History", emoji="⚔️", style=discord.ButtonStyle.primary, row=0)
@@ -3133,8 +3165,18 @@ class OracleIntelView(discord.ui.View):
         if not _ORACLE_INTEL_OK:
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
-        embed = _oracle_conf_embed("Rivalry History", "Pick a conference to select **Owner A's team**.")
-        view = OracleDualConfView("Rivalry History", self._do_rivalry)
+        user_team_name = roster.get_team_name(interaction.user.id)
+        if user_team_name:
+            embed = _oracle_conf_embed("Rivalry History",
+                                       "Pick a conference to select **Owner B's team**.",
+                                       team_a=user_team_name)
+            view = OracleDualConfView("Rivalry History", self._do_rivalry,
+                                      step="B", team_a_name=user_team_name,
+                                      user_id=interaction.user.id)
+        else:
+            embed = _oracle_conf_embed("Rivalry History", "Pick a conference to select **Owner A's team**.")
+            view = OracleDualConfView("Rivalry History", self._do_rivalry,
+                                      user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Game Plan", emoji="🎯", style=discord.ButtonStyle.primary, row=0)
