@@ -601,13 +601,15 @@ class RulingPanelView(discord.ui.View):
         self.add_item(view_btn)
 
     async def _guilty_callback(self, interaction: discord.Interaction):
+        c = _complaints.get(self.complaint_id)
+        if not c:
+            return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
+        if c.get("verdict") not in (None, "pending"):
+            return await interaction.response.send_message("Already ruled on.", ephemeral=True)
         if self._acted:
             return await interaction.response.send_message("Already ruled on.", ephemeral=True)
         if not await is_commissioner(interaction):
             return await interaction.response.send_message("❌ Commissioners only.", ephemeral=True)
-        c = _complaints.get(self.complaint_id)
-        if not c:
-            return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
         if not c.get("penalty"):
             return await interaction.response.send_message(
                 "⚠️ Please select a **penalty** from the dropdown before issuing a guilty verdict.",
@@ -617,6 +619,11 @@ class RulingPanelView(discord.ui.View):
         await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "guilty"))
 
     async def _not_guilty_callback(self, interaction: discord.Interaction):
+        c = _complaints.get(self.complaint_id)
+        if not c:
+            return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
+        if c.get("verdict") not in (None, "pending"):
+            return await interaction.response.send_message("Already ruled on.", ephemeral=True)
         if self._acted:
             return await interaction.response.send_message("Already ruled on.", ephemeral=True)
         if not await is_commissioner(interaction):
@@ -625,6 +632,11 @@ class RulingPanelView(discord.ui.View):
         await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "not_guilty"))
 
     async def _dismiss_callback(self, interaction: discord.Interaction):
+        c = _complaints.get(self.complaint_id)
+        if not c:
+            return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
+        if c.get("verdict") not in (None, "pending"):
+            return await interaction.response.send_message("Already ruled on.", ephemeral=True)
         if self._acted:
             return await interaction.response.send_message("Already ruled on.", ephemeral=True)
         if not await is_commissioner(interaction):

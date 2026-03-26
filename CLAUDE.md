@@ -98,6 +98,7 @@ build_member_db              →  tsl_members table (identity registry)
 | **Sentinel** | Rule enforcement, blowout monitor, compliance | `sentinel_cog.py` |
 | **Oracle** | Analytics, stats, power rankings, profiles | `oracle_cog.py` (class: StatsHubCog) |
 | **Genesis** | Trades, roster, dev traits, draft | `genesis_cog.py` |
+| **Ability Engine** | Lock & Key ability audit, dev budget enforcement, position change validation | `ability_engine.py` |
 | **Flow** | Economy, TSL sportsbook, casino, live engagement | `flow_sportsbook.py`, `casino/`, `economy_cog.py`, `flow_live_cog.py` |
 | **Flow Store** | Store engine — item effects, purchases | `flow_store.py`, `store_effects.py` |
 | **Flow Subsystem** | Wallet, audit, events, wager registry | `flow_wallet.py`, `flow_audit.py`, `flow_events.py`, `wager_registry.py` |

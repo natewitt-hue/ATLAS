@@ -154,6 +154,7 @@ def _serialize_player(p: dict) -> dict:
         "age":           p.get("age", "?"),
         "dev":           p.get("dev", "Normal"),
         "teamId":        p.get("teamId", 0),
+        "rosterId":      p.get("rosterId"),
     }
 
 
@@ -1707,6 +1708,10 @@ class TradeActionView(discord.ui.View):
         trade = _trades.get(self.trade_id)
         if not trade:
             return await interaction.response.send_message("❌ Trade not found.", ephemeral=True)
+        if trade.get("status") in ("approved", "rejected"):
+            return await interaction.response.send_message(
+                "This trade has already been resolved.", ephemeral=True
+            )
 
         is_involved = (
             interaction.user.id == self.proposer_id or

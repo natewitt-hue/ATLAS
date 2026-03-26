@@ -167,7 +167,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.9.2"  # fix: core infrastructure bug fixes (loop, schema leak, affinity tx)
+ATLAS_VERSION = "7.9.3"  # fix: rosterId staleness check, ruling panel restart guard, counter on resolved trade
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
