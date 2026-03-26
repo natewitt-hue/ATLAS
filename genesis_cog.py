@@ -967,34 +967,49 @@ class ConferenceSelectView(discord.ui.View):
         step: str = "A",
         team_a: dict | None = None,
         user_id: int | None = None,
+        auto_resolved: bool = False,
     ):
         super().__init__(timeout=180)
-        self.bot_ref     = bot
-        self.proposer_id = proposer_id
-        self.step        = step
-        self.team_a      = team_a
-        self._user_id    = user_id
+        self.bot_ref        = bot
+        self.proposer_id    = proposer_id
+        self.step           = step
+        self.team_a         = team_a
+        self._user_id       = user_id
+        self._auto_resolved = auto_resolved
 
         # Add "My Team" button if user has an assigned team
         if user_id:
-            entry = roster.get_entry_by_id(user_id)
-            if entry:
-                team_dict = roster.get_team_dict(user_id)
-                if team_dict:
-                    # Don't show "My Team" for step B if it would pick the same team as A
-                    skip = (
-                        team_a
-                        and int(team_a.get("id", 0)) == int(team_dict.get("id", 0))
-                    )
-                    if not skip:
-                        btn = discord.ui.Button(
-                            label=f"My Team ({entry.team_name})",
-                            style=discord.ButtonStyle.success,
-                            emoji="⭐",
-                            row=0,
+            try:
+                entry = roster.get_entry_by_id(user_id)
+                if entry:
+                    team_dict = roster.get_team_dict(user_id)
+                    if team_dict:
+                        # Don't show "My Team" for step B if it would pick the same team as A
+                        skip = (
+                            team_a
+                            and int(team_a.get("id", 0)) == int(team_dict.get("id", 0))
                         )
-                        btn.callback = self._my_team_callback(team_dict)
-                        self.add_item(btn)
+                        if not skip:
+                            btn = discord.ui.Button(
+                                label=f"My Team ({entry.team_name})",
+                                style=discord.ButtonStyle.success,
+                                emoji="⭐",
+                                row=0,
+                            )
+                            btn.callback = self._my_team_callback(team_dict)
+                            self.add_item(btn)
+            except Exception:
+                pass  # Graceful fallback: no My Team button
+
+        # Add "Change Team A" button when Team A was auto-resolved (not manually picked)
+        if auto_resolved and step == "B" and team_a is not None:
+            change_btn = discord.ui.Button(
+                label="🔄 Change Team A",
+                style=discord.ButtonStyle.secondary,
+                row=1,
+            )
+            change_btn.callback = self._change_team_a_callback()
+            self.add_item(change_btn)
 
     def _my_team_callback(self, team_dict: dict):
         """Return a callback that selects the user's own team."""
@@ -1019,6 +1034,26 @@ class ConferenceSelectView(discord.ui.View):
                     proposer_id=self.proposer_id, bot=self.bot_ref,
                 )
                 await interaction.response.edit_message(embed=view.step_embed(), view=view)
+        return callback
+
+    def _change_team_a_callback(self):
+        """Return a callback that discards the auto-resolved Team A and restarts from Step 1."""
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.proposer_id:
+                return await interaction.response.send_message(
+                    "❌ Only the proposer can change teams.", ephemeral=True,
+                )
+            embed = discord.Embed(
+                title="💱 Trade Center — Step 1",
+                description="Pick a conference to select **Team A** (the team sending).",
+                color=AtlasColors.INFO,
+            )
+            embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
+            view = ConferenceSelectView(
+                bot=self.bot_ref, proposer_id=self.proposer_id,
+                step="A", user_id=self._user_id,
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
         return callback
 
     @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈")
@@ -1799,6 +1834,7 @@ class TradeCenterCog(commands.Cog):
                 bot=self.bot, proposer_id=interaction.user.id,
                 step="B", team_a=user_team,
                 user_id=interaction.user.id,
+                auto_resolved=True,
             )
         else:
             embed = discord.Embed(
@@ -2088,6 +2124,7 @@ class GenesisHubView(discord.ui.View):
                 bot=self.bot, proposer_id=interaction.user.id,
                 step="B", team_a=user_team,
                 user_id=interaction.user.id,
+                auto_resolved=True,
             )
         else:
             embed = discord.Embed(
