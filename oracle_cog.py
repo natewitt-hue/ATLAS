@@ -43,6 +43,7 @@ from discord.ext import commands
 import analysis as an
 import data_manager as dm
 import intelligence as ig
+import roster
 
 from permissions import ADMIN_USER_IDS, is_commissioner
 
@@ -803,7 +804,6 @@ def _resolve_owner_team(
     target = override or interaction.user
     # Primary: roster module (owner assignments from tsl_members)
     try:
-        import roster
         team = roster.get_team_name(target.id)
         if team:
             return target.name, team
@@ -1253,8 +1253,7 @@ async def _build_owner_embed(target: discord.Member, guild: discord.Guild) -> di
                 or (opp_member.display_name if opp_member else str(b["opponent_id"]))
             )
             try:
-                import roster as _r
-                opp_team = _r.get_team_name(b["opponent_id"]) or ""
+                opp_team = roster.get_team_name(b["opponent_id"]) or ""
             except Exception:
                 opp_team = ig.KNOWN_MEMBER_TEAMS.get(b["opponent_id"], "")
             h2h_str   = ""
@@ -1619,7 +1618,6 @@ class DraftClassView(discord.ui.View):
 
         # Build team options
         try:
-            import roster
             all_teams = roster.get_all_teams()
         except Exception:
             all_teams = []
@@ -2924,15 +2922,36 @@ class _OracleTeamSelectView(discord.ui.View):
 class OracleConfView(discord.ui.View):
     """AFC / NFC buttons for single-team Oracle analysis types."""
 
-    def __init__(self, analysis_label: str, callback_fn, hub_view_fn=None):
+    def __init__(self, analysis_label: str, callback_fn, hub_view_fn=None,
+                 user_id: int | None = None):
         super().__init__(timeout=300)
         self._analysis_label = analysis_label
         self._callback_fn = callback_fn
         self._hub_view_fn = hub_view_fn
+        self._user_id = user_id
+
+        # Add "My Team" button if user has an assigned team
+        if user_id:
+            entry = roster.get_entry_by_id(user_id)
+            if entry:
+                btn = discord.ui.Button(
+                    label=f"My Team ({entry.team_name})",
+                    style=discord.ButtonStyle.success,
+                    emoji="⭐",
+                    row=0,
+                )
+                btn.callback = self._my_team_cb(entry.team_name)
+                self.add_item(btn)
+
+    def _my_team_cb(self, team_name: str):
+        async def callback(interaction: discord.Interaction):
+            await self._callback_fn(interaction, team_name)
+        return callback
 
     def _make_back(self):
         embed = _oracle_conf_embed(self._analysis_label, "Pick a conference.")
-        return OracleConfView(self._analysis_label, self._callback_fn, self._hub_view_fn), embed
+        return OracleConfView(self._analysis_label, self._callback_fn,
+                              self._hub_view_fn, user_id=self._user_id), embed
 
     @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈", row=0)
     async def afc_button(self, interaction: discord.Interaction, _b: discord.ui.Button):
@@ -3125,7 +3144,7 @@ class OracleIntelView(discord.ui.View):
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         embed = _oracle_conf_embed("Game Plan", "Pick a conference to select the **team you want to beat**.")
-        view = OracleConfView("Game Plan", self._do_game_plan)
+        view = OracleConfView("Game Plan", self._do_game_plan, user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
     # Row 1 — Deep Dives
@@ -3137,7 +3156,7 @@ class OracleIntelView(discord.ui.View):
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         embed = _oracle_conf_embed("Team Report", "Pick a conference to select a team.")
-        view = OracleConfView("Team Report", self._do_team_report)
+        view = OracleConfView("Team Report", self._do_team_report, user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Owner Profile", emoji="👤", style=discord.ButtonStyle.secondary, row=1)
@@ -3147,7 +3166,7 @@ class OracleIntelView(discord.ui.View):
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         embed = _oracle_conf_embed("Owner Profile", "Pick a conference to select an owner's team.")
-        view = OracleConfView("Owner Profile", self._do_owner_profile)
+        view = OracleConfView("Owner Profile", self._do_owner_profile, user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(label="Player Scout", emoji="🔭", style=discord.ButtonStyle.secondary, row=1)
@@ -3178,7 +3197,7 @@ class OracleIntelView(discord.ui.View):
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         embed = _oracle_conf_embed("Dynasty Profile", "Pick a conference to select an owner's team.")
-        view = OracleConfView("Dynasty Profile", self._do_dynasty)
+        view = OracleConfView("Dynasty Profile", self._do_dynasty, user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
     # Row 2 — Extended Analysis
@@ -3190,7 +3209,7 @@ class OracleIntelView(discord.ui.View):
             await interaction.response.send_message("Oracle analysis module offline.", ephemeral=True)
             return
         embed = _oracle_conf_embed("Betting Profile", "Pick a conference to select an owner's team.")
-        view = OracleConfView("Betting Profile", self._do_betting_profile)
+        view = OracleConfView("Betting Profile", self._do_betting_profile, user_id=interaction.user.id)
         await interaction.response.edit_message(embed=embed, view=view)
 
 
