@@ -41,6 +41,7 @@ from discord.ext import commands
 from atlas_colors import AtlasColors
 
 import data_manager as dm
+import roster
 import trade_engine as te
 from player_picker import PlayerPickerView, make_multi_picker
 
@@ -928,7 +929,6 @@ def _build_conference_team_options(
         # Show owner nickname from roster if available, else API userName
         owner_label = ""
         try:
-            import roster
             entry = roster.get_owner(abbr) if abbr else None
             owner_label = entry.nickname or entry.discord_username if entry else ""
         except Exception:
@@ -966,12 +966,60 @@ class ConferenceSelectView(discord.ui.View):
         self, bot: commands.Bot, proposer_id: int,
         step: str = "A",
         team_a: dict | None = None,
+        user_id: int | None = None,
     ):
         super().__init__(timeout=180)
         self.bot_ref     = bot
         self.proposer_id = proposer_id
         self.step        = step
         self.team_a      = team_a
+        self._user_id    = user_id
+
+        # Add "My Team" button if user has an assigned team
+        if user_id:
+            entry = roster.get_entry_by_id(user_id)
+            if entry:
+                team_dict = roster.get_team_dict(user_id)
+                if team_dict:
+                    # Don't show "My Team" for step B if it would pick the same team as A
+                    skip = (
+                        team_a
+                        and int(team_a.get("id", 0)) == int(team_dict.get("id", 0))
+                    )
+                    if not skip:
+                        btn = discord.ui.Button(
+                            label=f"My Team ({entry.team_name})",
+                            style=discord.ButtonStyle.success,
+                            emoji="⭐",
+                            row=0,
+                        )
+                        btn.callback = self._my_team_callback(team_dict)
+                        self.add_item(btn)
+
+    def _my_team_callback(self, team_dict: dict):
+        """Return a callback that selects the user's own team."""
+        async def callback(interaction: discord.Interaction):
+            if self.step == "A":
+                # Move to step B with user's team as Team A
+                embed = _conference_select_embed(
+                    "B",
+                    "Pick a conference to select **Team B** (the team receiving).",
+                    team_a=team_dict,
+                )
+                view = ConferenceSelectView(
+                    bot=self.bot_ref, proposer_id=self.proposer_id,
+                    step="B", team_a=team_dict,
+                    user_id=self._user_id,
+                )
+                await interaction.response.edit_message(embed=embed, view=view)
+            else:
+                # Step B: user picked their own team as the receiving team
+                view = PickerTradeView(
+                    team_a=self.team_a, team_b=team_dict,
+                    proposer_id=self.proposer_id, bot=self.bot_ref,
+                )
+                await interaction.response.edit_message(embed=view.step_embed(), view=view)
+        return callback
 
     @discord.ui.button(label="AFC", style=discord.ButtonStyle.primary, emoji="🏈")
     async def afc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1035,6 +1083,7 @@ class ConferenceTeamSelect(discord.ui.Select):
             view = ConferenceSelectView(
                 bot=self.bot_ref, proposer_id=self.proposer_id,
                 step="B", team_a=team,
+                user_id=self.proposer_id,
             )
             await interaction.response.edit_message(embed=embed, view=view)
         else:
@@ -1074,6 +1123,7 @@ class ConferenceTeamSelectView(discord.ui.View):
         view = ConferenceSelectView(
             bot=self.bot_ref, proposer_id=self.proposer_id,
             step=self.step, team_a=self.team_a,
+            user_id=self.proposer_id,
         )
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -1744,6 +1794,7 @@ class TradeCenterCog(commands.Cog):
         embed.set_footer(text="TSL Trade Engine v2.7 • Picker mode • All valuations are advisory")
         view = ConferenceSelectView(
             bot=self.bot, proposer_id=interaction.user.id, step="A",
+            user_id=interaction.user.id,
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -2017,6 +2068,7 @@ class GenesisHubView(discord.ui.View):
         embed.set_footer(text="TSL Trade Engine v2.7 · Picker mode · All valuations are advisory")
         view = ConferenceSelectView(
             bot=self.bot, proposer_id=interaction.user.id, step="A",
+            user_id=interaction.user.id,
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
