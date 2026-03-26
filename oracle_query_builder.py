@@ -1254,6 +1254,347 @@ ORDER BY CAST(og.seasonIndex AS INTEGER)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  STANDINGS-BASED METRICS (Group D)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def team_efficiency(team: str | None = None) -> tuple[str, tuple]:
+    """Offensive/defensive yardage, points scored/allowed, turnover diff from standings."""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(offTotalYds  AS INTEGER) AS offTotalYds,
+    CAST(offPassYds   AS INTEGER) AS offPassYds,
+    CAST(offRushYds   AS INTEGER) AS offRushYds,
+    CAST(defTotalYds  AS INTEGER) AS defTotalYds,
+    CAST(defPassYds   AS INTEGER) AS defPassYds,
+    CAST(defRushYds   AS INTEGER) AS defRushYds,
+    CAST(ptsFor       AS INTEGER) AS ptsFor,
+    CAST(ptsAgainst   AS INTEGER) AS ptsAgainst,
+    CAST(netPts       AS INTEGER) AS netPts,
+    CAST(tODiff       AS INTEGER) AS tODiff,
+    ROUND(CAST(winPct AS REAL), 3) AS winPct
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY CAST(netPts AS INTEGER) DESC"
+    return sql, tuple(params)
+
+
+def strength_of_schedule(team: str | None = None) -> tuple[str, tuple]:
+    """Pre-computed strength of schedule from standings table."""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(totalSoS     AS REAL) AS totalSoS,
+    CAST(playedSoS    AS REAL) AS playedSoS,
+    CAST(remainingSoS AS REAL) AS remainingSoS,
+    CAST(initialSoS   AS REAL) AS initialSoS,
+    CAST(totalWins    AS INTEGER) AS totalWins,
+    CAST(totalLosses  AS INTEGER) AS totalLosses
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY CAST(totalSoS AS REAL) DESC"
+    return sql, tuple(params)
+
+
+def team_home_away(team: str | None = None) -> tuple[str, tuple]:
+    """Home/away win-loss splits from standings."""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(homeWins   AS INTEGER) AS homeWins,
+    CAST(homeLosses AS INTEGER) AS homeLosses,
+    CAST(awayWins   AS INTEGER) AS awayWins,
+    CAST(awayLosses AS INTEGER) AS awayLosses
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY (CAST(homeWins AS INTEGER) + CAST(awayWins AS INTEGER)) DESC"
+    return sql, tuple(params)
+
+
+def team_division_standings(
+    division: str | None = None,
+    conference: str | None = None,
+) -> tuple[str, tuple]:
+    """Division and conference records from standings."""
+    params: list = []
+    wheres: list[str] = []
+    sql = """
+SELECT
+    teamName,
+    CAST(divWins    AS INTEGER) AS divWins,
+    CAST(divLosses  AS INTEGER) AS divLosses,
+    CAST(confWins   AS INTEGER) AS confWins,
+    CAST(confLosses AS INTEGER) AS confLosses,
+    divisionName,
+    conferenceName
+FROM standings
+"""
+    if division:
+        wheres.append("divisionName = ?")
+        params.append(division)
+    if conference:
+        wheres.append("conferenceName = ?")
+        params.append(conference)
+    if wheres:
+        sql += "WHERE " + " AND ".join(wheres) + "\n"
+    sql += "ORDER BY divisionName, CAST(divWins AS INTEGER) DESC"
+    return sql, tuple(params)
+
+
+def team_rankings(team: str | None = None) -> tuple[str, tuple]:
+    """All rank columns from standings — useful for 'where does team X rank?'"""
+    params: list = []
+    sql = """
+SELECT
+    teamName,
+    CAST(rank            AS INTEGER) AS rank,
+    CAST(prevRank        AS INTEGER) AS prevRank,
+    CAST(offTotalYdsRank AS INTEGER) AS offTotalYdsRank,
+    CAST(defTotalYdsRank AS INTEGER) AS defTotalYdsRank,
+    CAST(ptsForRank      AS INTEGER) AS ptsForRank,
+    CAST(ptsAgainstRank  AS INTEGER) AS ptsAgainstRank
+FROM standings
+"""
+    if team:
+        sql += "WHERE teamName = ?\n"
+        params.append(team)
+    sql += "ORDER BY CAST(rank AS INTEGER)"
+    return sql, tuple(params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  COMPOSITE PLAYER SCORES (Group E)
+# Weights are documented as constants. HAVING COUNT(*) >= 4 filters small samples.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def qb_composite(
+    season: int | None = None,
+    limit: int = 10,
+) -> tuple[str, tuple]:
+    """Top QBs by weighted composite: passer rating (30%), TD:INT (10pts/ratio), YPA (5x), sack rate (-20x).
+
+    Composite weights (tunable):
+        rating_weight  = 0.30
+        td_int_weight  = 10.0   (applied to TD:INT ratio)
+        ypa_weight     = 5.0
+        sack_penalty   = 20.0   (negative, applied to sack rate = sacks/attempts)
+    """
+    params: list = ["1"]  # stageIndex for regular season
+    if season is not None:
+        season_filter = "AND seasonIndex = ?"
+        params.append(str(season))
+    else:
+        season_filter = ""
+
+    sql = f"""
+SELECT
+    fullName,
+    teamName,
+    ROUND(AVG(CAST(passerRating  AS REAL)), 1)  AS passerRating,
+    ROUND(AVG(CAST(passCompPct   AS REAL)), 1)  AS passCompPct,
+    SUM(CAST(passTDs   AS INTEGER))             AS passTDs,
+    SUM(CAST(passInts  AS INTEGER))             AS passInts,
+    ROUND(AVG(CAST(passYdsPerAtt AS REAL)), 2)  AS passYdsPerAtt,
+    SUM(CAST(passSacks AS INTEGER))             AS passSacks,
+    SUM(CAST(passAtt   AS INTEGER))             AS passAtt,
+    ROUND(
+        AVG(CAST(passerRating AS REAL)) * 0.30
+        + (CAST(SUM(CAST(passTDs AS INTEGER)) AS REAL)
+           / NULLIF(SUM(CAST(passInts AS INTEGER)), 0)) * 10.0
+        + AVG(CAST(passYdsPerAtt AS REAL)) * 5.0
+        - (CAST(SUM(CAST(passSacks AS INTEGER)) AS REAL)
+           / NULLIF(SUM(CAST(passAtt AS INTEGER)), 0)) * 20.0,
+        2
+    ) AS composite_score
+FROM offensive_stats
+WHERE stageIndex = ? {season_filter}
+  AND pos = 'QB'
+GROUP BY fullName, teamName
+HAVING COUNT(*) >= 4
+ORDER BY composite_score DESC
+LIMIT ?
+"""
+    params.append(limit)
+    return sql, tuple(params)
+
+
+def rb_composite(
+    season: int | None = None,
+    limit: int = 10,
+) -> tuple[str, tuple]:
+    """Top RBs by weighted composite: YPC (10x), broken tackles/att (50x), YAC/att (5x), fumble penalty (-30x).
+
+    Composite weights (tunable):
+        ypc_weight           = 10.0
+        broken_tackle_weight = 50.0  (applied per-carry: broken_tackles / attempts)
+        yac_weight           = 5.0   (applied per-carry: yac / attempts)
+        fumble_penalty       = 30.0  (negative, fumble rate: fumbles / attempts)
+
+    NOTE: Composite scores are NOT comparable across position groups.
+    Use within a single position group only.
+    """
+    params: list = ["1"]
+    if season is not None:
+        season_filter = "AND seasonIndex = ?"
+        params.append(str(season))
+    else:
+        season_filter = ""
+
+    sql = f"""
+SELECT
+    fullName,
+    teamName,
+    SUM(CAST(rushYds              AS INTEGER)) AS rushYds,
+    SUM(CAST(rushTDs              AS INTEGER)) AS rushTDs,
+    ROUND(AVG(CAST(rushYdsPerAtt         AS REAL)), 2) AS rushYdsPerAtt,
+    SUM(CAST(rushBrokenTackles    AS INTEGER)) AS rushBrokenTackles,
+    SUM(CAST(rushYdsAfterContact  AS INTEGER)) AS rushYdsAfterContact,
+    SUM(CAST(rushFum              AS INTEGER)) AS rushFum,
+    SUM(CAST(rushAtt              AS INTEGER)) AS rushAtt,
+    ROUND(
+        AVG(CAST(rushYdsPerAtt AS REAL)) * 10.0
+        + (CAST(SUM(CAST(rushBrokenTackles AS INTEGER)) AS REAL)
+           / NULLIF(SUM(CAST(rushAtt AS INTEGER)), 0)) * 50.0
+        + (CAST(SUM(CAST(rushYdsAfterContact AS INTEGER)) AS REAL)
+           / NULLIF(SUM(CAST(rushAtt AS INTEGER)), 0)) * 5.0
+        - (CAST(SUM(CAST(rushFum AS INTEGER)) AS REAL)
+           / NULLIF(SUM(CAST(rushAtt AS INTEGER)), 0)) * 30.0,
+        2
+    ) AS composite_score
+FROM offensive_stats
+WHERE stageIndex = ? {season_filter}
+  AND pos = 'RB'
+GROUP BY fullName, teamName
+HAVING COUNT(*) >= 4
+   AND SUM(CAST(rushAtt AS INTEGER)) >= 20
+ORDER BY composite_score DESC
+LIMIT ?
+"""
+    params.append(limit)
+    return sql, tuple(params)
+
+
+def wr_composite(
+    season: int | None = None,
+    limit: int = 10,
+) -> tuple[str, tuple]:
+    """Top WRs/TEs by weighted composite: catch% (50x), YPC (5x), YAC/catch (3x), TD bonus (10x), drop penalty (-20x).
+
+    Composite weights (tunable):
+        catch_pct_weight = 50.0
+        ypc_weight       = 5.0
+        yac_weight       = 3.0   (per-catch YAC)
+        td_weight        = 10.0  (per-TD)
+        drop_penalty     = 20.0  (negative, drop rate: drops / (catches + drops))
+
+    NOTE: Composite scores are NOT comparable across position groups.
+    WR scores scale ~50x higher than QB composites due to catch% (0-100) * 50.0 weight.
+    Use within a single position group only.
+    """
+    params: list = ["1"]
+    if season is not None:
+        season_filter = "AND seasonIndex = ?"
+        params.append(str(season))
+    else:
+        season_filter = ""
+
+    sql = f"""
+SELECT
+    fullName,
+    teamName,
+    SUM(CAST(recYds          AS INTEGER))  AS recYds,
+    SUM(CAST(recTDs          AS INTEGER))  AS recTDs,
+    ROUND(AVG(CAST(recCatchPct    AS REAL)), 1) AS recCatchPct,
+    ROUND(AVG(CAST(recYdsPerCatch AS REAL)), 2) AS recYdsPerCatch,
+    ROUND(AVG(CAST(recYacPerCatch AS REAL)), 2) AS recYacPerCatch,
+    SUM(CAST(recDrops        AS INTEGER))  AS recDrops,
+    SUM(CAST(recCatches      AS INTEGER))  AS recCatches,
+    ROUND(
+        AVG(CAST(recCatchPct AS REAL)) * 50.0
+        + AVG(CAST(recYdsPerCatch AS REAL)) * 5.0
+        + AVG(CAST(recYacPerCatch AS REAL)) * 3.0
+        + (CAST(SUM(CAST(recTDs AS INTEGER)) AS REAL)
+           / NULLIF(COUNT(*), 0)) * 10.0
+        - (CAST(SUM(CAST(recDrops AS INTEGER)) AS REAL)
+           / NULLIF(SUM(CAST(recCatches AS INTEGER)) + SUM(CAST(recDrops AS INTEGER)), 0)) * 20.0,
+        2
+    ) AS composite_score
+FROM offensive_stats
+WHERE stageIndex = ? {season_filter}
+  AND pos IN ('WR', 'TE')
+GROUP BY fullName, teamName
+HAVING COUNT(*) >= 4
+ORDER BY composite_score DESC
+LIMIT ?
+"""
+    params.append(limit)
+    return sql, tuple(params)
+
+
+def defensive_composite(
+    season: int | None = None,
+    limit: int = 10,
+) -> tuple[str, tuple]:
+    """Top defenders by weighted composite: sacks (2x), INTs (3x), forced fumbles (2x), TDs (6x), deflections (1x), tackles (0.5x).
+
+    Composite weights (tunable):
+        sack_weight    = 2.0
+        int_weight     = 3.0
+        ff_weight      = 2.0
+        td_weight      = 6.0
+        defl_weight    = 1.0
+        tackle_weight  = 0.5
+    """
+    params: list = ["1"]
+    if season is not None:
+        season_filter = "AND seasonIndex = ?"
+        params.append(str(season))
+    else:
+        season_filter = ""
+
+    sql = f"""
+SELECT
+    fullName,
+    teamName,
+    SUM(CAST(defTotalTackles AS INTEGER)) AS defTotalTackles,
+    SUM(CAST(defSacks        AS INTEGER)) AS defSacks,
+    SUM(CAST(defInts         AS INTEGER)) AS defInts,
+    SUM(CAST(defForcedFum    AS INTEGER)) AS defForcedFum,
+    SUM(CAST(defDeflections  AS INTEGER)) AS defDeflections,
+    SUM(CAST(defTDs          AS INTEGER)) AS defTDs,
+    ROUND(
+        SUM(CAST(defSacks       AS INTEGER)) * 2.0
+        + SUM(CAST(defInts      AS INTEGER)) * 3.0
+        + SUM(CAST(defForcedFum AS INTEGER)) * 2.0
+        + SUM(CAST(defTDs       AS INTEGER)) * 6.0
+        + SUM(CAST(defDeflections AS INTEGER)) * 1.0
+        + SUM(CAST(defTotalTackles AS INTEGER)) * 0.5,
+        2
+    ) AS composite_score
+FROM defensive_stats
+WHERE stageIndex = ? {season_filter}
+GROUP BY fullName, teamName
+HAVING COUNT(*) >= 4
+ORDER BY composite_score DESC
+LIMIT ?
+"""
+    params.append(limit)
+    return sql, tuple(params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS (Layer 3)
 # ══════════════════════════════════════════════════════════════════════════════
 
