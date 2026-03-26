@@ -109,12 +109,24 @@ PENALTIES = {
     "custom":     ("📋",  "Custom Penalty",       "Commissioner will define the penalty in the ruling notes."),
 }
 
+# BUG#5: verify CATEGORIES and PENALTIES dicts stay in sync at module load
+# Both must be non-empty and use consistent 3-tuple (emoji, label, description) structure.
+assert CATEGORIES and PENALTIES, "CATEGORIES/PENALTIES must not be empty"
+assert all(isinstance(v, tuple) and len(v) == 3 for v in CATEGORIES.values()), \
+    "CATEGORIES entries must be (emoji, label, desc) 3-tuples"
+assert all(isinstance(v, tuple) and len(v) == 3 for v in PENALTIES.values()), \
+    "PENALTIES entries must be (emoji, label, desc) 3-tuples"
+
+# BUG#3: module-level locks to serialize state file I/O (prevents concurrent corruption)
+_complaint_file_lock = asyncio.Lock()
+_fr_file_lock = asyncio.Lock()
+
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 _complaints: dict[str, dict] = {}
 
 
-def _load_state():
+def _load_state():  # sync — only called at startup from __init__ (no concurrency risk)
     global _complaints
     if os.path.isfile(STATE_PATH):
         try:
@@ -134,22 +146,23 @@ def _prune_resolved_complaints():
         del _complaints[cid]
 
 
-def _save_complaint_state():
+async def _save_complaint_state():  # BUG#3: async + lock to prevent concurrent file corruption
     _prune_resolved_complaints()
-    try:
-        tmp = STATE_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(_complaints, f, indent=2)
-        os.replace(tmp, STATE_PATH)
-    except Exception as e:
-        print(f"[complaint_cog] State save error: {e}")
+    async with _complaint_file_lock:
+        try:
+            tmp = STATE_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(_complaints, f, indent=2)
+            os.replace(tmp, STATE_PATH)
+        except Exception as e:
+            print(f"[complaint_cog] State save error: {e}")
 
 
 # ── Force Request State ──────────────────────────────────────────────────────
 
 _force_requests: dict[str, dict] = {}
 
-def _load_fr_state():
+def _load_fr_state():  # sync — only called at startup from __init__ (no concurrency risk)
     global _force_requests
     try:
         with open(FR_STATE_PATH) as f:
@@ -157,7 +170,7 @@ def _load_fr_state():
     except (FileNotFoundError, json.JSONDecodeError):
         _force_requests = {}
 
-def _save_fr_state():
+async def _save_fr_state():  # BUG#3: async + lock to prevent concurrent file corruption
     # Prune resolved requests older than 7 days
     cutoff = (dt.now(timezone.utc) - datetime.timedelta(days=7)).isoformat()
     to_remove = [
@@ -166,13 +179,14 @@ def _save_fr_state():
     ]
     for rid in to_remove:
         del _force_requests[rid]
-    try:
-        tmp = FR_STATE_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(_force_requests, f, indent=2)
-        os.replace(tmp, FR_STATE_PATH)
-    except Exception as e:
-        print(f"[force_request] State save error: {e}")
+    async with _fr_file_lock:
+        try:
+            tmp = FR_STATE_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(_force_requests, f, indent=2)
+            os.replace(tmp, FR_STATE_PATH)
+        except Exception as e:
+            print(f"[force_request] State save error: {e}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -354,7 +368,7 @@ class ComplaintModal(discord.ui.Modal):
         }
 
         _complaints[complaint_id] = complaint
-        _save_complaint_state()
+        await _save_complaint_state()  # BUG#3: awaited for async lock
 
         # ── Create private thread in commissioner log channel ─────────────────
         admin_ch_id = _admin_chat_id()
@@ -383,7 +397,7 @@ class ComplaintModal(discord.ui.Modal):
                 await thread.add_user(accuser_member)
 
             complaint["thread_id"] = thread.id
-            _save_complaint_state()
+            await _save_complaint_state()  # BUG#3: awaited for async lock
 
             # ── Evidence upload prompt ────────────────────────────────────────
             upload_embed = discord.Embed(
@@ -499,7 +513,7 @@ class PenaltySelect(discord.ui.Select):
         if not c:
             return await interaction.response.send_message("❌ Complaint not found.", ephemeral=True)
         c["penalty"] = self.values[0]
-        _save_complaint_state()
+        await _save_complaint_state()  # BUG#3: awaited for async lock
         pen_emoji, pen_label, _ = PENALTIES[self.values[0]]
         await interaction.response.send_message(
             f"✅ Penalty set to **{pen_emoji} {pen_label}**. "
@@ -532,7 +546,7 @@ class RulingNotesModal(discord.ui.Modal, title="📣 Add Ruling Notes"):
         c["verdict"]      = self.verdict
         c["ruling_notes"] = self.notes.value.strip()
         c["ruled_by_id"]  = interaction.user.id
-        _save_complaint_state()
+        await _save_complaint_state()  # BUG#3: awaited for async lock
 
         ruling_embed = _build_ruling_embed(c)
 
@@ -1091,7 +1105,7 @@ class ForceRequestAdminView(discord.ui.View):
         # Persist resolved status
         if self.request_id in _force_requests:
             _force_requests[self.request_id]["status"] = final_ruling
-            _save_fr_state()
+            await _save_fr_state()  # BUG#3: awaited for async lock
 
     async def _approve_callback(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
@@ -1155,7 +1169,7 @@ class ForceRequestAdminView(discord.ui.View):
         # Persist resolved status
         if self.request_id in _force_requests:
             _force_requests[self.request_id]["status"] = "denied"
-            _save_fr_state()
+            await _save_fr_state()  # BUG#3: awaited for async lock
 
     async def _more_info_callback(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):
@@ -1338,7 +1352,7 @@ class ForceRequestCog(commands.Cog):
             "results_channel_id": _results_channel_id() or 0,
             "status": "pending",
         }
-        _save_fr_state()
+        await _save_fr_state()  # BUG#3: awaited for async lock
 
         admin_pings = " ".join(f"<@{uid}>" for uid in ADMIN_USER_IDS)
         await review_ch.send(

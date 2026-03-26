@@ -40,11 +40,20 @@ async def _get_browser():
     global _browser, _pw_context_manager, _pw_instance
     async with _browser_lock:
         if _browser is None or not _browser.is_connected():
+            # Drain leaked pages from old pool before reconnecting browser
+            if _pool is not None:
+                try:
+                    await _pool.drain()  # close all stale pages from disconnected browser
+                except Exception:
+                    pass
             from playwright.async_api import async_playwright
 
             _pw_context_manager = async_playwright()
             _pw_instance = await _pw_context_manager.__aenter__()
             _browser = await _pw_instance.chromium.launch(headless=True)
+            # Re-warm pool after reconnect so pages belong to the new browser
+            if _pool is not None:
+                await _pool.warm()
     return _browser
 
 
@@ -65,13 +74,18 @@ async def close_browser():
 # ---------------------------------------------------------------------------
 # Font loading + base64 caching
 # ---------------------------------------------------------------------------
-_FONT_CACHE: dict[str, str] = {}
+from collections import OrderedDict
+
+_FONT_CACHE_MAX = 50  # cap base64 font blobs to prevent unbounded memory growth
+_FONT_CACHE: OrderedDict[str, str] = OrderedDict()
 
 
 def _load_font_b64(name: str) -> str:
     if name not in _FONT_CACHE:
         path = _FONTS_DIR / name
         if path.exists():
+            if len(_FONT_CACHE) >= _FONT_CACHE_MAX:
+                _FONT_CACHE.popitem(last=False)  # evict oldest entry when limit exceeded
             _FONT_CACHE[name] = base64.b64encode(path.read_bytes()).decode()
         else:
             log.warning("Font file missing: %s", name)

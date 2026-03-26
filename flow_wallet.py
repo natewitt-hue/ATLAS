@@ -25,14 +25,27 @@ from typing import Optional
 import aiosqlite
 
 # -- Per-user asyncio locks to serialize balance operations ------------------
+import weakref  # BUG-4 FIX: use weak refs so locks are GC'd when no longer held
+
 _user_locks: dict[int, asyncio.Lock] = {}
+_LOCK_CLEANUP_THRESHOLD = 500  # BUG-4 FIX: trigger cleanup when dict exceeds this size
 
 
 def get_user_lock(uid: int) -> asyncio.Lock:
     """Get or create a per-user asyncio lock to serialize balance operations."""
     if uid not in _user_locks:
+        # BUG-4 FIX: periodic cleanup of unlocked entries to prevent unbounded growth
+        if len(_user_locks) > _LOCK_CLEANUP_THRESHOLD:
+            _cleanup_idle_locks()
         _user_locks[uid] = asyncio.Lock()
     return _user_locks[uid]
+
+
+def _cleanup_idle_locks() -> None:
+    """Remove locks that are not currently held — prevents unbounded dict growth."""
+    to_remove = [uid for uid, lock in _user_locks.items() if not lock.locked()]
+    for uid in to_remove:
+        del _user_locks[uid]
 
 # -- DB Path -----------------------------------------------------------------
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,13 +67,12 @@ class InsufficientFundsError(Exception):
 #  THEME PREFERENCES (lazy-migrated card_theme column)
 # =============================================================================
 
-_theme_col_checked = False
+_theme_col_checked: set[str] = set()  # BUG-5 FIX: keyed on db_path, not a single bool
 
 
 def _ensure_theme_column():
     """Add card_theme column to users_table if it doesn't exist (lazy migration)."""
-    global _theme_col_checked
-    if _theme_col_checked:
+    if DB_PATH in _theme_col_checked:  # BUG-5 FIX: check per db_path, not global flag
         return
     with sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT) as con:
         cols = [r[1] for r in con.execute("PRAGMA table_info(users_table)").fetchall()]
@@ -69,7 +81,7 @@ def _ensure_theme_column():
                 "ALTER TABLE users_table ADD COLUMN card_theme TEXT DEFAULT 'obsidian_gold'"
             )
             con.commit()
-    _theme_col_checked = True
+    _theme_col_checked.add(DB_PATH)  # BUG-5 FIX: mark this specific db_path as checked
 
 
 def get_theme(user_id: int) -> str:

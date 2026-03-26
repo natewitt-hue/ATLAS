@@ -126,6 +126,9 @@ def _sanitize_player(p: dict) -> dict:
         raw_ovr = best_ovr
     out["overallRating"] = _safe_int(raw_ovr, 70)
     out["playerBestOvr"] = out["overallRating"]   # keep in sync
+    out["devTrait"]          = _safe_int(p.get("devTrait"),          0)      # BUG#1: guard NaN devTrait (0=Normal)
+    out["contractYearsLeft"] = _safe_int(p.get("contractYearsLeft"), 2)      # BUG#1: guard NaN contractYearsLeft
+    out["contractSalary"]    = _safe_int(p.get("contractSalary"),    0)      # BUG#1: guard NaN contractSalary
     out["draftRound"]    = _safe_int(p.get("draftRound"),    7)
     out["draftPick"]     = _safe_int(p.get("draftPick"),     32)
     out["rookieYear"]    = _safe_int(p.get("rookieYear"),    dm.CURRENT_SEASON)
@@ -1572,116 +1575,121 @@ class TradeActionView(discord.ui.View):
             trade["resolved_by"] = interaction.user.id
             _save_trade_state()
 
-        # Disable all buttons after resolution
-        disabled_view = discord.ui.View()
-        for child in self.children:
-            child.disabled = True
-            disabled_view.add_item(child)
+            # BUG#9: invalidate scarcity cache after trade approval so next eval uses fresh data
+            if new_status == "approved" and hasattr(dm, '_state') and hasattr(dm._state, '_scarcity_cache'):
+                dm._state._scarcity_cache = {}
 
-        # ── Re-render image card with updated status ──────────────────────
-        # Uses stored serialized data instead of re-resolving from raw strings.
-        # This fixes picker-mode trades where players_a_raw/players_b_raw are "".
-        if _IMAGE_RENDER and cr and interaction.message and interaction.message.attachments:
-            try:
-                team_a_id = trade["team_a_id"]
-                team_b_id = trade["team_b_id"]
+            # BUG#2: all acceptance logic now runs inside the lock to prevent TOCTOU double-approve
+            # Disable all buttons after resolution
+            disabled_view = discord.ui.View()
+            for child in self.children:
+                child.disabled = True
+                disabled_view.add_item(child)
 
-                # Pull stored asset data (saved at trade creation time)
-                players_a = trade.get("players_a_data") or []
-                picks_a   = trade.get("picks_a_data") or []
-                players_b = trade.get("players_b_data") or []
-                picks_b   = trade.get("picks_b_data") or []
-
-                # Fallback: if no stored data, try re-resolving from raw
-                # (handles trades created before this patch was applied)
-                if not players_a and not picks_a and (trade.get("players_a_raw") or trade.get("picks_a_raw")):
-                    players_a, picks_a, _, _ = _resolve_assets(
-                        trade.get("players_a_raw", ""),
-                        trade.get("picks_a_raw", ""),
-                        team_a_id,
-                    )
-                if not players_b and not picks_b and (trade.get("players_b_raw") or trade.get("picks_b_raw")):
-                    players_b, picks_b, _, _ = _resolve_assets(
-                        trade.get("players_b_raw", ""),
-                        trade.get("picks_b_raw", ""),
-                        team_b_id,
-                    )
-
-                side_a = te.TradeSide(players=players_a, picks=picks_a, team_id=team_a_id)
-                side_b = te.TradeSide(players=players_b, picks=picks_b, team_id=team_b_id)
-                result = te.evaluate_trade(side_a, side_b)
-                a_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_a)
-                b_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_b)
-                card_data = {
-                    "trade_id":     self.trade_id,
-                    "status":       new_status,
-                    "team_a_name":  self.team_a.get("nickName", trade.get("team_a_name", "")),
-                    "team_a_owner": self.team_a.get("userName", trade.get("team_a_owner", "")),
-                    "team_b_name":  self.team_b.get("nickName", trade.get("team_b_name", "")),
-                    "team_b_owner": self.team_b.get("userName", trade.get("team_b_owner", "")),
-                    "players_a": players_a, "picks_a": picks_a,
-                    "players_b": players_b, "picks_b": picks_b,
-                    "side_a_value": result.side_a_value,
-                    "side_b_value": result.side_b_value,
-                    "delta_pct":    result.delta_pct,
-                    "band":         result.band,
-                    "ovr_delta":    a_ovr - b_ovr,
-                    "notes":        result.notes or [],
-                    "ai_commentary": trade.get("ai_commentary", ""),
-                    "proposer_id":  trade.get("proposer_id", 0),
-                    "warnings":     [],
-                }
-                _proposer = trade.get("proposer_id", 0)
-                _theme = get_theme_for_render(_proposer if _proposer else None)
-                png_bytes = await cr.render_trade_card(card_data, theme_id=_theme)
-                if png_bytes:
-                    import io as _io
-                    file = discord.File(_io.BytesIO(png_bytes), filename=f"trade_{self.trade_id}_{new_status}.png")
-                    await interaction.message.edit(attachments=[file], view=disabled_view)
-                    if _trades_channel_id() and interaction.guild:
-                        log_ch = interaction.guild.get_channel(_trades_channel_id())
-                        if log_ch:
-                            a_name = trade.get("team_a_name", "Team A")
-                            b_name = trade.get("team_b_name", "Team B")
-                            await log_ch.send(
-                                f"📋 Trade `{self.trade_id}` **{new_status.upper()}** by {interaction.user.mention} "
-                                f"— {a_name} ↔ {b_name}"
-                            )
-                    return
-            except Exception as e:
-                print(f"[trade_center] Status re-render error: {e}")
-
-        # Fallback: edit existing embed title
-        if interaction.message and interaction.message.embeds:
-            old_embed = interaction.message.embeds[0]
-            status_map = {
-                "approved":  ("✅", "APPROVED"),
-                "rejected":  ("❌", "REJECTED"),
-                "countered": ("🔄", "Counter Offered"),
-            }
-            s_emoji, s_label = status_map.get(new_status, ("⏳", new_status.title()))
-            new_embed = old_embed.copy()
-            new_embed.title = f"💱 Trade Proposal — {s_emoji} {s_label}"
-            new_embed.color = color
-            await interaction.message.edit(embed=new_embed, view=disabled_view)
-        else:
-            await interaction.followup.send(
-                f"{label} by {interaction.user.mention}", ephemeral=True
-            )
-
-        # Announce in trade log channel
-        if _trades_channel_id() and interaction.guild:
-            log_ch = interaction.guild.get_channel(_trades_channel_id())
-            if log_ch:
+            # ── Re-render image card with updated status ──────────────────────
+            # Uses stored serialized data instead of re-resolving from raw strings.
+            # This fixes picker-mode trades where players_a_raw/players_b_raw are "".
+            if _IMAGE_RENDER and cr and interaction.message and interaction.message.attachments:
                 try:
-                    a_name = trade.get("team_a_name", "Team A")
-                    b_name = trade.get("team_b_name", "Team B")
-                    await log_ch.send(
-                        f"📋 Trade `{self.trade_id}` **{new_status.upper()}** by {interaction.user.mention} "
-                        f"— {a_name} ↔ {b_name}"
-                    )
-                except Exception:
-                    pass
+                    team_a_id = trade["team_a_id"]
+                    team_b_id = trade["team_b_id"]
+
+                    # Pull stored asset data (saved at trade creation time)
+                    players_a = trade.get("players_a_data") or []
+                    picks_a   = trade.get("picks_a_data") or []
+                    players_b = trade.get("players_b_data") or []
+                    picks_b   = trade.get("picks_b_data") or []
+
+                    # Fallback: if no stored data, try re-resolving from raw
+                    # (handles trades created before this patch was applied)
+                    if not players_a and not picks_a and (trade.get("players_a_raw") or trade.get("picks_a_raw")):
+                        players_a, picks_a, _, _ = _resolve_assets(
+                            trade.get("players_a_raw", ""),
+                            trade.get("picks_a_raw", ""),
+                            team_a_id,
+                        )
+                    if not players_b and not picks_b and (trade.get("players_b_raw") or trade.get("picks_b_raw")):
+                        players_b, picks_b, _, _ = _resolve_assets(
+                            trade.get("players_b_raw", ""),
+                            trade.get("picks_b_raw", ""),
+                            team_b_id,
+                        )
+
+                    side_a = te.TradeSide(players=players_a, picks=picks_a, team_id=team_a_id)
+                    side_b = te.TradeSide(players=players_b, picks=picks_b, team_id=team_b_id)
+                    result = te.evaluate_trade(side_a, side_b)
+                    a_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_a)
+                    b_ovr = sum(int(p.get("overallRating") or p.get("playerBestOvr") or 0) for p in players_b)
+                    card_data = {
+                        "trade_id":     self.trade_id,
+                        "status":       new_status,
+                        "team_a_name":  self.team_a.get("nickName", trade.get("team_a_name", "")),
+                        "team_a_owner": self.team_a.get("userName", trade.get("team_a_owner", "")),
+                        "team_b_name":  self.team_b.get("nickName", trade.get("team_b_name", "")),
+                        "team_b_owner": self.team_b.get("userName", trade.get("team_b_owner", "")),
+                        "players_a": players_a, "picks_a": picks_a,
+                        "players_b": players_b, "picks_b": picks_b,
+                        "side_a_value": result.side_a_value,
+                        "side_b_value": result.side_b_value,
+                        "delta_pct":    result.delta_pct,
+                        "band":         result.band,
+                        "ovr_delta":    a_ovr - b_ovr,
+                        "notes":        result.notes or [],
+                        "ai_commentary": trade.get("ai_commentary", ""),
+                        "proposer_id":  trade.get("proposer_id", 0),
+                        "warnings":     [],
+                    }
+                    _proposer = trade.get("proposer_id", 0)
+                    _theme = get_theme_for_render(_proposer if _proposer else None)
+                    png_bytes = await cr.render_trade_card(card_data, theme_id=_theme)
+                    if png_bytes:
+                        import io as _io
+                        file = discord.File(_io.BytesIO(png_bytes), filename=f"trade_{self.trade_id}_{new_status}.png")
+                        await interaction.message.edit(attachments=[file], view=disabled_view)
+                        if _trades_channel_id() and interaction.guild:
+                            log_ch = interaction.guild.get_channel(_trades_channel_id())
+                            if log_ch:
+                                a_name = trade.get("team_a_name", "Team A")
+                                b_name = trade.get("team_b_name", "Team B")
+                                await log_ch.send(
+                                    f"📋 Trade `{self.trade_id}` **{new_status.upper()}** by {interaction.user.mention} "
+                                    f"— {a_name} ↔ {b_name}"
+                                )
+                        return
+                except Exception as e:
+                    print(f"[trade_center] Status re-render error: {e}")
+
+            # Fallback: edit existing embed title
+            if interaction.message and interaction.message.embeds:
+                old_embed = interaction.message.embeds[0]
+                status_map = {
+                    "approved":  ("✅", "APPROVED"),
+                    "rejected":  ("❌", "REJECTED"),
+                    "countered": ("🔄", "Counter Offered"),
+                }
+                s_emoji, s_label = status_map.get(new_status, ("⏳", new_status.title()))
+                new_embed = old_embed.copy()
+                new_embed.title = f"💱 Trade Proposal — {s_emoji} {s_label}"
+                new_embed.color = color
+                await interaction.message.edit(embed=new_embed, view=disabled_view)
+            else:
+                await interaction.followup.send(
+                    f"{label} by {interaction.user.mention}", ephemeral=True
+                )
+
+            # Announce in trade log channel
+            if _trades_channel_id() and interaction.guild:
+                log_ch = interaction.guild.get_channel(_trades_channel_id())
+                if log_ch:
+                    try:
+                        a_name = trade.get("team_a_name", "Team A")
+                        b_name = trade.get("team_b_name", "Team B")
+                        await log_ch.send(
+                            f"📋 Trade `{self.trade_id}` **{new_status.upper()}** by {interaction.user.mention} "
+                            f"— {a_name} ↔ {b_name}"
+                        )
+                    except Exception:
+                        pass
 
     async def _approve_callback(self, interaction: discord.Interaction):
         if not await is_commissioner(interaction):

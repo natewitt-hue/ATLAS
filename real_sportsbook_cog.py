@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -398,7 +399,12 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         await asyncio.sleep(random.uniform(5, 15))
         now = datetime.now(timezone.utc)
         for sport_key, cfg in SPORT_SEASONS.items():
-            if now.month in cfg["months"]:
+            # Check env override before hardcoded window (e.g. SPORT_SEASON_OVERRIDE_NFL=1)
+            override_key = "SPORT_SEASON_OVERRIDE_" + sport_key.split("_", 1)[-1].upper()
+            override = os.environ.get(override_key)
+            if override == "0":  # explicitly disabled via env var
+                continue
+            if override == "1" or now.month in cfg["months"]:
                 await self._sync_odds(sport_key)
 
     @sync_odds_task.before_loop
@@ -420,7 +426,12 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
         log.info(f"Syncing odds for {sport_key} ({league_key})...")
 
         try:
-            games = await self.client.get_upcoming_odds(league_key)
+            games = await asyncio.wait_for(  # timeout guard: ESPN fetch has no built-in limit
+                self.client.get_upcoming_odds(league_key), timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            log.error(f"ESPN odds fetch timed out for {sport_key} (>10s)")
+            return
         except Exception as e:
             log.error(f"ESPN odds fetch failed for {sport_key}: {e}")
             return
@@ -551,7 +562,12 @@ class RealSportsbookCog(commands.Cog, name="RealSportsbookCog"):
 
         log.info("[REAL-SB] Syncing scores...")
         try:
-            all_scores = await self.client.get_all_scores(days_from=7)
+            all_scores = await asyncio.wait_for(  # timeout guard: ESPN fetch has no built-in limit
+                self.client.get_all_scores(days_from=7), timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            log.error("[REAL-SB] ESPN score fetch timed out (>10s)")
+            return
         except Exception as e:
             log.error(f"[REAL-SB] ESPN score fetch failed: {e}")
             return

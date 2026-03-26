@@ -209,6 +209,8 @@ async def retry_sql(
 # ── Schema fed to AI for SQL generation ──────────────────────────────────────
 
 def _build_schema() -> str:
+    if dm.CURRENT_SEASON is None:  # bug-2: guard against call before dm.load_all() completes
+        return "DATABASE: tsl_history.db — schema unavailable (data not yet loaded)"
     return f"""DATABASE: tsl_history.db  ─  The Simulation League (TSL) Madden franchise history
 
 IMPORTANT RULES:

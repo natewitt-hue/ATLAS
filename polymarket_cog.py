@@ -2168,6 +2168,14 @@ class PolymarketCog(commands.Cog, name="Polymarket"):
 
         log.info(f"Polymarket sync complete — {upserted} upserted, {garbage_count} garbage-filtered.")
 
+        # ── Pass 1b: Prune old price snapshots (>90 days) ────────────────
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:  # bug-7: prevent unbounded price_snapshots growth
+            cutoff_90d = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+            cursor = await db.execute("DELETE FROM price_snapshots WHERE snapshot_at < ?", (cutoff_90d,))
+            if cursor.rowcount:
+                log.info(f"Pruned {cursor.rowcount} price snapshots older than 90 days.")
+            await db.commit()
+
         # ── Pass 2: Emit EVENT_FINALIZED for newly resolved markets ──────
         await self._finalize_resolved_pass()
 

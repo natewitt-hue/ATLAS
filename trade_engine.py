@@ -28,6 +28,17 @@ _PARITY_STATE_PATH = pathlib.Path(__file__).parent / "parity_state.json"
 
 log = logging.getLogger(__name__)
 
+
+def _safe_int(val, default: int = 0) -> int:
+    """BUG#8: NaN-safe int conversion — prevents ValueError on NaN/None/Inf fields."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return default if math.isnan(f) or math.isinf(f) else int(f)
+    except (ValueError, TypeError):
+        return default
+
 # ability_engine is optional — trade valuation works without it (meta bonus = 0)
 try:
     import ability_engine as ae
@@ -36,19 +47,25 @@ except (ImportError, AttributeError):
     ae = None
     _ABILITY_TABLE = {}
 
-# ── FIX #14: Season-dependent config ─────────────────────────────────────────
-# Change these once instead of hunting through ternaries everywhere.
-SEASON_CONFIG = {
-    "green_band_early":  12,    # delta% threshold for GREEN band (season <= 5)
-    "green_band_late":    9,    # delta% threshold for GREEN band (season >= 6)
-    "yellow_band_early": 20,    # delta% threshold for YELLOW band (season <= 5)
-    "yellow_band_late":  20,    # delta% threshold for YELLOW band (season >= 6)
-    "seasonal_mult_early": 1.15,  # pick EV multiplier (season <= 2)
-    "seasonal_mult_late":  0.80,  # pick EV multiplier (season >= 7)
-    "early_season_cutoff": 2,
-    "late_season_cutoff":  7,
-    "band_season_cutoff":  5,
-}
+# ── FIX #14 + BUG#10: Season-dependent config ───────────────────────────────
+# BUG#10: converted from module-level dict to function so dm.CURRENT_SEASON
+# is read at call time, not frozen at import time.
+def _season_config() -> dict:
+    """Return season-dependent config. Evaluated at call time, not module load."""
+    return {
+        "green_band_early":  12,    # delta% threshold for GREEN band (season <= 5)
+        "green_band_late":    9,    # delta% threshold for GREEN band (season >= 6)
+        "yellow_band_early": 20,    # delta% threshold for YELLOW band (season <= 5)
+        "yellow_band_late":  20,    # delta% threshold for YELLOW band (season >= 6)
+        "seasonal_mult_early": 1.15,  # pick EV multiplier (season <= 2)
+        "seasonal_mult_late":  0.80,  # pick EV multiplier (season >= 7)
+        "early_season_cutoff": 2,
+        "late_season_cutoff":  7,
+        "band_season_cutoff":  5,
+    }
+
+# Backwards compat alias — prefer _season_config() for fresh reads
+SEASON_CONFIG = _season_config()
 
 OVR_TABLE: dict[int, int] = {
     99: 3150, 98: 2900, 97: 2650, 96: 2400, 95: 2200, 94: 2000, 93: 1800, 92: 1625,
@@ -177,10 +194,7 @@ def player_value(player: dict, selling_team_id: int = 0, bundle_already_evaluate
 
     # ── OVR: check both field names — export uses playerBestOvr ──────────────
     ovr_raw = player.get("overallRating") or player.get("playerBestOvr") or 75
-    try:
-        ovr = int(float(ovr_raw))
-    except (ValueError, TypeError):
-        ovr = 75
+    ovr = _safe_int(ovr_raw, 75)  # BUG#8: NaN-safe at entry point
 
     pos  = player.get("pos", "HB")
     name = f"{player.get('firstName', '')} {player.get('lastName', '')}".strip()
@@ -188,20 +202,14 @@ def player_value(player: dict, selling_team_id: int = 0, bundle_already_evaluate
     # ── Age: export may not have an age column — derive from yearsPro ─────────
     # FIX #5: math is now a top-level import
     age_raw = player.get("age")
-    if age_raw is None or (isinstance(age_raw, float) and math.isnan(age_raw)):
+    _age_safe = _safe_int(age_raw, -1)  # BUG#8: NaN-safe age conversion
+    if _age_safe <= 0:
         # Derive: base draft age 22 + seasons played
-        try:
-            rookie_yr    = int(float(player.get("rookieYear", dm.CURRENT_SEASON) or dm.CURRENT_SEASON))
-            seasons_played = max(dm.CURRENT_SEASON - rookie_yr, 0)
-            age = 22 + seasons_played
-        except (ValueError, TypeError):
-            age = 25
+        rookie_yr = _safe_int(player.get("rookieYear", dm.CURRENT_SEASON) or dm.CURRENT_SEASON, dm.CURRENT_SEASON)
+        seasons_played = max(dm.CURRENT_SEASON - rookie_yr, 0)
+        age = 22 + seasons_played
     else:
-        try:
-            f = float(age_raw)
-            age = 25 if math.isnan(f) or math.isinf(f) else int(f)
-        except (ValueError, TypeError):
-            age = 25
+        age = _age_safe
 
     # FIX #3: bare except replaced with specific exception + logging
     try:
@@ -211,7 +219,7 @@ def player_value(player: dict, selling_team_id: int = 0, bundle_already_evaluate
         signable = contract.get("signable_flag", True)
     except Exception as e:
         log.warning(f"[Trade] Contract lookup failed for {name}: {e}")
-        years_remaining = int(player.get("contractYearsLeft", 2) or 2)
+        years_remaining = _safe_int(player.get("contractYearsLeft", 2) or 2, 2)  # BUG#8: NaN-safe
         cap_pct = 3.0
         signable = True
 
@@ -259,11 +267,12 @@ def pick_ev(round_: int, draft_year: int, team_id: int = 0, slot_in_round: int =
     except Exception as e:
         log.warning(f"[Trade] Contender discount lookup failed for team {team_id}: {e}")
 
-    # FIX #14: use SEASON_CONFIG instead of inline ternaries
-    if current_season <= SEASON_CONFIG["early_season_cutoff"]:
-        seasonal_mult = SEASON_CONFIG["seasonal_mult_early"]
-    elif current_season >= SEASON_CONFIG["late_season_cutoff"]:
-        seasonal_mult = SEASON_CONFIG["seasonal_mult_late"]
+    # FIX #14 + BUG#10: read config at call time via _season_config()
+    _cfg = _season_config()
+    if current_season <= _cfg["early_season_cutoff"]:
+        seasonal_mult = _cfg["seasonal_mult_early"]
+    elif current_season >= _cfg["late_season_cutoff"]:
+        seasonal_mult = _cfg["seasonal_mult_late"]
     else:
         seasonal_mult = 1.00
     ev = max(int(ev * seasonal_mult), 25)
@@ -320,14 +329,15 @@ def evaluate_trade(side_a: TradeSide, side_b: TradeSide) -> TradeEvalResult:
     max_val = max(a_total, b_total, 1)
     delta_pct = abs(a_total - b_total) / max_val * 100
     
-    # FIX #14: use SEASON_CONFIG for band thresholds
+    # FIX #14 + BUG#10: read config at call time via _season_config()
     season = dm.CURRENT_SEASON if hasattr(dm, "CURRENT_SEASON") else 1
-    if season <= SEASON_CONFIG["band_season_cutoff"]:
-        green_threshold  = SEASON_CONFIG["green_band_early"]
-        yellow_threshold = SEASON_CONFIG["yellow_band_early"]
+    _cfg = _season_config()
+    if season <= _cfg["band_season_cutoff"]:
+        green_threshold  = _cfg["green_band_early"]
+        yellow_threshold = _cfg["yellow_band_early"]
     else:
-        green_threshold  = SEASON_CONFIG["green_band_late"]
-        yellow_threshold = SEASON_CONFIG["yellow_band_late"]
+        green_threshold  = _cfg["green_band_late"]
+        yellow_threshold = _cfg["yellow_band_late"]
 
     band = "GREEN" if delta_pct <= green_threshold else ("YELLOW" if delta_pct <= yellow_threshold else "RED")
 

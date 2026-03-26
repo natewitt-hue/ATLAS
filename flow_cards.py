@@ -42,12 +42,15 @@ def _get_balance(user_id: int) -> int:
 
 
 def _get_season_start_balance(user_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as con:
-        row = con.execute(
-            "SELECT season_start_balance FROM users_table WHERE discord_id = ?",
-            (user_id,)
-        ).fetchone()
-    return row[0] if row else STARTING_BALANCE
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            row = con.execute(
+                "SELECT season_start_balance FROM users_table WHERE discord_id = ?",
+                (user_id,)
+            ).fetchone()
+        return row[0] if row else STARTING_BALANCE
+    except sqlite3.OperationalError:
+        return 0  # column may not exist on older DBs — safe fallback
 
 
 def _get_weekly_delta(user_id: int) -> int:

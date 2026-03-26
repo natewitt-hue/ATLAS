@@ -637,6 +637,21 @@ def load_all() -> None:
                     p["teamName"] = _l_name_map.get(int(tid), "Free Agent")
                 except (ValueError, TypeError):
                     p["teamName"] = "Free Agent"
+
+            # Normalize critical int fields — None from CSV causes int() crashes in
+            # trade_engine, genesis_cog, and ability_engine. Belt-and-suspenders:
+            # callers should also guard, but the data layer is the safest fix point.
+            for _field, _default in (
+                ("overallRating",     0),
+                ("devTrait",          0),   # 0=Normal, 1=Star, 2=SS, 3=XFactor
+                ("contractYearsLeft", 0),
+                ("contractSalary",    0),
+                ("injuryLength",      0),
+                ("yearsPro",          0),
+            ):
+                if p.get(_field) is None:
+                    p[_field] = _default
+
         print(f"     {len(players_raw)} players loaded")
     _l_players_cache = players_raw
 

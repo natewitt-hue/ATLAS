@@ -1169,7 +1169,7 @@ async def get_house_report() -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def can_claim_scratch(discord_id: int) -> bool:
-    today = date.today().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()  # UTC midnight boundary, not local
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT last_claim FROM daily_scratches WHERE discord_id=?", (discord_id,)
@@ -1188,8 +1188,9 @@ async def get_scratch_streak(discord_id: int) -> int:
             row = await cur.fetchone()
     if not row:
         return 0
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    today = date.today().isoformat()
+    utc_today = datetime.now(timezone.utc).date()  # UTC midnight boundary, not local
+    yesterday = (utc_today - timedelta(days=1)).isoformat()
+    today = utc_today.isoformat()
     if row[1] in (yesterday, today):
         return row[0]
     return 0  # streak broken
@@ -1206,8 +1207,9 @@ async def claim_scratch(discord_id: int, reward: int | None = None) -> dict | No
     if not await can_claim_scratch(discord_id):
         return None
 
-    today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    utc_today = datetime.now(timezone.utc).date()  # UTC midnight boundary, not local
+    today = utc_today.isoformat()
+    yesterday = (utc_today - timedelta(days=1)).isoformat()
 
     # Fallback: roll if caller didn't pass a pre-computed reward
     if reward is None:
@@ -1310,8 +1312,11 @@ def _generate_crash_point() -> tuple[float, str]:
     Uses a seeded hash so the crash point can be revealed after the round
     as proof it wasn't manipulated.
     """
-    seed = secrets.token_urlsafe(16)
-    h    = int(hashlib.sha256(seed.encode()).hexdigest(), 16)
+    entropy = secrets.token_bytes(8)  # per-round CSPRNG entropy, not default random
+    seed = entropy.hex()
+    seed_hash = hashlib.sha256(entropy).hexdigest()  # logged for auditability
+    log.info("Crash round seed hash: %s", seed_hash)
+    h    = int(seed_hash, 16)
     # Map hash to 0.0–1.0
     p    = (h % 10_000_000) / 10_000_000
 
@@ -1390,6 +1395,49 @@ async def cashout_crash_bet(bet_id: int, discord_id: int, multiplier: float) -> 
         await db.commit()
 
     return payout
+
+
+async def void_stale_crash_bets(max_idle_minutes: int = 30) -> list[dict]:
+    """Auto-void open wagers for crash sessions idle > max_idle_minutes.
+
+    Prevents players who leave mid-session from having unresolved wagers.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_idle_minutes)).isoformat()
+    voided = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Find active bets in rounds that have been open/idle past the cutoff
+        async with db.execute("""
+            SELECT cb.id, cb.discord_id, cb.wager, cr.round_id
+            FROM crash_bets cb
+            JOIN crash_rounds cr ON cb.round_id = cr.round_id
+            WHERE cb.status = 'active'
+              AND cr.status = 'open'
+              AND cr.created_at < ?
+        """, (cutoff,)) as cur:
+            stale = await cur.fetchall()
+
+        for bet_id, discord_id, wager, round_id in stale:
+            await db.execute(
+                "UPDATE crash_bets SET status='voided' WHERE id=?", (bet_id,)
+            )
+            # Refund the stale wager back to the player
+            await flow_wallet.credit(
+                discord_id, wager, "CASINO",
+                description="crash session timeout refund",  # auto-void idle >30min
+                reference_key=f"CRASH_TIMEOUT_{bet_id}",
+            )
+            voided.append({"bet_id": bet_id, "discord_id": discord_id, "wager": wager})
+            log.warning("Voided stale crash bet %d: $%d refunded to user %d", bet_id, wager, discord_id)
+
+        # Close the stale rounds too
+        if stale:
+            await db.execute(
+                "UPDATE crash_rounds SET status='timeout' WHERE status='open' AND created_at < ?",
+                (cutoff,),
+            )
+            await db.commit()
+
+    return voided
 
 
 async def resolve_crash_round(round_id: int) -> list[dict]:

@@ -182,6 +182,7 @@ async def gemini_sql(
 ) -> str | None:
     """Ask AI to generate SQL. Non-blocking via run_in_executor."""
     _sanitize = lambda s: re.sub(r"['\";\\]", "", s)
+    question = _sanitize(question)  # bug-8: sanitize user question before injecting into AI prompt
     alias_block = ""
     if alias_map:
         lines = [f"  '{_sanitize(nick)}' → use username '{_sanitize(user)}' in SQL" for nick, user in alias_map.items()]
@@ -260,7 +261,11 @@ Now generate a query for this question:
 """
 
     result = await atlas_ai.generate(prompt, tier=Tier.SONNET, temperature=0.05)
-    return extract_sql(result.text)
+    sql = extract_sql(result.text)
+    if sql and re.search(r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE)\b', sql, re.IGNORECASE):  # bug-8: reject mutating SQL from AI
+        log.warning("Blocked dangerous SQL from AI: %s", sql[:200])
+        return None
+    return sql
 
 
 async def gemini_answer(

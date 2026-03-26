@@ -77,10 +77,13 @@ _followup_counter: int = 0                 # Counter for periodic chain cache cl
 def _fire_and_log(coro, label: str = "") -> asyncio.Task:
     """Schedule a coroutine as a fire-and-forget task, logging any exceptions."""
     task = asyncio.ensure_future(coro)
-    task.add_done_callback(
-        lambda t: _log.warning("Background task %r failed: %s", label, t.exception())
-        if not t.cancelled() and t.exception() else None
-    )
+    def _safe_done_cb(t: asyncio.Task) -> None:  # bug-3: guard callback against its own exceptions
+        try:
+            if not t.cancelled() and t.exception():
+                _log.warning("Background task %r failed: %s", label, t.exception())
+        except Exception:  # bug-3: prevent callback crash from swallowing original error
+            _log.error("Background task %r: done-callback itself raised", label, exc_info=True)
+    task.add_done_callback(_safe_done_cb)
     return task
 
 
@@ -818,8 +821,9 @@ async def _ai_blurb(prompt: str, max_tokens: int = 120) -> str:
     try:
         result = await atlas_ai.generate(prompt, tier=Tier.HAIKU, max_tokens=max_tokens, temperature=0.8)
         return result.text
-    except Exception:
-        return ""
+    except Exception:  # bug-5: fallback on AI timeout/failure instead of silent empty
+        _log.warning("AI blurb generation failed — returning fallback", exc_info=True)
+        return "Stats summary unavailable — try again shortly."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2785,7 +2789,7 @@ class H2HModal(discord.ui.Modal, title="⚔️ Head-to-Head Lookup"):
             except Exception:
                 pass
 
-        embed.set_footer(text="Regular season only · All 6 seasons · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)
+        embed.set_footer(text=f"Regular season only · All {dm.CURRENT_SEASON} seasons · ATLAS™ Oracle", icon_url=ATLAS_ICON_URL)  # bug-4: read CURRENT_SEASON at invocation
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -4100,9 +4104,10 @@ class DraftSeasonView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=120)
+        current = dm.CURRENT_SEASON or 1  # bug-4: read at invocation, guard None
         options = [discord.SelectOption(label="All Seasons Overview", value="0")] + [
             discord.SelectOption(label=f"Season {s}", value=str(s))
-            for s in range(1, dm.CURRENT_SEASON + 1)
+            for s in range(1, current + 1)
         ]
         self.season_select.options = options[-25:]
 
@@ -4148,10 +4153,14 @@ class WeekRecapView(discord.ui.View):
 class SeasonRecapModal(discord.ui.Modal, title="📅 Season Recap"):
     season = discord.ui.TextInput(
         label="Season Number",
-        placeholder=f"1–{dm.CURRENT_SEASON}",
+        placeholder="Enter season number",  # bug-4: placeholder set at invocation via __init__
         required=True,
         max_length=3,
     )
+
+    def __init__(self):  # bug-4: read dm.CURRENT_SEASON at invocation, not class definition
+        super().__init__()
+        self.season.placeholder = f"1–{dm.CURRENT_SEASON}"
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True, ephemeral=True)

@@ -17,6 +17,7 @@ Discord commands (registered in bot.py):
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
+import functools  # BUG#7: needed for lru_cache on archetype calculation
 import logging
 import math
 import random
@@ -54,9 +55,10 @@ DEV_INT_TO_STR = {0: "Normal", 1: "Star", 2: "Superstar", 3: "Superstar X-Factor
 #   B = Solid, moderate threshold (above average, ~50th-70th pct)
 #   C = Common/universal (recovery, stamina, generic traits) — no stat gate
 #
-# Threshold format: dict of {stat_field: min_value} — ALL must be met (AND logic)
-#   Physical floor fields are also included here under the same AND logic.
-#   For dual-attribute checks, use OR logic (see CLAUDE.md: MaddenStats API Gotchas).
+# Threshold format: dict of {stat_field: min_value}
+#   Exactly 2 regular stat thresholds → OR logic (dual-attr per CLAUDE.md).
+#   1 or 3+ regular stat thresholds → AND logic (all must be met).
+#   Special keys (_edge_pmv_or_fmv, weight) always AND-checked independently.
 #
 # Archetype field: if set, calculate_true_archetype() must return that value.
 #   None = any archetype qualifies.
@@ -450,12 +452,24 @@ def _normalize_dev(player: dict) -> str:
     return DEV_INT_TO_STR.get(_safe_int(dev_int), "Normal")
 
 
+# BUG#7: LRU cache for archetype — called 3000+ times per full audit.
+# Keyed on (rosterId, season) since archetype ratings don't change within a season.
+@functools.lru_cache(maxsize=4096)
+def _cached_archetype(roster_id: int, season: int, pos: str, arch_tuple: tuple) -> str:
+    """Inner cached archetype resolver. arch_tuple = sorted pairs of (name, rating)."""
+    arch_scores = dict(arch_tuple)
+    return max(arch_scores, key=arch_scores.get) if arch_scores else "Unknown"
+
+
 def calculate_true_archetype(player: dict) -> str:
     """
     Determine a player's true archetype by comparing arch rating fields.
     Uses the game's own pre-computed archetype ratings rather than raw stats
     so the result is consistent with what Madden itself uses.
     Returns a canonical archetype string or 'Unknown'.
+
+    BUG#7: Results cached by (rosterId, season) to avoid redundant computation
+    during full-league audits (3000+ calls).
     """
     pos = player.get("pos", "")
 
@@ -530,7 +544,15 @@ def calculate_true_archetype(player: dict) -> str:
     else:
         return "Unknown"
 
-    return max(arch_scores, key=arch_scores.get) if arch_scores else "Unknown"
+    # BUG#7: delegate to cached resolver keyed on (rosterId, season)
+    try:
+        import data_manager as _dm
+        season = _dm.CURRENT_SEASON if hasattr(_dm, "CURRENT_SEASON") else 0
+    except ImportError:
+        season = 0
+    roster_id = _safe_int(player.get("rosterId", 0))
+    arch_tuple = tuple(sorted(arch_scores.items()))  # hashable for lru_cache
+    return _cached_archetype(roster_id, season, pos, arch_tuple)
 
 
 def check_physics_floor(player: dict, ability_name: str) -> tuple[bool, str]:
@@ -546,11 +568,18 @@ def check_physics_floor(player: dict, ability_name: str) -> tuple[bool, str]:
         return True, ""  # unknown ability = don't flag (can't audit what we don't know)
 
     thresholds = entry.get("thresholds", {})
+
+    # BUG#6: dual-attribute checks use OR logic per CLAUDE.md, not AND.
+    # Identify regular stat keys (exclude special keys handled separately).
+    _special_keys = {"_edge_pmv_or_fmv", "weight"}
+    regular_keys = [k for k in thresholds if k not in _special_keys]
+    is_dual_attr = len(regular_keys) == 2  # exactly 2 stat thresholds → OR logic
+
+    # First: always check special keys with AND (they are independent constraints)
     for key, min_val in thresholds.items():
         if key == "_edge_pmv_or_fmv":
             pmv = player.get("powerMovesRating", 0)
             fmv = player.get("finesseMovesRating", 0)
-            # Use the higher of the two (players specialize in one; finesse most common)
             best = max(pmv, fmv)
             if best < min_val:
                 return False, f"PMV({pmv}) or FMV({fmv}) must be ≥{min_val} (best={best})"
@@ -558,7 +587,23 @@ def check_physics_floor(player: dict, ability_name: str) -> tuple[bool, str]:
             actual = _safe_int(player.get("weight", 0))
             if actual < min_val:
                 return False, f"weight {actual}lbs < {min_val}lbs floor"
-        else:
+
+    # Then: check regular stat thresholds
+    if is_dual_attr:
+        # OR logic: player qualifies if EITHER threshold is met (per CLAUDE.md dual-attr rule)
+        fail_reasons = []
+        for key in regular_keys:
+            min_val = thresholds[key]
+            actual = _safe_int(player.get(key, 0))
+            if actual >= min_val:
+                return True, ""  # at least one met → pass
+            stat_label = key.replace("Rating", "").replace("Trait", "★")
+            fail_reasons.append(f"{stat_label}={actual} < {min_val}")
+        return False, " OR ".join(fail_reasons) + " (dual-attr OR)"
+    else:
+        # AND logic: all regular thresholds must be met
+        for key in regular_keys:
+            min_val = thresholds[key]
             actual = _safe_int(player.get(key, 0))
             if actual < min_val:
                 stat_label = key.replace("Rating", "").replace("Trait", "★")
@@ -909,6 +954,12 @@ def get_qualified_abilities(player: dict) -> list[tuple[str, int]]:
         passes = True
         surplus = 0
 
+        # BUG#6: dual-attribute checks use OR logic per CLAUDE.md
+        _special_keys = {"_edge_pmv_or_fmv", "weight"}
+        regular_keys = [k for k in thresholds if k not in _special_keys]
+        is_dual_attr = len(regular_keys) == 2  # exactly 2 stat thresholds → OR
+
+        # Special keys checked with AND first
         for key, min_val in thresholds.items():
             if key == "_edge_pmv_or_fmv":
                 pmv = _safe_int(player.get("powerMovesRating", 0))
@@ -924,8 +975,29 @@ def get_qualified_abilities(player: dict) -> list[tuple[str, int]]:
                     passes = False
                     break
                 surplus += actual - min_val
-            else:
+
+        if not passes:
+            continue
+
+        if is_dual_attr:
+            # OR: pass if EITHER regular threshold met (dual-attr per CLAUDE.md)
+            any_pass = False
+            best_surplus = 0
+            for key in regular_keys:
                 actual = _safe_int(player.get(key, 0))
+                min_val = thresholds[key]
+                if actual >= min_val:
+                    any_pass = True
+                    best_surplus = max(best_surplus, actual - min_val)
+            if not any_pass:
+                passes = False
+            else:
+                surplus += best_surplus
+        else:
+            # AND: all regular thresholds must be met
+            for key in regular_keys:
+                actual = _safe_int(player.get(key, 0))
+                min_val = thresholds[key]
                 if actual < min_val:
                     passes = False
                     break

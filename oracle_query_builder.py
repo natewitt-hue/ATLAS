@@ -21,10 +21,16 @@ Domain guards enforced by code, not LLM suggestions:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
 log = logging.getLogger("oracle_query_builder")
+
+
+def _sanitize_input(s: str) -> str:
+    """Strip special chars from user-supplied names before inclusion in AI prompts."""  # bug-1
+    return re.sub(r"['\";\\-]+", "", s).strip() if isinstance(s, str) else s
 
 # ── Lazy imports to avoid circular dependencies ──────────────────────────────
 _dm = None
@@ -497,6 +503,7 @@ class Query:
 
 def h2h(u1: str, u2: str, season: int | None = None) -> tuple[str, tuple]:
     """Head-to-head record — wraps existing deterministic SQL."""
+    u1, u2 = _sanitize_input(u1), _sanitize_input(u2)  # bug-1: sanitize user-supplied names
     intents = _get_codex_intents()
     if intents is None:
         raise RuntimeError("codex_intents not available")
@@ -505,6 +512,7 @@ def h2h(u1: str, u2: str, season: int | None = None) -> tuple[str, tuple]:
 
 def owner_record(user: str, season: int | None = None) -> tuple[str, tuple]:
     """Owner's win/loss record across their tenure."""
+    user = _sanitize_input(user)  # bug-1: sanitize user-supplied name
     params: list[Any] = [user, user, user, user, user]
     sql = """
         SELECT
@@ -533,6 +541,7 @@ def owner_record(user: str, season: int | None = None) -> tuple[str, tuple]:
 
 def team_record(team: str, season: int | None = None) -> tuple[str, tuple]:
     """Team's win/loss record."""
+    team = _sanitize_input(team)  # bug-1: sanitize user-supplied team name
     params: list[Any] = [team, team, team, team]
     sql = """
         SELECT
@@ -584,6 +593,7 @@ def standings_query(
 
 def streak_query(user: str) -> tuple[str, tuple]:
     """Last 20 games for computing current streak."""
+    user = _sanitize_input(user)  # bug-1: sanitize user-supplied name
     sql = """
         SELECT winner_user, seasonIndex, weekIndex,
                homeTeamName, awayTeamName, homeScore, awayScore
@@ -666,6 +676,7 @@ def roster_query(
     pos: str | None = None,
 ) -> tuple[str, tuple]:
     """Team roster query."""
+    team = _sanitize_input(team)  # bug-1: sanitize user-supplied team name
     q = (
         Query("players")
         .select(
@@ -733,6 +744,8 @@ def abilities_query(
     player: str | None = None,
 ) -> tuple[str, tuple]:
     """Player abilities (X-Factor/Superstar)."""
+    if team: team = _sanitize_input(team)  # bug-1: sanitize user-supplied names
+    if player: player = _sanitize_input(player)  # bug-1: sanitize user-supplied names
     q = Query("player_abilities").select(
         "firstName", "lastName", "teamName", "title", "description",
     )
@@ -813,6 +826,8 @@ def recent_games_query(
     opponent: str | None = None,
 ) -> tuple[str, tuple]:
     """Recent games for a user."""
+    user = _sanitize_input(user)  # bug-1: sanitize user-supplied name
+    if opponent: opponent = _sanitize_input(opponent)  # bug-1: sanitize user-supplied name
     params: list[Any] = [user, user]
     sql = """
         SELECT homeTeamName, awayTeamName, homeScore, awayScore,

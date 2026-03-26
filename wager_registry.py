@@ -27,6 +27,21 @@ log = logging.getLogger("wager_registry")
 
 _DB_TIMEOUT = 10
 
+# BUG-6 FIX: valid status transitions — prevents arbitrary overwrites
+VALID_TRANSITIONS: dict[str, set[str]] = {
+    "open":   {"won", "lost", "push", "voided", "cancelled"},
+    "won":    {"voided"},           # admin correction only
+    "lost":   {"voided"},           # admin correction only
+    "push":   {"voided"},           # admin correction only
+    "voided": set(),                # terminal state
+    "cancelled": set(),             # terminal state
+}
+
+
+class InvalidTransitionError(Exception):
+    """Raised when a wager status transition is not allowed."""
+    pass
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -135,6 +150,46 @@ async def settle_wager(
         await db.commit()
 
 
+async def update_wager_status(
+    subsystem: str,
+    subsystem_id: str,
+    new_status: str,
+    result_amount: Optional[int] = None,
+    *,
+    con=None,
+) -> None:
+    """Update wager status with transition validation (BUG-6 FIX)."""
+    ts = _now()
+
+    async def _do(db):
+        async with db.execute(
+            "SELECT status FROM wagers WHERE subsystem=? AND subsystem_id=?",
+            (subsystem, subsystem_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise ValueError(f"Wager not found: {subsystem}/{subsystem_id}")
+        current = row[0]
+        allowed = VALID_TRANSITIONS.get(current, set())
+        if new_status not in allowed:  # BUG-6 FIX: enforce valid transitions
+            raise InvalidTransitionError(
+                f"Cannot transition wager from '{current}' to '{new_status}'"
+            )
+        await db.execute(
+            "UPDATE wagers SET status=?, result_amount=COALESCE(?, result_amount), settled_at=? "
+            "WHERE subsystem=? AND subsystem_id=?",
+            (new_status, result_amount, ts, subsystem, subsystem_id),
+        )
+
+    if con is not None:
+        await _do(con)
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _do(db)
+        await db.commit()
+
+
 # =============================================================================
 #  SYNC API (for flow_sportsbook.py)
 # =============================================================================
@@ -197,6 +252,45 @@ def settle_wager_sync(
             "UPDATE wagers SET status=?, result_amount=?, settled_at=? "
             "WHERE subsystem=? AND subsystem_id=? AND status='open'",
             (status, result_amount, ts, subsystem, subsystem_id),
+        )
+
+    if con is not None:
+        _do(con)
+        return
+
+    with _db_con_sync() as c:
+        _do(c)
+        c.commit()
+
+
+def update_wager_status_sync(
+    subsystem: str,
+    subsystem_id: str,
+    new_status: str,
+    result_amount: Optional[int] = None,
+    *,
+    con: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Sync version of update_wager_status with transition validation (BUG-6 FIX)."""
+    ts = _now()
+
+    def _do(c):
+        row = c.execute(
+            "SELECT status FROM wagers WHERE subsystem=? AND subsystem_id=?",
+            (subsystem, subsystem_id),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Wager not found: {subsystem}/{subsystem_id}")
+        current = row[0]
+        allowed = VALID_TRANSITIONS.get(current, set())
+        if new_status not in allowed:  # BUG-6 FIX: enforce valid transitions
+            raise InvalidTransitionError(
+                f"Cannot transition wager from '{current}' to '{new_status}'"
+            )
+        c.execute(
+            "UPDATE wagers SET status=?, result_amount=COALESCE(?, result_amount), settled_at=? "
+            "WHERE subsystem=? AND subsystem_id=?",
+            (new_status, result_amount, ts, subsystem, subsystem_id),
         )
 
     if con is not None:

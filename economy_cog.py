@@ -363,20 +363,35 @@ class EconomyCog(commands.Cog):
 
         paid_count = 0
         last_paid = stipend.get("last_paid", "init")
+        # BUG-7 FIX: mark paid BEFORE payouts — prevents double-pay if bot crashes mid-loop
+        await mark_stipend_paid(stipend["stipend_id"])
         try:
-            for member in members:
+            # BUG-9 FIX: use floor division + distribute remainder 1-coin-at-a-time
+            num_members = len(members)
+            if num_members > 0:
+                base_amount = abs(stipend["amount"]) // num_members if num_members > 1 else abs(stipend["amount"])
+                remainder = abs(stipend["amount"]) - (base_amount * num_members) if num_members > 1 else 0
+            else:
+                base_amount = abs(stipend["amount"])
+                remainder = 0
+
+            for idx, member in enumerate(members):
+                # BUG-9 FIX: first N users get +1 coin to distribute remainder
+                payout = base_amount + (1 if idx < remainder else 0)
+                if payout <= 0:
+                    continue
                 # Deterministic ref_key: same stipend + member + period = same key,
                 # so reruns after partial failure are idempotent.
                 stip_ref = f"STIPEND_{stipend['stipend_id']}_{member.id}_{last_paid}"
                 if stipend["amount"] > 0:
                     old, new_bal = await admin_give(
-                        member.id, stipend["amount"], stipend["created_by"],
+                        member.id, payout, stipend["created_by"],
                         f"Stipend: {stipend['reason']}",
                         reference_key=stip_ref,
                     )
                 else:
                     old, new_bal = await admin_take(
-                        member.id, abs(stipend["amount"]), stipend["created_by"],
+                        member.id, payout, stipend["created_by"],
                         f"Deduction: {stipend['reason']}",
                         reference_key=stip_ref,
                     )
@@ -385,13 +400,13 @@ class EconomyCog(commands.Cog):
                 from ledger_poster import post_transaction
                 await post_transaction(
                     self.bot, guild.id, member.id,
-                    "STIPEND", stipend["amount"], new_bal,
+                    "STIPEND", payout if stipend["amount"] > 0 else -payout, new_bal,
                     stipend["reason"] or "Stipend payout", txn_id,
                 )
                 paid_count += 1
 
-            await mark_stipend_paid(stipend["stipend_id"])
         except Exception as e:
+            # BUG-8 FIX: log partial failure — idempotent ref_keys prevent double-pay on retry
             log.error(
                 "Stipend %s failed mid-loop after %d/%d members: %s",
                 stipend["stipend_id"], paid_count, len(members), e,
@@ -521,8 +536,18 @@ class EconomyCog(commands.Cog):
             return await interaction.followup.send(
                 f"❌ No members have {role.mention}.", ephemeral=True
             )
-        for m in members:
-            await admin_give(m.id, amount, interaction.user.id, reason)
+        # BUG-8 FIX: wrap batch payout in try/except for partial failure visibility
+        paid = 0
+        try:
+            for m in members:
+                await admin_give(m.id, amount, interaction.user.id, reason)
+                paid += 1
+        except Exception as e:
+            log.error("Role give failed after %d/%d members: %s", paid, len(members), e)
+            return await interaction.followup.send(
+                f"⚠️ Partial failure: paid {paid}/{len(members)} members. Error: {e}",
+                ephemeral=True,
+            )
 
         await self._post_audit(
             f"**{interaction.user.display_name}** gave **{amount:,}** to "
@@ -549,8 +574,18 @@ class EconomyCog(commands.Cog):
             return await interaction.followup.send(
                 f"❌ No members have {role.mention}.", ephemeral=True
             )
-        for m in members:
-            await admin_take(m.id, amount, interaction.user.id, reason)
+        # BUG-8 FIX: wrap batch payout in try/except for partial failure visibility
+        paid = 0
+        try:
+            for m in members:
+                await admin_take(m.id, amount, interaction.user.id, reason)
+                paid += 1
+        except Exception as e:
+            log.error("Role take failed after %d/%d members: %s", paid, len(members), e)
+            return await interaction.followup.send(
+                f"⚠️ Partial failure: deducted from {paid}/{len(members)} members. Error: {e}",
+                ephemeral=True,
+            )
 
         await self._post_audit(
             f"**{interaction.user.display_name}** took **{amount:,}** from "

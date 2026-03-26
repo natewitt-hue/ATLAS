@@ -45,10 +45,12 @@ def _rarity_val(r: str) -> int:
 # =============================================================================
 
 def _utcnow() -> str:
+    # BUG-11 FIX: always use timezone.utc — never datetime.now() without tz
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _utcnow_dt() -> datetime:
+    # BUG-11 FIX: always use timezone.utc — never datetime.now() without tz
     return datetime.now(timezone.utc)
 
 

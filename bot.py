@@ -167,7 +167,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.9.3"  # fix: rosterId staleness check, ruling panel restart guard, counter on resolved trade
+ATLAS_VERSION = "7.10.0"  # fix: sicko mode code review — AI timeout, NaN normalization, locking, error handling across 25 files
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

@@ -90,6 +90,14 @@ FREE_SPIN_OUTCOME_TABLE = [
 for _tbl in (SLOTS_OUTCOME_TABLE, FREE_SPIN_OUTCOME_TABLE):
     assert abs(_tbl[-1][0] - 1.0) < 1e-9, "RTP table final cumulative probability must be 1.0"
 
+# Validate symbol weight distribution sums to expected total at module load
+from atlas_html_engine import SLOT_ICON_CONFIG as _SIC
+_EXPECTED_WEIGHT_TOTAL = 80  # design constant: sum of all symbol weights (excluding wild=0)
+_actual_weight_total = sum(cfg["weight"] for cfg in _SIC.values())
+assert _actual_weight_total == _EXPECTED_WEIGHT_TOTAL, (  # guard against accidental weight drift
+    f"Slot symbol weights sum to {_actual_weight_total}, expected {_EXPECTED_WEIGHT_TOTAL}"
+)
+
 
 def _roll_outcome(table=None) -> tuple[float, str, str]:
     """Roll an outcome tier. Returns (multiplier, visual_type, message)."""

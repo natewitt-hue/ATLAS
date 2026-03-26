@@ -70,6 +70,12 @@ _GEMINI_MODELS = {
     Tier.OPUS: "gemini-2.0-flash",  # 2.5-pro requires thinking mode which can empty-response with low max_tokens
 }
 
+# ── Timeout config ───────────────────────────────────────────────────────────
+# generate() and generate_with_tools() enforce this timeout via asyncio.wait_for.
+# Discord deferred interactions have a 15-min window; 60s covers all real use cases
+# while preventing stalled Gemini calls from blocking the bot indefinitely.
+_AI_TIMEOUT: float = 60.0
+
 # ── Client singletons ────────────────────────────────────────────────────────
 
 _claude_client = None
@@ -448,25 +454,38 @@ async def generate(
     claude = _get_claude()
     if claude:
         try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: _call_claude(claude, prompt, system, tier,
-                                     max_tokens, temperature, json_mode),
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _call_claude(claude, prompt, system, tier,
+                                         max_tokens, temperature, json_mode),
+                ),
+                timeout=_AI_TIMEOUT,
             )
             return result
+        except asyncio.TimeoutError:
+            log.warning(f"[atlas_ai] Claude timed out after {_AI_TIMEOUT}s, falling back to Gemini")
         except Exception as e:
             log.warning(f"[atlas_ai] Claude failed ({e}), falling back to Gemini")
+    else:
+        log.debug("[atlas_ai] Claude client not available, using Gemini")
 
     gemini = _get_gemini()
     if gemini:
         try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: _call_gemini(gemini, prompt, system, tier,
-                                     max_tokens, temperature, json_mode),
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _call_gemini(gemini, prompt, system, tier,
+                                         max_tokens, temperature, json_mode),
+                ),
+                timeout=_AI_TIMEOUT,
             )
             result.fallback_used = True
             return result
+        except asyncio.TimeoutError:
+            log.error(f"[atlas_ai] Gemini also timed out after {_AI_TIMEOUT}s")
+            raise asyncio.TimeoutError("Both Claude and Gemini timed out")
         except Exception as e2:
             log.error(f"[atlas_ai] Gemini fallback also failed: {e2}")
             raise
@@ -488,25 +507,39 @@ async def generate_with_tools(
     claude = _get_claude()
     if claude:
         try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: _call_claude_with_tools(claude, prompt, tools,
-                                                system, tier, max_tokens),
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _call_claude_with_tools(claude, prompt, tools,
+                                                    system, tier, max_tokens),
+                ),
+                timeout=_AI_TIMEOUT,
             )
+            # Log if tool call was expected but not returned (silent failure guard)
+            if tools and not result.tool_calls:
+                log.debug("[atlas_ai] Claude returned no tool_calls despite tools being provided")
             return result
+        except asyncio.TimeoutError:
+            log.warning(f"[atlas_ai] Claude tools timed out after {_AI_TIMEOUT}s, falling back to Gemini")
         except Exception as e:
             log.warning(f"[atlas_ai] Claude tools failed ({e}), falling back to Gemini")
 
     gemini = _get_gemini()
     if gemini:
         try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: _call_gemini_with_tools(gemini, prompt, tools,
-                                                system, tier, max_tokens),
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _call_gemini_with_tools(gemini, prompt, tools,
+                                                    system, tier, max_tokens),
+                ),
+                timeout=_AI_TIMEOUT,
             )
             result.fallback_used = True
             return result
+        except asyncio.TimeoutError:
+            log.error(f"[atlas_ai] Gemini tools also timed out after {_AI_TIMEOUT}s")
+            raise asyncio.TimeoutError("Both Claude and Gemini tools timed out")
         except Exception as e2:
             log.error(f"[atlas_ai] Gemini tools fallback also failed: {e2}")
             raise

@@ -93,17 +93,29 @@ class PlayAgainView(discord.ui.View):
             )
         self._used = True
 
+        # Clamp wager to current max_bet in case it changed since last game
+        max_bet = await get_max_bet(self.user_id)
+        actual_wager = min(self.wager, max_bet)  # previous_bet may exceed current max_bet
+
         # Check balance BEFORE consuming the interaction response
         bal = await get_balance(self.user_id)
-        if bal < self.wager:
+        if bal < actual_wager:
             self._used = False
             return await interaction.response.send_message(
-                f"❌ Not enough Bucks — need **${self.wager:,}**, have **${bal:,}**.",
+                f"❌ Not enough Bucks — need **${actual_wager:,}**, have **${bal:,}**.",
                 ephemeral=True,
             )
 
         self._disable_all()
-        await self.replay_callback(interaction, replay_message=interaction.message)
+        # Use clamped wager if it was reduced
+        if actual_wager < self.wager:
+            import functools
+            clamped_callback = functools.partial(
+                self.replay_callback.func, wager=actual_wager
+            )
+            await clamped_callback(interaction, replay_message=interaction.message)
+        else:
+            await self.replay_callback(interaction, replay_message=interaction.message)
 
     async def _on_double(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user_id:

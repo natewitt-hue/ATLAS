@@ -1,6 +1,7 @@
 """
 awards_cog.py — ATLAS Echo · Anonymous Awards & Voting System
 """
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,8 @@ from permissions import ADMIN_USER_IDS
 
 log = logging.getLogger("awards")
 
+_polls_lock = asyncio.Lock()  # bug-6: guard concurrent poll file reads/writes
+
 # ── Poll persistence ──────────────────────────────────────────────────────────
 _POLLS_PATH = os.path.join(os.path.dirname(__file__), "polls_state.json")
 
@@ -26,7 +29,7 @@ def _load_polls() -> dict:
             log.exception("Poll load error")
     return {}
 
-def _save_polls() -> None:
+def _save_polls_sync() -> None:  # bug-6: renamed; callers must hold _polls_lock
     try:
         tmp = _POLLS_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -34,6 +37,11 @@ def _save_polls() -> None:
         os.replace(tmp, _POLLS_PATH)
     except Exception:
         log.exception("Poll save error")
+
+
+async def _save_polls() -> None:  # bug-6: async wrapper that acquires lock before writing
+    async with _polls_lock:
+        _save_polls_sync()
 
 _polls: dict = _load_polls()
 
@@ -62,7 +70,7 @@ class VoteSelect(discord.ui.Select):
             return await interaction.response.send_message("⚠️ You have already voted.", ephemeral=True)
             
         poll["votes"][uid] = self.values[0]
-        _save_polls()  # persist every vote immediately
+        await _save_polls()  # bug-6: await async lock-guarded write
         await interaction.response.send_message("✅ Vote recorded anonymously.", ephemeral=True)
 
 class VoteView(discord.ui.View):
@@ -80,7 +88,7 @@ class AwardsCog(commands.Cog):
         poll_id = str(uuid.uuid4())[:8]
         options = [n.strip() for n in nominees.split(",")]
         _polls[poll_id] = {"title": title, "options": options, "votes": {}, "open": True}
-        _save_polls()
+        await _save_polls()  # bug-6: await async lock-guarded write
 
         embed = discord.Embed(title=f"🗳️ {title}", description="Select your choice from the dropdown below. Votes are blind.", color=AtlasColors.TSL_GOLD)
         view = VoteView(poll_id, options)
@@ -95,7 +103,7 @@ class AwardsCog(commands.Cog):
             return await interaction.response.send_message("Poll not found.", ephemeral=True)
 
         _polls[poll_id]["open"] = False
-        _save_polls()
+        await _save_polls()  # bug-6: await async lock-guarded write
         tally = {}
         for vote in _polls[poll_id]["votes"].values():
             tally[vote] = tally.get(vote, 0) + 1

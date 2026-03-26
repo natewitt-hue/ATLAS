@@ -102,7 +102,7 @@ from permissions import ADMIN_USER_IDS
 STARTING_BALANCE  = 1000
 MIN_BET           = 50      # unified with real sportsbook
 WAGER_PRESETS     = [50, 100, 250, 500, 1000]
-MAX_PARLAY_LEGS   = 6
+MAX_PARLAY_LEGS   = 12     # BUG-3 FIX: raised from 6 to cap at 12 legs max
 HOME_FIELD_EDGE   = 2.0       # pts advantage — only applied when home is already favored
 SPREAD_CAP        = 21.0      # max absolute spread value (Madden has wider margins)
 OU_FLOOR          = 35.0      # minimum O/U total
@@ -485,8 +485,8 @@ def _compute_elo_ratings() -> dict:
                    CAST(weekIndex AS INTEGER) AS week
             FROM games
             WHERE CAST(status AS TEXT) IN ('2', '3')
-              AND homeUser IS NOT NULL AND homeUser != '' AND homeUser != 'CPU'
-              AND awayUser IS NOT NULL AND awayUser != '' AND awayUser != 'CPU'
+              AND homeUser IS NOT NULL AND homeUser != '' AND UPPER(TRIM(homeUser)) != 'CPU'
+              AND awayUser IS NOT NULL AND awayUser != '' AND UPPER(TRIM(awayUser)) != 'CPU'
               AND homeScore IS NOT NULL AND CAST(homeScore AS INTEGER) >= 0
             ORDER BY CAST(seasonIndex AS INTEGER), CAST(weekIndex AS INTEGER)
         """).fetchall()
@@ -714,16 +714,20 @@ def _calc_spread(home_power: float, away_power: float) -> float:
     Calculate point spread from HOME team's perspective.
     Negative = home favored. Positive = away favored.
 
-    HOME_FIELD_EDGE is only added when home is already favored (per league rules:
-    no phantom advantage in Madden where both players play remotely).
+    HOME_FIELD_EDGE is only applied when home is favored (positive raw spread
+    means home favored in engine internals). No phantom advantage in Madden
+    where both players play remotely.
 
     Example: home_power = 65, away_power = 50
-             raw = (50 - 65) / 4.0 = -3.75 → home is favored
-             with HFE: -3.75 - 2.0 = -5.75 → rounds to home -6.0
+             raw = (50 - 65) / 4.0 = -3.75 → away is favored
+             (no HFE applied)
+    Example: home_power = 50, away_power = 65
+             raw = (65 - 50) / 4.0 = +3.75 → home is favored
+             with HFE: +3.75 + 2.0 = +5.75 → rounds to home +6.0
     """
     raw = (away_power - home_power) / SPREAD_SCALING
-    if raw < 0:  # home is already favored — add HFE to widen
-        raw -= HOME_FIELD_EDGE
+    if raw > 0:  # BUG-1 FIX: apply HFE only when home is favored (raw > 0)
+        raw += HOME_FIELD_EDGE
     spread = round(raw * 2) / 2
     return max(-SPREAD_CAP, min(SPREAD_CAP, spread))
 
@@ -786,14 +790,20 @@ def _calc_ou(home_data: dict, away_data: dict,
 from odds_utils import american_to_str as _american_to_str, payout_calc as _payout_calc  # noqa: E402
 
 
+_MAX_PARLAY_MULTIPLIER = 500_000.0  # BUG-3 FIX: clamp to prevent float overflow
+
+
 def _combine_parlay_odds(odds_list: list[int]) -> int:
     """Combine multiple American odds into a single parlay American odds value."""
+    if len(odds_list) > MAX_PARLAY_LEGS:  # BUG-3 FIX: enforce leg cap at odds level
+        odds_list = odds_list[:MAX_PARLAY_LEGS]
     decimal = 1.0
     for o in odds_list:
         o = int(o)
         if o == 0:
             continue  # skip legs with zero odds to avoid ZeroDivisionError
         decimal *= (1 + o / 100) if o > 0 else (1 + 100 / abs(o))
+    decimal = min(decimal, _MAX_PARLAY_MULTIPLIER)  # BUG-3 FIX: clamp to prevent overflow
     if decimal <= 1.0:
         return 100  # fallback: even odds if all legs were zero/cancelled
     return int((decimal - 1) * 100) if decimal >= 2.0 else int(-100 / (decimal - 1))

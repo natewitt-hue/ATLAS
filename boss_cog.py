@@ -84,6 +84,8 @@ async def _resolve_member(
         1. Raw Discord ID or mention format
         2. TSL nickname / db_username / discord_username via roster
         3. Guild display name match
+
+    Warns the operator if multiple members match (bug-9).
     """
     text = text.strip()
     guild = interaction.guild
@@ -118,11 +120,14 @@ async def _resolve_member(
 
     # 3. Display name match
     text_lower = text.lower()
-    for m in guild.members:
-        if m.display_name.lower() == text_lower or m.name.lower() == text_lower:
-            return m
-
-    return None
+    matches = [  # bug-9: collect all matches instead of returning first
+        m for m in guild.members
+        if m.display_name.lower() == text_lower or m.name.lower() == text_lower
+    ]
+    if len(matches) > 1:  # bug-9: warn on ambiguous match
+        log.warning("Ambiguous member resolve: '%s' matched %d members: %s",
+                     text, len(matches), [m.display_name for m in matches])
+    return matches[0] if matches else None
 
 
 async def _resolve_role(
@@ -1860,6 +1865,8 @@ class BossAbilityReassignModal(discord.ui.Modal, title="🔄 Ability Reassignmen
                     "⚠️ No roster data. Run `/wittsync` first.", ephemeral=True
                 )
 
+            # bug-10: compute ALL results before sending anything, so partial
+            # failure in the loop doesn't leave the operator with half the output
             results = ae.reassign_roster(players, abilities)
 
             if not results:
@@ -1868,38 +1875,41 @@ class BossAbilityReassignModal(discord.ui.Modal, title="🔄 Ability Reassignmen
                 )
 
             summary = ae.summarize_reassignment(results)
+            summary_embed = _boss_build_reassignment_summary_embed(summary)
 
-            # 1. Summary embed
-            await interaction.followup.send(
-                embed=_boss_build_reassignment_summary_embed(summary), ephemeral=True
-            )
-
-            # 2. Team-by-team breakdown (only teams with changes)
             changed = [r for r in results if r.has_changes]
-            if changed:
-                team_embeds = _boss_build_reassignment_team_embeds(changed)
+            team_embeds = _boss_build_reassignment_team_embeds(changed) if changed else []
+
+            import json
+            import io as _io
+            export_data = ae.export_reassignment_json(results)
+
+            # bug-10: all computation done — now send atomically with rollback msg on failure
+            try:
+                await interaction.followup.send(embed=summary_embed, ephemeral=True)
                 for i in range(0, len(team_embeds), 10):
                     await interaction.followup.send(
                         embeds=team_embeds[i:i+10], ephemeral=True
                     )
-
-            # 3. JSON file attachment
-            import json
-            export_data = ae.export_reassignment_json(results)
-            if export_data:
-                import io as _io
-                json_str = json.dumps(export_data, indent=2)
-                file = discord.File(
-                    _io.BytesIO(json_str.encode("utf-8")),
-                    filename=f"reassignment_S{dm.CURRENT_SEASON}.json",
-                )
+                if export_data:
+                    json_str = json.dumps(export_data, indent=2)
+                    file = discord.File(
+                        _io.BytesIO(json_str.encode("utf-8")),
+                        filename=f"reassignment_S{dm.CURRENT_SEASON}.json",
+                    )
+                    await interaction.followup.send(
+                        content="📎 Full reassignment data attached.",
+                        file=file, ephemeral=True,
+                    )
+                elif not changed:
+                    await interaction.followup.send(
+                        "✅ No ability violations found — all SS/XF players are compliant.",
+                        ephemeral=True,
+                    )
+            except Exception as send_err:  # bug-10: surface partial-send failure
+                log.error("Reassignment send failed mid-loop: %s", send_err, exc_info=True)
                 await interaction.followup.send(
-                    content="📎 Full reassignment data attached.",
-                    file=file, ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    "✅ No ability violations found — all SS/XF players are compliant.",
+                    f"⚠️ Reassignment computed but output was interrupted: `{send_err}`",
                     ephemeral=True,
                 )
 

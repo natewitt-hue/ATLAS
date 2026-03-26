@@ -17,6 +17,7 @@ from typing import Optional
 from flow_wallet import DB_PATH
 
 _DB_TIMEOUT = 10
+MAX_STACK = 10  # BUG-10 FIX: cap effect stacking to prevent unbounded accumulation
 log = logging.getLogger(__name__)
 
 # -- Category → effect_type mapping ------------------------------------------
@@ -199,6 +200,35 @@ def get_badges_and_flair(discord_id: int) -> dict:
     flair = flair_list[0]["effect_data"] if flair_list else None
 
     return {"badges": badges, "trophies": trophies, "flair": flair}
+
+
+def activate_effect(
+    discord_id: int,
+    item_id: str,
+    effect_type: str,
+    effect_data: str,
+    started_at: str,
+    expires_at: Optional[str] = None,
+) -> bool:
+    """Insert a new active effect with stack-cap enforcement (BUG-10 FIX).
+
+    Returns True if inserted, False if MAX_STACK would be exceeded.
+    """
+    with _db_con() as con:
+        count = con.execute(
+            "SELECT COUNT(*) FROM store_effects "
+            "WHERE discord_id=? AND effect_type=? AND is_active=1",
+            (discord_id, effect_type),
+        ).fetchone()[0]
+        if count >= MAX_STACK:  # BUG-10 FIX: enforce stack cap before inserting
+            return False
+        con.execute(
+            "INSERT INTO store_effects "
+            "(discord_id, item_id, effect_type, effect_data, started_at, expires_at, is_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1)",
+            (discord_id, item_id, effect_type, effect_data, started_at, expires_at),
+        )
+    return True
 
 
 def expire_stale_effects() -> int:
