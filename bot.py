@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.7.0"  # feat: playoff round labels (Wild Card, Divisional, etc.) replace Week 19+
+ATLAS_VERSION = "7.7.1"  # fix: 4th down analyzer — Signal D, possession self-check, territory re-mapping, score re-anchor, play clock/game clock, FG range
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")

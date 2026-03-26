@@ -2264,12 +2264,14 @@ STEP 1 — READ THE SCREENSHOT (do this first, carefully)
 Extract every piece of game state from the Madden HUD:
 
   • Quarter (1st / 2nd / 3rd / 4th / OT)
-  • Clock — read exactly as shown. 2:13 is NOT inside the final 2:00. 2:00 or less IS.
+  • Clock — the GAME CLOCK (e.g., 6:07, 1:54) is the main timer in the center HUD.
+    The PLAY CLOCK (e.g., :10, :07) is a smaller countdown shown separately — NEVER use it.
+    Read ONLY the game clock for all time-based rules. 2:13 is NOT inside the final 2:00. 2:00 or less IS.
   • Raw scores for both teams as shown on the scorebar
   • Down & distance (e.g. "4th & Goal", "4th & 3", "4th & 7")
   • Field position label from the bottom HUD (e.g. "CAR 5", "GB 22")
 
-  ⚠️ POSSESSION — WHO HAS THE BALL (use both signals):
+  ⚠️ POSSESSION — WHO HAS THE BALL (use all signals, priority: C > D > A > B):
 
   SIGNAL A — Field position label:
     The label names the team whose TERRITORY the ball is in — that team is on DEFENSE.
@@ -2281,7 +2283,7 @@ Extract every piece of game state from the Madden HUD:
     "CAR 21 x 24• GB" → dot by GB's 24 → GB = OFFENSE
     "CAR 21• x 24 GB" → dot by CAR's 21 → CAR = OFFENSE
 
-  Both signals should agree. If they conflict, trust Signal A (field position) over Signal B (dot).
+  Signals A and B should agree. If they conflict, trust Signal A over Signal B.
 
   SIGNAL C — QB Name Identification (strongest signal):
     Look for the QUARTERBACK's last name displayed on the field near the line of scrimmage.
@@ -2290,12 +2292,32 @@ Extract every piece of game state from the Madden HUD:
     which team is on OFFENSE. The QB's team = OFFENSE.
     If you can read a QB name, state: "QB identified: [NAME] → [TEAM] = OFFENSE"
     If Signal C conflicts with A or B, TRUST SIGNAL C — it is the most reliable.
-    If the QB name is not visible or unreadable, fall back to Signals A and B.
+    If the QB name is not visible or unreadable, fall back to Signals A, B, and D.
+
+  SIGNAL D — Directional attack arrow:
+    A directional arrow (◄ or ▶) appears adjacent to the down & distance in the center scorebar.
+    This arrow points toward the end zone the OFFENSE is attacking on screen.
+    ◄ to the LEFT of the down & distance  → offense is attacking left
+    ▶ to the RIGHT of the down & distance → offense is attacking right
+    Use this to cross-confirm possession alongside Signal A. If Signal D and Signal A agree → confident.
+    If Signal D conflicts with Signal A, re-examine Signal A — the arrow is visually unambiguous.
+    Trust hierarchy: C > D > A > B. If the arrow is not visible, rely on Signals A, B, and C.
 
   State explicitly which team is offense and which is defense, and why.
 
+  ⚠️ POSSESSION SELF-CHECK — run this before continuing:
+    If your possession reading says "[TEAM X] on offense" but field position shows "[TEAM X] [yardage]"
+    — that is a CONTRADICTION. "[TEAM X] [yardage]" means the ball is in TEAM X's territory → TEAM X = DEFENSE.
+    Never write "[TEAM X] on offense" and "Ball on [TEAM X] [yardage]" in the same output — it is always wrong.
+    If you catch a contradiction here, re-examine all signals and correct possession before proceeding.
+
   Then state:
-    • Offense is [TRAILING by X / LEADING by X / TIED]
+    • Territory re-mapping: "[OFFENSE] is attacking [DEFENSE]'s end zone.
+      Ball on [DEFENSE] [X] = opponent's [X]-yard line → Zone: [GOLDEN ZONE / INSIDE THE 30 / OWN SIDE EXCEPTION / OWN TERRITORY]"
+      If ball is in own territory: "Ball on [OFFENSE] [X] = own [X]-yard line → Zone: [OWN SIDE EXCEPTION / OWN TERRITORY]"
+      Derive this AFTER confirming possession — never before.
+    • Score re-anchor: "[OFFENSE] has [X] pts, [DEFENSE] has [Y] pts → offense is [TRAILING by Z / LEADING by Z / TIED]"
+      Derive this AFTER confirming possession — must reflect the confirmed offense's perspective.
     • Exact yardage needed — CRITICAL for "4th & Goal" situations:
       "4th & Goal" does NOT mean short distance. You MUST calculate the actual yards to the end zone
       from the field position label. The field position number IS the distance to the goal line.
@@ -2357,6 +2379,10 @@ Ask yourself:
     • How much time is left, and how does that change win probability?
     • What happens to the opponent if you succeed vs. fail? — reason through ALL three outcomes
     • Is a FG here actually better or worse for the offense than failing on 4th down?
+      FG range reality check: estimated FG distance = field position number + 17 yards.
+      FGs from 55+ yards are low-percentage in sim leagues — do NOT treat a 55+ yard attempt as a
+      reliable Outcome C. If the kick would be 55+ yards, treat Outcome C as field position only (punt equivalent),
+      and weigh it accordingly against Outcome B.
 
   ⚠️ FIELD POSITION AFTER A FAILED 4TH DOWN ATTEMPT — reason this carefully:
     If the offense fails on 4th down, the DEFENSE takes over at the SAME spot on the field.
