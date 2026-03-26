@@ -76,7 +76,12 @@ stat_leaders(stat: str, season: int | None = None, sort: str = "best", limit: in
     "receiving yards", "receiving touchdowns", "receptions", "catches", "drops",
     "yards after catch", "passer rating", "completion percentage", "completions",
     "interceptions thrown", "fumbles", "tackles", "sacks", "interceptions",
-    "forced fumbles", "fumble recoveries", "defensive tds", "pass deflections".
+    "forced fumbles", "fumble recoveries", "defensive tds", "pass deflections",
+    "yards per attempt", "ypa", "pass attempts", "sacks taken", "longest pass",
+    "rush attempts", "yards per carry", "ypc", "broken tackles", "broken tackle rate",
+    "yards after contact", "longest rush", "20 yard runs",
+    "catch percentage", "catch pct", "yards per catch", "yac per catch", "yac",
+    "longest reception", "catches allowed", "int return yards", "safeties".
 
 team_stat_leaders(stat: str, season: int | None = None, sort: str = "best", limit: int = 10) -> (sql, params)
     Team stat leaders. Valid stats: "team total yards", "team pass yards", "team rush yards",
@@ -116,6 +121,76 @@ improvement_leaders(stat: str, season1: int, season2: int, limit: int = 10) -> (
 
 career_trajectory(user: str, stat: str) -> (sql, params)
     Season-by-season stat trajectory for an owner's team.
+
+owner_games(user: str, season: int | None = None, include_playoffs: bool = False) -> (sql, params)
+    All completed non-CPU games for an owner across all teams they've controlled.
+    Excludes CPU. Returns: seasonIndex, weekIndex, user_team, opp_team, is_home,
+    user_score, opp_score, won, margin. Use as base for custom owner queries.
+
+pythagorean_wins(user: str, season: int | None = None) -> (sql, params)
+    Expected wins from Pythagorean formula. Returns: seasonIndex, points_for,
+    points_against, actual_wins, games_played.
+    NOTE: Compute in Python: exp = (pf**2.37 / (pf**2.37 + pa**2.37)) * games_played
+    luck = actual_wins - exp
+
+home_away_record(user: str, season: int | None = None) -> (sql, params)
+    Owner's record split by home/away. Returns: location, wins, losses, games, win_pct.
+
+blowout_frequency(user: str, season: int | None = None, margin_threshold: int = 17) -> (sql, params)
+    How often an owner wins/loses by 17+ points per season.
+
+close_game_record(user: str, season: int | None = None, margin_threshold: int = 7) -> (sql, params)
+    Record in games decided by 7 or fewer points. Clutch metric.
+
+scoring_margin_distribution(user: str, season: int | None = None) -> (sql, params)
+    Win/loss count by margin bucket: 1-3, 4-7, 8-14, 15-21, 22+.
+
+first_half_second_half(user: str, season: int | None = None) -> (sql, params)
+    Record in first 8 weeks vs last 8+. Slow starter or fast finisher?
+
+owner_scoring_trend(user: str, season: int | None = None) -> (sql, params)
+    Per-week avg scoring for an owner. Shows mid-season surges and collapses.
+
+owner_consistency(user: str, min_games: int = 15) -> (sql, params)
+    Per-season win counts for all-time consistency analysis.
+    NOTE: Compute stddev in Python: import statistics; statistics.stdev([r['wins'] for r in rows])
+
+owner_career_summary(user: str) -> (sql, params)
+    Career totals: wins, losses, win%, seasons, teams_controlled (comma-separated).
+
+owner_improvement_arc(user: str) -> (sql, params)
+    Win% per season for trajectory plotting. All seasons.
+
+owner_division_record(user: str, season: int | None = None) -> (sql, params)
+    Owner's record in intra-division games.
+
+team_efficiency(team: str | None = None) -> (sql, params)
+    Offensive/defensive yardage, points scored/allowed, turnover diff. All teams or one.
+
+strength_of_schedule(team: str | None = None) -> (sql, params)
+    Pre-computed SoS: totalSoS, playedSoS, remainingSoS, initialSoS.
+
+team_home_away(team: str | None = None) -> (sql, params)
+    Home/away W-L splits from standings.
+
+team_division_standings(division: str | None = None, conference: str | None = None) -> (sql, params)
+    Division and conference records from standings.
+
+team_rankings(team: str | None = None) -> (sql, params)
+    All rank columns: overall rank, prevRank, offense/defense/points ranks.
+
+qb_composite(season: int | None = None, limit: int = 10) -> (sql, params)
+    Top QBs by weighted composite: passer rating, TD:INT, YPA, sack rate.
+
+rb_composite(season: int | None = None, limit: int = 10) -> (sql, params)
+    Top RBs (pos=RB only) by weighted composite: YPC, broken tackles/att, YAC/att, fumble rate.
+
+wr_composite(season: int | None = None, limit: int = 10) -> (sql, params)
+    Top WRs/TEs by weighted composite: catch%, YPC, YAC/catch, TDs, drop rate.
+    NOTE: Scores are NOT comparable to other position composites.
+
+defensive_composite(season: int | None = None, limit: int = 10) -> (sql, params)
+    Top defenders by weighted composite: sacks, INTs, forced fumbles, TDs, deflections, tackles.
 
 ### Layer 2: Query Builder (for custom queries not covered by Layer 1)
 
@@ -244,6 +319,50 @@ result = sorted(result, key=lambda x: x["improvement"], reverse=True)[:10]
 Q: "What's my record this season?"
 ```python
 sql, params = owner_record(CALLER, season=current_season())
+result, error = run_sql(sql, params)
+```
+
+Q: "How lucky has Witt been this season?"
+```python
+user = resolve_user("Witt") or "TheWitt"
+sql, params = pythagorean_wins(user, season=current_season())
+rows, error = run_sql(sql, params)
+for r in rows:
+    pf, pa = r["points_for"], r["points_against"]
+    if pf + pa > 0:
+        exp = (pf**2.37 / (pf**2.37 + pa**2.37)) * r["games_played"]
+        r["expected_wins"] = round(exp, 1)
+        r["luck"] = round(r["actual_wins"] - exp, 1)
+result = rows
+```
+
+Q: "Who has the best record in close games this season?"
+```python
+sql_owners, p_owners = (
+    Query("owner_tenure")
+    .select("DISTINCT userName")
+    .build()
+)
+owners, _ = run_sql(sql_owners, p_owners)
+result = []
+for o in owners:
+    u = o["userName"]
+    sql, params = close_game_record(u, season=current_season())
+    rows, _ = run_sql(sql, params)
+    if rows:
+        result.append({"owner": u, **rows[0]})
+result = sorted(result, key=lambda x: x.get("close_win_pct") or 0, reverse=True)[:10]
+```
+
+Q: "What's the strength of schedule for the Ravens?"
+```python
+sql, params = strength_of_schedule(team="Ravens")
+result, error = run_sql(sql, params)
+```
+
+Q: "Who's the best QB this season?"
+```python
+sql, params = qb_composite(season=current_season())
 result, error = run_sql(sql, params)
 ```
 """
@@ -381,6 +500,33 @@ def build_agent_env(
         "compare_seasons": qb.compare_seasons,
         "improvement_leaders": qb.improvement_leaders,
         "career_trajectory": qb.career_trajectory,
+
+        # Owner-scoped metrics (Group A)
+        "owner_games":                   qb.owner_games,
+        "pythagorean_wins":              qb.pythagorean_wins,
+        "home_away_record":              qb.home_away_record,
+        "blowout_frequency":             qb.blowout_frequency,
+        "close_game_record":             qb.close_game_record,
+        "scoring_margin_distribution":   qb.scoring_margin_distribution,
+        "first_half_second_half":        qb.first_half_second_half,
+        "owner_scoring_trend":           qb.owner_scoring_trend,
+        "owner_consistency":             qb.owner_consistency,
+        "owner_career_summary":          qb.owner_career_summary,
+        "owner_improvement_arc":         qb.owner_improvement_arc,
+        "owner_division_record":         qb.owner_division_record,
+
+        # Standings metrics (Group D)
+        "team_efficiency":               qb.team_efficiency,
+        "strength_of_schedule":          qb.strength_of_schedule,
+        "team_home_away":                qb.team_home_away,
+        "team_division_standings":       qb.team_division_standings,
+        "team_rankings":                 qb.team_rankings,
+
+        # Composite player scores (Group E)
+        "qb_composite":                  qb.qb_composite,
+        "rb_composite":                  qb.rb_composite,
+        "wr_composite":                  qb.wr_composite,
+        "defensive_composite":           qb.defensive_composite,
 
         # Layer 2: Query builder
         "Query": qb.Query,
