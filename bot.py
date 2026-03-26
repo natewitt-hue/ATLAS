@@ -172,7 +172,7 @@ except ImportError:
 load_dotenv(override=True)
 
 # ── Bot Version ──────────────────────────────────────────────────────────────
-ATLAS_VERSION = "7.8.0"  # feat: matchup card — fix PPG/PA/DIFF stats, edge indicators, win probability, confidence colors
+ATLAS_VERSION = "7.9.0"  # feat: "My Team" quick-select — team dropdowns default to user's team with one-click shortcut
 from constants import ATLAS_ICON_URL, ATLAS_GOLD
 
 DISCORD_TOKEN      = os.getenv("DISCORD_TOKEN")
