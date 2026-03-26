@@ -117,6 +117,22 @@ def get_all_teams() -> list[dict]:
     return sorted(teams, key=lambda t: t["nickName"])
 
 
+def get_team_dict(discord_id: int) -> dict | None:
+    """Return the full dm.df_teams row dict for a user's assigned team.
+
+    Returns None if the user has no team or team data isn't loaded.
+    Used by genesis trade flow which needs the full team dict (id, nickName, etc.).
+    """
+    entry = _by_id.get(discord_id)
+    if not entry or dm is None or dm.df_teams is None or dm.df_teams.empty:
+        return None
+    abbr = entry.team_abbr.upper()
+    mask = dm.df_teams["abbrName"].str.upper() == abbr
+    if not mask.any():
+        return None
+    return dm.df_teams[mask].iloc[0].to_dict()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Section 4 — Load / Refresh Cache
 # ══════════════════════════════════════════════════════════════════════════════
