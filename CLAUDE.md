@@ -35,6 +35,18 @@ so they can merge cleanly with no conflicts.
 - **Dead files belong in `QUARANTINE/`** — do not reference or import them.
 - **When creating a new `.py` module, add it to the relevant nightly audit task on the same commit.** Audit tasks live at `C:\Users\natew\.claude\scheduled-tasks\`. Map new files to the correct day: Flow/Economy/Sportsbook → Monday, Casino/Rendering → Tuesday, Oracle/Analytics → Wednesday, Genesis/Sentinel → Thursday, AI/Codex/Echo → Friday, Core Infrastructure → Saturday. Sunday auto-covers all files. Update both the `SKILL.md` file list and the task `description` field via `mcp__scheduled-tasks__update_scheduled_task`.
 
+### Flow Economy Gotchas
+
+These are hard-won lessons from the Flow/Sportsbook subsystem. Violating any causes silent data bugs or financial ledger corruption.
+
+| Rule | Detail |
+|------|--------|
+| `flow_wallet.debit()` idempotency | ALL debit calls MUST pass `reference_key`. Without it, Discord interaction retries or button double-clicks cause double-debits. Use `f"{SUBSYSTEM}_DEBIT_{uid}_{event_id}_{int(time.time())}"` as the format. |
+| `flow_wallet.credit()` idempotency | Same rule — ALL credit calls in settlement paths MUST pass `reference_key` to survive settlement retries. |
+| Admin view exception handling | Silent `except Exception: pass` in admin-facing views is prohibited. Always `log.exception(...)`. Admin views that silently return empty results on DB error are worse than visible errors. |
+| `"sportsbook_result"` bus topic | `flow_live_cog` subscribes but no live code publishes to this topic. Do not add publishers without also wiring `SportsbookEvent.guild_id` through the settlement path. |
+| `sportsbook_cards._get_season_start_balance()` | Must wrap in `try/except sqlite3.OperationalError` (see `flow_cards.py` pattern). Column may not exist on older DBs. |
+
 ### MaddenStats API Gotchas
 
 These are hard-won lessons. Violating any causes silent data bugs.
@@ -51,6 +63,7 @@ These are hard-won lessons. Violating any causes silent data bugs.
 | Dual-attribute checks | Use OR logic, not AND |
 | Draft history | Credit players to the team that drafted them (first statistical appearance), NOT current team. |
 | Owner resolution | API usernames have underscores/case mismatches. Use `_resolve_owner()` fuzzy lookup. |
+| `team_record` SQL | `winner_user`/`loser_user` are API usernames (not team nicknames). Always resolve team→username before binding params, or use `homeTeamName`/`awayTeamName` columns instead. |
 
 ### Discord API Constraints
 
@@ -98,14 +111,17 @@ build_member_db              →  tsl_members table (identity registry)
 | **Sentinel** | Rule enforcement, blowout monitor, compliance | `sentinel_cog.py` |
 | **Oracle** | Analytics, stats, power rankings, profiles | `oracle_cog.py` (class: StatsHubCog) |
 | **Genesis** | Trades, roster, dev traits, draft | `genesis_cog.py` |
+| **Owner Registry** | Discord user ↔ team assignments, conference lookups, assign/unassign UI | `roster.py` |
 | **Ability Engine** | Lock & Key ability audit, dev budget enforcement, position change validation | `ability_engine.py` |
 | **Flow** | Economy, TSL sportsbook, casino, live engagement | `flow_sportsbook.py`, `casino/`, `economy_cog.py`, `flow_live_cog.py` |
 | **Flow Store** | Store engine — item effects, purchases | `flow_store.py`, `store_effects.py` |
 | **Flow Subsystem** | Wallet, audit, events, wager registry | `flow_wallet.py`, `flow_audit.py`, `flow_events.py`, `wager_registry.py` |
 | **Real Sportsbook** | Real NFL/NBA betting with live ESPN odds | `real_sportsbook_cog.py`, `sportsbook_core.py`, `espn_odds.py` |
 | **Boss** | Visual commissioner control room — replaces `/commish` subcommands | `boss_cog.py` |
+| **God** | Privileged god-tier administration (`/god`) — affinity reset, DB rebuild | `god_cog.py` |
 | **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
+| **Atlas Home** | User baseball card home screen (`/atlas`) — profile, stats, theme selector | `atlas_home_cog.py`, `atlas_home_renderer.py` |
 | **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_html_engine.py` |
 
 ### Rendering Stack
@@ -123,6 +139,7 @@ All card renders use a single pipeline:
 | Trade | `card_renderer.py` | Trade card |
 | Ledger | `casino/renderer/ledger_renderer.py` | Transaction ledger |
 | Hub Cards | `flow_cards.py`, `sportsbook_cards.py` | Flow Hub, Sportsbook Hub, Stats Card |
+| Atlas Home Card | `atlas_home_renderer.py` | User baseball card — profile, economy stats, recent activity |
 
 Pipeline: Build HTML body → `wrap_card(body, status)` → `render_card(html)` → PNG bytes
 Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
@@ -148,15 +165,17 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 | 13 | `flow_live_cog` | Live engagement — pulse dashboard, highlights, recaps |
 | 14 | `real_sportsbook_cog` | Real NFL/NBA sportsbook with ESPN live odds |
 | 15 | `boss_cog` | Visual commissioner control room (`/boss`) |
+| 16 | `god_cog` | Privileged god-tier administration (`/god`) |
+| 17 | `atlas_home_cog` | User baseball card home screen (`/atlas`) |
 
 ### Databases
 
 | DB | Purpose |
 |----|---------|
 | `tsl_history.db` | Game history, player stats, member registry, server config |
-| `sportsbook.db` | Balances, bets, casino economy, affinity scores |
+| `sportsbook.db` | **Legacy (orphaned)** — superseded by `flow_economy.db`; file exists on disk but no active code writes to it |
 | `flow.db` | TSL sportsbook bets, Flow economy transactions |
-| `flow_economy.db` | Flow store purchases, wallet ledger |
+| `flow_economy.db` | Flow store purchases, wallet ledger, casino economy, balances, affinity scores |
 | `TSL_Archive.db` | Full Discord chat history archive (Oracle/Codex queries) |
 
 ### Environment Variables
@@ -170,6 +189,10 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 | `ORACLE_DB_PATH` | No | Path to TSL_Archive.db |
 | `FORCE_REQUEST_CHANNEL` | No | Channel ID |
 | `TRADE_LOG_CHANNEL_ID` | No | Channel name/ID |
+| `FLOW_DB_PATH` | No | Path to flow_economy.db (default: `./flow_economy.db`) — used by 10+ modules |
+| `ADMIN_CHANNEL_ID` | No | Discord channel ID for bot admin notifications (default: 0 = disabled) |
+| `DISCORD_GUILD_ID` | No | Discord guild/server ID (default: 0) |
+| `PREDICTION_MARKET_CHANNEL_ID` | No | Channel ID for prediction market posts (default: 0) |
 
 ---
 
@@ -179,7 +202,7 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 - **Hub views** — interactive button panels replace flat slash commands (v2.0 architecture)
 - **Soft fallbacks** — optional modules use try/except imports; missing = graceful degradation
 - **Channel routing** — `setup_cog.py` defines `REQUIRED_CHANNELS`. Commands use `require_channel()` decorator. Lazy resolvers call `setup_cog.get_channel_id()` with ImportError fallbacks.
-- **Admin delegation** — `commish_cog.py` delegates to `_impl` methods in other cogs
+- **Admin delegation** — `boss_cog.py` is the visual commissioner control room (`/boss`) that delegates to `_impl` methods in target cogs; no direct logic is duplicated
 - **Permission model** — `is_commissioner()` checks env `ADMIN_USER_IDS`, "Commissioner" role, or guild admin. `is_tsl_owner()` checks "TSL Owner" role. Both have decorator forms.
 
 ---
@@ -226,9 +249,8 @@ All Claude Code subagents are named. **When a new agent type is used for the fir
 
 ## Echo Persona
 
-Three voice modes loaded from `echo/*.txt`, selected by `infer_context()` from channel name:
-- **casual** — @mentions, banter, general chat
-- **official** — rulings, announcements, governance
-- **analytical** — stats, recaps, trade analysis
+Single unified persona defined inline in `echo_loader.py` (`_UNIFIED_PERSONA` constant). No `echo/*.txt` files are loaded. `infer_context()` always returns `'unified'`; `get_persona(context_type)` ignores `context_type` — all callers receive the same persona regardless of passing `"casual"`, `"official"`, or `"analytical"`.
 
-Voice rules: Always 3rd person as "ATLAS" (never "I"/"me"). Punchy — 2–4 sentences max, no bullet lists, no fluff. Cites real names and real numbers. Profanity natural but not gratuitous. In rulebook mode: cites exact section numbers, always definitive (LEGAL or ILLEGAL).
+The three-mode naming is preserved in callers for future re-differentiation if needed — the wiring is correct, the distinction is currently collapsed.
+
+Voice rules: Always 3rd person as "ATLAS" (never "I"/"me"). Punchy — 2–4 sentences max, no bullet lists, no fluff. Cites real names and real numbers. Profanity natural but not gratuitous. In rulebook mode: cites exact section numbers, always definitive (LEGAL or ILLEGAL). Subtle Dr Manhattan / detached omniscience undertone — a seasoning, not the main dish (one in five responses).
