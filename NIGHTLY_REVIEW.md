@@ -1,169 +1,156 @@
-# ATLAS Nightly Audit — 2026-04-06
+# ATLAS Nightly Audit — 2026-04-07
 
-**Focus:** Flow & Economy Module | **Recent commits (24h):** 0 | **Files audited:** 14 | **Lines reviewed:** ~9,000+
-
-**Modules covered:** `sportsbook_core.py`, `flow_sportsbook.py`, `economy_cog.py`, `flow_wallet.py`, `real_sportsbook_cog.py`, `wager_registry.py`, `flow_events.py`, `espn_odds.py`, `polymarket_cog.py`, `flow_store.py`, `flow_audit.py`, `flow_live_cog.py`, `flow_cards.py`, `sportsbook_cards.py`
+**Focus:** Casino & Rendering | **Recent commits:** 2 | **Files deeply read:** 17 | **Total lines analyzed:** ~10,215
 
 ---
 
 ## CRITICAL
 
-### [CRIT-1] `_place_real_bet()` debits wallet without `reference_key` — double-debit risk
-**File:** `real_sportsbook_cog.py` L778
-**Confidence:** HIGH
+### C-01 — Deadlock in `atlas_html_engine._get_browser()` after browser reconnect
+**File:** `atlas_html_engine.py` · `_get_browser()` / `PagePool.warm()`
+**Severity:** CRITICAL — all renders hang permanently after any browser crash/reconnect
+
+`_get_browser()` acquires `_browser_lock` (a non-reentrant `asyncio.Lock`), launches the browser, then calls `await _pool.warm()` **while still holding the lock**. `warm()` calls `_new_page()` → `_get_browser()` → `async with _browser_lock` → deadlock. The event loop is blocked forever; no casino render can complete.
 
 ```python
-new_balance = await flow_wallet.debit(
-    uid, amt, "REAL_BET",
-    description=f"Bet: {pick} ({bet_type})",
-    # ← NO reference_key
-)
+# CURRENT (broken):
+async def _get_browser():
+    async with _browser_lock:          # lock acquired
+        ...
+        _browser = await _pw_instance.chromium.launch(headless=True)
+        if _pool is not None:
+            await _pool.warm()         # re-enters _get_browser() → tries _browser_lock → DEADLOCK
 ```
 
-The debit has no idempotency key. If the interaction fires twice (button double-click, Discord retry, network timeout + retry), the wallet is debited twice. The straight-bet path in `flow_sportsbook.py` correctly uses `debit_ref = f"TSL_BET_DEBIT_{uid}_{game_id}_{int(time.time())}"`. The refund-on-failure path in the same function *does* use a `reference_key` (L813), making the asymmetry more visible.
+**Fix — move `_pool.warm()` outside the lock:**
+```python
+async def _get_browser():
+    async with _browser_lock:
+        if _browser is None or not _browser.is_connected():
+            if _pool is not None:
+                try:
+                    await _pool.drain()
+                except Exception:
+                    pass
+            _browser = await _pw_instance.chromium.launch(headless=True)
+    # warm AFTER releasing lock — _new_page() can now call _get_browser() safely
+    if _pool is not None:
+        await _pool.warm()
+```
 
-**Fix:** Add `reference_key=f"REAL_BET_DEBIT_{uid}_{espn_event_id}_{int(time.time())}"` to the `debit()` call at L778. Using `espn_event_id` as the primary key component (not `game_id`) prevents cross-bet collision while still bounding the idempotency window.
+This bug is latent in normal operation (browser stays alive) but is guaranteed to trigger on any Playwright crash, OOM kill, or bot restart that reconnects to an existing browser session. The orphan reconciliation loop and any render that fires in the reconnect window will deadlock all four pool pages simultaneously.
 
 ---
 
 ## WARNINGS
 
-### [WARN-1] Parlay debit lacks `reference_key` — retry risk
-**File:** `flow_sportsbook.py`, `ParlayWagerModal.on_submit()` ~L1353
-**Confidence:** MEDIUM
+### W-01 — Streak bonus idempotency key collision in `casino_db.process_wager()`
+**File:** `casino/casino_db.py` · L949
+**Severity:** WARNING — legitimate streak bonuses silently blocked on re-achievement
 
-`update_balance_sync(..., subsystem="PARLAY")` is called without a `reference_key`. Unlike straight bets (which use `debit_ref = f"TSL_BET_DEBIT_..."`), parlay debits have no idempotency guard. Modal `on_submit()` is called by Discord once per interaction, but Discord can replay interactions on timeout — same double-debit exposure as CRIT-1.
+Reference key: `f"streak_bonus_{discord_id}_{game_type}_{streak_info['len']}"` is constructed without a timestamp or session ID. If a player loses their W3 streak and rebuilds it to W3 again, `flow_wallet.credit()` sees the same key and skips the bonus as an idempotency duplicate. The player earned the bonus legitimately but never receives it.
 
-**Fix:** Generate `ref = f"TSL_PARLAY_DEBIT_{uid}_{int(time.time())}"` before the debit call and pass it as `reference_key`.
-
----
-
-### [WARN-2] N+1 aiosqlite connection per pending bet in `settle_event()`
-**File:** `sportsbook_core.py` ~L270
-**Confidence:** HIGH
-
-The outer `settle_event()` loop opens a new `aiosqlite.connect(DB_PATH)` for each pending bet (`async with aiosqlite.connect(...) as con:`). Under WAL mode this is safe for correctness, but it wastes connection overhead on every settlement batch. If 10 bets settle simultaneously, 10 connections open and close.
-
-**Fix:** Hoist the connection outside the loop and pass it into the bet-grading path, or collect all bets first and open a single connection for the batch.
-
----
-
-### [WARN-3] Silent bare `except: pass` in admin bet views — errors invisible
-**File:** `flow_sportsbook.py` L3477-3478 (ESPN bets admin view), L3536-3537 (settled bets admin view)
-**Confidence:** HIGH
-
+**Fix:** Append epoch seconds or session ID:
 ```python
-except Exception:
-    pass  # ← swallows all DB errors silently
+ref_key = f"streak_bonus_{discord_id}_{game_type}_{streak_info['len']}_{int(time.time())}"
 ```
-
-Both admin-facing views return empty results on any DB error with no log entry. If the `real_bets` table has a schema issue or DB is locked, the admin sees a blank list with no indication anything went wrong.
-
-**Fix:** Replace `pass` with `log.exception("ESPN bets admin view failed")` / `log.exception("Settled bets admin view failed")`. Optionally surface an error embed instead of empty results.
+The idempotency window for streak bonuses is one credit event, not one streak length. A unique timestamp suffix preserves protection against double-click races while allowing re-achievement payouts.
 
 ---
 
-### [WARN-4] `sportsbook_cards._get_season_start_balance` missing `OperationalError` guard
-**File:** `sportsbook_cards.py` L87-94
-**Confidence:** MEDIUM
+### W-02 — UTC vs local time split in streak tracking
+**File:** `casino/casino_db.py` · `get_streak()` L612, `_update_streak()` L629
+**Severity:** WARNING — streak resets behave differently depending on server timezone; off by one day at midnight UTC
 
+`get_streak()` and `_update_streak()` use `date.today().isoformat()` (local server time). The scratch functions (`can_claim_scratch`, `get_scratch_streak`, `claim_scratch`) were correctly fixed to `datetime.now(timezone.utc).date()` in the recent sicko-mode commit, but the base streak functions were not updated to match.
+
+On a UTC+X server, streaks reset at a different wall-clock time than scratch claims. A player who wins at 11:45 PM local / 00:15 AM UTC will see their streak treated as day N while scratch treats it as day N+1.
+
+**Fix:** Replace `date.today()` with `datetime.now(timezone.utc).date()` in both `get_streak()` and `_update_streak()`. Requires `from datetime import datetime, timezone` already present in the module.
+
+---
+
+### W-03 — `void_stale_crash_bets()` defined but never called (dead code)
+**File:** `casino/casino_db.py` · L1400 (definition); `casino/casino.py` (no caller found)
+**Severity:** WARNING — stale crash bets from aborted rounds accumulate indefinitely
+
+The function was added in the recent commit but has zero callers. Confirmed via codebase-wide grep: only the definition exists. Crash bets that were deducted but never settled (e.g., bot restart mid-round) will sit as open debits in the wager registry with no automatic resolution, which confuses the orphan reconciliation loop and skews ledger reports.
+
+**Fix:** Wire into `CasinoCog._orphan_reconciliation_loop()` alongside `reconcile_orphaned_wagers()`:
 ```python
-def _get_season_start_balance(user_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as con:
-        row = con.execute(
-            "SELECT season_start_balance FROM users_table WHERE discord_id = ?",
-            (user_id,)
-        ).fetchone()
-    return row[0] if row else STARTING_BALANCE
-    # ← no try/except for OperationalError
+async def _orphan_reconciliation_loop(self):
+    while True:
+        await asyncio.sleep(600)
+        await reconcile_orphaned_wagers()
+        await void_stale_crash_bets()   # ADD THIS
 ```
-
-The equivalent function in `flow_cards.py` (L44-53) wraps the entire query in `try/except sqlite3.OperationalError` with a safe fallback comment: `# column may not exist on older DBs`. `sportsbook_cards.py` omits this guard. On a DB that predates the `season_start_balance` column migration, this raises an unhandled exception and crashes `build_sportsbook_card()` / `build_stats_card()`.
-
-**Fix:** Mirror the `flow_cards.py` pattern — wrap in `try/except sqlite3.OperationalError: return 0`.
 
 ---
 
 ## OBSERVATIONS
 
-### [OBS-1] `"sportsbook_result"` is a dead event topic — no publisher exists
-**File:** `flow_live_cog.py` L428, `flow_sportsbook.py`, `real_sportsbook_cog.py`
+### O-01 — `db_migration_snapshots.py` blocking task template would stall event loop
+**File:** `db_migration_snapshots.py` · task template comment block
+**Severity:** LOW — not active in production; latent if wired up
 
-`FlowLiveCog.__init__` subscribes to `flow_bus.subscribe("sportsbook_result", ...)`. No code anywhere publishes to `"sportsbook_result"`. Settlement goes through `EVENT_FINALIZED = "event_finalized"` (consumed by `sportsbook_core`), but `sportsbook_core` doesn't re-emit a `"sportsbook_result"` event for `flow_live_cog`.
-
-**Effect:** Sportsbook wins/losses never register as live sessions. Parlay highlights never fire. `_on_sportsbook_result()` and `record_sportsbook()` are effectively dead code paths. The pulse dashboard sportsbook section stays zeroed.
-
-**Fix:** After settlement, emit `SportsbookEvent` on `"sportsbook_result"` — either from `sportsbook_core.settle_event()` after each credit, or from `flow_sportsbook.py` / `real_sportsbook_cog.py` after grading. Requires passing `guild_id` into the settlement path.
+The commented-out task template calls `take_daily_snapshot()` directly from async context. `take_daily_snapshot()` uses synchronous `sqlite3.connect()` with no `asyncio.to_thread()` wrapper. If the template is activated as a scheduled cog task, it will block the event loop for the full duration of a DB snapshot (~100ms–1s depending on size). Low priority but worth noting before FROGLAUNCH where scheduling will be revisited.
 
 ---
 
-### [OBS-2] Pulse dashboard sportsbook stats hardcoded to zeros
-**File:** `flow_live_cog.py` L648-649
+### O-02 — `play_again.py` silently swallows wager clamping path error
+**File:** `casino/play_again.py` · `_on_play()` L112–116
+**Severity:** LOW — functional but fragile
 
-```python
-sb_week=0, sb_bets=0, sb_volume=0, sb_hot_player=None, sb_hot_desc="",
-```
+When `actual_wager < self.wager`, the clamped replay path uses `functools.partial` on `self.replay_callback.func` — but `replay_callback` may not be a `functools.partial` object (it could be a plain coroutine function). Accessing `.func` on a plain callable raises `AttributeError`, which is not caught. The interaction is already partially consumed (buttons disabled via `_disable_all()`), leaving the player in a dead state with no game started and no error shown.
 
-These are always `0` / `None`. No DB query fetches live sportsbook data for the pulse card. Related to OBS-1 — even if events were published, the pulse aggregation doesn't query sportsbook tables.
-
----
-
-### [OBS-3] `record_sportsbook()` doesn't append to session `events` list
-**File:** `flow_live_cog.py` L282-313
-
-`SessionTracker.record_sportsbook()` updates session counters (`wins`, `losses`, `net_profit`, etc.) but never calls `session.events.append(...)`. Session recap cards (`render_session_recap`) query `session.events`, so sportsbook results are excluded from the recap event history even if OBS-1 were fixed.
+**Fix:** Check type before accessing `.func`, or pass wager as a keyword argument through the callback signature consistently.
 
 ---
 
-### [OBS-4] `_get_leaderboard_rank` in `sportsbook_cards.py` uses linear scan vs SQL window function
-**File:** `sportsbook_cards.py` L199-213
+### O-03 — `PagePool` silently shrinks on `_new_page()` failure
+**File:** `atlas_html_engine.py` · `PagePool.release()`
+**Severity:** LOW — no data loss; degrades render throughput over time
 
-Fetches all rows ordered by balance, then iterates in Python to find rank. The code comment acknowledges this is intentional for ~31 owners. `flow_cards.py` uses `RANK() OVER (ORDER BY balance DESC)` for O(1) lookup. Worth noting the inconsistency — if user count scales, the linear scan degrades. Low priority.
+When `_new_page()` raises (e.g., browser context timeout), `release()` logs the error and returns without re-adding a replacement page. The pool permanently loses that slot. Under sustained load, pool size drifts from 4 → 3 → 2 → 1 with no alerting, causing render queue backups. The browser-reconnect deadlock (C-01) makes this worse: if the fix for C-01 is applied, `warm()` after reconnect will replenish, but any pre-reconnect failures still shrink the pool.
 
 ---
 
 ## CROSS-MODULE RISKS
 
-### [XMOD-1] Real bet write split creates settlement vs. admin-read divergence
-**Files:** `real_sportsbook_cog.py` L790-818, `flow_cards.py` `_gather_my_bets_data()`
-
-`_place_real_bet()` writes to two places: `sportsbook_core.write_bet()` (flow.db) for settlement and a legacy `real_bets` table (flow_economy.db) for admin card reads. These are separate `try/except` blocks. If `write_bet()` succeeds but the legacy insert fails (or vice versa), the two DBs are out of sync: the bet settles but doesn't appear in the user's My Bets card, or vice versa. No reconciliation exists.
-
-**Current mitigation:** The refund path fires if `write_bet()` itself raises, but not if the legacy insert fails silently.
-
----
-
-### [XMOD-2] `sportsbook_core.finalize_event()` re-raises on missing event row
-**Files:** `sportsbook_core.py` `finalize_event()`, `real_sportsbook_cog.py` `_sync_scores()` L606-615
-
-`finalize_event()` raises `ValueError` if the event row doesn't exist (requires `write_event()` to be called first). In `_sync_scores()`, `write_event()` is called before `finalize_event()` — but if `write_event()` raises (e.g., DB locked), `finalize_event()` is never reached, and the score is silently not settled. The outer `except Exception: log.exception(...)` catches it, but there's no retry or deferred queue for missed finalizations. The 10-minute `settlement_poll()` fallback in `sportsbook_core` catches stragglers, but only for events already written to flow.db.
+| Risk | Files | Details |
+|------|-------|---------|
+| Rendering hard-blocked by C-01 | `atlas_html_engine.py` ↔ all renderers | All 6 renderer modules call `render_card()` which depends on the pool. C-01 means a single browser reconnect takes down casino, predictions, ledger, and pulse simultaneously. |
+| Streak bonus silently blocked (W-01) | `casino_db.py` ↔ `flow_wallet.py` | Idempotency key collision means `flow_wallet.credit()` rejects the bonus with no error surface to the player. The wager resolves successfully, so the bug is invisible in logs unless flow audit is queried directly. |
+| Crash orphan accumulation (W-03) | `casino_db.py` ↔ `wager_registry` ↔ `reconcile_orphaned_wagers()` | `void_stale_crash_bets()` targets crash-specific open bets. Without it, `reconcile_orphaned_wagers()` may or may not catch these depending on how crash bets are tagged — there is a risk of double-refund if reconciliation runs on crash bets that `void_stale_crash_bets()` would also close. Caller order in the maintenance loop matters. |
+| UTC split creates cross-subsystem date boundary inconsistency | `casino_db.py` streak vs scratch | Two subsystems in the same module disagree on when "today" ends. Any feature that reads both streak and scratch state for the same player on a date boundary can produce contradictory data. |
 
 ---
 
-## POSITIVE PATTERNS WORTH PRESERVING
+## POSITIVE PATTERNS
 
-| Pattern | Location | Why It Works |
-|---------|-----------|--------------|
-| Credit-first two-phase settlement | `sportsbook_core.settle_event()` | Wallet credit always succeeds before status update; `BEGIN IMMEDIATE` prevents double-credit |
-| Per-user asyncio locks | `flow_wallet.get_user_lock()` | Serializes concurrent requests at the Python level before hitting SQLite |
-| `VALID_TRANSITIONS` state machine | `wager_registry.py` | Enforces legal state changes at the registry layer, not at each call site |
-| Parlay legs batch-fetch (IN clause) | `flow_cards._gather_my_bets_data()` L593-604 | Single query for all parlay legs vs N+1 queries per parlay |
-| Stipend idempotency (mark before loop) | `economy_cog.pay_stipends()` | `mark_stipend_paid()` called before the payout loop — crash can't cause double-pay |
-| ESPN rate-limit + TTL cache + backoff | `espn_odds.py` | 0.3s inter-request floor, per-endpoint TTL caches, exponential 429 backoff |
-| `OperationalError` guard on column reads | `flow_cards._get_season_start_balance()` | Safe fallback for DB migrations that haven't run yet |
-| Pulse message edit-in-place | `flow_live_cog._update_pulse()` | Fetches existing msg_id, edits vs deletes/re-posts; avoids channel noise on 60s tick |
+These patterns are well-implemented and worth preserving explicitly.
+
+| Pattern | Location | Why It's Good |
+|---------|----------|---------------|
+| TOCTOU sentinel before first `await` | `blackjack.py`, `crash.py`, `coinflip.py` | Sets in-memory state synchronously before any DB/Discord call, preventing double-execution across concurrent Discord interactions. The standard pattern for Discord UI race conditions. |
+| `BEGIN IMMEDIATE` in `process_wager()` | `casino_db.py` | Prevents TOCTOU between balance check and debit in SQLite WAL mode. Correct choice — `BEGIN DEFERRED` would allow a race window. |
+| Outcome-first RTP in slots | `casino/games/slots.py` | `_roll_outcome()` → `_generate_reels_for_outcome()` decouples payout math from visual generation. RTP is deterministic regardless of visual; visual can be changed without touching payout logic. |
+| Weight total assertion at module load | `casino/games/slots.py` | `assert _actual_weight_total == 80` fails fast at import time if `SLOT_ICON_CONFIG` drifts. No silent RTP miscalibration ever ships. |
+| `finally` page return in `render_card()` | `atlas_html_engine.py` | Page is always returned to pool even on exception, preventing permanent pool exhaustion from render errors. |
+| `OrderedDict` LRU font cache | `atlas_html_engine.py` | Bounded at 50 entries with O(1) eviction. No unbounded memory growth in long-running sessions. |
+| Streak bonus and cold refund as separate idempotent credits | `casino_db.py` | Separating these from the main wager credit means each can be independently retried or skipped without re-running the full wager resolution. Correct decomposition of the settlement path. |
 
 ---
 
 ## TEST GAPS
 
-| Gap | Risk | Suggested Test |
-|-----|------|----------------|
-| `_place_real_bet()` double-invocation | CRIT-1 — double debit | Concurrent call test: two async tasks call `_place_real_bet()` for same user; assert wallet debited once |
-| `settle_event()` idempotency | Re-settlement could double-credit | Call `settle_event()` twice with same event_id; assert second call is a no-op |
-| `wager_registry` invalid transition rejection | Silent bugs if status machine bypassed | Assert `update_wager_status("won" → "open")` raises `ValueError` |
-| `flow_live_cog` session restore cycle | Persist + reconnect + replay | Persist a session to DB, call `load_persisted()`, assert session is restored and event count preserved |
-| `"sportsbook_result"` topic coverage | Dead subscription (OBS-1) undetected | Integration test: confirm a sportsbook settlement triggers a session update in `SessionTracker` |
+| Gap | Risk |
+|-----|------|
+| No test for `_get_browser()` re-entry path (C-01) | The deadlock only manifests on browser reconnect — hard to hit manually, easy to miss in review. Needs a mock that forces `_browser.is_connected()` to return False. |
+| No test for streak re-achievement bonus (W-01) | Would require a player to build, break, and rebuild a streak to the same length. Current tests likely only test first-time achievement. |
+| No test that `void_stale_crash_bets()` is invoked by the maintenance loop (W-03) | Function existence test alone isn't sufficient — need integration test confirming it's called. |
+| No UTC boundary test for streak functions | Need to assert `get_streak()` uses UTC date, not local. |
+| `play_again.py` wager clamping path (O-02) | The `functools.partial` `.func` access is only triggered when wager is clamped — requires a test that changes `max_bet` between game creation and replay. |
 
 ---
 
@@ -171,38 +158,19 @@ Fetches all rows ordered by balance, then iterates in Python to find rank. The c
 
 | Metric | Value |
 |--------|-------|
-| Files audited | 14 |
-| Lines of code reviewed | ~9,000 |
-| Git commits (last 24h) | 0 |
-| CRITICAL findings | 1 |
-| WARNINGS | 4 |
-| OBSERVATIONS | 4 |
-| CROSS-MODULE RISKS | 2 |
-| POSITIVE patterns noted | 8 |
-| TEST gaps identified | 5 |
-| Files with silent `except: pass` | 2 (`flow_sportsbook.py` ×2 sites) |
-| Dead event subscriptions | 1 (`"sportsbook_result"` — flow_live_cog) |
+| Critical findings | 1 |
+| Warnings | 3 |
+| Observations | 3 |
+| Cross-module risks | 4 |
+| Positive patterns documented | 7 |
+| Test gaps | 5 |
+| Files read | 17 |
+| Lines analyzed | ~10,215 |
+| Commits in scope | 2 (`d9cf9e2`, `d00007f`) |
+| New functions with no callers | 1 (`void_stale_crash_bets`) |
+| Idempotency violations | 1 (streak bonus key collision) |
+| UTC consistency violations | 1 (streak date functions) |
 
 ---
 
-## CLAUDE.md UPDATES
-
-### Health Check Results
-
-**Module Map** — all 14 audited files are represented in the Module Map. No gaps found.
-
-**Cog Load Order** — `flow_live_cog` (position 13) appears correctly after `flow_store` (12). Verified against `_EXTENSIONS` in `bot.py`. No ordering issues found.
-
-**New rule candidate (from WARN-3 pattern):**
-
-> **Admin view exception handling** — Silent `except Exception: pass` in admin-facing views is prohibited. Always log the exception; optionally surface an error embed. Admin views silently returning empty results on DB error are worse than a visible error.
-
-**New gotcha candidate (from CRIT-1 pattern):**
-
-| Rule | Detail |
-|------|--------|
-| `flow_wallet.debit()` idempotency | All debit calls MUST pass a `reference_key`. Without it, Discord interaction retries or button double-clicks cause double-debits. Use `f"{SUBSYSTEM}_DEBIT_{uid}_{event_id}_{int(time.time())}"` as the key format. |
-
-**New observation (from OBS-1):**
-
-> `"sportsbook_result"` event topic — `flow_live_cog` subscribes but no live code publishes. The parlay highlight and sportsbook session tracking code paths in `flow_live_cog` are entirely inactive until a publisher is wired into `sportsbook_core.settle_event()` or the grading paths.
+*Audit completed autonomously by scheduled task `audit-tuesday-casino` · 2026-04-07*

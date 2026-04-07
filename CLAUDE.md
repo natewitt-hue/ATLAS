@@ -113,7 +113,7 @@ build_member_db              →  tsl_members table (identity registry)
 | **Genesis** | Trades, roster, dev traits, draft | `genesis_cog.py` |
 | **Owner Registry** | Discord user ↔ team assignments, conference lookups, assign/unassign UI | `roster.py` |
 | **Ability Engine** | Lock & Key ability audit, dev budget enforcement, position change validation | `ability_engine.py` |
-| **Flow** | Economy, TSL sportsbook, casino, live engagement | `flow_sportsbook.py`, `casino/`, `economy_cog.py`, `flow_live_cog.py` |
+| **Flow** | Economy, TSL sportsbook, casino, live engagement | `flow_sportsbook.py`, `casino/`, `casino/play_again.py` (shared Play Again / Let It Ride view), `economy_cog.py`, `flow_live_cog.py` |
 | **Flow Store** | Store engine — item effects, purchases | `flow_store.py`, `store_effects.py` |
 | **Flow Subsystem** | Wallet, audit, events, wager registry | `flow_wallet.py`, `flow_audit.py`, `flow_events.py`, `wager_registry.py` |
 | **Real Sportsbook** | Real NFL/NBA betting with live ESPN odds | `real_sportsbook_cog.py`, `sportsbook_core.py`, `espn_odds.py` |
@@ -122,7 +122,7 @@ build_member_db              →  tsl_members table (identity registry)
 | **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
 | **Atlas Home** | User baseball card home screen (`/atlas`) — profile, stats, theme selector | `atlas_home_cog.py`, `atlas_home_renderer.py` |
-| **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_html_engine.py` |
+| **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_themes.py`, `atlas_colors.py`, `atlas_html_engine.py` |
 
 ### Rendering Stack
 
@@ -131,6 +131,8 @@ All card renders use a single pipeline:
 | Component | File | Purpose |
 |-----------|------|---------|
 | Style Tokens | `atlas_style_tokens.py` | Single source of truth for colors, fonts, spacing, layout |
+| Themes | `atlas_themes.py` | Theme registry — CSS variable overrides + overlays per user theme |
+| Embed Colors | `atlas_colors.py` | Discord embed color constants (used by all cogs for consistent palette) |
 | HTML Engine | `atlas_html_engine.py` | Page pool + `render_card()` + `wrap_card()` |
 | Casino Games | `casino/renderer/casino_html_renderer.py` | Blackjack, Slots, Crash, Coinflip, Scratch |
 | Highlights | `casino/renderer/highlight_renderer.py` | Jackpot, PvP, Crash LMS, Prediction, Parlay |
@@ -177,6 +179,8 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 | `flow.db` | TSL sportsbook bets, Flow economy transactions |
 | `flow_economy.db` | Flow store purchases, wallet ledger, casino economy, balances, affinity scores |
 | `TSL_Archive.db` | Full Discord chat history archive (Oracle/Codex queries) |
+
+`db_migration_snapshots.py` — standalone migration utility (synchronous `sqlite3.connect`); not loaded as a cog. Contains `take_daily_snapshot()`. Must be called via `asyncio.to_thread()` if ever wired into async context.
 
 ### Environment Variables
 
