@@ -37,13 +37,13 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] affinity.py
 
 ## Ring 1 — Genesis / Sentinel / Build (7)
-- [ ] genesis_cog.py
-- [ ] sentinel_cog.py
-- [ ] awards_cog.py
-- [ ] roster.py
-- [ ] build_tsl_db.py
-- [ ] build_member_db.py
-- [ ] atlas_html_engine.py
+- [x] genesis_cog.py
+- [x] sentinel_cog.py
+- [x] awards_cog.py
+- [x] roster.py
+- [x] build_tsl_db.py
+- [x] build_member_db.py
+- [x] atlas_html_engine.py
 
 ## Ring 1 — Admin / Casino / Home (4)
 - [ ] boss_cog.py
