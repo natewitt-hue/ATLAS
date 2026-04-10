@@ -83,29 +83,29 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] casino/renderer/session_recap_renderer.py
 
 ## Orphans (26)
-- [ ] ability_engine.py
-- [ ] backfill_embeddings.py
-- [ ] card_renderer.py
-- [ ] codex_intents.py
-- [ ] conftest.py
-- [ ] embed_helpers.py
-- [ ] espn_asset_scraper.py
-- [ ] flow_audit.py
-- [ ] flow_events.py
-- [ ] flow_cards.py
-- [ ] google_docs_writer.py
-- [ ] ledger_poster.py
-- [ ] oracle_agent.py
-- [ ] oracle_analysis.py
-- [ ] oracle_query_builder.py
-- [ ] oracle_renderer.py
-- [ ] pagination_view.py
-- [ ] stress_test_ai.py
-- [ ] stress_test_codex.py
-- [ ] stress_test_history.py
-- [ ] stress_test_vet.py
-- [ ] test_all_renders.py
-- [ ] test_oracle_stress.py
-- [ ] test_prediction_v6.py
-- [ ] test_query_builder.py
-- [ ] upload_emoji.py
+- [x] ability_engine.py
+- [x] backfill_embeddings.py
+- [x] card_renderer.py
+- [x] codex_intents.py
+- [x] conftest.py
+- [x] embed_helpers.py
+- [x] espn_asset_scraper.py
+- [x] flow_audit.py
+- [x] flow_events.py
+- [x] flow_cards.py
+- [x] google_docs_writer.py
+- [x] ledger_poster.py
+- [x] oracle_agent.py
+- [x] oracle_analysis.py
+- [x] oracle_query_builder.py
+- [x] oracle_renderer.py
+- [x] pagination_view.py
+- [x] stress_test_ai.py
+- [x] stress_test_codex.py
+- [x] stress_test_history.py
+- [x] stress_test_vet.py
+- [x] test_all_renders.py
+- [x] test_oracle_stress.py
+- [x] test_prediction_v6.py
+- [x] test_query_builder.py
+- [x] upload_emoji.py
