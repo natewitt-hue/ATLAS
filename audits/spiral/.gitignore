@@ -1,0 +1,5 @@
+# Transient files produced during the spiral review run.
+# Regenerated on every per-file invocation; not part of the audit record.
+_temp_prompt.md
+_last_stderr.log
+_probe_stderr.log
