@@ -52,21 +52,21 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] casino/casino.py
 
 ## Ring 2 — Core utilities (15)
-- [ ] analysis.py
-- [ ] atlas_colors.py
-- [ ] atlas_home_renderer.py
-- [ ] atlas_send.py
-- [ ] atlas_style_tokens.py
-- [ ] atlas_themes.py
-- [ ] db_migration_snapshots.py
-- [ ] espn_odds.py
-- [ ] format_utils.py
-- [ ] odds_utils.py
-- [ ] player_picker.py
-- [ ] sportsbook_cards.py
-- [ ] store_effects.py
-- [ ] team_branding.py
-- [ ] trade_engine.py
+- [x] analysis.py
+- [x] atlas_colors.py
+- [x] atlas_home_renderer.py
+- [x] atlas_send.py
+- [x] atlas_style_tokens.py
+- [x] atlas_themes.py
+- [x] db_migration_snapshots.py
+- [x] espn_odds.py
+- [x] format_utils.py
+- [x] odds_utils.py
+- [x] player_picker.py
+- [x] sportsbook_cards.py
+- [x] store_effects.py
+- [x] team_branding.py
+- [x] trade_engine.py
 
 ## Ring 2 — Casino subsystem (12)
 - [ ] casino/casino_db.py
