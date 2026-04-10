@@ -15,14 +15,14 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] echo_loader.py
 
 ## Ring 1 — Flow & Economy (8)
-- [ ] flow_sportsbook.py
-- [ ] flow_wallet.py
-- [ ] flow_store.py
-- [ ] flow_live_cog.py
-- [ ] economy_cog.py
-- [ ] sportsbook_core.py
-- [ ] wager_registry.py
-- [ ] real_sportsbook_cog.py
+- [x] flow_sportsbook.py
+- [x] flow_wallet.py
+- [x] flow_store.py
+- [x] flow_live_cog.py
+- [x] economy_cog.py
+- [x] sportsbook_core.py
+- [x] wager_registry.py
+- [x] real_sportsbook_cog.py
 
 ## Ring 1 — Oracle / AI / Memory (10)
 - [ ] oracle_cog.py
