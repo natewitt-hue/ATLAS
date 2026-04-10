@@ -69,18 +69,18 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] trade_engine.py
 
 ## Ring 2 — Casino subsystem (12)
-- [ ] casino/casino_db.py
-- [ ] casino/games/blackjack.py
-- [ ] casino/games/coinflip.py
-- [ ] casino/games/crash.py
-- [ ] casino/games/slots.py
-- [ ] casino/play_again.py
-- [ ] casino/renderer/casino_html_renderer.py
-- [ ] casino/renderer/highlight_renderer.py
-- [ ] casino/renderer/ledger_renderer.py
-- [ ] casino/renderer/prediction_html_renderer.py
-- [ ] casino/renderer/pulse_renderer.py
-- [ ] casino/renderer/session_recap_renderer.py
+- [x] casino/casino_db.py
+- [x] casino/games/blackjack.py
+- [x] casino/games/coinflip.py
+- [x] casino/games/crash.py
+- [x] casino/games/slots.py
+- [x] casino/play_again.py
+- [x] casino/renderer/casino_html_renderer.py
+- [x] casino/renderer/highlight_renderer.py
+- [x] casino/renderer/ledger_renderer.py
+- [x] casino/renderer/prediction_html_renderer.py
+- [x] casino/renderer/pulse_renderer.py
+- [x] casino/renderer/session_recap_renderer.py
 
 ## Orphans (26)
 - [ ] ability_engine.py
