@@ -25,16 +25,16 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] real_sportsbook_cog.py
 
 ## Ring 1 — Oracle / AI / Memory (10)
-- [ ] oracle_cog.py
-- [ ] oracle_memory.py
-- [ ] polymarket_cog.py
-- [ ] codex_cog.py
-- [ ] codex_utils.py
-- [ ] intelligence.py
-- [ ] lore_rag.py
-- [ ] conversation_memory.py
-- [ ] reasoning.py
-- [ ] affinity.py
+- [x] oracle_cog.py
+- [x] oracle_memory.py
+- [x] polymarket_cog.py
+- [x] codex_cog.py
+- [x] codex_utils.py
+- [x] intelligence.py
+- [x] lore_rag.py
+- [x] conversation_memory.py
+- [x] reasoning.py
+- [x] affinity.py
 
 ## Ring 1 — Genesis / Sentinel / Build (7)
 - [ ] genesis_cog.py
