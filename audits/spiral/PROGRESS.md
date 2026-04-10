@@ -7,12 +7,12 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] bot.py
 
 ## Ring 1 — Core orchestration (6)
-- [ ] echo_cog.py
-- [ ] setup_cog.py
-- [ ] permissions.py
+- [x] echo_cog.py
+- [x] setup_cog.py
+- [x] permissions.py
 - [x] constants.py
-- [ ] atlas_ai.py
-- [ ] echo_loader.py
+- [x] atlas_ai.py
+- [x] echo_loader.py
 
 ## Ring 1 — Flow & Economy (8)
 - [ ] flow_sportsbook.py
