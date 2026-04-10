@@ -46,10 +46,10 @@ Reviewer: Codex (codex-cli 0.118.0) via `task --prompt-file` with adapted advers
 - [x] atlas_html_engine.py
 
 ## Ring 1 — Admin / Casino / Home (4)
-- [ ] boss_cog.py
-- [ ] god_cog.py
-- [ ] atlas_home_cog.py
-- [ ] casino/casino.py
+- [x] boss_cog.py
+- [x] god_cog.py
+- [x] atlas_home_cog.py
+- [x] casino/casino.py
 
 ## Ring 2 — Core utilities (15)
 - [ ] analysis.py
