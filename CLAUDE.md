@@ -106,7 +106,7 @@ build_member_db              →  tsl_members table (identity registry)
 
 | Module | Purpose | Cog File(s) |
 |--------|---------|-------------|
-| **Core** | Orchestration, routing | `bot.py`, `setup_cog.py`, `permissions.py` |
+| **Core** | Orchestration, routing, shared embed builder | `bot.py`, `setup_cog.py`, `permissions.py`, `embed_helpers.py` |
 | **AI** | Centralized AI client — Claude primary, Gemini fallback | `atlas_ai.py` |
 | **Sentinel** | Rule enforcement, blowout monitor, compliance | `sentinel_cog.py` |
 | **Oracle** | Analytics, stats, power rankings, profiles | `oracle_cog.py` (class: StatsHubCog) |
@@ -117,9 +117,13 @@ build_member_db              →  tsl_members table (identity registry)
 | **Flow Store** | Store engine — item effects, purchases | `flow_store.py`, `store_effects.py` |
 | **Flow Subsystem** | Wallet, audit, events, wager registry | `flow_wallet.py`, `flow_audit.py`, `flow_events.py`, `wager_registry.py` |
 | **Real Sportsbook** | Real NFL/NBA betting with live ESPN odds | `real_sportsbook_cog.py`, `sportsbook_core.py`, `espn_odds.py` |
+| **Awards** | Anonymous voting polls, award nominations, tally & close | `awards_cog.py` |
 | **Boss** | Visual commissioner control room — replaces `/commish` subcommands | `boss_cog.py` |
 | **God** | Privileged god-tier administration (`/god`) — affinity reset, DB rebuild | `god_cog.py` |
-| **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py` |
+| **Codex** | History, records, NL→SQL→NL via AI | `codex_cog.py`, `codex_utils.py` (shared SQL/schema/identity), `codex_intents.py` (3-tier intent detection) |
+| **Conversation Memory** | Per-user + reply-chain conversation history (SQLite-backed, source-aware TTL) | `conversation_memory.py`, `oracle_memory.py` |
+| **Reasoning** | Two-phase code-generation reasoning engine — Analyst (Python codegen) + ATLAS response | `reasoning.py` |
+| **Lore RAG** | FAISS semantic search over Discord chat history for lore/drama context injection | `lore_rag.py` |
 | **Echo** | Commissioner voice/persona system | `echo_cog.py`, `echo_loader.py`, `affinity.py` |
 | **Atlas Home** | User baseball card home screen (`/atlas`) — profile, stats, theme selector | `atlas_home_cog.py`, `atlas_home_renderer.py` |
 | **Render** | Unified HTML→PNG card pipeline | `atlas_style_tokens.py`, `atlas_themes.py`, `atlas_colors.py`, `atlas_html_engine.py` |

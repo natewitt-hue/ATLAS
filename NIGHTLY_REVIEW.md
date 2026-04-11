@@ -1,148 +1,190 @@
-# ATLAS Nightly Code Review
-## Thursday · Genesis, Sentinel & Compliance Focus
-**Date:** 2026-04-09
-**Version:** ATLAS v7.10.0
-**Scope:** genesis_cog.py, trade_engine.py, god_cog.py, sentinel_cog.py, ability_engine.py, roster.py, card_renderer.py
-**Total LOC reviewed:** ~8,604 across 7 files
-**Commits in last 24h:** 0 (last commit: `ceef0e8` — Tuesday casino/rendering audit)
+# ATLAS Nightly Audit — 2026-04-11
+
+**Focus:** Core Infrastructure | **Recent commits:** 0 code changes (all 5 recent commits are audit artifacts) | **Files deeply read:** 14 | **Total lines analyzed:** ~4,800
 
 ---
 
-## Executive Summary
+## CRITICAL — Fix Before Next Deploy
 
-Genesis and Sentinel are in solid shape post the v7.10.0 sicko-mode sweep. The TOCTOU double-approve bug is properly fixed with `_trade_approval_lock`, async file I/O locking was applied to complaint/FR state, and `_safe_int()` is used consistently throughout the valuation pipeline. One critical bug was found in the render failure path of `TradeActionView._update_status()` that will cause double announcements in the trade log channel whenever a card render fails. Six warnings found across four files, primarily around async/sync discipline and missing sandboxing.
+### [C-01] `awards_cog.py` — Vote Race Condition: `_polls_lock` Acquired Too Late
 
----
-
-## CRITICAL — 1 finding
-
-### C1 · Double announcement on trade card render failure (genesis_cog.py)
-**Location:** `TradeActionView._update_status()` — render try/except block
-**Impact:** Every trade card render failure (Playwright crash, timeout, network issue) produces 2 announcements in the trade log channel: one from the embed fallback edit and one from the fallback channel send, flooding the commissioner log with duplicates.
-
-**Root cause:** The success path calls `log_ch.send(file=...)` and returns early. The except block falls through to the embed fallback which calls both `msg.edit(embed=...)` AND a second `log_ch.send(embed=...)`. The edit and the send are two distinct channel events visible to Discord users.
-
-**Fix:** Add a `return` (or `else`) guard after `msg.edit(embed=...)` in the fallback path, OR consolidate all channel send calls to a single site. The embed fallback should only edit the existing message, never spawn a second channel post.
-
----
-
-## WARNINGS — 6 findings
-
-### W1 · `_save_trade_state()` synchronous with no lock (genesis_cog.py)
-**Location:** `_save_trade_state()` function
-**Issue:** Unlike sentinel's `_save_complaint_state()` and `_save_fr_state()` which were converted to async with asyncio.Lock guards in v7.10.0, `_save_trade_state()` remains synchronous and unprotected. Concurrent trade approvals — two commissioners tapping Approve within milliseconds via different hub sessions — could cause a partial write to the state JSON, corrupting `_state["pending_trades"]`.
-**Severity:** Medium — requires two concurrent actors and exact timing, but trades are high-value operations.
-**Fix:** Apply the same async-lock pattern used in sentinel. Add `_trade_state_lock = asyncio.Lock()` at module level; convert `_save_trade_state()` to `async def` using `async with _trade_state_lock`.
-
-### W2 · ImportError bypass in `_counter_callback` skips authorization (genesis_cog.py)
-**Location:** `_counter_callback()` in `TradeActionView`, the `except ImportError: pass` block
-**Issue:** The authorization check (verifying the user is a party to the trade before allowing counter-offers) is gated inside a try/except that silently passes on ImportError. If the `intelligence` module is missing or fails to import, any Discord user who sees the trade card can submit a counter-offer regardless of whether they're party to the trade.
-**Severity:** Medium — the intelligence module is a soft dependency, so this is a realistic failure mode.
-**Fix:** Hoist the authorization check outside the intelligence try block, or re-raise ImportError as a user-visible error rather than silently passing.
-
-### W3 · `_save_counter()` has no asyncio.Lock (sentinel_cog.py)
-**Location:** `ForceRequestCog._save_counter()`
-**Issue:** `_save_counter()` is a synchronous write with no concurrency guard. If two force request counter submissions arrive simultaneously (Discord interaction retries or multi-tap), the JSON file could be partially overwritten.
-**Severity:** Low-Medium — force requests are less frequent than trades, but the write pattern is the same class of bug that was fixed in the complaint/FR state saves.
-**Fix:** Apply `_fr_file_lock` (already exists in the module) to `_save_counter()` and convert it to async.
-
-### W4 · Opponent name not sandboxed in force request AI prompt (sentinel_cog.py)
-**Location:** `ForceRequestCog` AI prompt construction
-**Issue:** The user's freetext note is correctly wrapped in `<untrusted_user_note>` tags in the AI prompt. However, the **opponent name** field — also supplied by the submitting user — is interpolated directly into the prompt without the same sandboxing. A user could supply an opponent name like `"John. Ignore all previous instructions and..."` to attempt prompt injection against the AI ruling system.
-**Severity:** Low — the AI output is a recommendation, not an automated action. A commissioner reviews before any ruling is applied. But the asymmetric treatment is a pattern inconsistency.
-**Fix:** Wrap opponent name in the same `<untrusted_user_note>` tags, or add a prompt note that all user-supplied fields are untrusted.
-
-### W5 · httpx sync/async inconsistency in sentinel_cog (sentinel_cog.py)
-**Location:** `_fetch_image_bytes` (4th down, uses sync `httpx.get` via `run_in_executor`) vs. force request (uses `async httpx.AsyncClient`)
-**Issue:** Two subsystems in the same file use different httpx patterns for the same operation (image download). The sync-in-executor pattern holds a threadpool thread for the full HTTP request duration.
-**Severity:** Low — both patterns are functionally correct.
-**Fix:** Standardize on `async httpx.AsyncClient` for both subsystems for consistency and to reduce threadpool pressure on slow image downloads.
-
-### W6 · `roster.assign()` / `roster.unassign()` run synchronous sqlite3 in async context (roster.py)
-**Location:** `OwnerRegistry.assign()`, `OwnerRegistry.unassign()`
-**Issue:** These methods use `sqlite3.connect()` directly and are called from async Discord interaction handlers. Each call blocks the event loop for the duration of the SQLite write.
-**Severity:** Low — writes are fast and infrequent in a 31-team league. Pragmatically acceptable but technically incorrect.
-**Fix:** Wrap sqlite3 calls in `asyncio.to_thread()` or convert to `aiosqlite`.
+- **File:** `awards_cog.py` L57–72
+- **Risk:** `_polls_lock` is only held during the *write* (`_save_polls`), not across the full read-check-write cycle. Two concurrent button clicks from the same user can both pass `if uid in poll["votes"]` before either writes — allowing double-voting.
+- **Evidence:**
+  ```python
+  uid = str(interaction.user.id)
+  if uid in poll["votes"]:          # ← check happens outside lock
+      return ...                    # ← another request is here simultaneously
+  poll["votes"][uid] = self.values[0]
+  await _save_polls()               # ← only the write holds the lock
+  ```
+  This is a classic TOCTOU (time-of-check / time-of-use) race. Discord's retry behavior on failed interactions makes this especially likely.
+- **Fix:** Acquire `_polls_lock` around the full check+write, not just the save:
+  ```python
+  async with _polls_lock:
+      if uid in poll["votes"]:
+          return await interaction.response.send_message("⚠️ Already voted.", ephemeral=True)
+      poll["votes"][uid] = self.values[0]
+      _save_polls_sync()   # already holds lock — call sync version directly
+  await interaction.response.send_message("✅ Vote recorded anonymously.", ephemeral=True)
+  ```
 
 ---
 
-## OBSERVATIONS — 10 findings
+## WARNINGS — Fix This Week
 
-### O1 · `_acted` flag not restart-safe — state-based guard now covers this
-`RulingPanelView._acted` is an in-memory flag that resets on bot restart. The new state-based double-ruling guard added in v7.10.0 (checking resolved status from persistent state before inspecting `_acted`) makes this safe. The flag is defense-in-depth rather than the primary gate. Acknowledged.
+### [W-01] `atlas_home_renderer.py` L50–213 — Outer `except Exception: pass` Silences All DB Errors
 
-### O2 · Trade re-evaluation at approve time may differ from propose time
-`TradeActionView` re-evaluates trade value at approval time using current roster data. If a player was re-rated or a cornerstone was added/removed between proposal and approval, the displayed band on the approved card may differ from what the proposer saw. Intentional in the general case (audit-correct) but worth documenting in trade rules.
+- **File:** `atlas_home_renderer.py` L50, L212–213
+- **Impact:** The outer `try: ... except Exception: pass` wraps the entire `gather_home_data()` function. Any unhandled error (schema mismatch, connection timeout, missing table) silently returns a card with all stats at zero. The user sees a blank card with no error indication. Admin has no log entry to investigate.
+- **Fix:** Replace the outer silent swallow with a logged warning:
+  ```python
+  except Exception:
+      log.warning("gather_home_data failed for user_id=%s", user_id, exc_info=True)
+  ```
+  The inner per-section `except Exception: pass` blocks are correct (graceful per-table degradation) — only the outer one needs fixing.
 
-### O3 · genesis-sentinel state import coupling
-`sentinel_cog.py` imports `_state`, `_save_state`, `_STATE_PATH` from `genesis_cog`. A TODO comment acknowledges this. The coupling is load-order safe (genesis loads before sentinel) but creates a fragile import dependency. Long-term: extract shared state to `genesis_state.py`.
+### [W-02] `setup_cog.py` L799–800 — Silent Role Enrichment Failure in Auto-Discovery
 
-### O4 · `rings_mult` uses selling team's rings, not drafting team's rings
-`trade_engine.py L237-241`: Acknowledged TODO. `rings_mult` should penalize the team that drafted the player (ring count at draft time), not the team currently selling. Current behavior slightly mis-attributes ring tax. Low-priority.
+- **File:** `setup_cog.py` L799–800 (`_auto_discover_db`)
+- **Impact:** `except Exception: pass` swallows any DB error during member role status enrichment. The comment says "tsl_members table may not exist yet" — a valid case, but this also swallows schema errors, constraint violations, and lock timeouts. No log entry means role-based status updates can silently stop working after a DB migration.
+- **Fix:**
+  ```python
+  except sqlite3.OperationalError:
+      pass  # tsl_members table not yet created — OK at startup
+  except Exception:
+      log.warning("Role enrichment failed for guild %s", gid, exc_info=True)
+  ```
 
-### O5 · `check_position_change()` defaults to legal=True for unknown position combos
-`ability_engine.py`: Any `(from_pos, to_pos)` pair not in `POSITION_CHANGE_RULES` returns `(True, ["Commissioner discretion applies"])`. This default-allow posture means novel combos (QB→WR, DE→DT, etc.) display as "ELIGIBLE" in Discord output with a note. Consider switching to default-deny for unspecified combos to avoid implicit approval signals.
+### [W-03] `build_member_db.py` L1258–1275 — N+1 Query in `validate_db_usernames()`
 
-### O6 · Dead code: `and not hard_blocks` on line 1309 of ability_engine.py
-`ability_engine.py L1309`: `if rule.get("requires_commissioner") and not hard_blocks:` — the function already returned `False` at L1307 if `hard_blocks` is non-empty, so `not hard_blocks` is always `True` at L1309. The condition simplifies to just `rule.get("requires_commissioner")`. Minor code clarity issue.
+- **File:** `build_member_db.py` L1265–1269
+- **Impact:** Runs one `SELECT COUNT(*) FROM games WHERE homeUser = ? OR awayUser = ?` per active member. With 31 members this is 31 individual queries on every startup/sync. If the league grows or this function is called more frequently, it becomes a measurable startup bottleneck.
+- **Fix:** Consolidate into a single query:
+  ```sql
+  SELECT db_username FROM tsl_members
+  WHERE db_username IS NOT NULL AND active = 1
+    AND db_username NOT IN (
+        SELECT DISTINCT homeUser FROM games WHERE homeUser != ''
+        UNION
+        SELECT DISTINCT awayUser FROM games WHERE awayUser != ''
+    )
+  ```
 
-### O7 · Force Request and 4th Down missing from SentinelHubView buttons
-`sentinel_cog.py`: `_build_sentinel_hub_embed()` lists "Force Request" and "4th Down" in the embed text as available tools, but `SentinelHubView` only has buttons for Complaint, Pos Change, Disconnect, Blowout, Stat Check, and Pos Log. There are no hub buttons for Force Request or 4th Down. Users see them described but cannot reach them from the hub — only via dedicated slash commands (if they exist).
+### [W-04] `setup_cog.py` L113–161 — `get_channel_id()` Blocks Event Loop on Cache Miss
 
-### O8 · Asset truncation in card_renderer.py has no "+N more" indicator
-`card_renderer.py L208-214`: `players_a[:4]` and `picks_a[:4]` silently cap assets at 4 per side. A trade with 5+ players/picks renders with extras invisibly dropped and no "+2 more" text shown on the card.
+- **File:** `setup_cog.py` L113 (`get_channel_id`), called at `blowout_monitor` L492, `auto_discover` L905
+- **Impact:** `get_channel_id()` is synchronous and opens a sqlite3 connection with a 2-second timeout. It's called directly on the event loop thread from `blowout_monitor` (a `tasks.loop`) and from `auto_discover` (post-executor, back on the event loop). A cache miss + DB lock = 2-second event loop stall. Gateway heartbeat is 41.25s; a 2-second stall is survivable but non-trivial. The async wrapper `get_channel_id_async` exists but isn't used in these call sites.
+- **Fix:** Replace the direct call in `auto_discover()` with:
+  ```python
+  ch_id = await get_channel_id_async(cfg_key, guild.id)
+  ```
+  For `blowout_monitor`, use `get_channel_id_async` too since it already runs in an async task.
 
-### O9 · `_ordinal()` produces wrong suffix for 21+ round picks
-`card_renderer.py L117-118`: Returns `f"{n}th"` for all values outside 1-3, including 21 ("21th"), 22 ("22th"), 23 ("23th"). TSL has rounds 1-7 so this is never triggered in practice, but would produce malformed strings on league expansion.
+### [W-05] `constants.py` L4–9 — Expiring Discord CDN Icon URL
 
-### O10 · ESPN CDN logo fallback is a silent external dependency during card renders
-`card_renderer.py L111`: `_team_logo_url()` falls back to `https://a.espncdn.com/i/teamlogos/nfl/500/{abbrev}.png` when local branding lookup fails. This URL is fetched by Playwright at render time. If ESPN CDN is slow or unreachable, the logo silently fails (broken image) with no error surfaced to the Discord user.
+- **File:** `constants.py` L4–9
+- **Impact:** `ATLAS_ICON_URL` contains a signed Discord CDN URL with an expiry timestamp (`ex=69add263`). When it expires, all embeds using the footer icon will silently show a broken image. Already noted in the v1.4.2 changelog but unresolved.
+- **Fix:** Host on GitHub raw, an S3 bucket, or Imgur. One-line change in `constants.py`.
+
+### [W-06] `awards_cog.py` — No Voting Window Enforcement
+
+- **File:** `awards_cog.py` — no deadline field in poll schema
+- **Impact:** Polls have no time-based close. If a commissioner creates a poll and forgets to run `_closepoll_impl`, voting stays open indefinitely. There's no `end_at` field and no background task to auto-close. Operational risk, not a security issue.
+- **Fix:** Add an optional `end_at` ISO timestamp to the poll schema; check it in `VoteSelect.callback` before accepting votes.
+
+### [W-07] `bot.py` L639–641 — Message Handler Swallows All AI Errors the Same Way
+
+- **File:** `bot.py` L639–641 (`on_message` handler)
+- **Impact:** One broad `except Exception` covers codex_utils failures, atlas_ai timeouts, affinity errors, and lore_rag errors. All produce the same generic reply: "ATLAS is currently undergoing maintenance." The user gets no useful signal and the operator sees only a traceback with no context about which subsystem failed.
+- **Fix:** The current logging (`print` + `traceback.print_exc()`) is adequate for a bot this size. Consider wrapping individual subsystem calls in try/except with labeled log messages so triage is faster. Not blocking, but worth the 10-minute investment.
 
 ---
 
-## POSITIVE PATTERNS — 10 findings
+## OBSERVATIONS — Track for Later
 
-1. **asyncio.Lock on complaint/FR file I/O** (sentinel_cog.py) — module-level `_complaint_file_lock` and `_fr_file_lock` applied to all persistent state writes. Correct async pattern.
+### [O-01] `data_manager.py` / `build_tsl_db.py` — Sequential API Fetches; Easy Parallelism Win
 
-2. **`_trade_approval_lock` TOCTOU fix** (genesis_cog.py) — all acceptance logic is inside the lock. Lock is correctly scoped to approval only, not the full interaction lifetime.
+Both `load_all()` and `sync_tsl_db()` fetch 8+ independent API endpoints sequentially. Each endpoint is ~0.5–2s. A `ThreadPoolExecutor` across the independent fetch calls could cut startup sync time by 60–70%. The biggest wins are the 6 stat-leader endpoints in `load_all()` (pass/rush/rec/sack/int/tackle) — all are fully independent.
 
-3. **`_safe_int()` NaN-safe helper used consistently** — appears in both genesis_cog.py and trade_engine.py. Guards the entire valuation pipeline against CSV export NaN values (known Madden export quirk).
+### [O-02] `boss_cog.py` L688–694 — Dead "Grade Week" Button Misleads Operator
 
-4. **`@functools.lru_cache(maxsize=4096)` on `_cached_archetype()`** (ability_engine.py) — keyed on `(rosterId, season, pos, arch_tuple)`. Prevents 3000+ redundant archetype calculations on full-roster audits.
+`BossSBGradeModal.on_submit` unconditionally returns "Manual grading is no longer supported." The button still appears in the Bets & Props panel. Either remove the button or change the label to "AG Status" (which is what the user probably wants). Leaving a button that always returns an error message is a UX trap.
 
-5. **Parameterized SQL throughout roster.py** — all queries use `?` placeholders. No string interpolation anywhere. Zero SQL injection surface.
+### [O-03] `data_manager.py` L207 — `discord_history.db` vs `TSL_Archive.db` Naming
 
-6. **SentinelHubView persistent view pattern** — `timeout=None` + unique `custom_id` on all 6 buttons. `setup()` registers the view before cog load. Buttons survive bot restarts.
+`_DB_PATH` at L207 resolves to `discord_history.db`. CLAUDE.md documents the Discord archive as `TSL_Archive.db`. These may be separate databases (one local, one Oracle-only), but the naming inconsistency is confusing and worth a comment clarifying the relationship.
 
-7. **RulingPanelView state-based double-ruling guard** — checks resolved status from persistent state before `_acted` flag, making the restart-unsafe in-memory flag defense-in-depth.
+### [O-04] `setup_cog.py::_auto_discover_db` — 6 Separate `sqlite3.connect()` Calls
 
-8. **HTML user content escaping via `_esc()`** (card_renderer.py) — all user-supplied strings (team names, owner names, player names, AI commentary, trade notes) routed through `esc()`. No XSS surface in server-side Playwright renders.
+The function opens and closes 6 separate connections to the same DB file. This is safe but wasteful. A single connection passed through the function would be cleaner and reduce open/close overhead. Low priority given the function runs once per startup.
 
-9. **`_validate_image_url()` SSRF defense** (sentinel_cog.py) — restricts force request image downloads to Discord CDN domains only. Prevents users from submitting arbitrary URLs to the image fetcher.
+### [O-05] `build_member_db.py::resolve_db_username` L1370–1379 — Fuzzy Match Writes Permanently
 
-10. **`POSITION_CHANGE_RULES` with `max_thresholds`** (ability_engine.py) — correctly models speed/agility CAPS as upper bounds distinct from minimums. The check correctly flags "too fast for LB" as a hard block.
+The fuzzy difflib match (cutoff=0.70) auto-caches via `UPDATE tsl_members SET db_username = ?`. If the wrong match is cached, it takes a manual DB edit to fix. A mismatch here means all `/ask me` queries return the wrong player's stats indefinitely. Consider logging the match for human review rather than auto-caching at the 0.70 cutoff.
+
+### [O-06] `atlas_home_renderer.py` — Per-Section `except Exception: pass` Is Correct
+
+Each DB sub-query has its own silent `except Exception: pass`. This is the right pattern — a missing `bets_table` shouldn't break the casino section. Just note that schema drift (e.g., column rename) is invisible without per-section logging. Consider `log.debug` instead of `pass` for easier future debugging.
+
+### [O-07] `bot.py` Docstring Shows v2.0.0 as Latest Changelog Entry
+
+`ATLAS_VERSION` is `7.10.0` but the inline docstring only covers changes up to `v2.0.0`. The docstring is cosmetic, but if someone reads it cold they'll have an incomplete picture of what the bot does. Not worth fixing proactively — just don't rely on it.
+
+### [O-08] `embed_helpers.py` — Used by Only 3 Files (`oracle_cog`, `sentinel_cog`, `flow_sportsbook`)
+
+`build_embed()` in `embed_helpers.py` is imported by only 3 cogs despite being a "shared" builder. Most other cogs construct embeds directly with `discord.Embed(...)`. The inconsistency isn't harmful but means new cogs won't naturally reach for it. Not a bug — just an observation for consistency.
+
+### [O-09] `awards_cog.py` — Announced Results Go to Public Channel, Not Ephemeral
+
+`_closepoll_impl` calls `await interaction.response.send_message(embed=embed)` without `ephemeral=True`. The commissioner's close action will post the results publicly (correct behavior for final results, but worth documenting as intentional).
 
 ---
 
 ## CROSS-MODULE RISKS
 
-| Risk | Source | Target | Severity |
-|------|--------|--------|----------|
-| Direct state import | sentinel_cog imports `_state`, `_save_state` from genesis_cog | genesis_cog state | Medium |
-| External logo dependency | card_renderer._team_logo_url() falls back to ESPN CDN | Playwright render path | Low |
-| Sync file read in async | trade_engine.evaluate_trade() reads parity_state.json via json.load() | trade evaluation | Low |
+### [X-01] `build_tsl_db.sync_tsl_db()` ATTACH Failure Drops `tsl_members` and `server_config`
+
+- **Caller/Callee:** `build_tsl_db.sync_tsl_db()` → `ATTACH DATABASE old_db` path at L399–418
+- **Risk:** If the old `tsl_history.db` has an exclusive write lock when `sync_tsl_db` runs the ATTACH, the preserve-tables step logs a warning and continues — but the new DB is missing `server_config`, `tsl_members`, and `conversation_history`. Every subsequent `get_channel_id()` call returns `None`, all channel routing silently fails, and `build_member_table()` re-seeds from `MEMBERS` (safe but loses runtime team assignments).
+- **Mitigation:** This window is small (~seconds during startup) and the bot typically starts without concurrent writers. But during development with multiple sessions open, the risk is real. Consider a pre-ATTACH lock check or a post-swap verification step.
+
+### [X-02] `data_manager._state` References Held Across Atomic Swap
+
+- **Caller/Callee:** Any cog that does `games = dm.df_games` at the start of a command handler
+- **Risk:** The `dm.__getattr__` proxy always reads from the current `_state`. But if a handler unpacks `games = dm.df_games` and then awaits, a sync in between replaces `_state`. The local `games` variable holds the old DataFrame. This is the expected Python behavior but could produce stale results in a long-running handler. Not a crash risk — just stale data for one request per sync cycle.
+
+### [X-03] `get_channel_id()` Zero-Config Soft-Fallback Masks `setup_cog` Load Failures
+
+- **Caller/Callee:** All cogs that call `get_channel_id()` → `setup_cog._channel_cache`
+- **Risk:** If `setup_cog` fails to load (import error, table creation failure), `_channel_cache` is empty and `get_channel_id()` returns `None` for every key. The `require_channel()` decorator soft-falls back to allowing all channels. No cog fails loudly — they silently post to wrong channels. The only signal is the `print(f"ATLAS Error loading setup_cog: {e}")` at startup. Make sure this startup error is visibly monitored.
+
+---
+
+## POSITIVE PATTERNS WORTH PRESERVING
+
+1. **`data_manager.load_all()` atomic swap** (`L677`): Single `_state = LeagueState(...)` reassignment. GIL guarantees atomicity — no explicit lock needed for the swap itself. Correct and clean.
+
+2. **`build_tsl_db.sync_tsl_db()` write-to-temp-then-replace** (`L347–463`): Writes to `tsl_history.db.tmp`, then atomically replaces. The database is never in a half-built state from the reader's perspective. 3-retry loop for Windows file locking with fallback to `shutil.copy2` is solid defensive coding.
+
+3. **`boss_cog.py` defense-in-depth admin gating**: `default_permissions=discord.Permissions(administrator=True)` at the Group level (L2534–2535) + explicit `await is_commissioner(interaction)` check in every handler AND every modal `on_submit`. Three independent layers — a misconfigured Discord permission won't bypass the code-level check.
+
+4. **`build_member_db.py` COALESCE upsert** (`L1147–1158`): `team = COALESCE(tsl_members.team, excluded.team)` ensures runtime `/commish assign` team assignments survive bot restarts. The IMMEDIATE transaction + `_build_lock` threading lock prevents concurrent build calls from corrupting the seed data.
+
+5. **`setup_cog.py` channel routing soft-fallback**: `require_channel()` returns `True` when no channels are configured (`if not allowed_ids: return True`). New servers work out-of-the-box without a `/setup` run. Graceful degradation over hard failures.
 
 ---
 
 ## TEST GAPS
 
-1. TOCTOU lock behavior — no test exercises two simultaneous approval attempts; lock correctness verified by code review only.
-2. Double-announcement on render failure — no test simulates render_trade_card() returning None and verifies exactly one channel message is sent.
-3. `_save_trade_state()` concurrent write — no test exercises two concurrent state writes.
-4. ImportError bypass in `_counter_callback` — no test verifies authorization is enforced when intelligence module is absent.
-5. `check_position_change()` unknown combos — no test verifies default-allow behavior for combos not in POSITION_CHANGE_RULES.
-6. Cornerstone parity blocking in evaluate_trade() — no test verifies that a locked player triggers RED band with BLOCKED note.
-7. Asset truncation in card renderer — no test verifies that a 5-player trade renders without error and correctly caps at 4 shown.
+| Test Case | Type | Validates | Priority |
+|-----------|------|-----------|----------|
+| Concurrent vote submissions (same user) | Unit | `awards_cog.py` TOCTOU race condition fix | **HIGH** |
+| sync_tsl_db() while another connection holds exclusive lock | Integration | ATTACH failure path — does `tsl_members` survive? | **HIGH** |
+| `gather_home_data()` with missing `bets_table` column | Integration | `atlas_home_renderer.py` per-section graceful degradation | MEDIUM |
+| `get_channel_id()` called on cache miss during `blowout_monitor` | Unit | Event loop blocking under 2s SQLite timeout | MEDIUM |
+| `validate_db_usernames()` with 100+ members | Performance | N+1 query impact at scale | LOW |
+| `resolve_db_username()` with two similar usernames (0.70 cutoff) | Unit | False positive fuzzy match gets cached | MEDIUM |
 
 ---
 
@@ -150,60 +192,30 @@ Genesis and Sentinel are in solid shape post the v7.10.0 sicko-mode sweep. The T
 
 | Metric | Value |
 |--------|-------|
-| Files reviewed | 7 |
-| Total LOC reviewed | ~8,604 |
-| Critical findings | 1 |
-| Warning findings | 6 |
-| Observations | 10 |
-| Positive patterns | 10 |
-| Test gaps | 7 |
-| Commits in 24h | 0 |
-| ATLAS version | 7.10.0 |
+| Code commits (last 24h) | 0 (all audit docs) |
+| Files deeply read | 14 |
+| Total lines analyzed | ~4,800 |
+| Critical issues | 1 |
+| Warnings | 7 |
+| Observations | 9 |
+| Cross-module risks | 3 |
+| Positive patterns noted | 5 |
+
+**Overall health:** Good. The core infrastructure is well-structured with solid atomic swap patterns, defense-in-depth auth, and graceful channel routing degradation. The one critical issue (vote race condition) is a real bug but limited to the awards system — a low-frequency, low-stakes feature. No deploy-blocking issues in the data pipeline or permission system.
+
+**Next audit focus:** Sunday — Cross-Cutting & Integration (full bot scan)
 
 ---
 
-## CLAUDE.md HEALTH CHECK
+## CLAUDE.md UPDATES
 
-**Method:** Cross-checked `_EXTENSIONS` list in `bot.py:241-259` against CLAUDE.md cog load order table. Verified module map entries against files on disk.
+### Changes Made
 
-### Cog Load Order — ACCURATE
+**1. Architecture Reference section — stale cog load order replaced:**
+- Section at bottom of CLAUDE.md had an old reference to `commish_cog` as the last cog and was missing `flow_store`, `flow_live_cog`, `real_sportsbook_cog`, `boss_cog`, `god_cog`, `atlas_home_cog` (everything after `economy_cog`).
+- Updated to match the actual `_EXTENSIONS` list in `bot.py`.
 
-`bot.py:_EXTENSIONS` matches CLAUDE.md table exactly — 17 cogs, same order:
-
-| # | CLAUDE.md | bot.py | Status |
-|---|-----------|--------|--------|
-| 1 | echo_cog | echo_cog | OK |
-| 2 | setup_cog | setup_cog | OK |
-| 3 | flow_sportsbook | flow_sportsbook | OK |
-| 4 | casino.casino | casino.casino | OK |
-| 5 | oracle_cog | oracle_cog | OK |
-| 6 | genesis_cog | genesis_cog | OK |
-| 7 | sentinel_cog | sentinel_cog | OK |
-| 8 | awards_cog | awards_cog | OK |
-| 9 | codex_cog | codex_cog | OK |
-| 10 | polymarket_cog | polymarket_cog | OK |
-| 11 | economy_cog | economy_cog | OK |
-| 12 | flow_store | flow_store | OK |
-| 13 | flow_live_cog | flow_live_cog | OK |
-| 14 | real_sportsbook_cog | real_sportsbook_cog | OK |
-| 15 | boss_cog | boss_cog | OK |
-| 16 | god_cog | god_cog | OK |
-| 17 | atlas_home_cog | atlas_home_cog | OK |
-
-### Module Map — ACCURATE
-
-All modules listed in CLAUDE.md Module Map are present and loaded. No new .py modules were introduced in this audit's focus set that require map updates.
-
-### Rendering Stack — ACCURATE
-
-`card_renderer.py` is correctly listed under "Trade | card_renderer.py | Trade card". All other renderer entries match prior verified state.
-
-### Version — CURRENT
-
-`ATLAS_VERSION = "7.10.0"` in `bot.py:170`. Matches most recent commit message.
-
-### CLAUDE.md VERDICT: No changes required.
-
----
-
-*ATLAS Nightly Review · Thursday Focus: Genesis / Sentinel / Compliance · 2026-04-09*
+**2. Module Map — missing entries added:**
+- `awards_cog.py` was in the Cog Load Order (#8) but absent from the Module Map table. Added with description "Awards & voting."
+- `embed_helpers.py` is imported by `oracle_cog`, `sentinel_cog`, and `flow_sportsbook` but not documented. Added under Core as a shared utility.
+- `oracle_memory.py` is imported in `bot.py` (`from oracle_memory import OracleMemory`) and used for conversation memory in the `on_message` handler but not in the Module Map. Added under Conversation Memory.
