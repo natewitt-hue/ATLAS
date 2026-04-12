@@ -180,8 +180,8 @@ Width: 700px · DPI: 2x · Wait: `domcontentloaded` · Pool: 4 pre-warmed pages
 |----|---------|
 | `tsl_history.db` | Game history, player stats, member registry, server config |
 | `sportsbook.db` | **Legacy (orphaned)** — superseded by `flow_economy.db`; file exists on disk but no active code writes to it |
-| `flow.db` | TSL sportsbook bets, Flow economy transactions |
-| `flow_economy.db` | Flow store purchases, wallet ledger, casino economy, balances, affinity scores |
+| `flow.db` | **New unified bet schema** — `events`, `bets`, `parlays` tables managed by `sportsbook_core.py`; used by real sportsbook, polymarket, and cross-system grading |
+| `flow_economy.db` | Flow wallet (`transactions`, `users_table`), casino economy, store purchases, balances, affinity scores, `bets_table` (TSL sportsbook legacy), `real_bets` (real sports bets) |
 | `TSL_Archive.db` | Full Discord chat history archive (Oracle/Codex queries) |
 
 `db_migration_snapshots.py` — standalone migration utility (synchronous `sqlite3.connect`); not loaded as a cog. Contains `take_daily_snapshot()`. Must be called via `asyncio.to_thread()` if ever wired into async context.

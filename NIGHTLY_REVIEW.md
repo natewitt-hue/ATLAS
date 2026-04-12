@@ -1,190 +1,200 @@
-# ATLAS Nightly Audit — 2026-04-11
+# ATLAS Nightly Audit — 2026-04-12
 
-**Focus:** Core Infrastructure | **Recent commits:** 0 code changes (all 5 recent commits are audit artifacts) | **Files deeply read:** 14 | **Total lines analyzed:** ~4,800
+**Focus:** Cross-Cutting & Integration | **Recent commits:** 1 (CLAUDE.md + review refresh) | **Files scanned:** 89 | **Cross-module contracts verified:** 47
 
 ---
 
 ## CRITICAL — Fix Before Next Deploy
 
-### [C-01] `awards_cog.py` — Vote Race Condition: `_polls_lock` Acquired Too Late
-
-- **File:** `awards_cog.py` L57–72
-- **Risk:** `_polls_lock` is only held during the *write* (`_save_polls`), not across the full read-check-write cycle. Two concurrent button clicks from the same user can both pass `if uid in poll["votes"]` before either writes — allowing double-voting.
+### [C-01] `real_sportsbook_cog.py` debit without `reference_key` — double-debit on retry
+- **File:** `real_sportsbook_cog.py` L778
+- **Risk:** User double-clicks bet button or Discord retries interaction → two debits for one bet. Financial ledger corruption. Violates CLAUDE.md rule explicitly documented as "causes silent data bugs."
 - **Evidence:**
-  ```python
-  uid = str(interaction.user.id)
-  if uid in poll["votes"]:          # ← check happens outside lock
-      return ...                    # ← another request is here simultaneously
-  poll["votes"][uid] = self.values[0]
-  await _save_polls()               # ← only the write holds the lock
-  ```
-  This is a classic TOCTOU (time-of-check / time-of-use) race. Discord's retry behavior on failed interactions makes this especially likely.
-- **Fix:** Acquire `_polls_lock` around the full check+write, not just the save:
-  ```python
-  async with _polls_lock:
-      if uid in poll["votes"]:
-          return await interaction.response.send_message("⚠️ Already voted.", ephemeral=True)
-      poll["votes"][uid] = self.values[0]
-      _save_polls_sync()   # already holds lock — call sync version directly
-  await interaction.response.send_message("✅ Vote recorded anonymously.", ephemeral=True)
-  ```
+```python
+new_balance = await flow_wallet.debit(
+    uid, amt, "REAL_BET",
+    description=f"Bet: {pick} ({bet_type})",
+)  # ← no reference_key
+```
+- **Fix:**
+```python
+debit_ref = f"REAL_BET_DEBIT_{uid}_{espn_event_id}_{int(time.time())}"
+new_balance = await flow_wallet.debit(
+    uid, amt, "REAL_BET",
+    description=f"Bet: {pick} ({bet_type})",
+    reference_key=debit_ref,
+)
+```
 
 ---
 
 ## WARNINGS — Fix This Week
 
-### [W-01] `atlas_home_renderer.py` L50–213 — Outer `except Exception: pass` Silences All DB Errors
+### [W-01] `flow_live_cog._on_sportsbook_result` is dead — bus topic never published
+- **File:** `flow_live_cog.py` L428, L528
+- **Impact:** Session recap for TSL sportsbook bet settlements never fires. The handler subscribes to `"sportsbook_result"` but no code in `flow_sportsbook.py` or anywhere else calls `flow_bus.emit("sportsbook_result", ...)`. All `flow_bus.emit` calls are `"game_result"` (casino) and `EVENT_FINALIZED` (predictions). Documented in CLAUDE.md gotchas but worth a concrete warning since the session tracker is silently inert for TSL bets.
+- **Suggestion:** Either wire `flow_sportsbook.py` settlement path to emit `SportsbookEvent` on the bus, or remove the dead subscriber and document explicitly that TSL sportsbook does not trigger live session updates.
 
-- **File:** `atlas_home_renderer.py` L50, L212–213
-- **Impact:** The outer `try: ... except Exception: pass` wraps the entire `gather_home_data()` function. Any unhandled error (schema mismatch, connection timeout, missing table) silently returns a card with all stats at zero. The user sees a blank card with no error indication. Admin has no log entry to investigate.
-- **Fix:** Replace the outer silent swallow with a logged warning:
-  ```python
-  except Exception:
-      log.warning("gather_home_data failed for user_id=%s", user_id, exc_info=True)
-  ```
-  The inner per-section `except Exception: pass` blocks are correct (graceful per-table degradation) — only the outer one needs fixing.
+### [W-02] `polymarket_cog.update_balance()` violates idempotency rule and is dead code
+- **File:** `polymarket_cog.py` L654–668
+- **Impact:** `update_balance()` calls `flow_wallet.credit()` / `flow_wallet.debit()` without `reference_key`. The function is never called in production code. If someone invokes it in a settlement retry path, it will double-credit/debit silently.
+- **Evidence:**
+```python
+async def update_balance(user_id, delta: int, *, contract_id=None):
+    if delta >= 0:
+        await flow_wallet.credit(uid, delta, "PREDICTION",  # ← no reference_key
+                                 description="prediction market", ...)
+```
+- **Suggestion:** Delete the function entirely. All active wallet operations in polymarket_cog already use `reference_key` correctly.
 
-### [W-02] `setup_cog.py` L799–800 — Silent Role Enrichment Failure in Auto-Discovery
+### [W-03] `cortex/` directory — orphaned subsystem with no live callers
+- **Files:** `cortex/cortex_analyst.py`, `cortex_engine.py`, `cortex_main.py`, `cortex_writer.py`
+- **Impact:** No production code imports from `cortex/`. `cortex_main.py` is a standalone CLI tool (reads `TSL_Archive.db`, calls Gemini), not loaded as a cog and not in `_EXTENSIONS`. Contains silent `except: pass` patterns (`cortex_main.py` L166, `cortex_analyst.py` L85). Currently invisible to nightly audits.
+- **Suggestion:** Move to `QUARANTINE/` or document as deliberate standalone CLI in CLAUDE.md.
 
-- **File:** `setup_cog.py` L799–800 (`_auto_discover_db`)
-- **Impact:** `except Exception: pass` swallows any DB error during member role status enrichment. The comment says "tsl_members table may not exist yet" — a valid case, but this also swallows schema errors, constraint violations, and lock timeouts. No log entry means role-based status updates can silently stop working after a DB migration.
-- **Fix:**
-  ```python
-  except sqlite3.OperationalError:
-      pass  # tsl_members table not yet created — OK at startup
-  except Exception:
-      log.warning("Role enrichment failed for guild %s", gid, exc_info=True)
-  ```
+### [W-04] `atlas_home_renderer.py` — 7 silent `except Exception: pass` blocks in DB read path
+- **File:** `atlas_home_renderer.py` L87, L100, L112, L139, L161, L181, L200, L213
+- **Impact:** When a DB column doesn't exist (schema drift), a query fails, or a table is missing, the home card silently shows 0/None for that stat with no log entry. Completely undiagnosable in production.
+- **Suggestion:** Add `log.warning(f"[home] stat read failed: {e}")` inside each inner except. 5-minute fix; drastically improves diagnosability.
 
-### [W-03] `build_member_db.py` L1258–1275 — N+1 Query in `validate_db_usernames()`
+### [W-05] CLAUDE.md documents incorrect `flow.db` ownership
+- **Impact:** CLAUDE.md Databases table says `flow.db = "TSL sportsbook bets, Flow economy transactions"`. Actual: `flow_sportsbook.py` (TSL sportsbook) writes `bets_table` to `flow_economy.db`. `flow.db` is the **new unified sportsbook_core schema** (`events`, `bets`, `parlays` — used by real sportsbook, polymarket, and cross-system grading). Developers debugging TSL bet issues will look in the wrong DB.
+- **Fix:** See CLAUDE.md UPDATES section below — corrected in this audit.
 
-- **File:** `build_member_db.py` L1265–1269
-- **Impact:** Runs one `SELECT COUNT(*) FROM games WHERE homeUser = ? OR awayUser = ?` per active member. With 31 members this is 31 individual queries on every startup/sync. If the league grows or this function is called more frequently, it becomes a measurable startup bottleneck.
-- **Fix:** Consolidate into a single query:
-  ```sql
-  SELECT db_username FROM tsl_members
-  WHERE db_username IS NOT NULL AND active = 1
-    AND db_username NOT IN (
-        SELECT DISTINCT homeUser FROM games WHERE homeUser != ''
-        UNION
-        SELECT DISTINCT awayUser FROM games WHERE awayUser != ''
-    )
-  ```
-
-### [W-04] `setup_cog.py` L113–161 — `get_channel_id()` Blocks Event Loop on Cache Miss
-
-- **File:** `setup_cog.py` L113 (`get_channel_id`), called at `blowout_monitor` L492, `auto_discover` L905
-- **Impact:** `get_channel_id()` is synchronous and opens a sqlite3 connection with a 2-second timeout. It's called directly on the event loop thread from `blowout_monitor` (a `tasks.loop`) and from `auto_discover` (post-executor, back on the event loop). A cache miss + DB lock = 2-second event loop stall. Gateway heartbeat is 41.25s; a 2-second stall is survivable but non-trivial. The async wrapper `get_channel_id_async` exists but isn't used in these call sites.
-- **Fix:** Replace the direct call in `auto_discover()` with:
-  ```python
-  ch_id = await get_channel_id_async(cfg_key, guild.id)
-  ```
-  For `blowout_monitor`, use `get_channel_id_async` too since it already runs in an async task.
-
-### [W-05] `constants.py` L4–9 — Expiring Discord CDN Icon URL
-
-- **File:** `constants.py` L4–9
-- **Impact:** `ATLAS_ICON_URL` contains a signed Discord CDN URL with an expiry timestamp (`ex=69add263`). When it expires, all embeds using the footer icon will silently show a broken image. Already noted in the v1.4.2 changelog but unresolved.
-- **Fix:** Host on GitHub raw, an S3 bucket, or Imgur. One-line change in `constants.py`.
-
-### [W-06] `awards_cog.py` — No Voting Window Enforcement
-
-- **File:** `awards_cog.py` — no deadline field in poll schema
-- **Impact:** Polls have no time-based close. If a commissioner creates a poll and forgets to run `_closepoll_impl`, voting stays open indefinitely. There's no `end_at` field and no background task to auto-close. Operational risk, not a security issue.
-- **Fix:** Add an optional `end_at` ISO timestamp to the poll schema; check it in `VoteSelect.callback` before accepting votes.
-
-### [W-07] `bot.py` L639–641 — Message Handler Swallows All AI Errors the Same Way
-
-- **File:** `bot.py` L639–641 (`on_message` handler)
-- **Impact:** One broad `except Exception` covers codex_utils failures, atlas_ai timeouts, affinity errors, and lore_rag errors. All produce the same generic reply: "ATLAS is currently undergoing maintenance." The user gets no useful signal and the operator sees only a traceback with no context about which subsystem failed.
-- **Fix:** The current logging (`print` + `traceback.print_exc()`) is adequate for a bot this size. Consider wrapping individual subsystem calls in try/except with labeled log messages so triage is faster. Not blocking, but worth the 10-minute investment.
+### [W-06] `build_tsl_db.py` L433, L483, L494 — silent `except Exception: pass` in DB migration
+- **File:** `build_tsl_db.py`
+- **Impact:** These silently swallow errors during WAL setup and migration steps. If `tsl_history.db` is locked during startup rebuild, the bot continues with a partially-built DB and no error is logged.
+- **Suggestion:** Replace with `except Exception as e: log.warning(f"[DB] non-fatal: {e}")`.
 
 ---
 
 ## OBSERVATIONS — Track for Later
 
-### [O-01] `data_manager.py` / `build_tsl_db.py` — Sequential API Fetches; Easy Parallelism Win
+### [O-01] `atlas_home_renderer.py` uses sync `sqlite3.connect` without WAL mode
+Under concurrent reads (multiple users loading `/atlas` simultaneously), the sync connection can block on the async WAL writer's write lock, causing up to 10-second DB timeouts on the home card render.
 
-Both `load_all()` and `sync_tsl_db()` fetch 8+ independent API endpoints sequentially. Each endpoint is ~0.5–2s. A `ThreadPoolExecutor` across the independent fetch calls could cut startup sync time by 60–70%. The biggest wins are the 6 stat-leader endpoints in `load_all()` (pass/rush/rec/sack/int/tackle) — all are fully independent.
+### [O-02] `oracle_cog.py` L138 — `SupportCog` referenced, never implemented
+`get_user_tier()` returns `"Elite"` for all users because `SupportCog` doesn't exist. TODO at L135. Either remove tier gating or implement SupportCog.
 
-### [O-02] `boss_cog.py` L688–694 — Dead "Grade Week" Button Misleads Operator
+### [O-03] `reasoning.py` module-level import in `bot.py` but only used in `oracle_agent.py`
+`bot.py` L133 imports `reasoning` — no direct usage in bot.py found. The actual consumers are in `oracle_agent.py`. Minor but adds startup dependency.
 
-`BossSBGradeModal.on_submit` unconditionally returns "Manual grading is no longer supported." The button still appears in the Bets & Props panel. Either remove the button or change the label to "AG Status" (which is what the user probably wants). Leaving a button that always returns an error message is a UX trap.
+### [O-04] `analysis.py` and `intelligence.py` — undocumented utility modules
+Both are imported by `oracle_cog.py` (`import analysis as an`, `import intelligence as ig`). Neither appears in CLAUDE.md's Module Map.
 
-### [O-03] `data_manager.py` L207 — `discord_history.db` vs `TSL_Archive.db` Naming
+### [O-05] `pagination_view.py` L152, L240 — silent `except Exception: pass` on Discord interactions
+Silently swallows errors when paginating bet history. Not critical but opaque in production.
 
-`_DB_PATH` at L207 resolves to `discord_history.db`. CLAUDE.md documents the Discord archive as `TSL_Archive.db`. These may be separate databases (one local, one Oracle-only), but the naming inconsistency is confusing and worth a comment clarifying the relationship.
+### [O-06] `atlas_ai.py` L276 — silent pass in exception handler
+Inside connection pool management. Should at minimum log a warning.
 
-### [O-04] `setup_cog.py::_auto_discover_db` — 6 Separate `sqlite3.connect()` Calls
+### [O-07] `sportsbook_core.py` L330 — `except Exception: pass` in migration guard
+If `flow.db` is readable-but-corrupted, migration v7 re-runs unnecessarily and archives live data.
 
-The function opens and closes 6 separate connections to the same DB file. This is safe but wasteful. A single connection passed through the function would be cleaner and reduce open/close overhead. Low priority given the function runs once per startup.
-
-### [O-05] `build_member_db.py::resolve_db_username` L1370–1379 — Fuzzy Match Writes Permanently
-
-The fuzzy difflib match (cutoff=0.70) auto-caches via `UPDATE tsl_members SET db_username = ?`. If the wrong match is cached, it takes a manual DB edit to fix. A mismatch here means all `/ask me` queries return the wrong player's stats indefinitely. Consider logging the match for human review rather than auto-caching at the 0.70 cutoff.
-
-### [O-06] `atlas_home_renderer.py` — Per-Section `except Exception: pass` Is Correct
-
-Each DB sub-query has its own silent `except Exception: pass`. This is the right pattern — a missing `bets_table` shouldn't break the casino section. Just note that schema drift (e.g., column rename) is invisible without per-section logging. Consider `log.debug` instead of `pass` for easier future debugging.
-
-### [O-07] `bot.py` Docstring Shows v2.0.0 as Latest Changelog Entry
-
-`ATLAS_VERSION` is `7.10.0` but the inline docstring only covers changes up to `v2.0.0`. The docstring is cosmetic, but if someone reads it cold they'll have an incomplete picture of what the bot does. Not worth fixing proactively — just don't rely on it.
-
-### [O-08] `embed_helpers.py` — Used by Only 3 Files (`oracle_cog`, `sentinel_cog`, `flow_sportsbook`)
-
-`build_embed()` in `embed_helpers.py` is imported by only 3 cogs despite being a "shared" builder. Most other cogs construct embeds directly with `discord.Embed(...)`. The inconsistency isn't harmful but means new cogs won't naturally reach for it. Not a bug — just an observation for consistency.
-
-### [O-09] `awards_cog.py` — Announced Results Go to Public Channel, Not Ephemeral
-
-`_closepoll_impl` calls `await interaction.response.send_message(embed=embed)` without `ephemeral=True`. The commissioner's close action will post the results publicly (correct behavior for final results, but worth documenting as intentional).
+### [O-08] `casino_db.refund_wager()` — no `reference_key` on credit
+`casino_db.py` L1092. Called for declined PvP challenges and crash round voids. Without a reference_key, a race condition or interaction retry could double-credit the refund. Low probability but non-zero.
 
 ---
 
 ## CROSS-MODULE RISKS
 
-### [X-01] `build_tsl_db.sync_tsl_db()` ATTACH Failure Drops `tsl_members` and `server_config`
+### [X-01] `flow_wallet.py` ↔ `wager_registry.py` lazy circular import
+- **Caller:** `flow_wallet.py` L505 — lazy `import wager_registry` inside `setup_wallet_db()`
+- **Callee:** `wager_registry.py` L24 — `from flow_wallet import DB_PATH` at module level
+- **Risk:** Works at runtime because `setup_wallet_db()` runs after both modules initialize. Any future refactor hoisting the import to module level will cause `ImportError` at startup. Invisible to static analysis.
+- **Recommendation:** Add comment at `flow_wallet.py` L504: `# Lazy import: wager_registry imports flow_wallet at module level — cannot hoist.`
 
-- **Caller/Callee:** `build_tsl_db.sync_tsl_db()` → `ATTACH DATABASE old_db` path at L399–418
-- **Risk:** If the old `tsl_history.db` has an exclusive write lock when `sync_tsl_db` runs the ATTACH, the preserve-tables step logs a warning and continues — but the new DB is missing `server_config`, `tsl_members`, and `conversation_history`. Every subsequent `get_channel_id()` call returns `None`, all channel routing silently fails, and `build_member_table()` re-seeds from `MEMBERS` (safe but loses runtime team assignments).
-- **Mitigation:** This window is small (~seconds during startup) and the bot typically starts without concurrent writers. But during development with multiple sessions open, the risk is real. Consider a pre-ATTACH lock check or a post-swap verification step.
+### [X-02] `boss_cog.py` delegates to sub-cogs registered by OTHER modules' `setup()` functions
+- **Caller:** `boss_cog.py` L2168 → `get_cog("TradeCenterCog")`; L2389 → `get_cog("ComplaintCog")`; L2442 → `get_cog("PositionChangeCog")`; L2177 → `get_cog("ParityCog")`
+- **Callee:** `genesis_cog.py setup()` registers `TradeCenterCog`, `ParityCog`; `sentinel_cog.py setup()` registers `ComplaintCog`, `ForceRequestCog`, `PositionChangeCog`
+- **Risk:** These cog names are NOT in `_EXTENSIONS`. If `genesis_cog` fails to load, boss_cog's Genesis admin commands all fail silently with "Cog not available." Mitigation: all `get_cog()` calls are null-checked.
 
-### [X-02] `data_manager._state` References Held Across Atomic Swap
+### [X-03] `oracle_cog.py` lazy imports `gemini_sql`/`gemini_answer` from `codex_cog` at runtime
+- **Caller:** `oracle_cog.py` L299 — lazy `from codex_cog import gemini_sql, gemini_answer`
+- **Risk:** If `codex_cog` fails to load, `_HISTORY_OK = False` and all Oracle history queries return `None, None` silently. No Discord-visible indication to users.
 
-- **Caller/Callee:** Any cog that does `games = dm.df_games` at the start of a command handler
-- **Risk:** The `dm.__getattr__` proxy always reads from the current `_state`. But if a handler unpacks `games = dm.df_games` and then awaits, a sync in between replaces `_state`. The local `games` variable holds the old DataFrame. This is the expected Python behavior but could produce stale results in a long-running handler. Not a crash risk — just stale data for one request per sync cycle.
+### [X-04] `real_sportsbook_cog.py` writes to BOTH `real_bets` (flow_economy.db) AND `sportsbook_core.bets` (flow.db) — settlement only reads `flow.db`
+- **Caller:** `real_sportsbook_cog.py` L783–800 — writes to both
+- **Risk:** `real_bets` in `flow_economy.db` is a legacy admin-read mirror; authoritative settlement data is in `flow.db`. A partial write (one succeeds, one fails) leaves these inconsistent. The debit at L778 happens BEFORE both writes — exception handler at L807 refunds on write failure, which is correct, but the diagnostic hazard is real.
 
-### [X-03] `get_channel_id()` Zero-Config Soft-Fallback Masks `setup_cog` Load Failures
+### [X-05] `flow_live_cog` subscribes to `"sportsbook_result"` but `flow_sportsbook.py` never emits it
+- **Subscriber:** `flow_live_cog.py` L428
+- **Publisher:** nowhere — zero calls to `flow_bus.emit("sportsbook_result", ...)` in entire codebase
+- **Impact:** TSL sportsbook bet settlements never generate live engagement events. Feature gap, not a crash.
 
-- **Caller/Callee:** All cogs that call `get_channel_id()` → `setup_cog._channel_cache`
-- **Risk:** If `setup_cog` fails to load (import error, table creation failure), `_channel_cache` is empty and `get_channel_id()` returns `None` for every key. The `require_channel()` decorator soft-falls back to allowing all channels. No cog fails loudly — they silently post to wrong channels. The only signal is the `print(f"ATLAS Error loading setup_cog: {e}")` at startup. Make sure this startup error is visibly monitored.
+### [X-06] `atlas_home_renderer.py` sync sqlite3 vs casino_db.py async aiosqlite — same `flow_economy.db`
+- **Risk:** Sync reader without WAL mode can block on async WAL writer under concurrent load. Not a data corruption risk; causes UI timeout.
+
+---
+
+## IMPORT CHAIN MAP
+
+### Highest Fan-In
+| Module | Direct Importers |
+|--------|-----------------|
+| `flow_wallet` | 5 (casino_db, economy_cog, flow_sportsbook, polymarket_cog, real_sportsbook_cog) |
+| `setup_cog` | 12 (lazy `get_channel_id` calls across the codebase) |
+| `data_manager` | 3 direct + lazy in most cogs |
+| `atlas_ai` | 3 direct |
+| `codex_utils` | 4 (bot.py, codex_cog, oracle_cog, oracle_query_builder) |
+
+### Highest Fan-Out
+- `oracle_cog.py` — 18+ imports including cross-cog lazy dependencies
+- `boss_cog.py` — delegates to all major subsystems via get_cog()
+- `genesis_cog.py` — 13+ imports
+
+### Cycles
+- `flow_wallet → wager_registry → flow_wallet` (lazy import breaks it at runtime — documented above)
+
+---
+
+## DB SCHEMA MISMATCHES
+
+| Query Location | Table.Column Referenced | DB | Status |
+|---------------|------------------------|----|--------|
+| `atlas_home_renderer.py` L106 | `real_bets.discord_id` | `flow_economy.db` | ✅ schema at `real_sportsbook_cog.py` L205 |
+| `flow_sportsbook.py` L3432 | `real_bets.status` | `flow_economy.db` | ✅ ok |
+| `atlas_home_renderer.py` L117 | `casino_sessions.discord_id` | `flow_economy.db` | ✅ schema at `casino_db.py` L81 |
+| `sportsbook_core.py` | `bets`, `events`, `parlays` | `flow.db` | ✅ defined in `_SCHEMA_SQL` |
+| CLAUDE.md Databases table | `flow.db = "TSL sportsbook bets"` | N/A | ⚠️ doc mismatch — fixed in Phase 4 |
+
+---
+
+## DEAD CODE CANDIDATES
+
+| Function / Module | File | Callers | Recommendation |
+|-------------------|------|---------|----------------|
+| `update_balance()` | `polymarket_cog.py` L654 | 0 | Delete — violates idempotency rule |
+| `_on_sportsbook_result()` | `flow_live_cog.py` L528 | 0 (bus never published) | Keep with comment; wire publisher when TSL SB settlement added |
+| `cortex/` (4 files) | `cortex/` | 0 live callers | Move to `QUARANTINE/` or document as standalone CLI |
+| `get_user_tier()` (SupportCog path) | `oracle_cog.py` L133 | Internal only | Simplify — always returns `"Elite"`, remove dead SupportCog lookup |
+| `reasoning` import | `bot.py` L133 | 0 direct uses in bot.py | Move to `oracle_agent.py` where it's actually needed |
 
 ---
 
 ## POSITIVE PATTERNS WORTH PRESERVING
 
-1. **`data_manager.load_all()` atomic swap** (`L677`): Single `_state = LeagueState(...)` reassignment. GIL guarantees atomicity — no explicit lock needed for the swap itself. Correct and clean.
+1. **`boss_cog.py` null-checks every `get_cog()` call** — All 56 `get_cog()` calls have `if not cog: return await _send_cog_error(...)`. No silent AttributeErrors anywhere in the delegation layer.
 
-2. **`build_tsl_db.sync_tsl_db()` write-to-temp-then-replace** (`L347–463`): Writes to `tsl_history.db.tmp`, then atomically replaces. The database is never in a half-built state from the reader's perspective. 3-retry loop for Windows file locking with fallback to `shutil.copy2` is solid defensive coding.
+2. **`sportsbook_core.py` per-event settlement locking** — `_settle_locks.setdefault(event_id, asyncio.Lock())` with early-return if locked prevents concurrent double-settlement. Exactly right.
 
-3. **`boss_cog.py` defense-in-depth admin gating**: `default_permissions=discord.Permissions(administrator=True)` at the Group level (L2534–2535) + explicit `await is_commissioner(interaction)` check in every handler AND every modal `on_submit`. Three independent layers — a misconfigured Discord permission won't bypass the code-level check.
+3. **`flow_wallet.py` per-user asyncio locks with GC cleanup** — `_user_locks` dict with `_cleanup_idle_locks()` at `_LOCK_CLEANUP_THRESHOLD=500`. Prevents unbounded growth without manual lifecycle management.
 
-4. **`build_member_db.py` COALESCE upsert** (`L1147–1158`): `team = COALESCE(tsl_members.team, excluded.team)` ensures runtime `/commish assign` team assignments survive bot restarts. The IMMEDIATE transaction + `_build_lock` threading lock prevents concurrent build calls from corrupting the seed data.
+4. **Lazy imports of `setup_cog.get_channel_id()`** — 12 modules import at call time. Prevents circular imports and allows setup_cog to fully initialize before any cog resolves channel IDs. Consistent across the codebase.
 
-5. **`setup_cog.py` channel routing soft-fallback**: `require_channel()` returns `True` when no channels are configured (`if not allowed_ids: return True`). New servers work out-of-the-box without a `/setup` run. Graceful degradation over hard failures.
+5. **Idempotency at the DB layer** — `reference_key TEXT UNIQUE DEFAULT NULL` in `transactions` table means the database itself enforces idempotency, not just application logic. Defense-in-depth.
 
 ---
 
 ## TEST GAPS
 
-| Test Case | Type | Validates | Priority |
-|-----------|------|-----------|----------|
-| Concurrent vote submissions (same user) | Unit | `awards_cog.py` TOCTOU race condition fix | **HIGH** |
-| sync_tsl_db() while another connection holds exclusive lock | Integration | ATTACH failure path — does `tsl_members` survive? | **HIGH** |
-| `gather_home_data()` with missing `bets_table` column | Integration | `atlas_home_renderer.py` per-section graceful degradation | MEDIUM |
-| `get_channel_id()` called on cache miss during `blowout_monitor` | Unit | Event loop blocking under 2s SQLite timeout | MEDIUM |
-| `validate_db_usernames()` with 100+ members | Performance | N+1 query impact at scale | LOW |
-| `resolve_db_username()` with two similar usernames (0.70 cutoff) | Unit | False positive fuzzy match gets cached | MEDIUM |
+| Test Case | Type | What It Validates | Priority |
+|-----------|------|-------------------|----------|
+| `test_real_sportsbook_double_click` | integration | Debit called twice same user+event → second call is no-op | high (C-01 direct) |
+| `test_sportsbook_result_bus_event` | integration | TSL bet settlement emits on flow_bus when wired | medium |
+| `test_boss_cog_missing_cog` | unit | `get_cog()` returns None → `_send_cog_error()` fires, no crash | medium |
+| `test_settlement_partial_write` | integration | `write_bet` success + `real_bets` INSERT failure → debit refunded | high (X-04) |
+| `test_home_renderer_schema_drift` | unit | Missing DB column → defaults returned, no exception propagated | low |
 
 ---
 
@@ -192,18 +202,19 @@ Each DB sub-query has its own silent `except Exception: pass`. This is the right
 
 | Metric | Value |
 |--------|-------|
-| Code commits (last 24h) | 0 (all audit docs) |
-| Files deeply read | 14 |
-| Total lines analyzed | ~4,800 |
-| Critical issues | 1 |
-| Warnings | 7 |
-| Observations | 9 |
-| Cross-module risks | 3 |
-| Positive patterns noted | 5 |
+| Files scanned | 89 |
+| Cross-module contracts verified | 47 |
+| Critical findings | 1 |
+| Warnings | 6 |
+| Observations | 8 |
+| Cross-module risks | 6 |
+| DB schema mismatches | 1 (documentation only) |
+| Dead code candidates | 5 |
+| Import chain issues | 3 (1 circular, 2 fragile) |
 
-**Overall health:** Good. The core infrastructure is well-structured with solid atomic swap patterns, defense-in-depth auth, and graceful channel routing degradation. The one critical issue (vote race condition) is a real bug but limited to the awards system — a low-frequency, low-stakes feature. No deploy-blocking issues in the data pipeline or permission system.
+**Overall integration health:** Module boundary contracts are well-maintained — every `get_cog()` is null-checked, wallet idempotency is enforced at the DB layer in most paths, and the DB split between `flow.db` and `flow_economy.db` is architecturally coherent even if confusingly documented. The single critical issue (real sportsbook debit without `reference_key`) is a one-line fix. The most significant systemic gap is the `sportsbook_result` bus topic dead zone — TSL bet settlement is the only major subsystem that doesn't participate in the live engagement pipeline.
 
-**Next audit focus:** Sunday — Cross-Cutting & Integration (full bot scan)
+**Next audit focus:** Monday — Flow & Economy (flow_wallet.py, flow_sportsbook.py, economy_cog.py, flow_audit.py, wager_registry.py, flow_events.py)
 
 ---
 
@@ -211,11 +222,8 @@ Each DB sub-query has its own silent `except Exception: pass`. This is the right
 
 ### Changes Made
 
-**1. Architecture Reference section — stale cog load order replaced:**
-- Section at bottom of CLAUDE.md had an old reference to `commish_cog` as the last cog and was missing `flow_store`, `flow_live_cog`, `real_sportsbook_cog`, `boss_cog`, `god_cog`, `atlas_home_cog` (everything after `economy_cog`).
-- Updated to match the actual `_EXTENSIONS` list in `bot.py`.
+**1. Databases table — corrected `flow.db` and `flow_economy.db` descriptions**
 
-**2. Module Map — missing entries added:**
-- `awards_cog.py` was in the Cog Load Order (#8) but absent from the Module Map table. Added with description "Awards & voting."
-- `embed_helpers.py` is imported by `oracle_cog`, `sentinel_cog`, and `flow_sportsbook` but not documented. Added under Core as a shared utility.
-- `oracle_memory.py` is imported in `bot.py` (`from oracle_memory import OracleMemory`) and used for conversation memory in the `on_message` handler but not in the Module Map. Added under Conversation Memory.
+Previous: `flow.db` = "TSL sportsbook bets, Flow economy transactions"  
+Corrected: `flow.db` = "Unified event/bet/parlay schema (sportsbook_core.py) — real sportsbook, polymarket, cross-system grading"  
+Corrected: `flow_economy.db` description expanded to clarify it holds `bets_table` (TSL sportsbook legacy), `real_bets` (real sports bets), wallet transactions, and casino tables.
