@@ -1,229 +1,238 @@
-# ATLAS Nightly Audit — 2026-04-12
-
-**Focus:** Cross-Cutting & Integration | **Recent commits:** 1 (CLAUDE.md + review refresh) | **Files scanned:** 89 | **Cross-module contracts verified:** 47
+# ATLAS Nightly Review — Casino & Rendering Subsystem
+**Date:** 2026-04-14
+**Audit Task:** `audit-tuesday-casino`
+**Scope:** 17 focus files — Casino games, casino DB, renderers, HTML engine, style tokens
+**Passes:** Anti-pattern scan · Logic trace · Cross-module contract · Performance · Security/Data integrity
 
 ---
 
-## CRITICAL — Fix Before Next Deploy
+## Phase 1 — Recent Commit Triage
 
-### [C-01] `real_sportsbook_cog.py` debit without `reference_key` — double-debit on retry
-- **File:** `real_sportsbook_cog.py` L778
-- **Risk:** User double-clicks bet button or Discord retries interaction → two debits for one bet. Financial ledger corruption. Violates CLAUDE.md rule explicitly documented as "causes silent data bugs."
-- **Evidence:**
+No changes to any focus file in the last 24 hours. Last 5 commits were audit docs and CLAUDE.md documentation updates only. Audit proceeds against current baseline.
+
+---
+
+## Phase 2 — Deep Audit Findings
+
+### CRITICAL — 1 issue
+
+---
+
+#### C-01 · `casino/games/slots.py` L216–250 — Wager deducted before render; render failure leaves player in limbo
+
+**Severity:** CRITICAL — player balance debited with no settlement record on Playwright failure
+**Rule violated:** CLAUDE.md — settlement path must be atomic; orphan wager reconciliation is last resort, not a design target
+
+Current execution order in `play_slots()`:
+
 ```python
-new_balance = await flow_wallet.debit(
-    uid, amt, "REAL_BET",
-    description=f"Bet: {pick} ({bet_type})",
-)  # ← no reference_key
+# L216
+await deduct_wager(uid, wager, ...)          # Balance already debited
+# L227
+card_bytes = await render_slots_card(...)     # RENDER — can fail (pool exhaustion, Playwright crash)
+# L250
+await process_wager(uid, wager, multiplier)  # NEVER REACHED if render fails
 ```
-- **Fix:**
+
+If `render_slots_card()` raises `asyncio.TimeoutError` (pool full) or any Playwright exception, `deduct_wager()` has already committed, `process_wager()` is never called, and the player's wager is orphaned. Orphan reconciliation runs every 10 minutes minimum — the player sees a deducted balance with no slot result during that window.
+
+**Fix:** Move `render_slots_card` after `process_wager`, or wrap the render in `try/except` with explicit `refund_wager` on failure:
+
 ```python
-debit_ref = f"REAL_BET_DEBIT_{uid}_{espn_event_id}_{int(time.time())}"
-new_balance = await flow_wallet.debit(
-    uid, amt, "REAL_BET",
-    description=f"Bet: {pick} ({bet_type})",
-    reference_key=debit_ref,
-)
+await deduct_wager(uid, wager, ...)
+try:
+    await process_wager(uid, wager, multiplier)
+    card_bytes = await render_slots_card(...)
+except Exception:
+    await refund_wager(uid, wager, correlation_id=correlation_id)
+    raise
 ```
+
+Contrast: `crash.py` wraps all render calls in `try/except discord.HTTPException` with text fallback. Same pattern needed in slots.
+---
+
+### WARNINGS — 4 issues
 
 ---
 
-## WARNINGS — Fix This Week
+#### W-01 · `casino/games/coinflip.py` L290, L309 — `refund_wager()` missing `correlation_id` in decline and timeout paths
 
-### [W-01] `flow_live_cog._on_sportsbook_result` is dead — bus topic never published
-- **File:** `flow_live_cog.py` L428, L528
-- **Impact:** Session recap for TSL sportsbook bet settlements never fires. The handler subscribes to `"sportsbook_result"` but no code in `flow_sportsbook.py` or anywhere else calls `flow_bus.emit("sportsbook_result", ...)`. All `flow_bus.emit` calls are `"game_result"` (casino) and `EVENT_FINALIZED` (predictions). Documented in CLAUDE.md gotchas but worth a concrete warning since the session tracker is silently inert for TSL bets.
-- **Suggestion:** Either wire `flow_sportsbook.py` settlement path to emit `SportsbookEvent` on the bus, or remove the dead subscriber and document explicitly that TSL sportsbook does not trigger live session updates.
+Both `decline_btn.callback` (L290) and `ChallengeView.on_timeout` (L309) call:
 
-### [W-02] `polymarket_cog.update_balance()` violates idempotency rule and is dead code
-- **File:** `polymarket_cog.py` L654–668
-- **Impact:** `update_balance()` calls `flow_wallet.credit()` / `flow_wallet.debit()` without `reference_key`. The function is never called in production code. If someone invokes it in a settlement retry path, it will double-credit/debit silently.
-- **Evidence:**
 ```python
-async def update_balance(user_id, delta: int, *, contract_id=None):
-    if delta >= 0:
-        await flow_wallet.credit(uid, delta, "PREDICTION",  # ← no reference_key
-                                 description="prediction market", ...)
+await refund_wager(self.challenger_id, self.wager)
 ```
-- **Suggestion:** Delete the function entirely. All active wallet operations in polymarket_cog already use `reference_key` correctly.
 
-### [W-03] `cortex/` directory — orphaned subsystem with no live callers
-- **Files:** `cortex/cortex_analyst.py`, `cortex_engine.py`, `cortex_main.py`, `cortex_writer.py`
-- **Impact:** No production code imports from `cortex/`. `cortex_main.py` is a standalone CLI tool (reads `TSL_Archive.db`, calls Gemini), not loaded as a cog and not in `_EXTENSIONS`. Contains silent `except: pass` patterns (`cortex_main.py` L166, `cortex_analyst.py` L85). Currently invisible to nightly audits.
-- **Suggestion:** Move to `QUARANTINE/` or document as deliberate standalone CLI in CLAUDE.md.
+`self.challenger_correlation_id` is stored on the view but never forwarded. `refund_wager` calls `flow_wallet.credit()` internally — without `reference_key`, a retry (network glitch on the refund response) credits the challenger twice.
 
-### [W-04] `atlas_home_renderer.py` — 7 silent `except Exception: pass` blocks in DB read path
-- **File:** `atlas_home_renderer.py` L87, L100, L112, L139, L161, L181, L200, L213
-- **Impact:** When a DB column doesn't exist (schema drift), a query fails, or a table is missing, the home card silently shows 0/None for that stat with no log entry. Completely undiagnosable in production.
-- **Suggestion:** Add `log.warning(f"[home] stat read failed: {e}")` inside each inner except. 5-minute fix; drastically improves diagnosability.
-
-### [W-05] CLAUDE.md documents incorrect `flow.db` ownership
-- **Impact:** CLAUDE.md Databases table says `flow.db = "TSL sportsbook bets, Flow economy transactions"`. Actual: `flow_sportsbook.py` (TSL sportsbook) writes `bets_table` to `flow_economy.db`. `flow.db` is the **new unified sportsbook_core schema** (`events`, `bets`, `parlays` — used by real sportsbook, polymarket, and cross-system grading). Developers debugging TSL bet issues will look in the wrong DB.
-- **Fix:** See CLAUDE.md UPDATES section below — corrected in this audit.
-
-### [W-06] `build_tsl_db.py` L433, L483, L494 — silent `except Exception: pass` in DB migration
-- **File:** `build_tsl_db.py`
-- **Impact:** These silently swallow errors during WAL setup and migration steps. If `tsl_history.db` is locked during startup rebuild, the bot continues with a partially-built DB and no error is logged.
-- **Suggestion:** Replace with `except Exception as e: log.warning(f"[DB] non-fatal: {e}")`.
+**Fix:** `await refund_wager(self.challenger_id, self.wager, correlation_id=self.challenger_correlation_id)` in both locations.
 
 ---
 
-## OBSERVATIONS — Track for Later
+#### W-02 · `db_migration_snapshots.py` L49–64 — Synchronous `sqlite3.connect()` in `take_daily_snapshot()`
 
-### [O-01] `atlas_home_renderer.py` uses sync `sqlite3.connect` without WAL mode
-Under concurrent reads (multiple users loading `/atlas` simultaneously), the sync connection can block on the async WAL writer's write lock, causing up to 10-second DB timeouts on the home card render.
+`take_daily_snapshot()` opens a blocking `sqlite3.connect()` and runs N individual `INSERT OR REPLACE` statements in a loop (one per user). CLAUDE.md documents this explicitly: "Must be called via `asyncio.to_thread()` if ever wired into async context."
 
-### [O-02] `oracle_cog.py` L138 — `SupportCog` referenced, never implemented
-`get_user_tier()` returns `"Elite"` for all users because `SupportCog` doesn't exist. TODO at L135. Either remove tier gating or implement SupportCog.
+Currently no async caller wires this function, so no immediate crash — but any future cog that calls it directly will block the event loop for every user in the system.
 
-### [O-03] `reasoning.py` module-level import in `bot.py` but only used in `oracle_agent.py`
-`bot.py` L133 imports `reasoning` — no direct usage in bot.py found. The actual consumers are in `oracle_agent.py`. Minor but adds startup dependency.
-
-### [O-04] `analysis.py` and `intelligence.py` — undocumented utility modules
-Both are imported by `oracle_cog.py` (`import analysis as an`, `import intelligence as ig`). Neither appears in CLAUDE.md's Module Map.
-
-### [O-05] `pagination_view.py` L152, L240 — silent `except Exception: pass` on Discord interactions
-Silently swallows errors when paginating bet history. Not critical but opaque in production.
-
-### [O-06] `atlas_ai.py` L276 — silent pass in exception handler
-Inside connection pool management. Should at minimum log a warning.
-
-### [O-07] `sportsbook_core.py` L330 — `except Exception: pass` in migration guard
-If `flow.db` is readable-but-corrupted, migration v7 re-runs unnecessarily and archives live data.
-
-### [O-08] `casino_db.refund_wager()` — no `reference_key` on credit
-`casino_db.py` L1092. Called for declined PvP challenges and crash round voids. Without a reference_key, a race condition or interaction retry could double-credit the refund. Low probability but non-zero.
+**Fix:** Either convert to `aiosqlite`, or wrap the entire function body in `asyncio.to_thread()` at the call site. Document the blocking contract in the function's docstring.
 
 ---
 
-## CROSS-MODULE RISKS
+#### W-03 · `casino/casino.py` L83–84 — Silent `except Exception: pass` in `post_to_ledger()`
 
-### [X-01] `flow_wallet.py` ↔ `wager_registry.py` lazy circular import
-- **Caller:** `flow_wallet.py` L505 — lazy `import wager_registry` inside `setup_wallet_db()`
-- **Callee:** `wager_registry.py` L24 — `from flow_wallet import DB_PATH` at module level
-- **Risk:** Works at runtime because `setup_wallet_db()` runs after both modules initialize. Any future refactor hoisting the import to module level will cause `ImportError` at startup. Invisible to static analysis.
-- **Recommendation:** Add comment at `flow_wallet.py` L504: `# Lazy import: wager_registry imports flow_wallet at module level — cannot hoist.`
+The admin notification fallback in `post_to_ledger` catches all exceptions silently:
 
-### [X-02] `boss_cog.py` delegates to sub-cogs registered by OTHER modules' `setup()` functions
-- **Caller:** `boss_cog.py` L2168 → `get_cog("TradeCenterCog")`; L2389 → `get_cog("ComplaintCog")`; L2442 → `get_cog("PositionChangeCog")`; L2177 → `get_cog("ParityCog")`
-- **Callee:** `genesis_cog.py setup()` registers `TradeCenterCog`, `ParityCog`; `sentinel_cog.py setup()` registers `ComplaintCog`, `ForceRequestCog`, `PositionChangeCog`
-- **Risk:** These cog names are NOT in `_EXTENSIONS`. If `genesis_cog` fails to load, boss_cog's Genesis admin commands all fail silently with "Cog not available." Mitigation: all `get_cog()` calls are null-checked.
+```python
+except Exception:
+    pass  # no log
+```
 
-### [X-03] `oracle_cog.py` lazy imports `gemini_sql`/`gemini_answer` from `codex_cog` at runtime
-- **Caller:** `oracle_cog.py` L299 — lazy `from codex_cog import gemini_sql, gemini_answer`
-- **Risk:** If `codex_cog` fails to load, `_HISTORY_OK = False` and all Oracle history queries return `None, None` silently. No Discord-visible indication to users.
+CLAUDE.md prohibits `except Exception: pass` in admin-facing views. If the primary ledger write succeeds but the admin channel notification fails (e.g., channel ID misconfigured), the failure is invisible. Errors will not surface in logs or monitoring.
 
-### [X-04] `real_sportsbook_cog.py` writes to BOTH `real_bets` (flow_economy.db) AND `sportsbook_core.bets` (flow.db) — settlement only reads `flow.db`
-- **Caller:** `real_sportsbook_cog.py` L783–800 — writes to both
-- **Risk:** `real_bets` in `flow_economy.db` is a legacy admin-read mirror; authoritative settlement data is in `flow.db`. A partial write (one succeeds, one fails) leaves these inconsistent. The debit at L778 happens BEFORE both writes — exception handler at L807 refunds on write failure, which is correct, but the diagnostic hazard is real.
-
-### [X-05] `flow_live_cog` subscribes to `"sportsbook_result"` but `flow_sportsbook.py` never emits it
-- **Subscriber:** `flow_live_cog.py` L428
-- **Publisher:** nowhere — zero calls to `flow_bus.emit("sportsbook_result", ...)` in entire codebase
-- **Impact:** TSL sportsbook bet settlements never generate live engagement events. Feature gap, not a crash.
-
-### [X-06] `atlas_home_renderer.py` sync sqlite3 vs casino_db.py async aiosqlite — same `flow_economy.db`
-- **Risk:** Sync reader without WAL mode can block on async WAL writer under concurrent load. Not a data corruption risk; causes UI timeout.
+**Fix:** Replace `pass` with `log.warning("Admin ledger notification failed", exc_info=True)`. One line; no behavior change.
 
 ---
 
-## IMPORT CHAIN MAP
+#### W-04 · `casino/casino_db.py` ~L1563 — PvP coinflip win bypasses `process_wager()`; no streak or jackpot credit
 
-### Highest Fan-In
-| Module | Direct Importers |
-|--------|-----------------|
-| `flow_wallet` | 5 (casino_db, economy_cog, flow_sportsbook, polymarket_cog, real_sportsbook_cog) |
-| `setup_cog` | 12 (lazy `get_channel_id` calls across the codebase) |
-| `data_manager` | 3 direct + lazy in most cogs |
-| `atlas_ai` | 3 direct |
-| `codex_utils` | 4 (bot.py, codex_cog, oracle_cog, oracle_query_builder) |
+`resolve_challenge()` credits the PvP winner via `flow_wallet.credit()` directly — it does not call `process_wager()`. This means:
+- Winner's streak counter is never updated (win doesn't count toward Momentum)
+- No jackpot pool contribution from PvP wins
+- Win is invisible to session recap stats
 
-### Highest Fan-Out
-- `oracle_cog.py` — 18+ imports including cross-cog lazy dependencies
-- `boss_cog.py` — delegates to all major subsystems via get_cog()
-- `genesis_cog.py` — 13+ imports
-
-### Cycles
-- `flow_wallet → wager_registry → flow_wallet` (lazy import breaks it at runtime — documented above)
+This is a consistent behavior gap, not a correctness bug — PvP coinflip is intentionally off the main wager path. Document in a comment if intentional, or route through `process_wager()` to unify behavior.
 
 ---
 
-## DB SCHEMA MISMATCHES
-
-| Query Location | Table.Column Referenced | DB | Status |
-|---------------|------------------------|----|--------|
-| `atlas_home_renderer.py` L106 | `real_bets.discord_id` | `flow_economy.db` | ✅ schema at `real_sportsbook_cog.py` L205 |
-| `flow_sportsbook.py` L3432 | `real_bets.status` | `flow_economy.db` | ✅ ok |
-| `atlas_home_renderer.py` L117 | `casino_sessions.discord_id` | `flow_economy.db` | ✅ schema at `casino_db.py` L81 |
-| `sportsbook_core.py` | `bets`, `events`, `parlays` | `flow.db` | ✅ defined in `_SCHEMA_SQL` |
-| CLAUDE.md Databases table | `flow.db = "TSL sportsbook bets"` | N/A | ⚠️ doc mismatch — fixed in Phase 4 |
+### Cross-Module Risks — 2 issues
 
 ---
 
-## DEAD CODE CANDIDATES
+#### X-01 · `casino/games/blackjack.py` L337, L362 — Misleading "Insufficient funds" on any Double/Split deduct failure
 
-| Function / Module | File | Callers | Recommendation |
-|-------------------|------|---------|----------------|
-| `update_balance()` | `polymarket_cog.py` L654 | 0 | Delete — violates idempotency rule |
-| `_on_sportsbook_result()` | `flow_live_cog.py` L528 | 0 (bus never published) | Keep with comment; wire publisher when TSL SB settlement added |
-| `cortex/` (4 files) | `cortex/` | 0 live callers | Move to `QUARANTINE/` or document as standalone CLI |
-| `get_user_tier()` (SupportCog path) | `oracle_cog.py` L133 | Internal only | Simplify — always returns `"Elite"`, remove dead SupportCog lookup |
-| `reasoning` import | `bot.py` L133 | 0 direct uses in bot.py | Move to `oracle_agent.py` where it's actually needed |
+Both `DoubleButton.callback` and `SplitButton.callback` catch `deduct_wager` failures as:
 
----
+```python
+except Exception:
+    await interaction.followup.send("Insufficient funds", ephemeral=True)
+```
 
-## POSITIVE PATTERNS WORTH PRESERVING
+Any DB connection error, `aiosqlite` exception, or unexpected state surfaces as "Insufficient funds" to the player. On a connection error, the player retries thinking they're broke — and may actually succeed on retry, potentially double-deducting if the first call partially committed.
 
-1. **`boss_cog.py` null-checks every `get_cog()` call** — All 56 `get_cog()` calls have `if not cog: return await _send_cog_error(...)`. No silent AttributeErrors anywhere in the delegation layer.
-
-2. **`sportsbook_core.py` per-event settlement locking** — `_settle_locks.setdefault(event_id, asyncio.Lock())` with early-return if locked prevents concurrent double-settlement. Exactly right.
-
-3. **`flow_wallet.py` per-user asyncio locks with GC cleanup** — `_user_locks` dict with `_cleanup_idle_locks()` at `_LOCK_CLEANUP_THRESHOLD=500`. Prevents unbounded growth without manual lifecycle management.
-
-4. **Lazy imports of `setup_cog.get_channel_id()`** — 12 modules import at call time. Prevents circular imports and allows setup_cog to fully initialize before any cog resolves channel IDs. Consistent across the codebase.
-
-5. **Idempotency at the DB layer** — `reference_key TEXT UNIQUE DEFAULT NULL` in `transactions` table means the database itself enforces idempotency, not just application logic. Defense-in-depth.
+**Fix:** Narrow the `except` to catch the specific low-balance error condition, or at minimum log the actual exception before sending the user message.
 
 ---
 
-## TEST GAPS
+#### X-02 · `casino/games/slots.py` L97 — Magic constant `_EXPECTED_WEIGHT_TOTAL = 80` in module-level assert
 
-| Test Case | Type | What It Validates | Priority |
-|-----------|------|-------------------|----------|
-| `test_real_sportsbook_double_click` | integration | Debit called twice same user+event → second call is no-op | high (C-01 direct) |
-| `test_sportsbook_result_bus_event` | integration | TSL bet settlement emits on flow_bus when wired | medium |
-| `test_boss_cog_missing_cog` | unit | `get_cog()` returns None → `_send_cog_error()` fires, no crash | medium |
-| `test_settlement_partial_write` | integration | `write_bet` success + `real_bets` INSERT failure → debit refunded | high (X-04) |
-| `test_home_renderer_schema_drift` | unit | Missing DB column → defaults returned, no exception propagated | low |
+```python
+assert _actual_weight_total == _EXPECTED_WEIGHT_TOTAL  # _EXPECTED_WEIGHT_TOTAL = 80
+```
 
----
+The `80` is a hardcoded constant. If a developer adds a new symbol row to `SLOT_ICON_CONFIG` and correctly updates the weights, this assert will fire at import time with an opaque `AssertionError` and no message. Bot fails to load entirely.
 
-## METRICS
-
-| Metric | Value |
-|--------|-------|
-| Files scanned | 89 |
-| Cross-module contracts verified | 47 |
-| Critical findings | 1 |
-| Warnings | 6 |
-| Observations | 8 |
-| Cross-module risks | 6 |
-| DB schema mismatches | 1 (documentation only) |
-| Dead code candidates | 5 |
-| Import chain issues | 3 (1 circular, 2 fragile) |
-
-**Overall integration health:** Module boundary contracts are well-maintained — every `get_cog()` is null-checked, wallet idempotency is enforced at the DB layer in most paths, and the DB split between `flow.db` and `flow_economy.db` is architecturally coherent even if confusingly documented. The single critical issue (real sportsbook debit without `reference_key`) is a one-line fix. The most significant systemic gap is the `sportsbook_result` bus topic dead zone — TSL bet settlement is the only major subsystem that doesn't participate in the live engagement pipeline.
-
-**Next audit focus:** Monday — Flow & Economy (flow_wallet.py, flow_sportsbook.py, economy_cog.py, flow_audit.py, wager_registry.py, flow_events.py)
+**Fix:** Either compute `_EXPECTED_WEIGHT_TOTAL` dynamically from the config table, or add an assert message: `assert ..., f"Slot weight table misconfigured: expected 80, got {_actual_weight_total}"`.
 
 ---
 
-## CLAUDE.md UPDATES
+### Observations — 3 notes
 
-### Changes Made
+---
 
-**1. Databases table — corrected `flow.db` and `flow_economy.db` descriptions**
+#### O-01 · `casino/games/crash.py` L51 — `MAX_CRASH_MULTIPLIER = 1000.0` is unreachable
 
-Previous: `flow.db` = "TSL sportsbook bets, Flow economy transactions"  
-Corrected: `flow.db` = "Unified event/bet/parlay schema (sportsbook_core.py) — real sportsbook, polymarket, cross-system grading"  
-Corrected: `flow_economy.db` description expanded to clarify it holds `bets_table` (TSL sportsbook legacy), `real_bets` (real sports bets), wallet transactions, and casino tables.
+`_generate_crash_point()` caps the crash point at `100.0` internally. The module-level `MAX_CRASH_MULTIPLIER = 1000.0` is referenced in `min(self.round_obj.current_mult, MAX_CRASH_MULTIPLIER)` during the tick loop — but since the crash point itself never exceeds 100x, the 1000x cap never fires.
+
+Either update the constant to `100.0` to match actual behavior, or remove the redundant cap from the tick loop.
+
+---
+
+#### O-02 · `casino/renderer/highlight_renderer.py` ~L82–146 — Local `_wrap_card()` embeds `<style>` in body
+
+`highlight_renderer.py` defines its own `_wrap_card()` that prepends `status_override_css` as an inline `<style>` block inside the HTML body before calling `atlas_html_engine.wrap_card()`. All other renderers inject status CSS as a `status_class` parameter. This is architecturally inconsistent but functionally correct. Low priority — note for when `atlas_html_engine.wrap_card()` signature is next extended.
+
+---
+
+#### O-03 · `casino/casino_db.py` `refund_wager()` — Credit with no `reference_key` (error-path-only)
+
+`refund_wager()` at L1089-1100 calls `flow_wallet.credit()` without `reference_key`. This function is only called in exception handlers (Blackjack `on_timeout`, Crash refund sweep, Slots render-path error). The existing `self.resolved` flag at the call site prevents double-execution from the view layer, but provides no DB-level idempotency. Lower priority than W-01 (coinflip) because these paths are exception-only, not user-triggered retry paths.
+
+---
+
+## Phase 3 — Anti-Pattern Scan Results
+
+| Pattern | Files matched | Notes |
+|---------|--------------|-------|
+| `except Exception: pass` | 1 | W-03 — `casino/casino.py` L83 |
+| bare `except:` | 0 | Clean |
+| `time.sleep()` in focus files | 0 | `asyncio.sleep(1.5)` in blackjack — acceptable UX |
+| `eval()` / `exec()` in focus files | 0 | Clean |
+| Blocking `sqlite3.connect()` in async-reachable code | 1 | W-02 — `db_migration_snapshots.py` |
+| `flow_wallet.debit()` without `reference_key` | 0 | Clean — `deduct_wager()` handles this correctly |
+| `flow_wallet.credit()` without `reference_key` (settlement) | 2 | W-01 coinflip refund, O-03 `refund_wager()` |
+| Render before settlement | 1 | C-01 — `slots.py` |
+| SQL string formatting / injection vectors | 0 | All queries use parameterized `?` bindings |
+
+---
+
+## Phase 4 — CLAUDE.md Health Check
+
+| Item | Status |
+|------|--------|
+| `flow_wallet.debit()` idempotency | ENFORCED — `deduct_wager()` correctly uses `reference_key` |
+| `flow_wallet.credit()` idempotency (settlement) | VIOLATED — `refund_wager()` (O-03), coinflip refund paths (W-01) |
+| `except Exception: pass` prohibited in admin views | VIOLATED — `post_to_ledger()` (W-03) |
+| `db_migration_snapshots.py` async context note | VALID — blocking sync acknowledged; no current async caller, risk is latent |
+| `sportsbook_cards._get_season_start_balance()` OperationalError wrap | OUT OF SCOPE for Tuesday audit (covered Monday) |
+| All other CLAUDE.md rules for focus files | VERIFIED — no additional gaps found |
+
+No CLAUDE.md updates required from tonight's audit.
+
+---
+
+## Positive Patterns (Confirmed Good)
+
+- **`casino_db.py` `process_wager()`** — Full `BEGIN IMMEDIATE` atomicity, streak → bonus → session → credit → jackpot → COMMIT order is correct. All credits use `reference_key`. Well-structured.
+- **`casino_db.py` `deduct_wager()`** — User lock + `BEGIN IMMEDIATE` + `wager_registry` registration. Correct TOCTOU prevention.
+- **`atlas_html_engine.py` `render_card()`** — `finally` block always releases page pool slot. No resource leaks. Pool reconnect/re-warm on browser crash is production-grade.
+- **`casino/games/crash.py`** — Cashout TOCTOU sentinel (`player.cashed_out = True` before `await`), render failure text fallback, full exception handler with per-player refund sweep.
+- **`casino/games/slots.py` `_spin_controlled()`** — Outcome computed server-side before visual reel generation. Correct provably-fair / RTP-control pattern.
+- **`casino_db.py` `claim_scratch()`** — Re-verifies claim status inside `BEGIN IMMEDIATE` before any write. No double-claim possible.
+- **`atlas_html_engine.py` `PagePool`** — LRU font cache (50 entries), dead-page replacement on release, `asyncio.TimeoutError` on 10s pool starvation. All edge cases handled.
+- **CSPRNG crash point generation** — `secrets.token_bytes(8)` → SHA256 → deterministic crash point. Cryptographically safe.
+
+---
+
+## Summary Table
+
+| ID | File | Line | Severity | Title |
+|----|------|------|----------|-------|
+| C-01 | casino/games/slots.py | 216-250 | CRITICAL | Render before process_wager — orphan on Playwright failure |
+| W-01 | casino/games/coinflip.py | 290, 309 | WARNING | refund_wager missing correlation_id in decline/timeout |
+| W-02 | db_migration_snapshots.py | 49-64 | WARNING | Blocking sqlite3 in async-reachable take_daily_snapshot |
+| W-03 | casino/casino.py | 83-84 | WARNING | Silent except pass in post_to_ledger notification fallback |
+| W-04 | casino/casino_db.py | ~1563 | WARNING | PvP coinflip win bypasses process_wager — no streak/jackpot |
+| X-01 | casino/games/blackjack.py | 337, 362 | RISK | Misleading Insufficient funds swallows all deduct errors |
+| X-02 | casino/games/slots.py | 97 | RISK | Magic weight constant assert fails silently on symbol table change |
+| O-01 | casino/games/crash.py | 51 | OBS | MAX_CRASH_MULTIPLIER = 1000.0 is unreachable (capped at 100x) |
+| O-02 | casino/renderer/highlight_renderer.py | ~82 | OBS | Local _wrap_card injects style into body — inconsistent pipeline |
+| O-03 | casino/casino_db.py | ~1093 | OBS | refund_wager credit has no reference_key (exception paths only) |
+
+**Totals:** 1 critical · 4 warnings · 2 cross-module risks · 3 observations
+
+---
+
+## Recommended Fix Order
+
+1. **C-01** — Reorder slots.py settlement: `process_wager` before `render_slots_card`, or add explicit `refund_wager` on render failure. High severity, isolated change.
+2. **W-01** — Pass `correlation_id=self.challenger_correlation_id` to both `refund_wager` calls in coinflip.py. Two-line fix, high idempotency value.
+3. **W-03** — Replace `except Exception: pass` in `casino.py` `post_to_ledger` with `log.warning(...)`. One line.
+4. **X-01** — Narrow `except Exception` in blackjack Double/Split to balance-check errors; log actual exception. Prevents misleading player messages.
+5. **X-02** — Add message to slots weight assert. One line.
+6. **W-02** — Add docstring to `take_daily_snapshot()` documenting blocking contract. Verify no async callers exist before considering conversion.
+7. **W-04** — Decision: document PvP streak exclusion intentionally, or route through `process_wager()`.
+
+---
+
+*Generated by audit-tuesday-casino scheduled task · ATLAS v2.x · 2026-04-14*
