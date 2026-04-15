@@ -1,14 +1,14 @@
-# ATLAS Nightly Review — Casino & Rendering Subsystem
-**Date:** 2026-04-14
-**Audit Task:** `audit-tuesday-casino`
-**Scope:** 17 focus files — Casino games, casino DB, renderers, HTML engine, style tokens
-**Passes:** Anti-pattern scan · Logic trace · Cross-module contract · Performance · Security/Data integrity
+# ATLAS Nightly Review — Oracle & Analytics Subsystem
+**Date:** 2026-04-15
+**Audit Task:** audit-wednesday-oracle
+**Scope:** 7 focus files — oracle_cog.py, oracle_query_builder.py, analysis.py, intelligence.py, data_manager.py, oracle_agent.py, oracle_memory.py
+**Passes:** Anti-pattern scan · Logic trace · Cross-module contract · Performance · Security/NL→SQL path
 
 ---
 
 ## Phase 1 — Recent Commit Triage
 
-No changes to any focus file in the last 24 hours. Last 5 commits were audit docs and CLAUDE.md documentation updates only. Audit proceeds against current baseline.
+No changes to any Oracle focus file in the last 24 hours. Most recent commit (6644a83) was the Tuesday Casino nightly audit. Audit proceeds against current baseline.
 
 ---
 
@@ -18,221 +18,205 @@ No changes to any focus file in the last 24 hours. Last 5 commits were audit doc
 
 ---
 
-#### C-01 · `casino/games/slots.py` L216–250 — Wager deducted before render; render failure leaves player in limbo
+#### C-01 · analysis.py L182 — team_profile() stores a coroutine object, never actual game data
 
-**Severity:** CRITICAL — player balance debited with no settlement record on Playwright failure
-**Rule violated:** CLAUDE.md — settlement path must be atomic; orphan wager reconciliation is last resort, not a design target
+**Severity:** CRITICAL — `recent` field always holds a dead coroutine object, never a list of games
+**Files affected:** analysis.py:182, analysis.py:258–265 (transitive via head_to_head())
 
-Current execution order in `play_slots()`:
-
-```python
-# L216
-await deduct_wager(uid, wager, ...)          # Balance already debited
-# L227
-card_bytes = await render_slots_card(...)     # RENDER — can fail (pool exhaustion, Playwright crash)
-# L250
-await process_wager(uid, wager, multiplier)  # NEVER REACHED if render fails
-```
-
-If `render_slots_card()` raises `asyncio.TimeoutError` (pool full) or any Playwright exception, `deduct_wager()` has already committed, `process_wager()` is never called, and the player's wager is orphaned. Orphan reconciliation runs every 10 minutes minimum — the player sees a deducted balance with no slot result during that window.
-
-**Fix:** Move `render_slots_card` after `process_wager`, or wrap the render in `try/except` with explicit `refund_wager` on failure:
+`team_profile()` is a synchronous function. At L182 it does:
 
 ```python
-await deduct_wager(uid, wager, ...)
-try:
-    await process_wager(uid, wager, multiplier)
-    card_bytes = await render_slots_card(...)
-except Exception:
-    await refund_wager(uid, wager, correlation_id=correlation_id)
-    raise
+"recent": dm.get_last_n_games(team_name, 5),
 ```
 
-Contrast: `crash.py` wraps all render calls in `try/except discord.HTTPException` with text fallback. Same pattern needed in slots.
+`dm.get_last_n_games()` is declared `async def` in data_manager.py:814. Calling it without `await` in a sync context returns a coroutine object — never executes, never raises, and silently stores `<coroutine object get_last_n_games>` into the dict. Any consumer that iterates `result["recent"]` either gets nothing (truthiness check) or a TypeError.
+
+`head_to_head()` at L258–265 calls `team_profile()` twice and surfaces both broken `recent` fields to callers, including Codex intent routing via `analyze_intent()` at L406–410.
+
+**Fix:** Make `team_profile()` async and await the call:
+
+```python
+async def team_profile(team_name: str) -> dict:
+    result = { ..., "recent": await dm.get_last_n_games(team_name, 5) }
+```
+
 ---
 
 ### WARNINGS — 4 issues
 
 ---
 
-#### W-01 · `casino/games/coinflip.py` L290, L309 — `refund_wager()` missing `correlation_id` in decline and timeout paths
+#### W-01 · oracle_memory.py L458–472 + oracle_query_log — No automatic pruning on either table
 
-Both `decline_btn.callback` (L290) and `ChallengeView.on_timeout` (L309) call:
+`prune_old_turns(days=90)` exists but is never called automatically. No periodic task, no scheduled hook, no call from `load_all()`. Every `embed_and_store()` call adds a row + embedding BLOB forever.
+
+`oracle_query_log` (observability table) has **no cleanup function at all** — every `log_query()` call writes a row with no TTL. Both tables grow without bound over a season of active use.
+
+Compounding issue: after `prune_old_turns()` deletes rows from `conversation_memory`, the FTS5 virtual table shadow rows are orphaned until `INSERT INTO oracle_fts(oracle_fts) VALUES('optimize')` is run. FTS index accumulates dead segments across prune cycles (see O-02).
+
+**Fix:** Add `@tasks.loop(hours=24)` periodic task to StatsHubCog calling `prune_old_turns(days=90)` and a new `prune_query_log(days=30)` method. Add FTS OPTIMIZE call inside `prune_old_turns()` after DELETE.
+
+---
+
+#### W-02 · intelligence.py — compare_draft_classes() N+1 sequential await loop (up to 93 iterations)
+
+`compare_draft_classes()` awaits `get_draft_class(season)` sequentially for every season in a for loop:
 
 ```python
-await refund_wager(self.challenger_id, self.wager)
+for season in range(2, dm.CURRENT_SEASON + 1):
+    dc = await get_draft_class(season)   # sequential — blocks on each DB round-trip
 ```
 
-`self.challenger_correlation_id` is stored on the view but never forwarded. `refund_wager` calls `flow_wallet.credit()` internally — without `reference_key`, a retry (network glitch on the refund response) credits the challenger twice.
+With `CURRENT_SEASON` at 95+, this is up to 93 sequential `run_in_executor` DB calls before any response, dominating wall time for `/stats draft` without a season argument.
 
-**Fix:** `await refund_wager(self.challenger_id, self.wager, correlation_id=self.challenger_correlation_id)` in both locations.
-
----
-
-#### W-02 · `db_migration_snapshots.py` L49–64 — Synchronous `sqlite3.connect()` in `take_daily_snapshot()`
-
-`take_daily_snapshot()` opens a blocking `sqlite3.connect()` and runs N individual `INSERT OR REPLACE` statements in a loop (one per user). CLAUDE.md documents this explicitly: "Must be called via `asyncio.to_thread()` if ever wired into async context."
-
-Currently no async caller wires this function, so no immediate crash — but any future cog that calls it directly will block the event loop for every user in the system.
-
-**Fix:** Either convert to `aiosqlite`, or wrap the entire function body in `asyncio.to_thread()` at the call site. Document the blocking contract in the function's docstring.
-
----
-
-#### W-03 · `casino/casino.py` L83–84 — Silent `except Exception: pass` in `post_to_ledger()`
-
-The admin notification fallback in `post_to_ledger` catches all exceptions silently:
+**Fix:** Parallelize with `asyncio.gather()`:
 
 ```python
-except Exception:
-    pass  # no log
+seasons = range(2, dm.CURRENT_SEASON + 1)
+results = await asyncio.gather(*[get_draft_class(s) for s in seasons], return_exceptions=True)
+draft_classes = [r for r in results if isinstance(r, dict)]
 ```
 
-CLAUDE.md prohibits `except Exception: pass` in admin-facing views. If the primary ledger write succeeds but the admin channel notification fails (e.g., channel ID misconfigured), the failure is invisible. Errors will not surface in logs or monitoring.
+---
 
-**Fix:** Replace `pass` with `log.warning("Admin ledger notification failed", exc_info=True)`. One line; no behavior change.
+#### W-03 · oracle_memory.py L399–455 — search_vector() O(n) cosine similarity in Python
+
+`search_vector()` fetches up to 2000 rows with embedding BLOBs from SQLite and computes cosine similarity in a Python loop. No `discord_id` filter scopes the scan per user — every call scans the full table and degrades linearly as the table grows.
+
+**Fix (short term):** Add `AND discord_id = ?` filter to scope per-user. Reduce LIMIT from 2000 to 500 — BM25 FTS handles recall; vector is a re-ranking pass, not primary retrieval.
+
+**Fix (long term):** Add index on `(discord_id, created_at)` to the oracle_memory schema migration.
 
 ---
 
-#### W-04 · `casino/casino_db.py` ~L1563 — PvP coinflip win bypasses `process_wager()`; no streak or jackpot credit
+#### W-04 · data_manager.py L994–1025 — get_discord_db_schema() opens synchronous sqlite3.connect() on 1.3GB DB without executor
 
-`resolve_challenge()` credits the PvP winner via `flow_wallet.credit()` directly — it does not call `process_wager()`. This means:
-- Winner's streak counter is never updated (win doesn't count toward Momentum)
-- No jackpot pool contribution from PvP wins
-- Win is invisible to session recap stats
+`get_discord_db_schema()` is called from async context (oracle_cog embed builders, Codex schema injection) but calls `sqlite3.connect(_DB_PATH)` synchronously with no `asyncio.to_thread()` wrapper.
 
-This is a consistent behavior gap, not a correctness bug — PvP coinflip is intentionally off the main wager path. Document in a comment if intentional, or route through `process_wager()` to unify behavior.
+5-minute TTL limits frequency, but a cache miss means a cold connection to a 1.3 GB database on the event loop thread, stalling all Discord interactions during bot cold start.
 
----
-
-### Cross-Module Risks — 2 issues
-
----
-
-#### X-01 · `casino/games/blackjack.py` L337, L362 — Misleading "Insufficient funds" on any Double/Split deduct failure
-
-Both `DoubleButton.callback` and `SplitButton.callback` catch `deduct_wager` failures as:
+**Fix:**
 
 ```python
-except Exception:
-    await interaction.followup.send("Insufficient funds", ephemeral=True)
+async def get_discord_db_schema() -> str:
+    if _discord_schema_cache and (now - _discord_schema_ts) < _SCHEMA_TTL:
+        return _discord_schema_cache
+    return await asyncio.to_thread(_get_schema_sync)
 ```
-
-Any DB connection error, `aiosqlite` exception, or unexpected state surfaces as "Insufficient funds" to the player. On a connection error, the player retries thinking they're broke — and may actually succeed on retry, potentially double-deducting if the first call partially committed.
-
-**Fix:** Narrow the `except` to catch the specific low-balance error condition, or at minimum log the actual exception before sending the user message.
 
 ---
 
-#### X-02 · `casino/games/slots.py` L97 — Magic constant `_EXPECTED_WEIGHT_TOTAL = 80` in module-level assert
+### CROSS-MODULE RISKS — 2 issues
+
+---
+
+#### R-01 · oracle_cog.py L2377–2390 — _build_team_matchup_embed() labels current-season H2H as "All-Time H2H"
+
+`_build_team_matchup_embed()` calls `dm.get_h2h_record(team_a, team_b)` and renders the result under field name **"📊 All-Time H2H"**. The `get_h2h_record()` docstring (data_manager.py:951–957) states:
+
+> Head-to-head record between two teams for the **CURRENT SEASON only**. For all-time H2H, query tsl_history.db directly via Codex.
+
+Users clicking the Matchup button believe they see career H2H history. In Week 1, every matchup shows 0–0.
+
+**Fix:** Rename the embed field to "This Season H2H", or replace with a `run_sql()` all-time query against tsl_history.db across all seasons and stage indices.
+
+---
+
+#### R-02 · analysis.py:258–265 → oracle_cog.py / Codex — head_to_head() inherits C-01 coroutine bug for both teams
+
+`head_to_head(team_a, team_b)` calls `team_profile()` twice. Both return dicts with `recent=<coroutine>`. Any AI path that serializes `team_profile()` output (Codex NL→analysis, matchup prompts) includes the coroutine repr string instead of actual game data. AI-generated team summaries silently omit recent form for both teams.
+
+**Blocked by:** C-01 fix resolves this entirely.
+
+---
+
+### OBSERVATIONS — 3 issues
+
+---
+
+#### O-01 · oracle_cog.py L2475 — Hardcoded "6 seasons of history" in _build_alltime_embed()
 
 ```python
-assert _actual_weight_total == _EXPECTED_WEIGHT_TOTAL  # _EXPECTED_WEIGHT_TOTAL = 80
+description="6 seasons of history — regular season",
 ```
 
-The `80` is a hardcoded constant. If a developer adds a new symbol row to `SLOT_ICON_CONFIG` and correctly updates the weights, this assert will fire at import time with an opaque `AssertionError` and no message. Bot fails to load entirely.
+`dm.CURRENT_SEASON` is 95+. Stale by ~89 seasons. Footer at L2596 correctly uses `f"Seasons 1–{dm.CURRENT_SEASON}"`, making description and footer inconsistent within the same embed.
 
-**Fix:** Either compute `_EXPECTED_WEIGHT_TOTAL` dynamically from the config table, or add an assert message: `assert ..., f"Slot weight table misconfigured: expected 80, got {_actual_weight_total}"`.
-
----
-
-### Observations — 3 notes
+**Fix:** `description=f"Seasons 1–{dm.CURRENT_SEASON} — regular season"`
 
 ---
 
-#### O-01 · `casino/games/crash.py` L51 — `MAX_CRASH_MULTIPLIER = 1000.0` is unreachable
+#### O-02 · oracle_memory.py — FTS5 index not optimized after prune_old_turns()
 
-`_generate_crash_point()` caps the crash point at `100.0` internally. The module-level `MAX_CRASH_MULTIPLIER = 1000.0` is referenced in `min(self.round_obj.current_mult, MAX_CRASH_MULTIPLIER)` during the tick loop — but since the crash point itself never exceeds 100x, the 1000x cap never fires.
+After `DELETE FROM conversation_memory WHERE ...`, FTS5 shadow tables retain orphaned document segments until `OPTIMIZE` is called. Over many prune cycles the FTS index accumulates dead segments, degrading `search_fts()` performance.
 
-Either update the constant to `100.0` to match actual behavior, or remove the redundant cap from the tick loop.
+**Fix:** Add to `prune_old_turns()` after the DELETE commit:
 
----
+```python
+await db.execute("INSERT INTO oracle_fts(oracle_fts) VALUES('optimize')")
+```
 
-#### O-02 · `casino/renderer/highlight_renderer.py` ~L82–146 — Local `_wrap_card()` embeds `<style>` in body
-
-`highlight_renderer.py` defines its own `_wrap_card()` that prepends `status_override_css` as an inline `<style>` block inside the HTML body before calling `atlas_html_engine.wrap_card()`. All other renderers inject status CSS as a `status_class` parameter. This is architecturally inconsistent but functionally correct. Low priority — note for when `atlas_html_engine.wrap_card()` signature is next extended.
-
----
-
-#### O-03 · `casino/casino_db.py` `refund_wager()` — Credit with no `reference_key` (error-path-only)
-
-`refund_wager()` at L1089-1100 calls `flow_wallet.credit()` without `reference_key`. This function is only called in exception handlers (Blackjack `on_timeout`, Crash refund sweep, Slots render-path error). The existing `self.resolved` flag at the call site prevents double-execution from the view layer, but provides no DB-level idempotency. Lower priority than W-01 (coinflip) because these paths are exception-only, not user-triggered retry paths.
+(Partially addressed by W-01 fix.)
 
 ---
 
-## Phase 3 — Anti-Pattern Scan Results
+#### O-03 · intelligence.py — _paginated_messages stale entry accumulation in low-traffic windows
 
-| Pattern | Files matched | Notes |
-|---------|--------------|-------|
-| `except Exception: pass` | 1 | W-03 — `casino/casino.py` L83 |
-| bare `except:` | 0 | Clean |
-| `time.sleep()` in focus files | 0 | `asyncio.sleep(1.5)` in blackjack — acceptable UX |
-| `eval()` / `exec()` in focus files | 0 | Clean |
-| Blocking `sqlite3.connect()` in async-reachable code | 1 | W-02 — `db_migration_snapshots.py` |
-| `flow_wallet.debit()` without `reference_key` | 0 | Clean — `deduct_wager()` handles this correctly |
-| `flow_wallet.credit()` without `reference_key` (settlement) | 2 | W-01 coinflip refund, O-03 `refund_wager()` |
-| Render before settlement | 1 | C-01 — `slots.py` |
-| SQL string formatting / injection vectors | 0 | All queries use parameterized `?` bindings |
+`_prune_stale_pages()` is called inside `register_pagination()` only. In a low-traffic window stale entries accumulate until the next registration. Noted in AUDIT_REPORT_2026_03_15, still open.
+
+**Fix:** Call `_prune_stale_pages()` in `get_pagination()` as well.
+
+---
+
+## Phase 3 — Security Audit (NL→SQL Path)
+
+**oracle_agent.py sandbox integrity:** PASS
+- `validate_sandbox_ast()` rejects dunder traversal at AST level before `exec()`
+- `_SAFE_BUILTINS` whitelist excludes `__import__`, `open`, `eval`, `type`, `exec`
+- `build_agent_env()` injects only QueryBuilder read functions + `run_sql` — no write/schema mutation surface
+- `run_sql` routes through `codex_utils` which opens `tsl_history.db` read-only
+
+**oracle_query_builder.py injection surface:** PASS
+- All user input flows through `_sanitize_input()` stripping `'";\\-` before SQL inclusion
+- `Query.__init__` validates against `_VALID_TABLES` frozenset; raises `ValueError` on unknown table
+- `Query.build()` uses `?` parameterized placeholders for all filter values
+- `game_extremes()` ORDER BY uses a 3-key dict whitelist, not user input directly
+- Composite functions use f-strings on controlled internal stat definition strings from DomainKnowledge
+
+**_franchise_nemesis() / _franchise_punching_bag():** PASS — `LIKE ?` parameterization; input filtered through `fuzzy_resolve_user()`
+
+**oracle_memory.py FTS sanitization:** PASS — `_sanitize_fts()` strips FTS5 metacharacters before MATCH
+
+**Overall NL→SQL verdict:** No injection path identified. Sandbox, parameterization, and whitelist layers correctly implemented.
 
 ---
 
 ## Phase 4 — CLAUDE.md Health Check
 
-| Item | Status |
+| Rule | Status |
 |------|--------|
-| `flow_wallet.debit()` idempotency | ENFORCED — `deduct_wager()` correctly uses `reference_key` |
-| `flow_wallet.credit()` idempotency (settlement) | VIOLATED — `refund_wager()` (O-03), coinflip refund paths (W-01) |
-| `except Exception: pass` prohibited in admin views | VIOLATED — `post_to_ledger()` (W-03) |
-| `db_migration_snapshots.py` async context note | VALID — blocking sync acknowledged; no current async caller, risk is latent |
-| `sportsbook_cards._get_season_start_balance()` OperationalError wrap | OUT OF SCOPE for Tuesday audit (covered Monday) |
-| All other CLAUDE.md rules for focus files | VERIFIED — no additional gaps found |
-
-No CLAUDE.md updates required from tonight's audit.
-
----
-
-## Positive Patterns (Confirmed Good)
-
-- **`casino_db.py` `process_wager()`** — Full `BEGIN IMMEDIATE` atomicity, streak → bonus → session → credit → jackpot → COMMIT order is correct. All credits use `reference_key`. Well-structured.
-- **`casino_db.py` `deduct_wager()`** — User lock + `BEGIN IMMEDIATE` + `wager_registry` registration. Correct TOCTOU prevention.
-- **`atlas_html_engine.py` `render_card()`** — `finally` block always releases page pool slot. No resource leaks. Pool reconnect/re-warm on browser crash is production-grade.
-- **`casino/games/crash.py`** — Cashout TOCTOU sentinel (`player.cashed_out = True` before `await`), render failure text fallback, full exception handler with per-player refund sweep.
-- **`casino/games/slots.py` `_spin_controlled()`** — Outcome computed server-side before visual reel generation. Correct provably-fair / RTP-control pattern.
-- **`casino_db.py` `claim_scratch()`** — Re-verifies claim status inside `BEGIN IMMEDIATE` before any write. No double-claim possible.
-- **`atlas_html_engine.py` `PagePool`** — LRU font cache (50 entries), dead-page replacement on release, `asyncio.TimeoutError` on 10s pool starvation. All edge cases handled.
-- **CSPRNG crash point generation** — `secrets.token_bytes(8)` → SHA256 → deterministic crash point. Cryptographically safe.
+| `get_persona()` for all AI system prompts | PASS — `get_persona('analytical')`, `get_persona('casual')` throughout oracle_cog.py |
+| `atlas_ai.generate()` for all AI calls | PASS — No direct Gemini/Claude SDK calls in focus files |
+| `atlas_ai.is_available()` guard before AI calls | PASS — Used at L2441 and all AI injection points |
+| `run_in_executor` for blocking DB calls | PARTIAL FAIL — `get_discord_db_schema()` missing executor wrap (W-04); all others correct |
+| Dead files in QUARANTINE/ only | PASS — No imports from QUARANTINE found |
+| `status IN ('2','3')` not `='3'` alone | PASS — All `games` table queries correctly use `status IN ('2','3')` |
+| `weekIndex` 0-based vs `CURRENT_WEEK` 1-based | PASS — `week_index = target - 1` correctly applied in `get_weekly_results()` |
+| `stageIndex='1'` for regular season | PASS — All `run_sql` calls on games table include `stageIndex='1'` |
 
 ---
 
-## Summary Table
+## Summary
 
-| ID | File | Line | Severity | Title |
-|----|------|------|----------|-------|
-| C-01 | casino/games/slots.py | 216-250 | CRITICAL | Render before process_wager — orphan on Playwright failure |
-| W-01 | casino/games/coinflip.py | 290, 309 | WARNING | refund_wager missing correlation_id in decline/timeout |
-| W-02 | db_migration_snapshots.py | 49-64 | WARNING | Blocking sqlite3 in async-reachable take_daily_snapshot |
-| W-03 | casino/casino.py | 83-84 | WARNING | Silent except pass in post_to_ledger notification fallback |
-| W-04 | casino/casino_db.py | ~1563 | WARNING | PvP coinflip win bypasses process_wager — no streak/jackpot |
-| X-01 | casino/games/blackjack.py | 337, 362 | RISK | Misleading Insufficient funds swallows all deduct errors |
-| X-02 | casino/games/slots.py | 97 | RISK | Magic weight constant assert fails silently on symbol table change |
-| O-01 | casino/games/crash.py | 51 | OBS | MAX_CRASH_MULTIPLIER = 1000.0 is unreachable (capped at 100x) |
-| O-02 | casino/renderer/highlight_renderer.py | ~82 | OBS | Local _wrap_card injects style into body — inconsistent pipeline |
-| O-03 | casino/casino_db.py | ~1093 | OBS | refund_wager credit has no reference_key (exception paths only) |
+| Category | Count |
+|----------|-------|
+| Critical | 1 |
+| Warnings | 4 |
+| Cross-Module Risks | 2 |
+| Observations | 3 |
+| Security findings | 0 (PASS) |
+| **Total** | **10** |
 
-**Totals:** 1 critical · 4 warnings · 2 cross-module risks · 3 observations
+**Highest priority:** C-01 — `analysis.team_profile()` async bug. Silent data corruption where `recent` game form is never populated in any team profile or H2H analysis built through analysis.py. One-line fix once function is made `async def`.
 
----
-
-## Recommended Fix Order
-
-1. **C-01** — Reorder slots.py settlement: `process_wager` before `render_slots_card`, or add explicit `refund_wager` on render failure. High severity, isolated change.
-2. **W-01** — Pass `correlation_id=self.challenger_correlation_id` to both `refund_wager` calls in coinflip.py. Two-line fix, high idempotency value.
-3. **W-03** — Replace `except Exception: pass` in `casino.py` `post_to_ledger` with `log.warning(...)`. One line.
-4. **X-01** — Narrow `except Exception` in blackjack Double/Split to balance-check errors; log actual exception. Prevents misleading player messages.
-5. **X-02** — Add message to slots weight assert. One line.
-6. **W-02** — Add docstring to `take_daily_snapshot()` documenting blocking contract. Verify no async callers exist before considering conversion.
-7. **W-04** — Decision: document PvP streak exclusion intentionally, or route through `process_wager()`.
-
----
-
-*Generated by audit-tuesday-casino scheduled task · ATLAS v2.x · 2026-04-14*
+**Second priority:** W-01 — `oracle_query_log` has no cleanup path. Will become the largest table in tsl_history.db with no drain mechanism as query volume grows.
