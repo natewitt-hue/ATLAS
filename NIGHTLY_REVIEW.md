@@ -1,222 +1,228 @@
-# ATLAS Nightly Review — Oracle & Analytics Subsystem
-**Date:** 2026-04-15
-**Audit Task:** audit-wednesday-oracle
-**Scope:** 7 focus files — oracle_cog.py, oracle_query_builder.py, analysis.py, intelligence.py, data_manager.py, oracle_agent.py, oracle_memory.py
-**Passes:** Anti-pattern scan · Logic trace · Cross-module contract · Performance · Security/NL→SQL path
+# ATLAS Nightly Audit — 2026-04-16
+
+**Focus:** Genesis, Sentinel & Compliance | **Recent commits (24h):** 1 (Wednesday Oracle audit only — no changes to focus files) | **Files deeply read:** 7 | **Total lines analyzed:** ~8,503
 
 ---
 
-## Phase 1 — Recent Commit Triage
+## CRITICAL — Fix Before Next Deploy
 
-No changes to any Oracle focus file in the last 24 hours. Most recent commit (6644a83) was the Tuesday Casino nightly audit. Audit proceeds against current baseline.
+### [C-01] sentinel_cog.py falls back to an isolated `_state` dict if genesis_cog import fails — position changes bypass cornerstone locks
 
----
-
-## Phase 2 — Deep Audit Findings
-
-### CRITICAL — 1 issue
-
----
-
-#### C-01 · analysis.py L182 — team_profile() stores a coroutine object, never actual game data
-
-**Severity:** CRITICAL — `recent` field always holds a dead coroutine object, never a list of games
-**Files affected:** analysis.py:182, analysis.py:258–265 (transitive via head_to_head())
-
-`team_profile()` is a synchronous function. At L182 it does:
-
+- **File:** `sentinel_cog.py` L1489–1520
+- **Risk:** If `from genesis_cog import _state, _save_state, _STATE_PATH` raises ImportError at import time (load-order race, bad restart, genesis_cog syntax error), sentinel_cog silently boots with its **own empty `_state` dict**. Position changes are then appended to that orphaned dict, never reaching the shared `parity_state.json`. The `cornerstones` key in `_state` will be empty — so cornerstone lock checks at `_run_position_change()` L2103 always return `False`, allowing any player to change position regardless of cornerstone designation.
+- **Evidence:**
 ```python
-"recent": dm.get_last_n_games(team_name, 5),
+# sentinel_cog.py L1489-1520
+try:
+    from genesis_cog import _state, _save_state, _STATE_PATH
+    _PARITY_STATE_AVAILABLE = True
+except ImportError:
+    # Standalone fallback: manage our own state dict
+    _PARITY_STATE_AVAILABLE = False
+    _STATE_PATH = os.path.join(os.path.dirname(__file__), "parity_state.json")
+    _state: dict = {}          # <-- EMPTY: no cornerstones, no position_changes
+
+    def _load_state_local():
+        global _state
+        if os.path.isfile(_STATE_PATH):
+            try:
+                with open(_STATE_PATH, "r") as f:
+                    _state.update(json.load(f))
+            ...
+    _load_state_local()   # reads disk, but only once at startup — cornerstones populated
 ```
-
-`dm.get_last_n_games()` is declared `async def` in data_manager.py:814. Calling it without `await` in a sync context returns a coroutine object — never executes, never raises, and silently stores `<coroutine object get_last_n_games>` into the dict. Any consumer that iterates `result["recent"]` either gets nothing (truthiness check) or a TypeError.
-
-`head_to_head()` at L258–265 calls `team_profile()` twice and surfaces both broken `recent` fields to callers, including Codex intent routing via `analyze_intent()` at L406–410.
-
-**Fix:** Make `team_profile()` async and await the call:
-
+The `_load_state_local()` call at L1520 does read from disk on startup — so cornerstones are present initially. But if the JSON file is ever absent (fresh deploy, corrupted), cornerstones start empty. More critically: **position changes written to this fallback `_state` never reach the `_state` object that genesis_cog reads** — they are in two separate Python dicts in memory. New cornerstones designated by genesis_cog during a session are invisible to sentinel's fallback path.
+- **Fix:** Extract `_state`, `_save_state`, and `_STATE_PATH` into a standalone `parity_state.py` module (the `TODO` at sentinel L1486 already calls this out). Both genesis_cog and sentinel_cog import from there — no coupling, no fallback split. Until then, add a log warning so the split state is at least visible:
 ```python
-async def team_profile(team_name: str) -> dict:
-    result = { ..., "recent": await dm.get_last_n_games(team_name, 5) }
-```
-
----
-
-### WARNINGS — 4 issues
-
----
-
-#### W-01 · oracle_memory.py L458–472 + oracle_query_log — No automatic pruning on either table
-
-`prune_old_turns(days=90)` exists but is never called automatically. No periodic task, no scheduled hook, no call from `load_all()`. Every `embed_and_store()` call adds a row + embedding BLOB forever.
-
-`oracle_query_log` (observability table) has **no cleanup function at all** — every `log_query()` call writes a row with no TTL. Both tables grow without bound over a season of active use.
-
-Compounding issue: after `prune_old_turns()` deletes rows from `conversation_memory`, the FTS5 virtual table shadow rows are orphaned until `INSERT INTO oracle_fts(oracle_fts) VALUES('optimize')` is run. FTS index accumulates dead segments across prune cycles (see O-02).
-
-**Fix:** Add `@tasks.loop(hours=24)` periodic task to StatsHubCog calling `prune_old_turns(days=90)` and a new `prune_query_log(days=30)` method. Add FTS OPTIMIZE call inside `prune_old_turns()` after DELETE.
-
----
-
-#### W-02 · intelligence.py — compare_draft_classes() N+1 sequential await loop (up to 93 iterations)
-
-`compare_draft_classes()` awaits `get_draft_class(season)` sequentially for every season in a for loop:
-
-```python
-for season in range(2, dm.CURRENT_SEASON + 1):
-    dc = await get_draft_class(season)   # sequential — blocks on each DB round-trip
-```
-
-With `CURRENT_SEASON` at 95+, this is up to 93 sequential `run_in_executor` DB calls before any response, dominating wall time for `/stats draft` without a season argument.
-
-**Fix:** Parallelize with `asyncio.gather()`:
-
-```python
-seasons = range(2, dm.CURRENT_SEASON + 1)
-results = await asyncio.gather(*[get_draft_class(s) for s in seasons], return_exceptions=True)
-draft_classes = [r for r in results if isinstance(r, dict)]
+except ImportError:
+    import logging as _log
+    _log.getLogger("atlas.sentinel").error(
+        "sentinel_cog: genesis_cog import failed — running with isolated parity state. "
+        "Cornerstone locks may be stale. FIX: extract parity_state.py."
+    )
+    ...
 ```
 
 ---
 
-#### W-03 · oracle_memory.py L399–455 — search_vector() O(n) cosine similarity in Python
+## WARNINGS — Fix This Week
 
-`search_vector()` fetches up to 2000 rows with embedding BLOBs from SQLite and computes cosine similarity in a Python loop. No `discord_id` filter scopes the scan per user — every call scans the full table and degrades linearly as the table grows.
+### [W-01] Counter-trade authorization fails open if `intelligence` module is unavailable
 
-**Fix (short term):** Add `AND discord_id = ?` filter to scope per-user. Reduce LIMIT from 2000 to 500 — BM25 FTS handles recall; vector is a re-ranking pass, not primary retrieval.
-
-**Fix (long term):** Add index on `(discord_id, created_at)` to the oracle_memory schema migration.
-
----
-
-#### W-04 · data_manager.py L994–1025 — get_discord_db_schema() opens synchronous sqlite3.connect() on 1.3GB DB without executor
-
-`get_discord_db_schema()` is called from async context (oracle_cog embed builders, Codex schema injection) but calls `sqlite3.connect(_DB_PATH)` synchronously with no `asyncio.to_thread()` wrapper.
-
-5-minute TTL limits frequency, but a cache miss means a cold connection to a 1.3 GB database on the event loop thread, stalling all Discord interactions during bot cold start.
-
-**Fix:**
-
+- **File:** `genesis_cog.py` L1724–1741
+- **Impact:** Any Discord user can submit a counter-offer on any trade if the `intelligence` module cannot be imported. Counter spamming from uninvolved users pollutes the trade log channel and creates fraudulent trade proposals.
+- **Evidence:**
 ```python
-async def get_discord_db_schema() -> str:
-    if _discord_schema_cache and (now - _discord_schema_ts) < _SCHEMA_TTL:
-        return _discord_schema_cache
-    return await asyncio.to_thread(_get_schema_sync)
+is_involved = (
+    interaction.user.id == self.proposer_id or
+    await is_commissioner(interaction)
+)
+if not is_involved:
+    try:
+        from intelligence import KNOWN_MEMBER_TEAMS
+        user_team_nick = KNOWN_MEMBER_TEAMS.get(interaction.user.id, "")
+        ...
+        if user_team_nick.lower() not in (team_a_nick.lower(), team_b_nick.lower()):
+            return await interaction.response.send_message("❌ Only involved owners...", ephemeral=True)
+    except ImportError:
+        pass  # Can't verify — allow it   <-- FAIL OPEN: any user can counter
+```
+- **Suggestion:** Fail closed on ImportError:
+```python
+    except ImportError:
+        return await interaction.response.send_message(
+            "❌ Authorization check unavailable. Contact a commissioner to counter.",
+            ephemeral=True,
+        )
+```
+
+### [W-02] `RulingPanelView._acted` set before `send_modal()` — button permanently dead if modal fails to open
+
+- **File:** `sentinel_cog.py` L617–659
+- **Impact:** If the Discord interaction deadline is hit between `_acted = True` and the modal appearing, `_acted` stays `True` and ALL verdict buttons are permanently dead for this complaint — no ruling can be issued without a bot restart and manual state repair.
+- **Evidence:**
+```python
+async def _guilty_callback(self, interaction: discord.Interaction):
+    ...
+    self._acted = True                                         # set BEFORE modal
+    await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "guilty"))
+    # if send_modal raises → _acted stays True forever
+```
+Same pattern at L644 (`_not_guilty_callback`) and L658 (`_dismiss_callback`).
+- **Suggestion:** Do not set `_acted` until the ruling is committed to `_complaints` inside `RulingNotesModal.on_submit()`. Guard the modal open with try/except and reset if it fails:
+```python
+try:
+    await interaction.response.send_modal(RulingNotesModal(self.complaint_id, "guilty"))
+    self._acted = True
+except Exception:
+    pass  # allow retry
+```
+
+### [W-03] `validate_position_change()` receives raw API player dicts — `"nan"` string attributes crash on `int()` conversion
+
+- **File:** `sentinel_cog.py` L2113 (caller) + L1579–1581 `_g()` (callee)
+- **Impact:** Player dicts from `dm.get_players()` can have attribute fields that are the string `"nan"` (not float NaN — a literal string from pandas CSV export). Genesis's `_sanitize_player()` catches this. Sentinel's `_run_position_change()` passes the raw player dict directly to `validate_position_change()` without sanitization. Inside `_g()`: `int(player.get(field, 0) or 0)` — `int("nan" or 0)` evaluates as `int("nan")` which raises `ValueError`. Any position change involving a player with a corrupted attribute field crashes mid-flow with no response to the user.
+- **Evidence:**
+```python
+def _g(player: dict, field: str, default: int = 0) -> int:
+    """Get a numeric player attribute safely."""
+    return int(player.get(field, default) or default)
+    # int("nan") → ValueError if field is literally the string "nan"
+```
+- **Suggestion:** Apply genesis's `_safe_int` pattern in `_g()`, or call `_sanitize_player()` before passing to `validate_position_change()` (import from genesis_cog or duplicate the function):
+```python
+def _g(player: dict, field: str, default: int = 0) -> int:
+    val = player.get(field, default) or default
+    try:
+        f = float(val)
+        return default if (f != f or f == float('inf') or f == float('-inf')) else int(f)
+    except (ValueError, TypeError):
+        return default
+```
+
+### [W-04] Trade card render failure leaves original image showing "PENDING REVIEW" after approval/rejection
+
+- **File:** `genesis_cog.py` `TradeActionView._update_status()` L1592–1692
+- **Impact:** When Playwright image re-render fails (crash, timeout), the original trade card image in Discord still shows "PENDING REVIEW" badge even after the trade is resolved. The log channel correctly posts the status update. Anyone viewing the original card is misled. Previously flagged as C1 — still unresolved.
+- **Evidence:** On render failure (L1659 `except Exception`), the fallback at L1662 cannot edit an image-backed message with an embed (image messages have no `.embeds`), so the `else:` branch fires an ephemeral followup only. The original image is never updated. The log channel is notified (L1681–1692), creating a state mismatch between visual card and log.
+- **Suggestion:** On render failure, at minimum disable the action buttons on the original message to prevent repeat clicks on a stale card:
+```python
+except Exception as e:
+    print(f"[trade_center] Status re-render error: {e}")
+    try:
+        await interaction.message.edit(view=disabled_view)   # disable buttons even if image stale
+    except Exception:
+        pass
 ```
 
 ---
 
-### CROSS-MODULE RISKS — 2 issues
+## OBSERVATIONS — Track for Later
+
+### [O-01] card_renderer.py silently caps trade card assets at 4 per side
+
+- **File:** `card_renderer.py` L208–216
+- **Note:** `players_a[:4]` and `picks_a[:4]` — trades with 5+ assets on one side silently truncate in the image. The embed fallback shows all assets. A 5-player trade has a missing player in the PNG with no visual indicator. Low frequency but the discrepancy between image and embed could cause confusion during approval.
+
+### [O-02] `trade_engine.evaluate_trade()` reads `parity_state.json` synchronously on every call
+
+- **File:** `trade_engine.py` L348–355
+- **Note:** Every trade evaluation does one synchronous file read (FIX #4 moved it out of the per-player loop, which was the right call). Low risk for current traffic. Worth wrapping in `asyncio.to_thread()` before any VPS deploy with network-mounted storage.
+
+### [O-03] `genesis_cog._save_state()` is synchronous — called from async command handlers
+
+- **File:** `genesis_cog.py` L1931–1940, called at L2017, L2037, L2055, L2139
+- **Note:** These saves happen in `_runlottery_impl`, `_orphanfranchise_impl`, `log_cap_clear_attempt`, and `_run_position_change` — all async. File is small JSON (~5–10 KB) so blocking is sub-millisecond, but technically incorrect. `asyncio.to_thread(_save_state)` would be the clean fix.
+
+### [O-04] Previous C1 (double log-channel announce) — resolved in current code
+
+- **File:** `genesis_cog.py` `_update_status()` L1592–1692
+- **Note:** Last Thursday's audit flagged a double log-channel send on render failure. Current code does not reproduce this: the success path returns early after one send (L1658), and the fallback path sends exactly one log-channel message (L1681–1692). No double-announce present. Closing as resolved.
+
+### [O-05] `god_cog.py` is 121 lines — clean, minimal, well-scoped
+
+- **File:** `god_cog.py`
+- **Note:** Two commands, both gated with `is_god()`, both defer before heavy work, `affinity` module safely optional. No issues found. Pattern is exemplary for a privileged command module.
 
 ---
 
-#### R-01 · oracle_cog.py L2377–2390 — _build_team_matchup_embed() labels current-season H2H as "All-Time H2H"
+## CROSS-MODULE RISKS
 
-`_build_team_matchup_embed()` calls `dm.get_h2h_record(team_a, team_b)` and renders the result under field name **"📊 All-Time H2H"**. The `get_h2h_record()` docstring (data_manager.py:951–957) states:
+### [X-01] sentinel_cog.py ↔ genesis_cog.py tight coupling on `_state` / `_save_state` internals
 
-> Head-to-head record between two teams for the **CURRENT SEASON only**. For all-time H2H, query tsl_history.db directly via Codex.
+- **Caller:** `sentinel_cog.py` L1489 — imports genesis_cog private symbols
+- **Callee:** `genesis_cog.py` L1908–1940 — `_state` and `_save_state` are module globals, not a public API
+- **Risk:** Any rename or extraction of parity state breaks sentinel silently at import time. The fallback split-state described in C-01 is the direct consequence. The genesis_cog load-order comment at CLAUDE.md confirms genesis must load before sentinel — a load failure at any point breaks this contract invisibly.
 
-Users clicking the Matchup button believe they see career H2H history. In Week 1, every matchup shows 0–0.
+### [X-02] `validate_position_change()` stat thresholds are AND-checked but CLAUDE.md requires OR for dual-attribute
 
-**Fix:** Rename the embed field to "This Season H2H", or replace with a `run_sql()` all-time query against tsl_history.db across all seasons and stage indices.
+- **Caller:** `sentinel_cog.py` L1802–1816 — `validate_position_change()` inner loop
+- **Callee:** `ability_engine.check_physics_floor()` — correctly implements OR for dual-attr
+- **Risk:** `validate_position_change()` has its own attribute checking logic (`_g()` / `_h()` / `_w()`) that checks ALL attribute thresholds as AND. For position change rules that happen to specify exactly 2 regular attributes (e.g. S→CB: `speedRating >= 88` AND `agilityRating >= 85`), the intent may be AND (a player must have both), which is fine. But there is no dual-attr OR override in `validate_position_change()` — unlike `ability_engine`. If future position rules are added expecting OR semantics, they would silently AND. Low risk with current rules (they appear intentionally AND), but worth documenting.
 
----
+### [X-03] Two live `TradeActionView` instances per trade — no cross-message button sync
 
-#### R-02 · analysis.py:258–265 → oracle_cog.py / Codex — head_to_head() inherits C-01 coroutine bug for both teams
-
-`head_to_head(team_a, team_b)` calls `team_profile()` twice. Both return dicts with `recent=<coroutine>`. Any AI path that serializes `team_profile()` output (Codex NL→analysis, matchup prompts) includes the coroutine repr string instead of actual game data. AI-generated team summaries silently omit recent form for both teams.
-
-**Blocked by:** C-01 fix resolves this entirely.
-
----
-
-### OBSERVATIONS — 3 issues
+- **Caller:** `genesis_cog._evaluate_and_post()` L893–910 — a second `TradeActionView` posted to the trade log channel
+- **Callee:** Same function L867 — first view in the proposer's ephemeral
+- **Risk:** Approving from the log-channel buttons disables those buttons, but the proposer's ephemeral still shows active Approve/Reject buttons. The `_trade_approval_lock` prevents double-execution, but stale buttons in the ephemeral can cause confusing "already approved" error messages hours later. Low severity (correct outcome, bad UX).
 
 ---
 
-#### O-01 · oracle_cog.py L2475 — Hardcoded "6 seasons of history" in _build_alltime_embed()
+## POSITIVE PATTERNS WORTH PRESERVING
 
-```python
-description="6 seasons of history — regular season",
-```
-
-`dm.CURRENT_SEASON` is 95+. Stale by ~89 seasons. Footer at L2596 correctly uses `f"Seasons 1–{dm.CURRENT_SEASON}"`, making description and footer inconsistent within the same embed.
-
-**Fix:** `description=f"Seasons 1–{dm.CURRENT_SEASON} — regular season"`
+1. **`_trade_approval_lock` (genesis_cog.py L86, L1528)** — TOCTOU prevention correctly applied. Status re-checked inside the lock before any state mutation. The TOCTOU bug from prior seasons is gone.
+2. **`_validate_image_url()` allowlist + `<untrusted_user_note>` tags (sentinel_cog.py L62–64, L824)** — Discord CDN allowlist prevents SSRF. User-supplied note is wrapped in untrusted tags in the AI prompt. Good prompt injection hygiene at both layers.
+3. **`_sanitize_player()` NaN guards (genesis_cog.py L90–142)** — Comprehensive `_safe_int()` / `_safe_float()` applied to all player fields before they reach the trade engine. Applied in both text-mode and picker-mode paths.
+4. **Dual-attribute OR logic in `ability_engine.check_physics_floor()` (L576–602)** — CLAUDE.md spec correctly implemented: `is_dual_attr = len(regular_keys) == 2` gates OR vs AND. `DEV_INT_TO_STR` mapping exactly matches spec (0=Normal, 1=Star, 2=Superstar, 3=XFactor).
+5. **Async file locking in sentinel_cog.py complaint/FR subsystem (L121–122, L182–188)** — `_complaint_file_lock` and `_fr_file_lock` correctly protect concurrent writes. Atomic `os.replace()` used throughout. Pattern is correct and consistent.
 
 ---
 
-#### O-02 · oracle_memory.py — FTS5 index not optimized after prune_old_turns()
+## TEST GAPS
 
-After `DELETE FROM conversation_memory WHERE ...`, FTS5 shadow tables retain orphaned document segments until `OPTIMIZE` is called. Over many prune cycles the FTS index accumulates dead segments, degrading `search_fts()` performance.
-
-**Fix:** Add to `prune_old_turns()` after the DELETE commit:
-
-```python
-await db.execute("INSERT INTO oracle_fts(oracle_fts) VALUES('optimize')")
-```
-
-(Partially addressed by W-01 fix.)
-
----
-
-#### O-03 · intelligence.py — _paginated_messages stale entry accumulation in low-traffic windows
-
-`_prune_stale_pages()` is called inside `register_pagination()` only. In a low-traffic window stale entries accumulate until the next registration. Noted in AUDIT_REPORT_2026_03_15, still open.
-
-**Fix:** Call `_prune_stale_pages()` in `get_pagination()` as well.
+| Test Case | Type | What It Validates | Priority |
+|-----------|------|-------------------|----------|
+| `test_position_change_cornerstone_bypass_on_import_fail` | integration | Cornerstone lock survives genesis_cog import failure | high |
+| `test_counter_auth_importerror_denies` | unit | Counter trade denied when intelligence unavailable | high |
+| `test_validate_position_change_nan_string_attr` | unit | `_g()` handles `"nan"` string without ValueError | high |
+| `test_trade_render_fail_buttons_disabled` | integration | Original trade card buttons disabled when image re-render fails | med |
+| `test_ruling_panel_acted_flag_on_modal_fail` | unit | `_acted` not set if `send_modal()` raises | med |
+| `test_evaluate_trade_blocks_cornerstone_player` | integration | `evaluate_trade()` returns RED band for cornerstoned player | high |
 
 ---
 
-## Phase 3 — Security Audit (NL→SQL Path)
+## METRICS
 
-**oracle_agent.py sandbox integrity:** PASS
-- `validate_sandbox_ast()` rejects dunder traversal at AST level before `exec()`
-- `_SAFE_BUILTINS` whitelist excludes `__import__`, `open`, `eval`, `type`, `exec`
-- `build_agent_env()` injects only QueryBuilder read functions + `run_sql` — no write/schema mutation surface
-- `run_sql` routes through `codex_utils` which opens `tsl_history.db` read-only
-
-**oracle_query_builder.py injection surface:** PASS
-- All user input flows through `_sanitize_input()` stripping `'";\\-` before SQL inclusion
-- `Query.__init__` validates against `_VALID_TABLES` frozenset; raises `ValueError` on unknown table
-- `Query.build()` uses `?` parameterized placeholders for all filter values
-- `game_extremes()` ORDER BY uses a 3-key dict whitelist, not user input directly
-- Composite functions use f-strings on controlled internal stat definition strings from DomainKnowledge
-
-**_franchise_nemesis() / _franchise_punching_bag():** PASS — `LIKE ?` parameterization; input filtered through `fuzzy_resolve_user()`
-
-**oracle_memory.py FTS sanitization:** PASS — `_sanitize_fts()` strips FTS5 metacharacters before MATCH
-
-**Overall NL→SQL verdict:** No injection path identified. Sandbox, parameterization, and whitelist layers correctly implemented.
-
----
-
-## Phase 4 — CLAUDE.md Health Check
-
-| Rule | Status |
-|------|--------|
-| `get_persona()` for all AI system prompts | PASS — `get_persona('analytical')`, `get_persona('casual')` throughout oracle_cog.py |
-| `atlas_ai.generate()` for all AI calls | PASS — No direct Gemini/Claude SDK calls in focus files |
-| `atlas_ai.is_available()` guard before AI calls | PASS — Used at L2441 and all AI injection points |
-| `run_in_executor` for blocking DB calls | PARTIAL FAIL — `get_discord_db_schema()` missing executor wrap (W-04); all others correct |
-| Dead files in QUARANTINE/ only | PASS — No imports from QUARANTINE found |
-| `status IN ('2','3')` not `='3'` alone | PASS — All `games` table queries correctly use `status IN ('2','3')` |
-| `weekIndex` 0-based vs `CURRENT_WEEK` 1-based | PASS — `week_index = target - 1` correctly applied in `get_weekly_results()` |
-| `stageIndex='1'` for regular season | PASS — All `run_sql` calls on games table include `stageIndex='1'` |
-
----
-
-## Summary
-
-| Category | Count |
-|----------|-------|
-| Critical | 1 |
+| Metric | Value |
+|--------|-------|
+| Files deeply audited | 7 |
+| Critical findings | 1 |
 | Warnings | 4 |
-| Cross-Module Risks | 2 |
-| Observations | 3 |
-| Security findings | 0 (PASS) |
-| **Total** | **10** |
+| Observations | 5 |
+| Cross-module risks | 3 |
+| Test gaps identified | 6 |
+| Anti-pattern grep hits | 3 (counter fail-open, `_g()` NaN gap, `_acted` premature set) |
 
-**Highest priority:** C-01 — `analysis.team_profile()` async bug. Silent data corruption where `recent` game form is never populated in any team profile or H2H analysis built through analysis.py. One-line fix once function is made `async def`.
+**Overall health:** Genesis and Sentinel are structurally solid — TOCTOU locking, NaN sanitization, and async file locking are all well-implemented. The dominant risk is the sentinel↔genesis parity state coupling, which creates a silent compliance bypass path on any genesis_cog load failure. Extracting `parity_state.py` is the correct long-term fix and the existing TODO acknowledges it. Short-term: add a log error on the ImportError fallback so the split-state condition is at least visible in bot startup logs.
 
-**Second priority:** W-01 — `oracle_query_log` has no cleanup path. Will become the largest table in tsl_history.db with no drain mechanism as query volume grows.
+**Next audit focus:** Friday — AI, Codex & Echo
